@@ -13,8 +13,10 @@ The inputs are three tables of the CRUD service's own (``printer_cost_profiles``
 ``printer_wear_parts``, ``printer_maintenance_costs``), keyed by the registry printer. A
 printer linked to Bambuddy takes its tasks and their intervals from Bambuddy's
 maintenance tracker, read through the orders seam (``integrations.py``), and keeps the
-last intervals read; when Bambuddy does not answer, the rate uses those and says so
-(``intervals`` ``stored``). A printer only the LAN reaches has its intervals typed.
+intervals of the tasks it counts (and clears the rest); when Bambuddy does not answer,
+the rate uses those and says so (``intervals`` ``stored``), counting only the tasks the
+last read counted, so it is the live rate as last read. A printer only the LAN reaches
+has its intervals typed.
 A printer with no profile is priced at the book's ``machine_rate_per_hour``.
 """
 
@@ -23,8 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal, Self
@@ -95,8 +97,9 @@ class WearPart(BaseModel):
 
 class MaintenanceCost(BaseModel):
     """One occurrence of a maintenance task: the minutes it takes and its consumables.
-    ``interval_hours`` is typed for a printer Bambuddy does not track; for a linked one
-    it is the last interval read from Bambuddy, and what is sent is ignored."""
+    ``interval_hours`` is typed for a printer Bambuddy does not track. A linked one's
+    tasks are priced at Bambuddy's intervals: a task read from it keeps the interval read,
+    whatever is sent, and one not read (yet) is not counted (``not_read``)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -186,16 +189,28 @@ def compute(
     printer: str | None = None,
     printer_name: str | None = None,
     intervals_read_at: datetime | None = None,
+    read_tasks: Collection[str] | None = None,
 ) -> MachineRateBreakdown:
     """The rate and its parts. ``tasks`` are Bambuddy's (a linked printer read now):
     the tasks are its, each with its interval, priced with the cost row of the same
-    name. ``None`` prices every cost row with its own ``interval_hours`` (typed, or the
-    last read from Bambuddy)."""
+    name. ``None`` prices every cost row with its own ``interval_hours``: typed, or, for
+    a linked printer, the last read from Bambuddy, where ``read_tasks`` names the rows the
+    last read counted and any other row is ``not_read``."""
     labour = Decimal(profile.labour_rate_per_hour or default_labour or "0")
     parts: list[MaintenancePart] = []
     if tasks is None:
         for cost in costs:
-            parts.append(_task_part(cost.task, cost.interval_hours, "hours", cost, labour, None))
+            unread = read_tasks is not None and cost.task not in read_tasks
+            parts.append(
+                _task_part(
+                    cost.task,
+                    cost.interval_hours,
+                    "hours",
+                    cost,
+                    labour,
+                    "not_read" if unread else None,
+                )
+            )
     else:
         by_task = {cost.task: cost for cost in costs}
         for task in tasks:
@@ -267,13 +282,22 @@ def _number(value: Decimal | None) -> str | None:
 
 @dataclass
 class Stored:
-    """A printer's rows: its profile (None for none), parts and task costs, and when its
-    intervals were last read from Bambuddy (the latest of its rows')."""
+    """A printer's rows: its profile (None for none), parts and task costs, when its
+    intervals were last read from Bambuddy (the latest of its rows'), the tasks whose
+    interval was read, and whether the printer is linked to Bambuddy."""
 
     profile: CostProfile | None
     wear: list[WearPart]
     costs: list[MaintenanceCost]
     read_at: datetime | None
+    read_tasks: set[str] = field(default_factory=set)
+    linked: bool = False
+    serial: str | None = None
+
+    @property
+    def stored_reads(self) -> set[str] | None:
+        """`compute`'s ``read_tasks``: a linked printer's read tasks, else None."""
+        return self.read_tasks if self.linked else None
 
 
 class MachineRateStore:
@@ -299,8 +323,11 @@ class MachineRateStore:
         args: tuple[object, ...] = () if keys is None else (keys,)
         with self._pool.connection() as conn:
             profiles = conn.execute(
-                "SELECT printer, purchase_price, life_hours, watts, kwh_price,"
-                f" labour_rate_per_hour FROM printer_cost_profiles{where}",
+                "SELECT c.printer, c.purchase_price, c.life_hours, c.watts, c.kwh_price,"
+                " c.labour_rate_per_hour, p.bambuddy_printer_id IS NOT NULL AS linked,"
+                " p.serial"
+                " FROM printer_cost_profiles AS c JOIN printers AS p ON p.id = c.printer"
+                + ("" if keys is None else " WHERE c.printer = ANY(%s)"),
                 args,
             ).fetchall()
             parts = conn.execute(
@@ -315,8 +342,17 @@ class MachineRateStore:
             ).fetchall()
         found: dict[str, Stored] = {}
         for row in profiles:
-            fields = {k: _number(v) for k, v in row.items() if k != "printer"}
-            found[str(row["printer"])] = Stored(CostProfile.model_validate(fields), [], [], None)
+            fields = {
+                k: _number(v) for k, v in row.items() if k not in ("printer", "linked", "serial")
+            }
+            found[str(row["printer"])] = Stored(
+                CostProfile.model_validate(fields),
+                [],
+                [],
+                None,
+                linked=row["linked"],
+                serial=row["serial"],
+            )
         for r in parts:
             held = found.setdefault(str(r["printer"]), Stored(None, [], [], None))
             held.wear.append(
@@ -333,8 +369,10 @@ class MachineRateStore:
                 )
             )
             read_at = r["interval_read_at"]
-            if read_at is not None and (held.read_at is None or read_at > held.read_at):
-                held.read_at = read_at
+            if read_at is not None:
+                held.read_tasks.add(r["task"])
+                if held.read_at is None or read_at > held.read_at:
+                    held.read_at = read_at
         return found
 
     def replace(self, printer: str, body: MachineRateInputs) -> None:
@@ -399,18 +437,30 @@ class MachineRateStore:
     def remember_intervals(self, printer: str, tasks: Sequence[MaintenanceTask]) -> None:
         """Bambuddy's intervals kept on the printer's task rows of the same name, for
         when it does not answer. Only a counted task's: a calendar task's interval is
-        days, not print-hours."""
+        days, not print-hours. Every other row's interval is cleared (a task disabled,
+        made a calendar one or gone from Bambuddy since), so the stored rate counts what
+        this read counted."""
         key = printer_uuid(printer)
         if key is None:
             return
+        counted = [
+            task
+            for task in tasks
+            if task.enabled and task.interval_type == "hours" and task.interval_hours > 0
+        ]
         with self._pool.connection() as conn, conn.transaction():
-            for task in tasks:
-                if task.enabled and task.interval_type == "hours" and task.interval_hours > 0:
-                    conn.execute(
-                        "UPDATE printer_maintenance_costs SET interval_hours = %s,"
-                        " interval_read_at = now() WHERE printer = %s AND task = %s",
-                        (_hours(task.interval_hours), key, task.task),
-                    )
+            for task in counted:
+                conn.execute(
+                    "UPDATE printer_maintenance_costs SET interval_hours = %s,"
+                    " interval_read_at = now() WHERE printer = %s AND task = %s",
+                    (_hours(task.interval_hours), key, task.task),
+                )
+            conn.execute(
+                "UPDATE printer_maintenance_costs SET interval_hours = NULL,"
+                " interval_read_at = NULL WHERE printer = %s AND NOT (task = ANY(%s))"
+                " AND (interval_hours IS NOT NULL OR interval_read_at IS NOT NULL)",
+                (key, [task.task for task in counted]),
+            )
 
 
 class MachineRateView(BaseModel):
@@ -483,17 +533,27 @@ class MachineRates:
             printer=row.id,
             printer_name=row.name,
             intervals_read_at=stored.read_at if intervals == "stored" else None,
+            read_tasks=stored.read_tasks if intervals == "stored" else None,
         )
 
     def stored_rates(self) -> dict[str, str]:
         """Every profiled printer's rate from its stored intervals, by registry id: no
         Bambuddy call, for the money view (job cost spec §4.1). Blocking."""
+        return self._stored_rates()[0]
+
+    def _stored_rates(self) -> tuple[dict[str, str], dict[str, str]]:
+        """:meth:`stored_rates`, and the same rates by each printer's serial."""
         runtime = self.settings.snapshot().runtime
-        return {
-            printer: self._stored_rate(stored, runtime.pricing_labour_rate_per_hour)
-            for printer, stored in self.store.stored_all().items()
-            if stored.profile is not None
-        }
+        by_id: dict[str, str] = {}
+        by_serial: dict[str, str] = {}
+        for printer, stored in self.store.stored_all().items():
+            if stored.profile is None:
+                continue
+            rate = self._stored_rate(stored, runtime.pricing_labour_rate_per_hour)
+            by_id[printer] = rate
+            if stored.serial is not None:
+                by_serial[stored.serial] = rate
+        return by_id, by_serial
 
     @staticmethod
     def _stored_rate(stored: Stored, default_labour: str) -> str:
@@ -506,6 +566,7 @@ class MachineRates:
             default_labour=default_labour,
             currency="",
             intervals="stored",
+            read_tasks=stored.stored_reads,
         ).rate_per_hour
 
     def check_rate(self, printer: str | None, printer_id: int | None) -> str | None:
@@ -521,16 +582,17 @@ class MachineRates:
         labour = self.settings.snapshot().runtime.pricing_labour_rate_per_hour
         return self._stored_rate(stored, labour)
 
-    def money_rates(self) -> tuple[str, dict[str, str]]:
+    def money_rates(self) -> tuple[str, dict[str, str], dict[str, str]]:
         """The money view's machine rates (job cost spec §4.1): for an attempt with no
-        quote's rate, its printer's rate (:meth:`stored_rates`), else the configured
-        default printer's, else the book's ``machine_rate_per_hour``. Blocking."""
-        rates = self.stored_rates()
+        quote's rate, its printer's rate (:meth:`stored_rates`; by its serial when its row
+        was merged away), else the configured default printer's, else the book's
+        ``machine_rate_per_hour``. The fallback, by registry id, by serial. Blocking."""
+        rates, by_serial = self._stored_rates()
         fallback = self.settings.snapshot().runtime.pricing_machine_rate_per_hour
         default = self.resolve(None, None)
         if default is not None and default.id in rates:
             fallback = rates[default.id]
-        return fallback, rates
+        return fallback, rates, by_serial
 
     def resolve(self, printer: str | None, printer_id: int | None) -> PrinterRow | None:
         """The registry printer a quote is priced for (§6.2): the one it names, else the

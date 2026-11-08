@@ -218,9 +218,10 @@ def test_the_money_views_fallback_is_the_default_printers_rate(
     lan = lan_printer(printers)
     store.replace(lan.id, INPUTS)
     machine = rates(store, printers, settings_store, FakeBambuddy(None))
-    assert machine.money_rates() == ("0.9", {lan.id: "0.7"})
+    by_serial = {lan.serial: "0.7"}
+    assert machine.money_rates() == ("0.9", {lan.id: "0.7"}, by_serial)
     settings_store.save(SettingsPatch(default_printer=lan.id))
-    assert machine.money_rates() == ("0.7", {lan.id: "0.7"})
+    assert machine.money_rates() == ("0.7", {lan.id: "0.7"}, by_serial)
 
 
 async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals(
@@ -228,11 +229,66 @@ async def test_a_reply_that_does_not_validate_falls_back_to_the_stored_intervals
 ) -> None:
     printer = linked_printer(printers)
     store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
     garbled = FakeBambuddy([], garbled=True)
     rate = await rates(store, printers, settings_store, garbled).breakdown(printer)
     assert garbled.asked == [7]
     assert rate.intervals == "stored"
-    assert rate.maintenance_per_hour == "0.12"
+    assert rate.maintenance_per_hour == "0.24"
+
+
+LINKED_INPUTS = MachineRateInputs(
+    profile=CostProfile(labour_rate_per_hour="30"),
+    maintenance=[
+        MaintenanceCost(task="Rods", minutes="20", consumables="2", interval_hours="100"),
+        MaintenanceCost(task="Belts", minutes="10", consumables="1", interval_hours="100"),
+        MaintenanceCost(task="Filter", minutes="5", consumables="9", interval_hours="100"),
+        MaintenanceCost(task="Typed", minutes="5", consumables="9", interval_hours="100"),
+        MaintenanceCost(task="Later", minutes="5", consumables="9", interval_hours="100"),
+    ],
+)
+
+
+def _tasks(belts_enabled: bool) -> list[MaintenanceTask]:
+    return [
+        MaintenanceTask(task="Rods", interval_hours=50),
+        MaintenanceTask(task="Belts", interval_hours=200, enabled=belts_enabled),
+        MaintenanceTask(task="Filter", interval_hours=30, interval_type="days"),
+        MaintenanceTask(task="Later", interval_hours=0),
+    ]
+
+
+async def test_a_linked_printers_stored_rate_is_its_live_rate(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    """The stored path (Bambuddy down, the money view, the quote's check) counts what
+    the live read counts: a task never read, a disabled, calendar or gone one is not
+    counted, and a task Bambuddy disables or drops later stops counting."""
+    printer = linked_printer(printers)
+    store.replace(printer.id, LINKED_INPUTS)
+    before = await rates(store, printers, settings_store, FakeBambuddy(None)).breakdown(printer)
+    assert before.maintenance_per_hour == "0"
+    assert {p.task: p.why for p in before.maintenance} == dict.fromkeys(
+        ["Rods", "Belts", "Filter", "Typed", "Later"], "not_read"
+    )
+
+    for belts in (True, False):
+        live = await rates(store, printers, settings_store, FakeBambuddy(_tasks(belts))).breakdown(
+            printer
+        )
+        machine = rates(store, printers, settings_store, FakeBambuddy(None))
+        down = await machine.breakdown(printer)
+        assert down.intervals == "stored"
+        assert down.rate_per_hour == live.rate_per_hour
+        assert machine.stored_rates()[printer.id] == live.rate_per_hour
+        assert machine.check_rate(printer.id, None) == live.rate_per_hour
+        counted = {p.task for p in down.maintenance if p.counted}
+        assert counted == ({"Rods", "Belts"} if belts else {"Rods"})
+    # Rods (20 min x 30 / 60 + 2) / 50 = 0.24; Belts was (5 + 1) / 200 = 0.03 until disabled.
+    assert live.maintenance_per_hour == "0.24"
 
 
 def test_the_check_reads_the_quotes_printers_stored_rate(

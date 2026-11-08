@@ -15,6 +15,11 @@ so a call sent again after a lost answer answers as the first did. The insert's
 `record`, `record_run` and `older_open`. A record sent again finds its run's outcome
 recorded and answers None, as a second reader does over SQL.
 
+`RemotePrinterStore` is the worker's `PrinterStore` with `ensure_bambuddy_written` over
+the route (#5298 Task 29's first route, taken early by #4625): a merge it makes runs on
+the API, which may write every table `PRINTER_REFERENCES` names. Its other methods stay
+on the worker's SQL until Task 29.
+
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a
 task on the event loop posts each to the API, which logs and NOTIFYs it once by its id.
@@ -44,6 +49,8 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.printers.lan_models import LanStopped
+from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +76,34 @@ class RemoteSettingsStore:
 
     def close(self) -> None:
         self._client.close()
+
+
+class RemotePrinterStore(PrinterStore):
+    """Blocking: called through ``asyncio.to_thread``, as the SQL store is. The row is
+    made or merged on the API, which announces a merge."""
+
+    def __init__(self, client: CrudSyncClient, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._client = client
+
+    def ensure_bambuddy_written(
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None = None,
+    ) -> tuple[PrinterRow, bool]:
+        body = {
+            "bambuddy_printer_id": bambuddy_printer_id,
+            "serial": serial,
+            "name": name,
+            "model": model,
+            "listed": None if listed is None else sorted(listed),
+        }
+        answer = self._client.request("POST", f"{BASE}/printers/ensure-bambuddy", json=body).json()
+        return PrinterRow.model_validate(answer["row"]), bool(answer["written"])
 
 
 def _no_such_run(error: CrudRefusedError) -> bool:

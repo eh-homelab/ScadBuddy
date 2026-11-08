@@ -460,7 +460,8 @@ class QuoteLine(BaseModel):
 #: Bambuddy does not track (``typed``), or none at all (``none``: no profile).
 IntervalSource = Literal["bambuddy", "stored", "typed", "none"]
 #: Why a task is listed and not counted.
-NotCounted = Literal["calendar", "disabled", "no_interval", "not_in_bambuddy"]
+#: ``not_read``: a linked printer's task whose interval Bambuddy has not given (yet).
+NotCounted = Literal["calendar", "disabled", "no_interval", "not_in_bambuddy", "not_read"]
 
 
 class MaintenancePart(BaseModel):

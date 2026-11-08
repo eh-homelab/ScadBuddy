@@ -776,16 +776,23 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Each part per hour is rounded to 0.0001 and the rate is their sum. A printer linked to
   Bambuddy takes its tasks and intervals from `GET /maintenance/printers/{id}` (the seam's
   `maintenance_tasks`, `Read Status`; calendar and disabled tasks are listed, not counted)
-  and keeps them on its task rows (`interval_read_at`), which price it when Bambuddy does
-  not answer (`intervals` `stored`). No profile is the book's `machine_rate_per_hour`. Routes
+  and keeps the counted tasks' intervals on its task rows (`interval_read_at`; every other
+  row's is cleared), which price it when Bambuddy does not answer (`intervals` `stored`):
+  the stored path counts only those rows (`compute`'s `read_tasks`; a task not read yet is
+  `not_read`), so it gives the rate last read live. No profile is the book's
+  `machine_rate_per_hour`. A merge of the three tables runs on the API only: the print
+  worker's run makes or merges its printer row through `POST
+  /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
+  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29's route taken early). Routes
   `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
   default printer) and records `printer` and `machine_rate_breakdown`. A quote's
   `support_filaments` price each sliced slot that is no colour slot of the item as its own
   `Support, …` filament line (`support_check` in the quote's check). The money view
-  prices an attempt with no quote's rate at its printer's stored rate, else the default
-  printer's, else the book's (`CostRates.printer_rates`, `MachineRates.money_rates`).
+  prices an attempt with no quote's rate at its printer's stored rate (by its kept
+  `printer_serial` when that row was merged away, `CostRates.serial_rates`), else the
+  default printer's, else the book's (`CostRates.printer_rates`, `MachineRates.money_rates`).
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)

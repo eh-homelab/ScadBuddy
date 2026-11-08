@@ -22,8 +22,9 @@ DESCRIPTION = (
     "over the printer's life. Every amount is in the shop's `orders_currency`; each part "
     "is rounded to 0.0001 and the rate is their sum. A printer linked to Bambuddy takes "
     "its tasks and their intervals from Bambuddy's maintenance tracker (a calendar or "
-    "disabled task is listed, never counted) and keeps the last intervals read; when "
-    "Bambuddy does not answer, `intervals` is `stored`. A printer with no profile is the "
+    "disabled task is listed, never counted) and keeps the intervals of the tasks it "
+    "counts; when Bambuddy does not answer, `intervals` is `stored` and only those tasks "
+    "count (a task not read yet is `not_read`). A printer with no profile is the "
     "price book's `machine_rate_per_hour` (`source` `price_book`)."
 )
 
@@ -52,7 +53,7 @@ async def get_machine_rate(printer_id: str, orders: OrdersDep) -> MachineRateVie
     description=(
         "Replaces the profile, the wear parts and the maintenance task costs whole. A "
         "task whose interval was read from Bambuddy keeps it; the `interval_hours` sent "
-        "for it is ignored. " + DESCRIPTION
+        "for it is ignored, and a linked printer's task not read yet is not counted. " + DESCRIPTION
     ),
 )
 async def put_machine_rate(
