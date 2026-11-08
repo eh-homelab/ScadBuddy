@@ -24,6 +24,10 @@ function allowed(order: Order, items: OrderItemDetail[], rules: { shipments: Shi
   return items.filter((item) => itemActions(order, item, rules).some((action) => keys.includes(action.key) && action.blocked === null))
 }
 
+/** The statuses the bulk fulfil takes (`lifecycle.py` `FULFILLABLE`): it refuses any other
+ * item, and then writes nothing for the rest. */
+const FULFILLABLE = new Set(['approved', 'failed'])
+
 /** How many of the item are still to make: its quantity less its accepted production attempts. */
 function remaining(item: OrderItemDetail): number {
   const made = item.fulfilments.filter((f) => f.purpose === 'production' && f.accepted_at != null).reduce((sum, f) => sum + f.quantity, 0)
@@ -42,6 +46,7 @@ export function ItemsBulk({
   shipments,
   unfulfilAllowed,
   busy,
+  onWriting,
   onClear,
   onChanged,
 }: {
@@ -50,11 +55,13 @@ export function ItemsBulk({
   shipments: Shipment[]
   unfulfilAllowed: boolean
   busy: boolean
+  /** A bulk write starts (true) or ends (false): the page's other writes wait for it. */
+  onWriting: (writing: boolean) => void
   onClear: () => void
   onChanged: () => void
 }) {
   const rules = { shipments, unfulfilAllowed }
-  const fulfil = allowed(order, selected, rules, ['fulfil'])
+  const fulfil = allowed(order, selected, rules, ['fulfil']).filter((item) => FULFILLABLE.has(item.status))
   const print = allowed(order, selected, rules, ['print'])
   const remove = allowed(order, selected, rules, ['delete', 'cancel'])
   const [fulfilling, setFulfilling] = useState(false)
@@ -80,6 +87,7 @@ export function ItemsBulk({
         <FulfilDialog
           orderId={order.id}
           items={fulfil}
+          onWriting={onWriting}
           onClose={() => setFulfilling(false)}
           onDone={() => {
             setFulfilling(false)
@@ -100,6 +108,7 @@ export function ItemsBulk({
       <RemoveDialog
         orderId={order.id}
         items={remove}
+        onWriting={onWriting}
         open={removing}
         onOpenChange={setRemoving}
         onDone={() => {
@@ -114,16 +123,29 @@ export function ItemsBulk({
 }
 
 /** One dialog for the selected items' fulfilment: how many of each were made, all or none. */
-function FulfilDialog({ orderId, items, onClose, onDone }: { orderId: string; items: OrderItemDetail[]; onClose: () => void; onDone: () => void }) {
+function FulfilDialog({
+  orderId,
+  items,
+  onWriting,
+  onClose,
+  onDone,
+}: {
+  orderId: string
+  items: OrderItemDetail[]
+  onWriting: (writing: boolean) => void
+  onClose: () => void
+  onDone: () => void
+}) {
   const [typed, setTyped] = useState<Record<string, string>>(() => Object.fromEntries(items.map((item) => [item.id, String(remaining(item))])))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const titles = new Map(items.map((item) => [item.id, item.title]))
 
   async function submit() {
-    const lines = items.map((item) => ({ item_id: item.id, quantity: parseQuantity(typed[item.id] ?? '') }))
+    const lines = items.map((item) => ({ item_id: item.id, quantity: parseQuantity(typed[item.id] ?? String(remaining(item))) }))
     if (lines.some((line) => line.quantity === null)) return setError(QUANTITY_HINT)
     setBusy(true)
+    onWriting(true)
     setError(null)
     try {
       await api.fulfilOrderItems(orderId, lines.map((line) => ({ item_id: line.item_id, quantity: line.quantity! })))
@@ -133,6 +155,7 @@ function FulfilDialog({ orderId, items, onClose, onDone }: { orderId: string; it
       setError(named.length > 0 ? `${refusalText(err)} (${named.join(', ')})` : refusalText(err))
     } finally {
       setBusy(false)
+      onWriting(false)
     }
   }
 
@@ -160,7 +183,8 @@ function FulfilDialog({ orderId, items, onClose, onDone }: { orderId: string; it
                 aria-label={`Quantity made of ${item.title}`}
                 inputMode="numeric"
                 className="h-8 w-20 text-right"
-                value={typed[item.id] ?? ''}
+                // An item that joins on a reload starts at what is still to make.
+                value={typed[item.id] ?? String(remaining(item))}
                 disabled={busy}
                 onChange={(event) => {
                   setTyped({ ...typed, [item.id]: event.target.value })
@@ -194,6 +218,7 @@ function FulfilDialog({ orderId, items, onClose, onDone }: { orderId: string; it
 function RemoveDialog({
   orderId,
   items,
+  onWriting,
   open,
   onOpenChange,
   onDone,
@@ -201,6 +226,7 @@ function RemoveDialog({
 }: {
   orderId: string
   items: OrderItemDetail[]
+  onWriting: (writing: boolean) => void
   open: boolean
   onOpenChange: (open: boolean) => void
   onDone: () => void
@@ -211,6 +237,7 @@ function RemoveDialog({
 
   async function confirm() {
     setBusy(true)
+    onWriting(true)
     setError(null)
     let removed = 0
     try {
@@ -225,6 +252,7 @@ function RemoveDialog({
       if (removed > 0) onChanged()
     } finally {
       setBusy(false)
+      onWriting(false)
     }
   }
 

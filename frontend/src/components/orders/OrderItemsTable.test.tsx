@@ -805,6 +805,41 @@ describe('OrderItemsTable · duplicate and bulk actions (#4955)', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(`(${title})`)
   })
 
+  it('fulfils only the selected items the bulk route takes: approved or failed', async () => {
+    const added = await api.addOrderItemAfterAcceptance(ORDER_ACCEPTED, { kind: 'custom', title: 'Rush fee', quantity: 1, unit_price_minor: 500 })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await screen.findByTestId(`order-item-${added.id}`)
+    await user.click(screen.getByRole('checkbox', { name: 'Select all items' }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Fulfil…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Fulfil items' })
+    expect(within(dialog).getAllByRole('textbox').map((box) => box.getAttribute('aria-label'))).toEqual(['Quantity made of Name Keychain'])
+  })
+
+  it('turns the page writes off while a bulk remove runs', async () => {
+    let finish: () => void = () => undefined
+    vi.spyOn(api, 'deleteOrderItem').mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)))
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' }))
+    await user.click(within(screen.getByTestId('bulk-actions')).getByRole('button', { name: 'Remove…' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product', hidden: true })).toBeDisabled())
+    await act(async () => finish())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add product' })).toBeEnabled())
+  })
+
+  it('drops the selection when the order is cancelled', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('checkbox', { name: 'Select Name Keychain' }))
+    expect(screen.getByTestId('bulk-actions')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel order…' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel the order' }))
+    await waitFor(() => expect(state.orders.find((o) => o.id === ORDER_DRAFT)?.status).toBe('cancelled'))
+    await waitFor(() => expect(screen.queryByTestId('bulk-actions')).toBeNull())
+  })
+
   it('turns Fulfil off, with the reason, when no selected item can be fulfilled now', async () => {
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })

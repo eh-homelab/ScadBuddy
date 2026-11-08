@@ -112,9 +112,11 @@ export function itemActions(
     })
   }
   // A copy is added as an add is (`_takes_item`): on an open order, or after acceptance while
-  // the order takes items and is not on hold (#5349).
+  // the order takes items and is not on hold (#5349). On an open order a custom item's copy
+  // has its price accepted as it is made, which a hold refuses too (`duplicate_item`).
   if (OPEN_FOR_EDITS.has(order.status) || TAKES_ITEMS.has(order.status)) {
-    actions.push({ key: 'duplicate', label: 'Duplicate', blocked: TAKES_ITEMS.has(order.status) && order.on_hold ? ON_HOLD : null })
+    const held = order.on_hold && (TAKES_ITEMS.has(order.status) || item.kind === 'custom')
+    actions.push({ key: 'duplicate', label: 'Duplicate', blocked: held ? ON_HOLD : null })
   }
   if (!settled) {
     actions.push(item.status === 'draft' ? { key: 'delete', label: 'Delete item', blocked: null } : { key: 'cancel', label: 'Cancel item', blocked: null })

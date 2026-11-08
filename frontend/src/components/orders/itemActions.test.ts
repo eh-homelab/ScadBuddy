@@ -74,6 +74,12 @@ describe('itemActions (#4955)', () => {
     expect(shipped.find((a) => a.key === 'reopen')?.blocked).toMatch(/no accepted price/)
   })
 
+  it("refuses a custom item's duplicate on an open order on hold: its price is accepted as it is copied", () => {
+    const blocked = (i: OrderItemDetail) => itemActions(order({ status: 'draft', on_hold: true }), i, { shipments: [], unfulfilAllowed: true }).find((a) => a.key === 'duplicate')?.blocked
+    expect(blocked(item({ kind: 'custom', reference: null, output_id: null }))).toMatch(/on hold/)
+    expect(blocked(item())).toBeNull()
+  })
+
   it('duplicates on an open or accepted order, refused on hold, and not once shipped', () => {
     const priced = item({ status: 'approved', quotes: [quote({ accepted: true })] })
     const held = itemActions(order({ status: 'in_production', on_hold: true }), priced, { shipments: [], unfulfilAllowed: true })

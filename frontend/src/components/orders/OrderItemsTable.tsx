@@ -65,6 +65,7 @@ export function OrderItemsTable({
   onAct,
   costs,
   busy = false,
+  onWriting,
 }: {
   orderId: string
   /** The order: the ⋯ menu's rules read its status and hold. */
@@ -102,12 +103,15 @@ export function OrderItemsTable({
   costs?: OrderCosts
   /** A page write is running: the header's adds and the ⋯ menu's writes wait for it. */
   busy?: boolean
+  /** A bulk write starts or ends: the page holds its other writes (`busy`) meanwhile. */
+  onWriting?: (writing: boolean) => void
 }) {
   const canAdd = addTo !== null
   // #4955 step 3 — the rows picked for a bulk action; none on a visitor's cart or an ended order.
   const selectable = !isCart(order) && order.status !== 'closed' && order.status !== 'cancelled'
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
-  const chosen = items.filter((item) => picked.has(item.id))
+  // An order that stops taking a selection (cancelled, closed) drops it.
+  const chosen = selectable ? items.filter((item) => picked.has(item.id)) : []
   const pick = (ids: string[], on: boolean) => {
     const next = new Set(picked)
     for (const id of ids) {
@@ -278,6 +282,7 @@ export function OrderItemsTable({
               shipments={shipments}
               unfulfilAllowed={unfulfilAllowed}
               busy={busy}
+              onWriting={onWriting ?? (() => undefined)}
               onClear={() => setPicked(new Set())}
               onChanged={onChanged}
             />
