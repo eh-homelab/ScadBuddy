@@ -26,6 +26,7 @@ from scadbuddy.payments.provider import (
     Credential,
     ProviderError,
     ProviderUnavailableError,
+    Verified,
 )
 from scadbuddy.payments.registry import providers
 from scadbuddy.payments.stripe import API, SIGNATURE_TOLERANCE_SECONDS, STRIPE, StripeProvider
@@ -96,12 +97,12 @@ async def test_verify_lists_one_session_and_names_the_mode() -> None:
     listed = respx.get(f"{API}/v1/checkout/sessions").mock(
         return_value=httpx.Response(200, json=payload("api.checkout_sessions.list.empty.json"))
     )
-    assert await STRIPE.verify(CRED) == "Stripe account (test mode)"
+    assert await STRIPE.verify(CRED) == Verified(account_label="Stripe account (test mode)")
     request = listed.calls.last.request
     assert request.url.params["limit"] == "1"
     assert request.headers["authorization"] == f"Bearer {KEY}"
     live = Credential(settings={}, secrets={"secret_key": "rk_live_1", "webhook_secret": WHSEC})
-    assert await STRIPE.verify(live) == "Stripe account (live)"
+    assert await STRIPE.verify(live) == Verified(account_label="Stripe account (live)")
 
 
 @pytest.mark.parametrize(

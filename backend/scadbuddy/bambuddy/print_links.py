@@ -27,7 +27,7 @@ share both tables (#1750).
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
-hash whose file the start uploaded (`print_history._lan_run`). A LAN start has no queue
+hash whose file the start uploaded (`print_history._run_by_file`). A LAN start has no queue
 item, so no send names it.
 """
 

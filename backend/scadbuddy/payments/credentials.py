@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.payments.provider import Credential
-from scadbuddy.payments.store import has_open_requests
+from scadbuddy.payments.store import has_open_requests, resume_closes
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,8 @@ class PaymentCredentials:
         secrets: Mapping[str, str],
         account_label: str,
     ) -> ProviderRow:
-        """Upsert. The first row connected becomes the default."""
+        """Upsert. The first row connected becomes the default. The provider's pages the
+        sweep could not close start their tries over (`resume_closes`)."""
         if self._kek is None:
             raise KekMissingError()
         plaintext = json.dumps(dict(secrets), sort_keys=True)
@@ -132,6 +133,7 @@ class PaymentCredentials:
                     f" RETURNING {_ROW}",
                     (row_id, provider, *values),
                 ).fetchone()
+            resume_closes(conn, provider)
         assert row is not None
         return ProviderRow.model_validate(row)
 

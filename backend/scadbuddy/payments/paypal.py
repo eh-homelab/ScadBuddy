@@ -80,6 +80,7 @@ from scadbuddy.payments.provider import (
     ProviderError,
     ProviderField,
     ProviderUnavailableError,
+    Verified,
 )
 
 logger = logging.getLogger(__name__)
@@ -306,7 +307,7 @@ class PayPalProvider:
 
     # -- the seam ---------------------------------------------------------------------
 
-    async def verify(self, credential: Credential) -> str:
+    async def verify(self, credential: Credential) -> Verified:
         environment = credential.settings.get("environment", "")
         self._base(credential)
         if not credential.settings.get("client_id"):
@@ -335,7 +336,8 @@ class PayPalProvider:
                 raise ProviderError(
                     f"the PayPal webhook {webhook_id} does not send {', '.join(missing)}"
                 )
-        return f"PayPal app {token.app_id} ({environment})"
+        # An app takes many currencies: none to compare.
+        return Verified(account_label=f"PayPal app {token.app_id} ({environment})")
 
     async def create_request(
         self,

@@ -14,7 +14,7 @@ runtime (``api/components.py``).
 
 import logging
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, BackgroundTasks, Request, status
 
 from scadbuddy.api.payments import PROBLEMS, not_found
 from scadbuddy.core.problems import ApiError
@@ -68,11 +68,16 @@ async def _body(request: Request) -> bytes:
         " `replayed` and records nothing more."
     ),
 )
-async def receive_webhook(provider: str, request: Request, payments: PaymentsDep) -> WebhookAnswer:
+async def receive_webhook(
+    provider: str, request: Request, payments: PaymentsDep, later: BackgroundTasks
+) -> WebhookAnswer:
     body = await _body(request)
     headers = {name.lower(): value for name, value in request.headers.items()}
     try:
-        outcome = await payments.service.handle_webhook(provider, headers, body)
+        # #5700: the pages the payment marked are closed once the answer is sent.
+        outcome = await payments.service.handle_webhook(
+            provider, headers, body, after=later.add_task
+        )
     except ProviderNotFoundError as error:
         raise not_found(error) from None
     except BadSignatureError:
