@@ -141,6 +141,8 @@ export const handlers = [
         template_name: found.slug,
         libraries: [],
         snapshot_key: `src-${found.slug}-${found.commit}`,
+        // The backend fills every unnamed parameter's default in here; the mock has no schema.
+        fixed: { ...found.fixed },
       },
     }
     listings = listings.map((l) => (l.id === id ? published : l))

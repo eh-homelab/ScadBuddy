@@ -481,25 +481,28 @@ if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
     raise SystemExit(0)
 
 if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
-    # A storefront listing's template (#5282): a ranged width, a free height, a
-    # `// color` parameter (typed by the source scan) and a select.
-    pathlib.Path(out).write_text(
-        json.dumps(
-            {
-                "title": "Listing",
-                "parameters": [
-                    {"name": "width", "type": "number", "initial": 50, "group": "Main",
-                     "min": 10, "max": 100, "step": 1},
-                    {"name": "height", "type": "number", "initial": 5, "group": "Main"},
-                    {"name": "colour", "type": "string", "initial": "#FF0000",
-                     "group": "Main"},
-                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
-                     "options": [{"name": "Round", "value": "round"},
-                                 {"name": "Square", "value": "square"}]},
-                ],
-            }
-        )
+    # A storefront listing's template (#5282): a ranged width, a free height (its
+    # default read from the source's `height = N;`), a `// color` parameter (typed by
+    # the source scan), a select, and a hidden colour `trim` when the source sets one.
+    height = next(
+        (float(line.split("=")[1].strip(" ;")) for line in text.splitlines()
+         if line.startswith("height =")),
+        5,
     )
+    parameters = [
+        {"name": "width", "type": "number", "initial": 50, "group": "Main",
+         "min": 10, "max": 100, "step": 1},
+        {"name": "height", "type": "number", "initial": int(height), "group": "Main"},
+        {"name": "colour", "type": "string", "initial": "#FF0000", "group": "Main"},
+        {"name": "shape", "type": "string", "initial": "round", "group": "Main",
+         "options": [{"name": "Round", "value": "round"},
+                     {"name": "Square", "value": "square"}]},
+    ]
+    if "trim =" in text:
+        parameters.append(
+            {"name": "trim", "type": "string", "initial": "#00FF00", "group": "Hidden"}
+        )
+    pathlib.Path(out).write_text(json.dumps({"title": "Listing", "parameters": parameters}))
     raise SystemExit(0)
 
 if out is not None and out.endswith(".3mf"):

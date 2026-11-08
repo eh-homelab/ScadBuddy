@@ -68,6 +68,8 @@ PUBLISH_LOCK_CONNECT_TIMEOUT: Final = 5
 #: The most publishes one process runs at once, each holding one connection of its own
 #: for its lock; one more is refused (503 ``listing_publish_busy``).
 PUBLISH_LOCKS_MAX: Final = 2
+#: The advisory lock a create takes, so two creates never take the same position.
+POSITION_LOCK: Final = f"{HOLDER}:position"
 #: The publish locks' name in `core/pg_pool.py`'s registry and in ``pg_stat_activity``.
 PUBLISH_LOCKS_NAME: Final = "scadbuddy-storefront-publish"
 
@@ -163,7 +165,8 @@ class ListingStore:
         """A new listing, unpublished, after every other one; 422
         ``listing_choice_empty`` for a choice with nothing to choose."""
         _check_choices(body)
-        with self.pool.connection() as conn:
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
             row = conn.execute(
                 "INSERT INTO storefront_listings"
                 " (slug, commit, title, description, position, params, fixed, colours, media_ids)"
@@ -297,22 +300,21 @@ class ListingStore:
         self,
         listing_id: str,
         *,
-        fixed: Mapping[str, ParamValue],
         snapshot: ListingSnapshot,
         media: Sequence[ListingMedia],
         expected_updated_at: datetime,
     ) -> Listing:
-        """The listing published with what ``publish`` captured. Holds of the listing
+        """The listing published with what ``publish`` captured (its effective values in
+        ``snapshot.fixed``; the row's ``fixed`` is left as the shop set it). Holds of the listing
         on any blob other than the snapshot and ``media`` are dropped (a republish's
         old ones). 409 ``listing_changed`` when it changed after it was read."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
-                "UPDATE storefront_listings SET fixed = %s, snapshot = %s, media = %s,"
+                "UPDATE storefront_listings SET snapshot = %s, media = %s,"
                 " published = true, published_at = clock_timestamp(),"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
                 (
-                    Jsonb(dict(fixed)),
                     Jsonb(snapshot.model_dump(mode="json")),
                     Jsonb([item.model_dump(mode="json") for item in media]),
                     listing_id,
@@ -443,6 +445,12 @@ def _whole_multiple(step: float, of: float) -> bool:
     return times >= 1 - 1e-9 and abs(times - round(times)) < 1e-9
 
 
+def _on_grid(offset: float, step: float) -> bool:
+    """Whether ``offset`` is a whole number of ``step``s, to a float's rounding."""
+    times = offset / step
+    return abs(times - round(times)) < 1e-9
+
+
 def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> None:
     """``value`` as the colour of one of the listing's filaments, or 422."""
     if not isinstance(value, str) or value.casefold() not in {c.casefold() for c in colours}:
@@ -476,12 +484,14 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
             float(n).is_integer() for n in (bound.min, bound.max, bound.step or 1)
         ):
             raise outside
-        if (
-            parameter.step is not None
-            and bound.step is not None
-            and not _whole_multiple(bound.step, parameter.step)
-        ):
-            raise outside
+        # On a schema with a step, the customer's values stay on its grid: a step that
+        # is a whole number of the schema's, from a least value on the grid.
+        if parameter.step is not None and parameter.step > 0:
+            if bound.step is None or not _whole_multiple(bound.step, parameter.step):
+                raise outside
+            origin = parameter.min if parameter.min is not None else 0.0
+            if not _on_grid(bound.min - origin, parameter.step):
+                raise outside
         return
     if isinstance(bound, TextBound):
         if parameter.type != "string" or parameter.options:
@@ -500,8 +510,14 @@ def checked_fixed(
     colours: Mapping[str, str],
 ) -> dict[str, ParamValue]:
     """The listing checked against ``schema`` and the price book's ``colours`` (by
-    filament id), and its fixed values with every parameter it does not name at the
-    schema's default (plan point 13). Raises the 422 of the first fault."""
+    filament id), and every value a render of it uses that the customer does not choose:
+    its fixed values, and every parameter it does not name at the schema's default
+    (plan point 13). Raises the 422 of the first fault.
+
+    A colour a customer may pick, or one the shop locked or left at its default, must be
+    a listing filament's (plan point 12). A parameter in the source's hidden group is
+    never in ``schema`` (`render/schema.py` `build_schema` leaves it out), so it is
+    neither checked nor fixed here: a render takes it from the source."""
     for filament_id in body.colours:
         if filament_id not in colours:
             raise _unprocessable(
@@ -530,7 +546,6 @@ def checked_fixed(
             continue
         if parameter.initial is not None and _takes(parameter, parameter.initial):
             fixed[parameter.name] = parameter.initial
-    # A locked colour is printed in a listing filament, set or defaulted alike.
     for name, value in fixed.items():
         if by_name[name].type == "color":
             _check_colour(name, value, offered)
@@ -611,7 +626,8 @@ async def _copy_media(
                 "listing_media_unknown", f"the template has no media {media_id!r}"
             ) from None
         key = f"listing-media-{await asyncio.to_thread(_sha256, path)}"
-        with path.open("rb") as data:
+        data = await asyncio.to_thread(path.open, "rb")
+        try:
             await content.put(
                 "media",
                 data,
@@ -619,6 +635,8 @@ async def _copy_media(
                 scope=BlobScope(slug=listing.slug, title=title),
                 key=key,
             )
+        finally:
+            await asyncio.to_thread(data.close)
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
         copied.append(
             ListingMedia(
@@ -671,8 +689,7 @@ async def _publish(
         return await asyncio.to_thread(
             store.mark_published,
             listing.id,
-            fixed=fixed,
-            snapshot=facts.model_copy(update={"snapshot_key": key}),
+            snapshot=facts.model_copy(update={"snapshot_key": key, "fixed": fixed}),
             media=media,
             expected_updated_at=listing.updated_at,
         )

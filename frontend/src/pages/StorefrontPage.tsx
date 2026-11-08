@@ -193,10 +193,9 @@ export function StorefrontPage() {
       const id = saved?.id ?? current.id
       if (id === null) return
       const published = await api.publishStorefrontListing(id)
-      // The draft just published, not the row: publish fixes every unnamed parameter at
-      // its default, so the row's `fixed` holds more than the draft does.
-      const text = savedKey(listingInput(current.draft, schema.data, filaments))
-      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: cur.draft, saved: text }))
+      // The row as published: its `fixed` keeps only the shop's locks (the defaults it
+      // filled are the snapshot's), so it is the body that was saved.
+      whileOpen(current.key, (cur) => ({ ...opened(published, cur.key), draft: cur.draft, saved: storedKey(published) }))
       refresh()
     })
   }

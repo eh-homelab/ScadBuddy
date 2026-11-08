@@ -151,8 +151,10 @@ def test_publish_snapshots_the_schema_and_holds_the_source(
         "colour",
         "shape",
     ]
-    # Every parameter the listing does not name is fixed at its default (plan point 13).
-    assert published["fixed"] == {"height": 5, "colour": "#FF0000", "shape": "round"}
+    # Every parameter the listing does not name is fixed at its default (plan point 13),
+    # in the snapshot; the row's `fixed` keeps only the shop's own locks.
+    assert published["fixed"] == {}
+    assert snapshot["fixed"] == {"height": 5, "colour": "#FF0000", "shape": "round"}
     assert holders(client, snapshot["snapshot_key"]) == [(HOLDER, listing["id"])]
     [media] = published["media"]
     assert media["blob_key"].startswith("listing-media-") and media["kind"] == "image"
@@ -338,6 +340,55 @@ def listing_holds(client: TestClient, listing_id: str) -> set[str]:
             (HOLDER, listing_id),
         ).fetchall()
     return {row["key"] for row in rows}
+
+
+def test_a_republish_at_a_new_version_takes_its_defaults(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    """Publish at A, then at B where `height`'s default moved: B's default is the one a
+    render uses, and `fixed` still holds only what the shop locked."""
+    slug = template["slug"]
+    body = listing_body(template, pla_red, fixed={"shape": "square"})
+    listing = create(client, body)
+    first = publish(client, listing["id"])
+    assert first["snapshot"]["fixed"]["height"] == 5
+    saved = client.put(
+        f"/api/v1/models/{slug}/source",
+        json={"source": SOURCE.replace("height = 5;", "height = 8;")},
+        headers=press(),
+    )
+    assert saved.status_code == 200, saved.text
+    commit = client.get(f"/api/v1/models/{slug}").json()["version"]
+    assert commit != template["commit"]
+    edited = client.put(
+        f"{LISTINGS}/{listing['id']}",
+        json={
+            "listing": {**body, "commit": commit, "fixed": first["fixed"]},
+            "updated_at": first["updated_at"],
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    second = publish(client, listing["id"])
+    assert second["fixed"] == {"shape": "square"}
+    assert second["snapshot"]["fixed"] == {"height": 8, "colour": "#FF0000", "shape": "square"}
+
+
+def test_a_hidden_colour_needs_no_listing_filament(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    """A `// color` parameter in the Hidden group has no row in the editor, and no
+    listing filament need have its colour: the schema leaves it out (`build_schema`), so
+    publish neither checks nor fixes it, and a render takes it from the source."""
+    slug = template["slug"]
+    hidden = SOURCE.replace(
+        "// %%LISTING%%\n", '// %%LISTING%%\n/* [Hidden] */\ntrim = "#00FF00"; // color\n'
+    )
+    saved = client.put(f"/api/v1/models/{slug}/source", json={"source": hidden}, headers=press())
+    assert saved.status_code == 200, saved.text
+    commit = client.get(f"/api/v1/models/{slug}").json()["version"]
+    listing = create(client, listing_body(template, pla_red, commit=commit))
+    published = publish(client, listing["id"])
+    assert "trim" not in published["snapshot"]["fixed"]
 
 
 def test_a_failed_republish_leaves_only_the_published_holds(

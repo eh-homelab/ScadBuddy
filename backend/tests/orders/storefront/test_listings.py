@@ -4,6 +4,7 @@ template's commit and the content store, is in ``tests/api/test_storefront_listi
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from scadbuddy.core.pg_pool import PoolUse, pools
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.storefront.listings import (
     HOLDER,
+    POSITION_LOCK,
     PUBLISH_LOCKS_MAX,
     PUBLISH_LOCKS_NAME,
     ListingStore,
@@ -68,7 +70,6 @@ def published(store: ListingStore, refs: BlobRefs) -> Listing:
     refs.add(SNAPSHOT.snapshot_key, HOLDER, listing.id)
     return store.mark_published(
         listing.id,
-        fixed={"height": 5},
         snapshot=SNAPSHOT,
         media=[],
         expected_updated_at=listing.updated_at,
@@ -112,7 +113,7 @@ def test_only_published_listings_are_listed_as_published(
     assert [listing.id for listing in store.published()] == [published.id]
     assert published.published and published.published_at is not None
     assert published.snapshot == SNAPSHOT
-    assert published.fixed == {"height": 5}
+    assert published.fixed == {}
 
 
 def test_editing_a_published_listing_unpublishes_it(
@@ -171,7 +172,6 @@ def test_a_publish_against_an_edited_listing_is_refused(
     with refused_as("listing_changed"):
         store.mark_published(
             edited.id,
-            fixed={},
             snapshot=SNAPSHOT,
             media=[],
             expected_updated_at=published.updated_at,
@@ -353,3 +353,52 @@ def test_publishes_at_once_are_capped_and_counted(store: ListingStore, pg_pool: 
             end()
     assert counted().open == 0
     store.begin_publish(listings[-1].id)()
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        # No step on a slider whose schema has one: a customer could pick 1.05.
+        {"kind": "number", "min": 1, "max": 8, "step": None},
+        # A least value off the schema's grid (1, 1.5, 2, ...).
+        {"kind": "number", "min": 1.25, "max": 8, "step": 0.5},
+    ],
+)
+def test_a_bound_off_the_schemas_step_is_refused(bound: dict[str, Any]) -> None:
+    schema = CustomizerSchema.model_validate(
+        {
+            "parameters": [
+                {
+                    "name": "width",
+                    "type": "slider",
+                    "group": "Size",
+                    "initial": 2,
+                    "min": 1,
+                    "max": 8,
+                    "step": 0.5,
+                }
+            ]
+        }
+    )
+    with refused_as("listing_bounds_outside_schema", 422):
+        checked_fixed(schema, body(params={"width": bound}), {})
+
+
+def test_creates_wait_for_the_position_lock(store: ListingStore, pg_pool: PgPool) -> None:
+    """A create takes the position lock, so two at once never share a position."""
+    made: list[Listing] = []
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
+        worker = threading.Thread(target=lambda: made.append(store.create(body())))
+        worker.start()
+        worker.join(0.5)
+        assert made == []
+    worker.join(5)
+    assert len(made) == 1
+    threads = [threading.Thread(target=lambda: made.append(store.create(body()))) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    positions = [listing.position for listing in made]
+    assert len(set(positions)) == len(positions) == 7
