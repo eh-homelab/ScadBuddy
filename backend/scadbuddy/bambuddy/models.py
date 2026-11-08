@@ -129,6 +129,26 @@ class LocalPresetCatalogue(BambuddyModel):
     process: list[LocalPreset] = Field(default_factory=list)
 
 
+class MaintenanceStatus(BambuddyModel):
+    """One task of ``GET /api/v1/maintenance/printers/{id}`` (``MaintenanceStatus`` in
+    Bambuddy's ``backend/app/schemas/maintenance.py`` at maziggy/bambuddy@2f871923, read
+    2026-11-08): only what a machine rate reads (#4625). ``interval_hours`` is print-hours
+    for an ``hours`` task and calendar days for a ``days`` one."""
+
+    maintenance_type_name: str
+    enabled: bool = True
+    interval_hours: float
+    interval_type: Literal["hours", "days"] = "hours"
+
+
+class PrinterMaintenanceOverview(BambuddyModel):
+    """``GET /api/v1/maintenance/printers/{id}``: the printer's maintenance tasks, each
+    with its interval (``PrinterMaintenanceOverview``, same source)."""
+
+    printer_id: int
+    maintenance_items: list[MaintenanceStatus] = Field(default_factory=list)
+
+
 class Printer(BambuddyModel):
     """``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
 

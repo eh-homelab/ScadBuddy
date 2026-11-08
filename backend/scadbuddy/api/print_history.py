@@ -518,8 +518,9 @@ async def _part_settings(
     waits for it (#5733). The settings are None when nothing names a run exactly (a send
     recorded before #1751, a print queued outside ScadBuddy, a reprint made in Bambuddy
     under another name) or the run is pruned. A failed read of them is logged and gives
-    None, so the print record still loads. A failed fetch cancels the read."""
-    # A task group, so a failed fetch cancels the read and waits for it: the request's
+    None, so the print record still loads. A failed fetch cancels the read, and a read
+    that fails with an error `_guarded` does not catch cancels the fetch."""
+    # A task group, so a failed task cancels the other and waits for it: the request's
     # database read never outlives the request (#5739). The caller sees the error itself.
     try:
         async with asyncio.TaskGroup() as group:
@@ -635,18 +636,20 @@ async def _link_lan_prints(
     no queue item, so nothing else links its print. Each subject with such a start since
     `linking.LAN_LINK_WINDOW` is scanned by its slices' hashes
     (`linking.link_lan_starts`), at most `linking.LAN_SCANS_PER_CALL` per call and once per
-    `linking.LAN_SCAN_INTERVAL`. Each archive found that names no start yet is read once,
-    and its file name names the start (`_run_by_file`, the exactly-one rule), so the
-    start is not looked for again. A failure is logged, never raised: the list still
-    loads, and a later call tries again."""
+    `linking.LAN_SCAN_INTERVAL`; the read skips the subjects scanned within it (#5749).
+    Each archive found that names no start yet is read once, and its file name names the
+    start (`_run_by_file`, the exactly-one rule), so the start is not looked for again. A
+    failure is logged, never raised: the list still loads, and a later call tries again."""
+    now = time.monotonic()
     try:
         pending = await runs.lan_unnamed(
-            datetime.now(UTC) - linking.LAN_LINK_WINDOW, linking.LAN_PENDING_LIMIT
+            datetime.now(UTC) - linking.LAN_LINK_WINDOW,
+            linking.LAN_PENDING_LIMIT,
+            skip=linking.recent_lan_scans(now),
         )
     except psycopg.Error:
         logger.exception("could not read the LAN prints to link")
         return
-    now = time.monotonic()
     claimed: list[LanPending] = []
     for row in pending:
         if len(claimed) >= linking.LAN_SCANS_PER_CALL:

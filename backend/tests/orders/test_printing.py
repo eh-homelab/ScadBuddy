@@ -31,6 +31,7 @@ from scadbuddy.orders.printing import (
     print_check,
     print_item,
     print_request_id,
+    setup_differences,
 )
 from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import OutputsRead
@@ -979,3 +980,14 @@ def test_the_test_print_check_repairs_a_copy_changed_behind_its_revision(
     assert refusal == "revision_not_newest"
     assert [r.number for r in shop.rows.revisions(item.id)] == [1, 2]
     assert "revision.repaired" in shop.kinds(order)
+
+
+def test_a_disabled_supports_is_the_same_whatever_else_it_names() -> None:
+    """#5720 review: supports off slices alike whatever type or angle rides along
+    (`supports.wanted_settings`), so it is never a reason for a new quote."""
+    recorded = {"supports": {"enabled": False, "type": None}, "print_sequence": None}
+    off = {"supports": {"enabled": False, "type": "tree", "threshold_angle": 40}}
+    assert setup_differences(off, recorded) == []
+    on = {"supports": {"enabled": True, "type": "tree"}}
+    assert setup_differences(on, recorded) == ["supports"]
+    assert setup_differences({"print_sequence": "by object"}, recorded) == ["print_sequence"]

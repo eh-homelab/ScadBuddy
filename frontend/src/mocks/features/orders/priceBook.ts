@@ -6,6 +6,7 @@ import { acceptOperation } from '../operations'
 import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
+import { retax } from './money'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
 
 /**
@@ -318,6 +319,7 @@ export const handlers = [
       if (found.status === 'draft') found.status = 'quoted'
       found.updated_at = now()
       event(order, 'quote.recorded', { item_id: found.id, quote_id: made.id })
+      retax(order.id)
       rederive(order)
       return acceptOperation('order_item_quote', `order_item:${found.id}`, made as unknown as Record<string, unknown>)
     } catch (error) {
@@ -391,6 +393,7 @@ export const handlers = [
       if (found.status === 'draft') found.status = 'quoted'
       found.updated_at = now()
       event(order, 'quote.recorded', { item_id: found.id, quote_id: made.id })
+      retax(order.id)
       rederive(order)
       return HttpResponse.json(made, { status: 201 })
     } catch (error) {

@@ -625,6 +625,64 @@ async def test_a_custom_items_print_counts_with_no_default_labour(shop: Shop) ->
     assert line.unknown == ["prints"]
 
 
+async def test_an_attempt_with_no_quote_rate_is_costed_at_its_printers_machine_rate(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#4625: with no slice quote's rate, an attempt's seconds are priced at the machine
+    rate of the printer it printed on, else today's book rate, estimated either way."""
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    on_printer = attempt(shop, order, item, "succeeded", 1, 12.0, 93)
+    attempt(shop, order, item, "failed", 0, 1.0, 94)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET printer = 'p-a' WHERE id = %s", (on_printer.id,)
+        )
+    rates = USD.model_copy(update={"machine_rate_per_hour": "36", "printer_rates": {"p-a": "72"}})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    first, second = costs.items[0].attempts
+    # 500 s at 72 per hour, then 500 s at 36.
+    assert (first.machine_minor, "machine" in first.estimated) == (1000, True)
+    assert (second.machine_minor, "machine" in second.estimated) == (500, True)
+
+
+async def test_an_attempt_on_a_merged_away_printer_is_costed_at_the_kept_printers_rate(
+    shop: Shop, pool: PgPool
+) -> None:
+    """#4625: a merge deletes the row an attempt names; the kept row holds its serial,
+    so the attempt is priced at that printer's rate by the serial it kept."""
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    gone = attempt(shop, order, item, "succeeded", 1, 12.0, 93)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET printer = 'p-gone', printer_serial = 'S1'"
+            " WHERE id = %s",
+            (gone.id,),
+        )
+    rates = USD.model_copy(
+        update={
+            "machine_rate_per_hour": "36",
+            "printer_rates": {"p-kept": "72"},
+            "serial_rates": {"S1": "72"},
+        }
+    )
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    assert costs.items[0].attempts[0].machine_minor == 1000
+
+
 async def test_a_cancelled_item_with_no_cost_has_no_margin_state(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)

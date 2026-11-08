@@ -66,7 +66,30 @@ const PRICING_DECIMALS = new Set([
   'pricing_labour_rate_per_hour',
   'pricing_usd_rate',
   'orders_thin_margin_percent',
+  // #5281 — auto tax, below 100.
+  'orders_tax_percent',
 ])
+
+/** #5281 — `money.py` `DepositRule`'s checks, or the message of the first one a rule fails. */
+function depositRuleProblem(rule: Record<string, unknown>): string | null {
+  if (!['has_request', 'total_above', 'first_order'].includes(String(rule.criterion))) return "criterion: Input should be 'has_request', 'total_above' or 'first_order'"
+  if ((rule.percent == null) === (rule.amount_minor == null)) return 'Value error, a rule has exactly one of percent and amount_minor'
+  if ((rule.above_minor != null) !== (rule.criterion === 'total_above')) return 'Value error, above_minor is set exactly when the criterion is total_above'
+  if (rule.percent != null && !(/^\d+(\.\d+)?$/.test(String(rule.percent)) && Number(rule.percent) > 0 && Number(rule.percent) <= 100)) return 'percent: Value error, a percent is above 0 and at most 100'
+  if (rule.amount_minor != null && !(Number.isInteger(rule.amount_minor) && (rule.amount_minor as number) >= 1)) return 'amount_minor: Input should be greater than or equal to 1'
+  if (rule.above_minor != null && !(Number.isInteger(rule.above_minor) && (rule.above_minor as number) >= 0)) return 'above_minor: Input should be greater than or equal to 0'
+  return null
+}
+
+/** #5281 — `money.py` `ShippingOption`'s checks. */
+function shippingOptionProblem(option: Record<string, unknown>): string | null {
+  if (!/^[a-z0-9_-]{1,40}$/.test(String(option.id ?? ''))) return "id: String should match pattern '^[a-z0-9_-]{1,40}$'"
+  const label = typeof option.label === 'string' ? [...option.label].length : 0
+  if (label < 1 || label > 200) return 'label: String should have 1 to 200 characters'
+  if (!(Number.isInteger(option.amount_minor) && (option.amount_minor as number) >= 0)) return 'amount_minor: Input should be greater than or equal to 0'
+  if (typeof option.ships !== 'boolean') return 'ships: Input should be a valid boolean'
+  return null
+}
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
   'store_backend',
@@ -121,6 +144,20 @@ function putSettings(body: Record<string, unknown>) {
   }
   for (const [name, value] of Object.entries(body)) {
     if (name === 'reset') continue
+    if (name === 'orders_deposit_policy' || name === 'storefront_shipping_options') {
+      const rows = (value ?? []) as Record<string, unknown>[]
+      if (rows.length > 20) return refused(name, 'List should have at most 20 items')
+      const check = name === 'orders_deposit_policy' ? depositRuleProblem : shippingOptionProblem
+      for (const [i, row] of rows.entries()) {
+        const bad = check(row)
+        if (bad) return refused(`${name}.${i}`, bad)
+      }
+      if (name === 'storefront_shipping_options' && new Set(rows.map((o) => o.id)).size < rows.length) return refused(name, 'Value error, shipping option ids are unique')
+      // The view answers an empty list for null.
+      next[name] = rows
+      continue
+    }
+    if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
     if (!envSeeded.has(name)) {
       next[name] =
         name === 'display_unit'
@@ -144,6 +181,7 @@ function putSettings(body: Record<string, unknown>) {
       const text = typeof value === 'string' ? value.trim() : ''
       if (!/^\d+(\.\d+)?$/.test(text)) return refused(name, `Value error, ${envName(name)} must be at least 0`)
       if ((name === 'rough_estimate_factor' || name === 'pricing_usd_rate') && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
+      if (name === 'orders_tax_percent' && Number(text) >= 100) return refused(name, `Value error, ${envName(name)} must be less than 100`)
     }
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")

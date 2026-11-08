@@ -1,11 +1,22 @@
 import { useState } from 'react'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Revision } from '../../api/types'
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
 import { offersPrint } from './itemActions'
 import { Button } from '@/components/ui/button'
+
+/** #4673 — what a print refused because its setup differs from the quote's
+ * (`reason: "setup_differs"`) adds: the steps this page offers. An item's print with no
+ * choices prints the quote's setup, which the assistant can send; this dialog always
+ * sends its own (it is reworked in a later step of #4673). */
+export const REQUOTE_HINT = "Quote the item again, or ask the assistant to print it with the quote's setup."
+
+function withHint(cause: unknown): unknown {
+  if (!(cause instanceof ApiError) || (cause.problem as { reason?: string }).reason !== 'setup_differs') return cause
+  return new ApiError({ ...cause.problem, detail: `${cause.detail.replace(/\.?$/, '.')} ${REQUOTE_HINT}` })
+}
 
 /** The order states past acceptance, in which an item is made (§3.5). */
 const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
@@ -71,8 +82,12 @@ export function ItemPrintDialog({
         itemId: item.id,
         quoted: (quoted?.part_settings ?? null) as PartSettingsMap | null,
         start: async (body) => {
-          if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
-          else await api.printItem(order.id, item.id, body)
+          try {
+            if (testRevision) await api.testPrintRevision(order.id, item.id, testRevision.id, body as PrintRunRequest)
+            else await api.printItem(order.id, item.id, body)
+          } catch (cause) {
+            throw withHint(cause)
+          }
           onChanged()
         },
       }}

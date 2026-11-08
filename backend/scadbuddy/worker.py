@@ -68,6 +68,7 @@ from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteEvents,
     RemoteOutcomes,
+    RemotePrinterStore,
     RemotePrintRunStore,
     RemoteSettingsStore,
 )
@@ -1302,7 +1303,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     print_runs = RemotePrintRunStore(crud)
     operations = RemoteOperationStore(crud, "print")
     kek = settings_kek(settings.secret_key_file)
-    printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
+    # A run's first check makes or merges a row on the API (#4625): a merge writes tables
+    # this worker's role is never granted.
+    printers = RemotePrinterStore(
+        crud.blocking(), pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file)
+    )
     reports = PrinterReportStore(pool)
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9). The
     # worker hears no ``print.run`` (#5298), so it keeps no run (`RecentRuns`): each read
@@ -1435,7 +1440,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
 
 #: The CRUD areas the print worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PRINT_CRUD_AREAS = frozenset({"settings", "runs", "operations", "events"})
+PRINT_CRUD_AREAS = frozenset({"settings", "runs", "operations", "events", "printer-ensure"})
 
 
 async def run_print_worker(

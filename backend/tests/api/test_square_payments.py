@@ -183,6 +183,23 @@ def test_cancelling_a_request_deletes_its_payment_link(
     assert square["delete"].called
 
 
+def test_a_location_with_no_currency_is_refused(
+    client: TestClient, square: respx.MockRouter
+) -> None:
+    """A provider whose account takes one currency must name it, or its row would read
+    "Currency not checked" for good and a reconnect would never clear it (#5752 review)."""
+    location = payload("api.location.json")
+    del location["location"]["currency"]
+    square.get(f"/v2/locations/{LOCATION}").respond(json=location)
+    refused = client.put("/api/v1/payments/providers/square", json=CONNECT)
+    assert refused.status_code == 409, refused.text
+    problem = refused.json()
+    assert problem["type"] == "https://scadbuddy.dev/problems/payments/currency_unknown"
+    assert problem["detail"] == "square did not say which currency the account takes"
+    statuses = client.get("/api/v1/payments/providers").json()
+    assert [s["connected"] for s in statuses if s["id"] == "square"] == [False]
+
+
 def test_a_location_in_another_currency_is_refused(
     client: TestClient, square: respx.MockRouter
 ) -> None:

@@ -74,6 +74,8 @@ from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings,
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
@@ -431,14 +433,16 @@ def print_crud_app(
     events: EventBus | None = None,
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
+    printers: PrinterStore | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
-    through ``runs`` and ``outcomes``, publishing on ``events``, and writing operations
-    through ``operations`` of ``kinds``."""
+    through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
+    through ``operations`` of ``kinds``, and printer rows through ``printers``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
+        PRINTERS: SimpleNamespace(store=printers),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -511,7 +515,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = ["settings", "runs", "operations", "events"]
+    areas = ["settings", "runs", "operations", "events", "printer-ensure"]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

@@ -177,6 +177,23 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
+#: A printer's machine rate inputs (#4625), one profile with its wear parts and tasks.
+MACHINE_RATE_TABLES = ("printer_cost_profiles", "printer_wear_parts", "printer_maintenance_costs")
+
+
+def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # The three tables are one set of inputs: when the kept printer has a profile, all of
+    # the gone printer's rows go; otherwise all of them move. Never a mix of the two.
+    kept = conn.execute(
+        "SELECT 1 FROM printer_cost_profiles WHERE printer = %s", (into,)
+    ).fetchone()
+    for table in MACHINE_RATE_TABLES:
+        if kept is not None:
+            conn.execute(f"DELETE FROM {table} WHERE printer = %s", (merged,))
+        else:
+            conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
+
+
 #: The per-printer settings maps whose keys may be a registry id (#4971): a LAN-only
 #: printer's entries, keyed by its row since it has no Bambuddy id.
 PRINTER_KEYED_SETTINGS = (
@@ -233,6 +250,11 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #4971: the printer a rack hotend was last seen on, and a pick's.
     PrinterReference("rack_nozzle_seen", "printer"),
     PrinterReference("rack_nozzle_picks", "printer"),
+    # #4625: the machine rate's inputs, judged together by one hook (each entry calls it;
+    # after the first, the gone printer has no rows left to move or drop).
+    PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
+    PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
+    PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries.
     _repoint_settings,

@@ -22,6 +22,12 @@ the API's `PrintRunStore`, so its ``print.run`` event and activity row commit wi
 record is natural on its run (``ON CONFLICT (run_id) DO NOTHING``), and its
 ``print.outcome`` commits with it.
 
+A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
+or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
+#4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
+those writes are the API's, never the worker's role's. Natural: decided under the
+registry's lock, so a call sent again finds the row and writes nothing.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -55,7 +61,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
+from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
+from scadbuddy.printers.models import PrinterRow
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +297,34 @@ async def record_outcome(body: OutcomeWrite, runs: PrintRunsDep) -> Recorded:
 @router.get("/outcomes/older-open", name="crud_print_older_open_runs")
 async def older_open(subject: str, runs: PrintRunsDep) -> list[PrintRun]:
     return await _outcomes(runs).older_open(subject)
+
+
+class EnsureBambuddy(BaseModel):
+    """`PrinterStore.ensure_bambuddy_written`'s arguments."""
+
+    bambuddy_printer_id: int
+    serial: str | None = None
+    name: str
+    model: str | None = None
+    listed: list[int] | None = None
+
+
+class EnsuredPrinter(BaseModel):
+    row: PrinterRow
+    written: bool
+
+
+@router.post("/printers/ensure-bambuddy", name="crud_print_ensure_bambuddy")
+async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> EnsuredPrinter:
+    row, written = await asyncio.to_thread(
+        printers.store.ensure_bambuddy_written,
+        body.bambuddy_printer_id,
+        serial=body.serial,
+        name=body.name,
+        model=body.model,
+        listed=None if body.listed is None else frozenset(body.listed),
+    )
+    return EnsuredPrinter(row=row, written=written)
 
 
 @router.post("/events", name="crud_print_publish_event")

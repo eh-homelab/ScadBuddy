@@ -35,6 +35,8 @@ const PAGES = [
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',
   '/customers/c1a00000-0000-4000-8000-000000000001',
+  // The storefront's listings (#4962): its tab is "Storefront · ScadBuddy".
+  '/storefront',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]

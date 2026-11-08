@@ -4,10 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
-import { resetMockState } from '../mocks/handlers'
+import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -342,3 +342,119 @@ describe('OrderPage payment requests (#4957)', () => {
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Payments' })).getByText('$5.00')).toBeInTheDocument())
   })
 })
+
+// #5281: a balance request that stands holds the shipment until it is paid or waived.
+describe('OrderPage, the balance (#5281)', () => {
+  beforeEach(() => resetMockState())
+
+  it('says the balance is unpaid and offers Ship without full payment', async () => {
+    const found = state.items.find((i) => i.id === ITEM_APPROVED)!
+    found.status = 'fulfilled'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'ready'
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const shipments = screen.getByRole('region', { name: 'Shipments' })
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    expect(await within(shipments).findByRole('alert')).toHaveTextContent(/balance is not paid/)
+    await user.click(within(shipments).getByRole('button', { name: 'Ship without full payment' }))
+    await user.type(screen.getByLabelText('Reason'), 'pays on delivery')
+    await user.click(screen.getByRole('button', { name: 'Ship unpaid' }))
+    await waitFor(() => expect(within(shipments).queryByRole('alert')).toBeNull())
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    await waitFor(() => expect(screen.getByText('Shipped')).toBeInTheDocument())
+  })
+
+  it('shows the auto tax with its mark, the deposit due and the shipping hold in the summary', async () => {
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    state.charges.push({ id: 'h0000000-0000-4000-8000-0000000000aa', order_id: ORDER_ACCEPTED, kind: 'tax', label: 'Tax 10%', amount_minor: 300, position: 0, auto: true })
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.deposit_minor = 1000
+    render(ORDER_ACCEPTED)
+    const totals = await screen.findByTestId('order-totals')
+    expect(within(totals).getByText('auto')).toBeInTheDocument()
+    expect(within(totals).getByText('Deposit due')).toBeInTheDocument()
+    expect(totals).toHaveTextContent('$10.00')
+    expect(within(totals).getByText('Shipping held until the balance is paid')).toBeInTheDocument()
+  })
+
+  // Review fix round 1, minor 1: a waiver made in the Summary card clears the Shipments alert.
+  it('clears the unpaid-balance alert once the balance is waived elsewhere on the page', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'ready'
+    await api.requestPayment(ORDER_ACCEPTED, { kind: 'balance' })
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    const shipments = screen.getByRole('region', { name: 'Shipments' })
+    await user.click(within(shipments).getByRole('button', { name: 'Add shipment' }))
+    await within(shipments).findByRole('alert')
+    const money = screen.getByRole('region', { name: 'Deposit and balance' })
+    await user.click(within(money).getByRole('button', { name: 'Ship without full payment' }))
+    await user.type(screen.getByLabelText('Reason'), 'pays on delivery')
+    await user.click(screen.getByRole('button', { name: 'Ship unpaid' }))
+    await waitFor(() => expect(within(shipments).queryByRole('alert')).toBeNull())
+  })
+})
+
+// Review fix round 1, important 2: the shipping option and the charges editor write one list.
+describe('OrderPage, the shipping option and the charges (#5281)', () => {
+  beforeEach(() => {
+    resetMockState()
+    setMockSettings({ ...mockSettings(), storefront_shipping_options: [{ id: 'post', label: 'Tracked post', amount_minor: 650, ships: true }] })
+  })
+
+  it('keeps the shipping charge: Add charge, pick an option, Save', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const charges = screen.getByRole('region', { name: 'Charges' })
+    await user.click(within(charges).getByRole('button', { name: 'Add charge' }))
+    // The editor has unsaved rows: the picker waits for them.
+    expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeDisabled()
+    expect(screen.getByText('Save or discard the charges first')).toBeInTheDocument()
+    await user.click(within(charges).getByRole('button', { name: 'Discard' }))
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping option' }), 'Tracked post · $6.50')
+    await waitFor(() => expect(within(charges).getByLabelText('Charge 1 label')).toHaveValue('Tracked post'))
+    await user.click(within(charges).getByRole('button', { name: 'Add charge' }))
+    await choose(user, within(charges).getByRole('combobox', { name: 'Charge 2 kind' }), 'fee')
+    await user.type(within(charges).getByLabelText('Charge 2 label'), 'Rush')
+    await user.type(within(charges).getByLabelText('Charge 2 amount'), '3')
+    await user.click(within(charges).getByRole('button', { name: 'Save charges' }))
+    await waitFor(() =>
+      expect(state.charges.filter((c) => c.order_id === ORDER_DRAFT).map((c) => [c.kind, c.label, c.amount_minor, c.shipping_option_id ?? null])).toEqual([
+        ['shipping', 'Tracked post', 650, 'post'],
+        ['fee', 'Rush', 300, null],
+      ]),
+    )
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Shipping option' })).toBeEnabled())
+  })
+
+  // Review fix round 2: no edit starts on the charges while the option is being written.
+  it('locks Add charge while the shipping option is being written', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.put('/api/v1/orders/:id/shipping-option', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const charges = screen.getByRole('region', { name: 'Charges' })
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping option' }), 'Tracked post · $6.50')
+    await waitFor(() => expect(within(charges).getByRole('button', { name: 'Add charge' })).toBeDisabled())
+    release()
+    await waitFor(() => expect(within(charges).getByLabelText('Charge 1 label')).toHaveValue('Tracked post'))
+    expect(within(charges).getByRole('button', { name: 'Add charge' })).toBeEnabled()
+  })
+
+  // #5726 review: an option that ships keeps the address; the refusal shows on the page.
+  it('shows why the shipping address cannot be cleared while the option ships', async () => {
+    await api.setShippingOption(ORDER_DRAFT, 'post')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await choose(user, screen.getByRole('combobox', { name: 'Shipping address' }), 'No address')
+    expect(await screen.findByText(/ships by Tracked post: it keeps its shipping address/)).toBeInTheDocument()
+    expect(state.orders.find((o) => o.id === ORDER_DRAFT)!.shipping_address_id).not.toBeNull()
+  })
+})
+

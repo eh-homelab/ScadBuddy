@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../../api/client'
-import { resetMockState } from '../../../mocks/handlers'
+import { mockSettings, resetMockState } from '../../../mocks/handlers'
 import { mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -81,19 +81,33 @@ describe('Settings → Payments (#4957)', () => {
     mockConnectProvider('a', 'CAD')
     renderSettingsSection(<Payments />, { route })
     const fake = within(await screen.findByRole('region', { name: 'Fake' }))
-    expect(await fake.findByText('Connected in CAD; orders are in USD. New payment links will fail.')).toBeInTheDocument()
+    expect(await fake.findByText('Connected in CAD; orders are in USD. Payment links for orders in USD will fail; orders in CAD still work.')).toBeInTheDocument()
   })
 
   it('says nothing when the account takes the orders currency, or any', async () => {
     mockConnectProvider('a', 'USD')
     const first = renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
-    expect(screen.queryByText(/New payment links will fail/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Payment links for orders in/)).not.toBeInTheDocument()
     first.unmount()
     mockConnectProvider('a')
     renderSettingsSection(<Payments />, { route })
     expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
-    expect(screen.queryByText(/New payment links will fail/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Payment links for orders in/)).not.toBeInTheDocument()
+  })
+
+  it('asks to reconnect an account in one currency whose currency was never checked (#5666)', async () => {
+    mockConnectProvider('a', null, true)
+    renderSettingsSection(<Payments />, { route })
+    const fake = within(await screen.findByRole('region', { name: 'Fake' }))
+    expect(await fake.findByText('Currency not checked; reconnect to check it.')).toBeInTheDocument()
+  })
+
+  it('never asks a provider whose account takes any currency', async () => {
+    mockConnectProvider('a')
+    renderSettingsSection(<Payments />, { route })
+    expect(await screen.findByText('Connected as Fake account a')).toBeInTheDocument()
+    expect(screen.queryByText(/Currency not checked/)).not.toBeInTheDocument()
   })
 
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {
@@ -103,3 +117,23 @@ describe('Settings → Payments (#4957)', () => {
     expect((await api.connectPaymentProvider('fake', body)).connected).toBe(true)
   })
 })
+
+describe('Settings → Payments, paying by hand (#5281)', () => {
+  beforeEach(() => resetMockState())
+
+  it('saves the payment instructions as plain text', async () => {
+    const { user } = renderSettingsSection(<Payments />, { route })
+    const box = await screen.findByLabelText('Payment instructions')
+    await user.type(box, 'Bank transfer to <b>12-34</b>, with the order number.')
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }))
+    await waitFor(() => expect(mockSettings().storefront_payment_instructions).toBe('Bank transfer to <b>12-34</b>, with the order number.'))
+    expect(await screen.findByText('Saved.')).toBeInTheDocument()
+    // Kept as typed: plain text, never markup.
+    expect(box).toHaveValue('Bank transfer to <b>12-34</b>, with the order number.')
+    // Cleared, it is null again.
+    await user.clear(box)
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }))
+    await waitFor(() => expect(mockSettings().storefront_payment_instructions).toBeNull())
+  })
+})
+

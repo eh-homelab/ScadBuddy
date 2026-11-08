@@ -43,6 +43,7 @@ function statusOf(id: string): ProviderStatus {
     last_webhook_error: connected?.last_webhook_error ?? null,
     last_webhook_error_at: connected?.last_webhook_error_at ?? null,
     currency: connected?.currency ?? null,
+    reports_currency: connected?.reports_currency ?? false,
   }
 }
 
@@ -63,7 +64,7 @@ export const handlers = [
     if (!kek) return problem(request, 409, 'payment credentials need SCADBUDDY_SECRET_KEY_FILE', PROBLEMS + 'kek_missing')
     // The first provider connected is the default (`is_default`, at most one row).
     const was = state.providers.find((p) => p.id === id)
-    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null }
+    const row = { id, account_label: `Fake account ${body.settings.account}`, is_default: was?.is_default ?? state.providers.length === 0, connected_at: now(), last_webhook_at: was?.last_webhook_at ?? null, last_webhook_error: null, last_webhook_error_at: null, currency: null, reports_currency: false }
     state.providers = [...state.providers.filter((p) => p.id !== id), row]
     return HttpResponse.json(statusOf(id))
   }),
@@ -87,8 +88,8 @@ export const handlers = [
 ]
 
 /** Connect the fake provider as the settings form would, for a test's setup. */
-export function mockConnectProvider(account = 'a', currency: string | null = null) {
-  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null, last_webhook_error: null, last_webhook_error_at: null, currency }]
+export function mockConnectProvider(account = 'a', currency: string | null = null, reportsCurrency = false) {
+  state.providers = [{ id: FAKE.id, account_label: `Fake account ${account}`, is_default: true, connected_at: now(), last_webhook_at: null, last_webhook_error: null, last_webhook_error_at: null, currency, reports_currency: reportsCurrency }]
 }
 
 /** #5684 — the fake provider's last webhook failed with `error` (connect it first). */

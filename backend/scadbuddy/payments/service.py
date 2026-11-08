@@ -86,6 +86,14 @@ class CurrencyMismatchError(Exception):
         )
 
 
+class CurrencyUnknownError(Exception):
+    """A provider whose account takes one currency did not name it (#5752 review): such a
+    row would read "Currency not checked" for good, so it is not connected."""
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"{provider} did not say which currency the account takes")
+
+
 class FieldError(ValueError):
     """A connect body that names a field the provider does not declare, or leaves one
     out. ``loc`` is the field's place in the body."""
@@ -123,6 +131,10 @@ class ProviderStatus(BaseModel):
     #: Whether a failed request's page can still be paid (#4959): true for a provider
     #: that captures an approval (PayPal), whose order the customer can approve again.
     reapprovable: bool
+    #: Whether the provider's account takes one currency (`PaymentProvider
+    #: .reports_currency`): a connected row of it with no ``currency`` was connected
+    #: before the currency was kept, and is asked to reconnect.
+    reports_currency: bool = False
 
 
 class ProviderConnect(BaseModel):
@@ -566,6 +578,8 @@ class Payments:
         verified = await adapter.verify(
             Credential(settings=dict(body.settings), secrets=dict(body.secrets))
         )
+        if adapter.reports_currency and verified.currency is None:
+            raise CurrencyUnknownError(provider)
         if verified.currency is not None and verified.currency != shop_currency:
             raise CurrencyMismatchError(provider, verified.currency, shop_currency)
         account_label = verified.account_label
@@ -618,6 +632,7 @@ class Payments:
                     last_webhook_error_at=None if row is None else row.last_webhook_error_at,
                     currency=None if row is None else row.currency,
                     reapprovable=self._reapprovable(provider_id),
+                    reports_currency=adapter is not None and adapter.reports_currency,
                 )
             )
         return found

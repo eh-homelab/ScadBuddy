@@ -19,6 +19,14 @@ import {
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
+/** A request body as sent: every field may be left out, each with the schema's type. */
+type Sent<T> = { [K in keyof T]?: T[K] }
+type MachineRateSent = {
+  profile: Sent<components['schemas']['CostProfile']>
+  wear_parts?: components['schemas']['WearPart'][]
+  maintenance?: Sent<components['schemas']['MaintenanceCost']>[]
+}
+
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
 // items as ScadBuddy's own records. Routes: backend/scadbuddy/api/customers.py and
 // api/orders.py. `read` lists and gets; `write` is a record the shop keeps (a customer, an
@@ -1457,8 +1465,13 @@ export const orderTools: Tool[] = [
     label: 'Print an order line item',
     description:
       "Print an approved line item of an accepted order from its accepted quote (#4719): a print run of the item's " +
-      "output with the print dialog's choices (printer, a spool per slot, nozzles and quality, as print_output takes " +
-      'them), every plate, for the quantity still to print. Answers with the attempt it recorded (outcome unknown, ' +
+      "output with the quote's print setup (#4673: printer, path, a spool per slot, nozzles and quality, tower, " +
+      'supports and sequence, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
+      '`filament_plan`), every plate, for the quantity still to print. Send none of them to print what was quoted; ' +
+      "each one sent must be the quote's (a printer, choices, tower, supports or sequence that differs is refused " +
+      '`requote_needed`: quote it again with them), except `path` (another route slices again) and the spools ' +
+      "(`filament_plan`, filled from the item's filaments). A manual or archive quote records no setup: send " +
+      '`choices` and `filament_plan` (else 422 `print_setup_missing`). Answers with the attempt it recorded (outcome unknown, ' +
       'nothing made yet), the item queued; the item then follows the print (printing, then printed or failed), and ' +
       'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
       "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
@@ -1476,10 +1489,10 @@ export const orderTools: Tool[] = [
     input: z.object({
       order_id: orderId,
       item_id: itemId,
-      printer_id: sliceQuote.shape.printer_id,
+      printer_id: sliceQuote.shape.printer_id.describe("Omit for the accepted quote's printer"),
       printer: sliceQuote.shape.printer,
-      filament_plan: sliceQuote.shape.filament_plan,
-      choices: printChoices,
+      filament_plan: sliceQuote.shape.filament_plan.optional().describe("Omit for the accepted quote's spools"),
+      choices: printChoices.optional().describe("Omit for the accepted quote's (its `choices.choices`)"),
       options: printOptionFields.optional().describe(
         "Per-print queue options, as print_output takes them: bed_levelling, flow_cali, nozzle_offset_cali, " +
           "vibration_cali, timelapse and the rest. Its project_id and quantity are the item's, never these",
@@ -1514,7 +1527,9 @@ export const orderTools: Tool[] = [
       (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : '') +
       (path === 'bambuddy' ? " through Bambuddy's queue" : path === 'native' ? ' over the LAN' : '') +
       partSettingsPhrase(part_settings) +
-      setupPhrase(setup),
+      setupPhrase(setup) +
+      // #4673: no choices of its own is the quote's whole setup.
+      (setup.choices === undefined ? " with its slice quote's print setup (refused when the quote records none)" : ''),
     handler: async ({ order_id, item_id, test_revision_id, ...request }, ctx) =>
       json(
         test_revision_id !== undefined
@@ -2015,6 +2030,99 @@ export const orderTools: Tool[] = [
         }
       }
       return json(answer)
+    },
+  }),
+  defineTool({
+    name: 'machine_rate_get',
+    label: "Read a printer's machine rate",
+    description:
+      "A registry printer's machine rate (list_printers' `id`): its inputs (`inputs`, null with none) and the rate " +
+      'they give now with each part (`breakdown`): each maintenance task\'s minutes at the labour rate plus its ' +
+      'consumables over its interval in print-hours, each wear part\'s cost over its life, the power (watts / 1000 x ' +
+      'the price of a kWh) and the purchase price over the life, in the shop\'s currency. A printer linked to Bambuddy ' +
+      'takes its tasks and intervals from Bambuddy (`intervals` `bambuddy`, or `stored` when Bambuddy did not ' +
+      "answer). A printer with no inputs is the price book's machine rate (`source` `price_book`). A slice quote " +
+      'for the printer is priced at this rate and records each part.',
+    input: z.object({ printer: ID.describe("The registry printer (list_printers' `id`)") }),
+    risk: 'read',
+    routes: ['GET /api/v1/printers/{printer_id}/machine-rate'],
+    handler: async ({ printer }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/printers/{printer_id}/machine-rate', { params: { path: { printer_id: printer } } }),
+          `read printer ${printer}'s machine rate`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'machine_rate_set',
+    label: "Set a printer's machine rate",
+    description:
+      "Keep a registry printer's machine rate inputs (machine_rate_get): `inputs` replaces them whole: `profile` " +
+      '(purchase_price, life_hours (null: no depreciation), watts, kwh_price, labour_rate_per_hour (null: the ' +
+      "shop's labour rate)), `wear_parts` ({name, cost, life_hours}) and `maintenance` ({task, minutes, " +
+      'consumables, interval_hours}; a printer linked to Bambuddy names its Bambuddy tasks and keeps Bambuddy\'s ' +
+      "intervals). `remove: true` drops them, so the printer is priced at the price book's machine rate again. " +
+      'Decimals are strings. A recorded quote keeps the rate it was priced at.',
+    input: z.object({
+      printer: ID.describe("The registry printer (list_printers' `id`)"),
+      inputs: z
+        .object({
+          profile: z
+            .object({
+              purchase_price: decimal.optional(),
+              life_hours: decimal.nullable().optional(),
+              watts: decimal.optional(),
+              kwh_price: decimal.optional(),
+              labour_rate_per_hour: decimal.nullable().optional(),
+            })
+            .strict(),
+          wear_parts: z
+            .array(z.object({ name: z.string().min(1).max(100), cost: decimal, life_hours: decimal }).strict())
+            .max(50)
+            .default([]),
+          maintenance: z
+            .array(
+              z
+                .object({
+                  task: z.string().min(1).max(100),
+                  minutes: decimal.optional(),
+                  consumables: decimal.optional(),
+                  interval_hours: decimal.nullable().optional(),
+                })
+                .strict(),
+            )
+            .max(50)
+            .default([]),
+        })
+        .strict()
+        .optional(),
+      remove: z.boolean().default(false),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/printers/{printer_id}/machine-rate', 'DELETE /api/v1/printers/{printer_id}/machine-rate'],
+    title: ({ printer, remove }) => (remove ? `Remove printer ${printer}'s machine rate` : `Set printer ${printer}'s machine rate`),
+    handler: async ({ printer, inputs, remove }, { backend }) => {
+      if (remove && inputs !== undefined) throw new ToolError('give inputs or remove: true, not both')
+      const path = { printer_id: printer }
+      if (remove) {
+        await ok(backend.DELETE('/api/v1/printers/{printer_id}/machine-rate', { params: { path } }), `remove printer ${printer}'s machine rate`)
+        return json({ removed: printer })
+      }
+      if (inputs === undefined) throw new ToolError('nothing to change: give inputs, or remove: true')
+      // Checked against the route's schema, so the zod shape cannot drift from it. The
+      // generated type marks a field with a default as required (openapi-typescript's
+      // defaultNonNullable), though the API takes it omitted: `Sent` lets it be left out.
+      const sent: MachineRateSent = inputs
+      return json(
+        await ok(
+          backend.PUT('/api/v1/printers/{printer_id}/machine-rate', {
+            params: { path },
+            body: sent as components['schemas']['MachineRateInputs'],
+          }),
+          `set printer ${printer}'s machine rate`,
+        ),
+      )
     },
   }),
   defineTool({

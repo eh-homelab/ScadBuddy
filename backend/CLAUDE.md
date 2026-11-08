@@ -244,7 +244,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   everything from the trigger's row (the Schedule carries the trigger id only) and runs
   as its creator, with a run grant only from a standing grant a person approved; never
   take an author or a grant status from a body. A trigger pins a version; any edit
-  returns its standing grant to requested, and an approval names the state it saw
+  returns its standing grant to requested (the one exception: the built-in flow's move,
+  `orders/builtin_flow.py` `move_triggers`, #4673), and an approval names the state it saw
   (`seen`); a fire is admitted, and a standing grant spent, under row locks.
   The `orders` bound (#4252, orders spec §7.2): `GrantRule.orders` (ids, or `"any"`)
   bounds `queue_print` and `tool` by the order the call names (`CallFacts.order_id`: an
@@ -614,8 +615,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
   script, inputs `notify` and `settle_hours`), registered by
-  `ensure_builtin_flow` at the component's start only when the name never had a version
-  (`FlowDefinitions.register_new`, `FlowExistsError`), so a person's edit or delete stands;
+  `ensure_builtin_flow` at the component's start when the name never had a version
+  (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
+  is still an unedited built-in one with another script (#4673, `_upgraded`:
+  `FlowDefinitions.upgrade_builtin`, which writes only while the newest is the one it
+  read, `expect_head`, and never over a delete), so a person's edit or delete stands.
+  A trigger pins its version, so `move_triggers` then moves each trigger of an older
+  built-in version to the newest (`TriggerStore.move_builtin`, under the row lock, its
+  approved grant kept) only when the grant is in force and admits, by function and tool,
+  every call the new script makes that its version did not (`script_calls`; `agent(`
+  never); any other trigger gets `NEWER_NOTICE` in `flow_triggers.notice`, which an edit of
+  its version clears, and only while it still runs the version read; it runs again after a
+  person approves a built-in trigger's grant (`move_after_approval`);
   `SCADBUDDY_ORDERS_BUILTIN_FLOW` (a bootstrap field, on by default, off in the tests'
   settings) switches it. It prints each approved or failed item through `queue_print`
   with an `order_item_id` source; a refusal (`order_on_hold`, `requote_needed`, any
@@ -630,8 +641,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the agent to record the attempts under a grant kept to the order, and with `notify`,
   once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
   through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
-  component's start; it reads the versions first (a name with any registers nothing),
-  then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
+  component's start; it reads the versions first (a name with any registers nothing,
+  unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
   build (`flows/reconcile.py` `created_by`).
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
@@ -657,8 +668,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`quote.py` `print_setup`: printer, path, `PrintChoices`, and the `prime_tower`, `supports` and
   `print_sequence` the body takes in `PrintRunRequest`'s shapes, which `operations.py`
   `preview_request` slices with) and `filament_plan`, null on a manual or archive quote.
-  An item's print takes the tower, supports and sequence it omits from the quote's
-  (`printing.py` `QUOTED_SETUP`, `print_body`'s `setup`); one that differs is `requote_needed`. The lifecycle drops the quote holders §3.4 releases
+  An item's print (`ItemPrintRequest`, `{}` included) takes every part of that setup and
+  the spools it omits from the quote's (`printing.py` `QUOTED_SETUP`, `quoted_setup`;
+  `operations.py` `filled`); one sent that differs is `requote_needed` with `reason`
+  `setup_differs` and `differs` (`setup_differences`: not `path`, a printer name left
+  null, or the spools; the dialog adds its hint only then), a quote's `native` path taken
+  on a printer no longer on the LAN is `requote_needed` naming that
+  (`quoted_path_refusal`), and a quote
+  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
@@ -870,6 +887,31 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   back (`parts.returned`); a fulfilled item's parts are fixed (`item_parts_used`). The
   unit-cost history takes `item_id` (`parts_unit_minor`). Agent `part_list`, `part_stock_add`,
   `order_item_parts_set`.
+  The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
+  `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
+  `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in
+  `printers/store.py` `PRINTER_REFERENCES`; `MachineRates`, `OrdersComponent.machine_rates`).
+  Each part per hour is rounded to 0.0001 and the rate is their sum. A printer linked to
+  Bambuddy takes its tasks and intervals from `GET /maintenance/printers/{id}` (the seam's
+  `maintenance_tasks`, `Read Status`; calendar and disabled tasks are listed, not counted)
+  and keeps the counted tasks' intervals on its task rows (`interval_read_at`; every other
+  row's is cleared), which price it when Bambuddy does not answer (`intervals` `stored`):
+  the stored path counts only those rows (`compute`'s `read_tasks`; a task not read yet is
+  `not_read`), so it gives the rate last read live. No profile is the book's
+  `machine_rate_per_hour`. A merge of the three tables runs on the API only: the print
+  worker's run makes or merges its printer row through `POST
+  /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
+  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29's route taken early). Routes
+  `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
+  is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
+  `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the
+  default printer) and records `printer` and `machine_rate_breakdown`. A quote's
+  `support_filaments` price each sliced slot that is no colour slot of the item as its own
+  `Support, …` filament line (`support_check` in the quote's check). The money view
+  prices an attempt with no quote's rate at its printer's stored rate, or the book's for a
+  printer with no profile (by its kept `printer_serial` when that row was merged away,
+  `CostRates.serial_rates`); an attempt naming no registry printer at the default
+  printer's, else the book's (`CostRates.printer_rates`, `MachineRates.money_rates`).
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
@@ -1010,7 +1052,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `CurrencyMismatchError`, 409 `currency_mismatch`, #5666, and keeps it on the row,
   `payment_credentials.currency`, given back as `ProviderStatus.currency`; Settings →
   Payments warns when `orders_currency` moved away from it since, and the settings
-  route does not refuse that move) and
+  route does not refuse that move; a provider whose account takes one currency
+  (`PaymentProvider.reports_currency`, Square's) with a row of no currency, connected
+  before it was kept, is asked to reconnect; such a provider whose `verify` names no
+  currency is refused, `CurrencyUnknownError`, 409 `currency_unknown`) and
   `component.py` (`PAYMENTS`, which reads `ORDERS`; `PaymentsDep`). Tables
   `payment_requests`, `payment_events` (one row per provider and event id, so a replayed
   webhook records one payment; no body column) and `payment_credentials`, plus
