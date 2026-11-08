@@ -8,7 +8,8 @@ only ever inserted whole, with the reply, and commits with the write or not at a
 rolled-back write leaves no reply to replay. Two requests with one key are serialised by a
 transaction-scoped advisory lock on the key, so the second waits and replays the first.
 Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record` are the
-two halves, for a route whose write cannot be one callable.
+two halves, for a route whose write cannot be one callable; `forget` drops a reply whose
+write the route undid.
 """
 
 from __future__ import annotations
@@ -129,6 +130,12 @@ def idempotent_write(
         reply = write()
         record(conn, caller, key, route, body, reply)
         return reply
+
+
+def forget(conn: Connection[DictRow], caller: CrudCaller, key: str) -> None:
+    """Drop the reply of ``key``, in the caller's transaction: for a write the route
+    undid after it was recorded, so the same key sent again runs the write again."""
+    conn.execute("DELETE FROM crud_requests WHERE caller = %s AND key = %s", (caller, key))
 
 
 def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:

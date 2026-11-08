@@ -141,6 +141,9 @@ class RenderLimits:
         """A counted row for a render that costs a run, and its id; `RenderLimited` when
         the visitor, the client or the open renders are at their limit. ``visitor_id``
         is the visitor's row id (``storefront_visitors.id``)."""
+        # The concurrency limit is the whole shop's, so every admit takes one lock
+        # (`LOCK_OPEN`) and admits run one at a time. Keep this transaction short: a
+        # few counts and one insert, never a Temporal call or other I/O.
         with conn.transaction():
             conn.execute(
                 "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s)),"
@@ -216,6 +219,11 @@ class RenderLimits:
         """The row's render never ran (the queue was full): it counts against no limit."""
         with self._pool.connection() as conn:
             conn.execute("UPDATE storefront_renders SET counted = false WHERE id = %s", (row_id,))
+
+    def drop(self, conn: Conn, row_id: int) -> None:
+        """The row of a render whose submit failed before it named a job: the visitor is
+        not charged for it."""
+        conn.execute("DELETE FROM storefront_renders WHERE id = %s AND job_id IS NULL", (row_id,))
 
     def owned(self, visitor_id: str, job_id: str) -> OwnedRender | None:
         """The visitor's newest row for ``job_id``, or None when the visitor never asked

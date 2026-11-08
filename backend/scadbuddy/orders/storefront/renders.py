@@ -6,7 +6,8 @@ same values share one render. A render that joins an open job of the same key, o
 a finished one, is `RenderLimits.free`; any other is `RenderLimits.admit`, counted against
 the visitor's and the client's limits. Both run inside `idempotent_write` keyed by the
 edge's ``Idempotency-Key``, so a request the edge sends again after a lost answer is
-counted once (plan point 21).
+counted once (plan point 21). A start that fails for any reason but a full queue drops
+the counted row and its recorded reply: a render that never started costs nothing.
 
 A visitor reads a render only when one of its own rows names it (`RenderLimits.owns`):
 any other job id, a guessed one among them, is 404 ``render_not_found``. `store_render`
@@ -31,7 +32,7 @@ from pydantic import TypeAdapter
 
 from scadbuddy.api.jobs import submit_problems
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write
+from scadbuddy.crud.idempotency import Replay, forget, idempotent_write
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, part_volumes, rough_estimate
 from scadbuddy.orders.models import Filament
@@ -47,7 +48,7 @@ from scadbuddy.orders.storefront.wire import Listing, RenderBody, StoreRender
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.wire import JOB_ID
+from scadbuddy.storefront.wire import JOB_ID, STOREFRONT_PROBLEMS
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -60,6 +61,9 @@ RENDER_ROUTE: Final = "POST /storefront/renders"
 RENDER_FAILED: Final = "This design could not be made with these choices. Try other values."
 RENDER_CANCELLED: Final = "This render was stopped. Try again."
 _PARTS: Final = TypeAdapter(list[EstimatedPart])
+QUEUE_FULL: Final = f"{STOREFRONT_PROBLEMS}render_queue_full"
+#: What a visitor whose render could not start waits before it asks again.
+UNAVAILABLE_RETRY: Final = 5
 
 
 def not_found() -> ApiError:
@@ -105,6 +109,14 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
 
 
+def _undo(state: AppState, limits: RenderLimits, row: int, key: str) -> None:
+    """The counted row of a render that never started, and the reply recorded for its
+    key, in one transaction."""
+    with state.projection.pool.connection() as conn, conn.transaction():
+        limits.drop(conn, row)
+        forget(conn, "storefront", key)
+
+
 def _shared(state: AppState, conn: Any, render_key: str) -> bool:
     """Whether a render of ``render_key`` is open now, or done with its result still
     held: the visitor then shares it, at no cost."""
@@ -121,8 +133,9 @@ async def start_render(
 ) -> StoreRender:
     """The visitor's render of the listing at ``body``'s values. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``) and 429
-    ``render_queue_full``, each with ``Retry-After``."""
+    ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``), 429
+    ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start: its row
+    and its recorded reply are dropped, so it costs nothing), each with ``Retry-After``."""
     orders = _orders(state)
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
@@ -195,29 +208,42 @@ async def start_render(
         ) from None
     row: int = recorded.body["row"]
     params = reference.inputs.get("params", {})
-    # A refusal other than a full queue is the operator's or Temporal's (a 5xx the edge
-    # sends again with the same key, or a missing snapshot), not the visitor's.
-    with submit_problems():
-        try:
-            job = await state.render.submit(
-                reference.slug,
-                params if isinstance(params, dict) else {},
-                model_version=reference.commit,
-                inputs=reference.inputs,
-                whole_inputs=listing.snapshot.pipeline,
-                request_id=key,
-                reuse_finished=True,
-            )
-        except QueueFullError as error:
-            # The render never ran: it counts against nothing.
-            await asyncio.to_thread(limits.uncount, row)
-            raise problem(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "render_queue_full",
-                "The shop is busy making other designs. Try again in a moment.",
-                headers={"Retry-After": str(error.retry_after)},
-                retry_after=error.retry_after,
-            ) from None
+    try:
+        with submit_problems():
+            try:
+                job = await state.render.submit(
+                    reference.slug,
+                    params if isinstance(params, dict) else {},
+                    model_version=reference.commit,
+                    inputs=reference.inputs,
+                    whole_inputs=listing.snapshot.pipeline,
+                    request_id=key,
+                    reuse_finished=True,
+                )
+            except QueueFullError as error:
+                # The render never ran: it counts against nothing.
+                await asyncio.to_thread(limits.uncount, row)
+                raise problem(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "render_queue_full",
+                    "The shop is busy making other designs. Try again in a moment.",
+                    headers={"Retry-After": str(error.retry_after)},
+                    retry_after=error.retry_after,
+                ) from None
+    except Exception as error:
+        if isinstance(error, ApiError) and error.type == QUEUE_FULL:
+            raise
+        # Temporal, the store or a snapshot failed the start: the visitor is not charged.
+        # The row and its recorded reply go together, so the same key sent again (the
+        # edge's client retries a 5xx) admits a new row rather than replaying this one.
+        logger.warning("a visitor's render was not started", exc_info=True)
+        await asyncio.to_thread(_undo, state, limits, row, key)
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "render_unavailable",
+            "The shop could not start this render. Try again in a moment.",
+            headers={"Retry-After": str(UNAVAILABLE_RETRY)},
+        ) from None
     await asyncio.to_thread(limits.attach, row, job.id)
     return store_render(job)
 

@@ -20,6 +20,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
 from scadbuddy.render.job_models import Job, QueueFullError, now
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
+from scadbuddy.workflows.commands import TemporalUnavailableError
 from tests.api.conftest import set_fake_env
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
@@ -428,3 +429,44 @@ def test_a_failed_render_says_a_fixed_text() -> None:
 
 def test_the_crud_side_lists_the_area(crud: CrudCaller) -> None:
     assert "renders" in crud.get("/areas").json()["areas"]
+
+
+def ledger_rows(crud: CrudCaller, key: str) -> int:
+    with _state(crud.api).projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM crud_requests WHERE caller = 'storefront' AND key = %s",
+            (key,),
+        ).fetchone()
+    assert row is not None
+    n: int = row["n"]
+    return n
+
+
+@pytest.mark.parametrize("failure", [TemporalUnavailableError("down"), RuntimeError("unexpected")])
+def test_a_failed_submit_costs_no_render(
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    """A render that never started is not charged, and the same key sent again is a new
+    try: the ledger holds no reply naming the deleted row."""
+    render = _state(crud.api).render
+    real = render.submit
+
+    async def fails(*_args: Any, **_kwargs: Any) -> Job:
+        raise failure
+
+    monkeypatch.setattr(render, "submit", fails)
+    body = render_body(listing, {"width": 71})
+    r = crud.post("/renders", json=body, key="k-failed")
+    assert r.status_code == 503, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "render_unavailable"
+    assert "down" not in r.text and "unexpected" not in r.text
+    assert counted_rows(crud, TOKEN_A) == 0 and counted_rows(crud, TOKEN_A, counted=False) == 0
+    assert ledger_rows(crud, "k-failed") == 0
+    monkeypatch.setattr(render, "submit", real)
+    again = crud.post("/renders", json=body, key="k-failed")
+    assert again.status_code == 202, again.text
+    assert counted_rows(crud, TOKEN_A) == 1
+    assert wait_done(crud, TOKEN_A, again.json()["id"])["status"] == "done"
