@@ -119,8 +119,9 @@ export function OrderPage() {
     row.scrollIntoView?.({ block: 'center' })
   }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
-  // #4955 — the drawer section a row's ⋯ action opened the item at, scrolled to once.
-  const [section, setSection] = useState<ItemSection | null>(null)
+  // #4955 — the drawer section a row's ⋯ action opened an item at, scrolled to once. Kept
+  // with the item's id, so it never reaches another item's drawer.
+  const [section, setSection] = useState<{ item: string; at: ItemSection } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
@@ -279,7 +280,10 @@ export function OrderPage() {
           attachments={attachments}
           currency={order.currency}
           exponent={order.minor_exponent}
-          onOpen={(item) => setOpenItem(item.id)}
+          onOpen={(item) => {
+            setSection(null)
+            setOpenItem(item.id)
+          }}
           onChanged={reload}
           addTo={adds && { mode: adds, number: order.number ?? 'Cart' }}
           selected={current?.id ?? null}
@@ -288,9 +292,10 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           onAdd={() => setAdding(true)}
           onSection={(item, at) => {
-            setSection(at)
+            setSection({ item: item.id, at })
             setOpenItem(item.id)
           }}
+          busy={busy}
           onAct={(action) => void act(action)}
           costs={costs.data?.order_id === order.id ? costs.data : undefined}
         />
@@ -502,7 +507,7 @@ export function OrderPage() {
           parts={orderParts.data?.order_id === order.id ? (orderParts.data.items.find((i) => i.item_id === current.id)?.parts ?? []) : undefined}
           slices={slices}
           unfulfilAllowed={unfulfilAllowed}
-          section={section}
+          section={section?.item === current.id ? section.at : null}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -559,9 +564,14 @@ function ItemDrawer({
   const [notes, setNotes] = useState(item.notes)
   const [typedPrice, setTypedPrice] = useState(unitText)
   const [printing, setPrinting] = useState(item.requires_printing)
-  useEffect(() => {
-    if (section) document.getElementById(`item-section-${section}`)?.scrollIntoView?.({ block: 'start' })
-  }, [section])
+  // Scrolled to once, when its wrapper attaches: the drawer's content mounts in a portal, after
+  // this component's own effects run.
+  const scrolledTo = useRef(false)
+  const sectionRef = (name: ItemSection) => (element: HTMLDivElement | null) => {
+    if (!element || name !== section || scrolledTo.current) return
+    scrolledTo.current = true
+    element.scrollIntoView?.({ block: 'start' })
+  }
   useEffect(() => {
     setQuantity(String(item.quantity))
     setTitle(item.title)
@@ -755,7 +765,7 @@ function ItemDrawer({
       {parts && <ItemPartsEditor orderId={order.id} item={item} rows={parts} editable={!ENDED.has(order.status) && item.status !== 'fulfilled'} onChanged={onChanged} />}
       {/* A visitor's cart (#5282) has no price or print section, so no menu action opens one. */}
       {!isCart(order) && (
-      <div id="item-section-quote" data-testid="item-section-quote">
+      <div id="item-section-quote" data-testid="item-section-quote" ref={sectionRef('quote')}>
       {custom ? (
         // #4954 — a custom item's price is the field above: nothing is recorded here. A price
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
@@ -767,11 +777,11 @@ function ItemDrawer({
       )}
       {itemProject && <BambuddyProject projectId={itemProject.project_id} label="The item's Bambuddy project" />}
       {!isCart(order) && (
-        <div id="item-section-print" data-testid="item-section-print">
+        <div id="item-section-print" data-testid="item-section-print" ref={sectionRef('print')}>
           <PrintItem order={order} item={item} onChanged={onChanged} />
         </div>
       )}
-      <div id="item-section-fulfil" data-testid="item-section-fulfil">
+      <div id="item-section-fulfil" data-testid="item-section-fulfil" ref={sectionRef('fulfil')}>
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={production} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       </div>
       <OrderAttachments

@@ -52,6 +52,7 @@ export function OrderItemsTable({
   onSection,
   onAct,
   costs,
+  busy = false,
 }: {
   orderId: string
   /** The order: the ⋯ menu's rules read its status and hold. */
@@ -84,9 +85,11 @@ export function OrderItemsTable({
   /** A ⋯ action that is done in the drawer: the page opens the item at that section. */
   onSection?: (item: OrderItemDetail, section: ItemSection) => void
   /** A ⋯ action that writes (delete, cancel, reopen): the page runs it and shows a refusal. */
-  onAct?: (action: () => Promise<unknown>) => void
+  onAct: (action: () => Promise<unknown>) => void
   /** #5326 — the order's money view: a row shows its item's loss or thin-margin badge. */
   costs?: OrderCosts
+  /** A page write is running: the header's adds and the ⋯ menu's writes wait for it. */
+  busy?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const canAdd = addTo !== null
@@ -195,8 +198,9 @@ export function OrderItemsTable({
         actions={itemActions(order, item, { shipments, unfulfilAllowed })}
         onOpen={() => onOpen(item)}
         onSection={(section) => (onSection ? onSection(item, section) : onOpen(item))}
-        onAct={onAct ?? ((action) => void action().then(onChanged))}
+        onAct={onAct}
         onChanged={onChanged}
+        busy={busy}
       />
     ),
   })
@@ -214,11 +218,11 @@ export function OrderItemsTable({
       toolbar={
         canAdd && !isCart(order) && (
           <>
-            <Button type="button" variant="outline" size="sm" onClick={onAdd}>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onAdd}>
               Add product
             </Button>
             {/* #4954 — the entry row under the items takes it (#5541: after acceptance too). */}
-            <Button type="button" variant="outline" size="sm" onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
               Add custom item
             </Button>
           </>
@@ -233,7 +237,7 @@ export function OrderItemsTable({
             mode={addTo.mode}
             currency={currency}
             exponent={exponent}
-            trailing={columns.length - 6}
+            trailing={columns.length - 1 - columns.findIndex((column) => column.key === 'total')}
             onChanged={onChanged}
           />
         ) : undefined
@@ -279,6 +283,9 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
   )
 }
 
+/** The actions that write at once, or after a confirm: off while a page write runs. */
+const WRITES: ReadonlySet<ItemAction['key']> = new Set(['unfulfil', 'reopen', 'delete', 'cancel'])
+
 /** The actions done in the drawer, at the section they open it at. */
 const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'quote', print: 'print', fulfil: 'fulfil' }
 
@@ -295,6 +302,7 @@ function ItemMenu({
   onSection,
   onAct,
   onChanged,
+  busy,
 }: {
   orderId: string
   item: OrderItemDetail
@@ -303,6 +311,8 @@ function ItemMenu({
   onSection: (section: ItemSection) => void
   onAct: (action: () => Promise<unknown>) => void
   onChanged: () => void
+  /** A page write is running: the writes here wait for it. */
+  busy: boolean
 }) {
   const [confirming, setConfirming] = useState(false)
   function run(action: ItemAction) {
@@ -329,7 +339,7 @@ function ItemMenu({
             <Fragment key={action.key}>
               <DropdownMenuItem
                 variant={action.key === 'delete' || action.key === 'cancel' || action.key === 'unfulfil' ? 'destructive' : 'default'}
-                disabled={action.blocked !== null}
+                disabled={action.blocked !== null || (busy && WRITES.has(action.key))}
                 onSelect={() => run(action)}
               >
                 {action.label}
