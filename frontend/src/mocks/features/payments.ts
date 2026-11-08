@@ -33,6 +33,7 @@ export const setMockKek = (present: boolean) => {
 }
 export function reset(): void {
   kek = true
+  FAKE.reports_currency = false
 }
 
 function statusOf(id: string): ProviderStatus {
