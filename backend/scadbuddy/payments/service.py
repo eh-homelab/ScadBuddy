@@ -34,9 +34,11 @@ from scadbuddy.payments.models import (
 from scadbuddy.payments.provider import (
     BadSignatureError,
     Credential,
+    EventTooEarlyError,
     PaymentProvider,
     ProviderError,
     ProviderField,
+    ProviderUnavailableError,
 )
 
 if TYPE_CHECKING:
@@ -291,9 +293,13 @@ class Payments:
         adapter, credential = await asyncio.to_thread(self._connected, provider)
         event = await adapter.parse_webhook(credential, headers, body)
         await asyncio.to_thread(self._credentials.touch_webhook, provider)
-        outcome = await asyncio.to_thread(
-            self._orders.lifecycle.record_provider_event, provider, event
-        )
+        try:
+            outcome = await asyncio.to_thread(
+                self._orders.lifecycle.record_provider_event, provider, event
+            )
+        except EventTooEarlyError as early:
+            # Nothing was written: a 503 makes the provider send the event again.
+            raise ProviderUnavailableError(str(early)) from None
         logger.info("payment event from %s (%s): %s", provider, event.kind, outcome)
         return outcome
 

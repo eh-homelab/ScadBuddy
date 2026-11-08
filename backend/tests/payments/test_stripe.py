@@ -245,6 +245,15 @@ async def test_a_bad_signature_is_refused_before_anything_is_read() -> None:
             await STRIPE.parse_webhook(CRED, signed(b"not json"), b"not json!")
 
 
+@pytest.mark.parametrize("stamp", ["\u00b2", "9" * 5000, "-5", " 1"])
+async def test_a_malformed_timestamp_is_a_bad_signature(stamp: str) -> None:
+    """``str.isdigit`` takes ``\u00b2`` and 5000 digits, which ``int`` refuses."""
+    body = (PAYLOADS / "checkout.session.expired.json").read_bytes()
+    good = signed(body)["stripe-signature"].split(",", 1)[1]
+    with pytest.raises(BadSignatureError):
+        await STRIPE.parse_webhook(CRED, {"stripe-signature": f"t={stamp},{good}"}, body)
+
+
 async def test_an_old_timestamp_is_refused() -> None:
     body = (PAYLOADS / "checkout.session.expired.json").read_bytes()
     old = int(time.time()) - SIGNATURE_TOLERANCE_SECONDS - 5

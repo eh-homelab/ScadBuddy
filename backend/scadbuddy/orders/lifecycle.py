@@ -103,6 +103,7 @@ from scadbuddy.payments.models import (
     PaymentRequestView,
     ProviderEvent,
 )
+from scadbuddy.payments.provider import EventTooEarlyError
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -1046,14 +1047,28 @@ class Lifecycle:
         by: Actor,
     ) -> tuple[EventOutcome, Payment | None]:
         """#4958: a fee the provider knew only after it told the payment. It goes on the
-        payment this provider made for the request, under the order's lock taken by the
-        caller, once: a payment that already has its fee keeps it."""
-        if not event.fee_minor or not self._paid_by(conn, order, found, provider):
+        payment this provider made for the request (a paid request's own, or one recorded
+        on a request paid by hand), under the order's lock taken by the caller, once: a
+        payment that already has its fee keeps it. Events come in any order, so a fee
+        whose payment is not recorded yet is `EventTooEarlyError`: the transaction rolls
+        back, its event row too, and the provider's retry is read again."""
+        if not event.fee_minor:
             return "ignored", None
-        assert found.payment_id is not None
         payment = next(
-            p for p in self.store.payments(order.id, conn=conn) if p.id == found.payment_id
+            (
+                p
+                for p in self.store.payments(order.id, conn=conn)
+                if p.provider == provider
+                and p.payment_request_id == found.id
+                and p.reference == found.provider_ref
+                and p.amount_minor > 0
+            ),
+            None,
         )
+        if payment is None:
+            raise EventTooEarlyError(
+                f"the {provider} payment this fee belongs to is not recorded yet"
+            )
         written = self._write_fee(conn, order, payment.id, provider, event.fee_minor, by)
         return ("recorded" if written else "ignored"), payment
 

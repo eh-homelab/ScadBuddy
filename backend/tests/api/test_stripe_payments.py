@@ -183,6 +183,20 @@ def test_stripe_down_after_the_signature_is_503_and_stripe_retries(
     assert fees(pg_conninfo)[0][0] == 50
 
 
+def test_a_fee_that_arrives_before_its_payment_is_sent_again(
+    client: TestClient, stripe: respx.MockRouter, pg_conninfo: str
+) -> None:
+    """``charge.updated`` can land before the paid event commits: it answers 503 with
+    nothing recorded, and Stripe's retry records the fee."""
+    stripe_request(client)
+    early = send(client, "charge.updated.balance_transaction.json")
+    assert early.status_code == 503
+    assert early.json()["type"] == "https://scadbuddy.dev/problems/payments/provider_unavailable"
+    assert send(client, "checkout.session.completed.card.json").json() == {"outcome": "recorded"}
+    assert send(client, "charge.updated.balance_transaction.json").json() == {"outcome": "recorded"}
+    assert [f[0] for f in fees(pg_conninfo)] == [50]
+
+
 def test_a_forged_event_records_nothing(client: TestClient, stripe: respx.MockRouter) -> None:
     order_id, _ = stripe_request(client)
     body = (PAYLOADS / "checkout.session.completed.card.json").read_bytes()

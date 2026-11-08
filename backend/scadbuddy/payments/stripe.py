@@ -83,6 +83,7 @@ ORDER_ID: Final = "scadbuddy_order_id"
 REQUEST_ID: Final = "scadbuddy_payment_request_id"
 #: A Stripe object id (``cs_…``, ``pi_…``, ``txn_…``); nothing else goes in a path.
 _STRIPE_ID: Final = re.compile(r"[A-Za-z0-9_]{1,255}")
+_TIMESTAMP: Final = re.compile(r"[0-9]{1,12}")
 
 
 class _RefusedError(Exception):
@@ -109,7 +110,9 @@ def verify_signature(secret: str, header: str, body: bytes, *, now: float) -> No
     signatures: list[str] = []
     for part in header.split(","):
         prefix, _, value = part.strip().partition("=")
-        if prefix == "t" and value.isdigit():
+        # ASCII digits of a bounded length only: ``str.isdigit`` takes "\u00b2" and
+        # 5000 digits, which ``int`` refuses.
+        if prefix == "t" and _TIMESTAMP.fullmatch(value):
             timestamp = int(value)
         elif prefix == "v1":
             signatures.append(value)

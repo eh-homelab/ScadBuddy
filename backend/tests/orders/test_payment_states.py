@@ -11,6 +11,7 @@ from scadbuddy.orders.models import Order
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments.credentials import PaymentCredentials, ProviderBusyError
 from scadbuddy.payments.models import PaymentRequestView, ProviderEvent
+from scadbuddy.payments.provider import EventTooEarlyError
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY
@@ -159,14 +160,30 @@ def test_a_fee_is_written_once(shop: PayShop) -> None:
     assert _outcomes(shop) == ["recorded", "ignored", "ignored"]
 
 
-def test_a_fee_for_a_request_not_paid_by_the_provider_is_ignored(shop: PayShop) -> None:
+def test_a_fee_before_its_payment_is_too_early_and_leaves_no_row(shop: PayShop) -> None:
+    """Stripe does not keep event order: a fee can arrive before the paid event commits.
+    It is refused with nothing written, so the provider sends it again."""
+    order, _ = shop.linked()
+    with pytest.raises(EventTooEarlyError):
+        shop.lifecycle.record_provider_event("fake", FEE)
+    assert _outcomes(shop) == []
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    assert shop.lifecycle.record_provider_event("fake", FEE) == "recorded"
+    assert [f.amount_minor for f in shop.rows.cost_entries(order.id)] == [31]
+
+
+def test_a_fee_goes_on_the_providers_payment_when_the_request_was_paid_by_hand(
+    shop: PayShop,
+) -> None:
     order, req = shop.linked()
-    assert shop.lifecycle.record_provider_event("fake", FEE) == "ignored"
     shop.lifecycle.add_payment(order.id, BY, amount_minor=700, payment_request_id=req.id)
-    assert shop.lifecycle.record_provider_event(
-        "fake", FEE.model_copy(update={"event_id": "p7"})
-    ) == ("ignored")
-    assert shop.rows.cost_entries(order.id) == []
+    with pytest.raises(EventTooEarlyError):
+        shop.lifecycle.record_provider_event("fake", FEE)
+    shop.lifecycle.record_provider_event("fake", SETTLED)
+    assert shop.lifecycle.record_provider_event("fake", FEE) == "recorded"
+    [stripe_paid] = [p for p in shop.rows.payments(order.id) if p.provider]
+    [fee] = shop.rows.cost_entries(order.id)
+    assert fee.source == f"payment:{stripe_paid.id}"
 
 
 def test_a_fee_event_with_no_fee_is_ignored(shop: PayShop) -> None:
