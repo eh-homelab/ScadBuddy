@@ -19,8 +19,11 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
+from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, Response
 from starlette.types import Receive, Scope, Send
+
+from scadbuddy.core.problems import problem_response
 
 ENTRY: Final = "storefront.html"
 MANIFEST: Final = Path(".vite") / "manifest.json"
@@ -84,18 +87,25 @@ class StorefrontStatic:
         self.allowed = frozenset(_closure(manifest, ENTRY))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        assert scope["type"] == "http"
+        if scope["type"] != "http":
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close"})
+            return
         response = self._response(scope)
         await response(scope, receive, send)
 
     def _response(self, scope: Scope) -> Response:
-        if scope["method"] not in ("GET", "HEAD"):
-            return PlainTextResponse("Method Not Allowed", 405, headers={"Allow": "GET, HEAD"})
         path: str = scope["path"]
         root: str = scope.get("root_path", "")
         if root and path.startswith(root):
             path = path[len(root) :]
         parts = PurePosixPath(path).parts[1:]  # without the leading "/"
+        # Before the method check: Starlette gives this mount a request whose path an
+        # edge route matches but whose method it does not.
+        if parts and parts[0] == "api":
+            return problem_response(Request(scope), 404, "No such resource.")
+        if scope["method"] not in ("GET", "HEAD"):
+            return PlainTextResponse("Method Not Allowed", 405, headers={"Allow": "GET, HEAD"})
         if not parts:
             return self._page()
         if parts[0] == ASSETS_DIR:
@@ -104,9 +114,8 @@ class StorefrontStatic:
                 response.headers["Cache-Control"] = IMMUTABLE
                 return response
             return _not_found()
-        # A client route never has a file extension, a dot file, or `..`; an API path
-        # that reached here matched no route.
-        if parts[0] == "api" or any(part.startswith(".") or "." in part for part in parts):
+        # A client route never has a file extension, a dot file, or `..`.
+        if any(part.startswith(".") or "." in part for part in parts):
             return _not_found()
         return self._page()
 

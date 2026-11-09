@@ -757,8 +757,8 @@ def test_an_item_id_that_is_not_one_never_reaches_the_crud_side(
 ) -> None:
     before = len(crud_mock.calls)
     r = edge.delete(f"/api/store/v1/draft/items/{item_id}", headers={"Origin": PUBLIC_URL})
-    # ".." leaves the path whole: ``DELETE /draft`` is no route.
-    assert r.status_code == (405 if item_id == ".." else 404)
+    # ".." leaves the path whole: ``DELETE /draft`` is no route, so the edge's 404.
+    assert r.status_code == 404
     assert len(crud_mock.calls) == before
 
 

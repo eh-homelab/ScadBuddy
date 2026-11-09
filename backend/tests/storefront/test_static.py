@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import MutableMapping
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -122,6 +125,45 @@ def test_an_encoded_traversal_is_404(dist: Path, raw: str) -> None:
     response = TestClient(static_app(dist)).get(url)
     assert response.status_code == 404
     assert response.text == "Not Found"
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/store/v1/listings"),
+        ("GET", "/api/store/v1/draft/items/abc"),
+        ("DELETE", "/api/store/v1/nothing"),
+    ],
+)
+def test_an_api_path_no_route_took_is_the_edges_problem_document(
+    dist: Path,
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+    method: str,
+    path: str,
+) -> None:
+    """Starlette gives the `/` mount a request whose path a route matches but whose
+    method it does not: still a problem document, not plain text."""
+    app = create_app(load(frontend_dir=dist))
+    with TestClient(app, base_url="https://testserver", client=CLIENT) as client:
+        response = client.request(method, path)
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["status"] == 404
+
+
+def test_a_websocket_is_closed_not_an_error(dist: Path) -> None:
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def receive() -> MutableMapping[str, Any]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {"type": "websocket", "path": "/nothing", "root_path": ""}
+    asyncio.run(StorefrontStatic(dist)(scope, receive, send))
+    assert [m["type"] for m in sent] == ["websocket.close"]
 
 
 def test_a_write_is_refused(dist: Path) -> None:
