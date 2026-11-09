@@ -106,7 +106,9 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.printers_now import (
+    NOT_ASKED,
     PrintersNow,
+    PrintingItems,
     job_keys,
     printers_now,
     printing_items,
@@ -707,11 +709,12 @@ async def post_tray_spool(
         "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
         "names Bambuddy's archives page. A printing or paused job ScadBuddy queued or "
-        "started carries `scadbuddy` (#3741): the output or library file. When Bambuddy "
-        "says the printer prints a queue item, only ScadBuddy's record of that item "
-        "matches. When it prints none, a run's LAN start on that printer under the job's "
-        "name matches, until the run records that start's end. A linked archive alone is "
-        "not a match, as Bambuddy's reprint of it prints the same archive. "
+        "started carries `scadbuddy` (#3741): the output or library file. On a printer "
+        "linked to Bambuddy, when Bambuddy's queue has a printing item on it, only "
+        "ScadBuddy's record of that item matches, and when the queue cannot be read, "
+        "nothing matches. Otherwise a run's LAN start on that printer under the job's name "
+        "matches, until the run records that start's end. A linked archive alone is not a "
+        "match, as Bambuddy's reprint of it prints the same archive. "
         "A printer whose status cannot be read is a card with `error`, never a failed page."
     ),
 )
@@ -731,25 +734,25 @@ async def get_printers_now(
         cards = await printers_now(
             None, links, printers.store, printers.reports, now=now, native=native
         )
-        items: dict[str, int] = {}
+        printing = NOT_ASKED
     else:
         async with client_for(settings) as client:
             cards = await printers_now(
                 client, links, printers.store, printers.reports, now=now, native=native
             )
             # #3741: the queue item each working card prints, in one read of Bambuddy's.
-            items = await printing_items(client, cards)
-    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, items), items)
+            printing = await printing_items(client, cards)
+    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, printing), printing)
     return with_lan_runs(cards, await _lan_controls(runs, cards))
 
 
 async def _scadbuddy_jobs(
-    links: PrintLinkStore, cards: PrintersNow, items: dict[str, int]
+    links: PrintLinkStore, cards: PrintersNow, printing: PrintingItems
 ) -> JobMatches:
     """Which working cards' jobs ScadBuddy queued or started (#3741), in one read; none
     when its records cannot be read, so a database blip costs the badges, never the
     strip."""
-    queue_items, starts = job_keys(cards, items)
+    queue_items, starts = job_keys(cards, printing)
     try:
         return await links.jobs(queue_items=queue_items, lan_starts=starts)
     except DATABASE_ERRORS:

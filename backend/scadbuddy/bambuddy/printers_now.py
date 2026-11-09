@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -103,14 +104,17 @@ class PrinterNow(BaseModel):
     #: clear. ``None`` when no run waits on it.
     lan_run: LanRunControl | None = None
     #: The output or library file ScadBuddy queued or started this job for (#3741),
-    #: matched only while it prints or is paused. When Bambuddy says this printer prints
-    #: a queue item, only ScadBuddy's record of that item matches. When it prints none,
-    #: the LAN start a run on this printer recorded under ``job_name`` and has not seen
-    #: end matches (a run's last start never records an end). A linked ``archive_id``
-    #: alone is not a match: Bambuddy's reprint of it prints the same archive. ``None``
-    #: for a job queued from Bambuddy, or when Bambuddy's queue or ScadBuddy's records
-    #: cannot be read. A job started on the printer itself is ``None`` too, unless it has
-    #: the name of such a LAN start: then it matches that run.
+    #: matched only while it prints or is paused (`with_scadbuddy_jobs`). On a
+    #: Bambuddy-linked card, when Bambuddy's queue has a printing item on this printer,
+    #: only ScadBuddy's record of the item the card takes matches; when the queue cannot
+    #: be read, nothing matches. Otherwise (the queue read names no item on this printer,
+    #: a printer not linked to Bambuddy, or Bambuddy not asked), the LAN start a run on
+    #: this printer recorded under ``job_name`` and has not seen end matches (a run's
+    #: last start never records an end). A linked ``archive_id`` alone is not a match:
+    #: Bambuddy's reprint of it prints the same archive. ``None`` for a job queued from
+    #: Bambuddy, and when ScadBuddy's records cannot be read. A job started on the
+    #: printer itself is ``None`` too, unless it has the name of such a LAN start: then
+    #: it matches that run.
     scadbuddy: ScadBuddyJob | None = None
 
 
@@ -122,27 +126,51 @@ def _working(printer: PrinterNow) -> bool:
     return printer.activity in ("printing", "paused")
 
 
-async def printing_items(client: BambuddyClient, now: PrintersNow) -> dict[str, int]:
-    """The queue item each working Bambuddy-linked card prints (#3741), by registry id,
-    from one read of Bambuddy's ``printing`` items. A card gets one only when exactly
-    one such item names its printer, and, when both are known, the item's archive is
-    the card's. Bambuddy not asked when no card needs it; its queue unreadable costs only
-    the marks."""
+@dataclass(frozen=True)
+class PrintingItems:
+    """What Bambuddy's printing queue says of the working cards (#3741), by registry id:
+    `printing_items`' answer."""
+
+    #: The one queue item each card prints: exactly one printing item names its printer
+    #: and, when both are known, the item's archive is the card's.
+    items: dict[str, int] = field(default_factory=dict)
+    #: The cards that a LAN start may not match: each Bambuddy-linked card that has a
+    #: printing item on its printer (one it takes or not), and every working
+    #: Bambuddy-linked card when the queue could not be read. A LAN start has no queue
+    #: item, so such a card's job may be Bambuddy's own (its reprint of that print, for
+    #: one). Its badge comes from its item's record or not at all.
+    queue_decides: frozenset[str] = frozenset()
+
+
+#: Bambuddy not asked (no Bambuddy, or every printer printed to natively, D4): every
+#: card may be matched by a LAN start.
+NOT_ASKED = PrintingItems()
+
+
+async def printing_items(client: BambuddyClient, now: PrintersNow) -> PrintingItems:
+    """What Bambuddy's ``printing`` items say of each working Bambuddy-linked card
+    (#3741), from one read. Bambuddy not asked when no such card works. Its queue
+    unreadable costs only the marks: no card takes an item, and no Bambuddy-linked card
+    is matched by a LAN start."""
     working = [(p, p.printer_id) for p in now.printers if _working(p) and p.printer_id is not None]
     if not working:
-        return {}
+        return NOT_ASKED
     try:
         items = await client.queue(status="printing")
     except (ApiError, ValidationError, ValueError):
         logger.info("Bambuddy's printing queue unreadable; the strip shows no queue marks")
-        return {}
+        return PrintingItems(queue_decides=frozenset(printer.id for printer, _ in working))
     on: dict[int, list[QueueItem]] = {}
     for item in items:
         if item.printer_id is not None:
             on.setdefault(item.printer_id, []).append(item)
     found: dict[str, int] = {}
+    decides: set[str] = set()
     for printer, bambuddy_id in working:
         mine = on.get(bambuddy_id, [])
+        if not mine:
+            continue
+        decides.add(printer.id)
         if len(mine) != 1:
             continue
         (item,) = mine
@@ -152,38 +180,42 @@ async def printing_items(client: BambuddyClient, now: PrintersNow) -> dict[str, 
         ):
             continue
         found[printer.id] = item.id
-    return found
+    return PrintingItems(items=found, queue_decides=frozenset(decides))
 
 
-def job_keys(now: PrintersNow, items: Mapping[str, int]) -> tuple[list[int], list[tuple[str, str]]]:
+def job_keys(now: PrintersNow, printing: PrintingItems) -> tuple[list[int], list[tuple[str, str]]]:
     """What `PrintLinkStore.jobs` is asked for the working cards (#3741): the queue item
-    each one prints (`printing_items`), and, for a card with none, its registry id with
-    its job name (a LAN start's ``subtask_name``)."""
+    each one prints (`printing_items`), and, for a card whose job Bambuddy's queue does
+    not decide, its registry id with its job name (a LAN start's ``subtask_name``)."""
     working = [printer for printer in now.printers if _working(printer)]
-    queue_items = [items[p.id] for p in working if p.id in items]
-    starts = [(p.id, p.job_name) for p in working if p.id not in items and p.job_name is not None]
+    queue_items = [printing.items[p.id] for p in working if p.id in printing.items]
+    starts = [
+        (p.id, p.job_name)
+        for p in working
+        if p.id not in printing.queue_decides and p.job_name is not None
+    ]
     return queue_items, starts
 
 
 def with_scadbuddy_jobs(
-    now: PrintersNow, matches: JobMatches, items: Mapping[str, int]
+    now: PrintersNow, matches: JobMatches, printing: PrintingItems
 ) -> PrintersNow:
-    """``now`` with each working card's ScadBuddy job (#3741). A card with a printing
-    Bambuddy queue item is decided by that item's record alone: a LAN start has no queue
-    item, so the item is another job (Bambuddy's reprint of that print, for one) even
-    under the same name. A card with none is matched by a run's LAN start of its job
-    name on this printer."""
+    """``now`` with each working card's ScadBuddy job (#3741). A card whose job
+    Bambuddy's queue decides (`PrintingItems.queue_decides`) is matched by its item's
+    record alone, or not at all: a LAN start has no queue item, so Bambuddy's item is
+    another job (its reprint of that print, for one) even under the same name. Any other
+    card is matched by a run's LAN start of its job name on this printer."""
 
     def card(printer: PrinterNow) -> PrinterNow:
         if not _working(printer):
             return printer
-        item = items.get(printer.id)
-        if item is not None:
-            job = matches.queue_items.get(item)
+        job: ScadBuddyJob | None = None
+        if printer.id in printing.queue_decides:
+            item = printing.items.get(printer.id)
+            if item is not None:
+                job = matches.queue_items.get(item)
         elif printer.job_name is not None:
             job = matches.lan_starts.get((printer.id, printer.job_name))
-        else:
-            job = None
         return printer if job is None else printer.model_copy(update={"scadbuddy": job})
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])

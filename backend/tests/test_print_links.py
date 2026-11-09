@@ -276,6 +276,18 @@ async def test_a_reprint_marks_its_item_and_is_no_send(links: PrintLinkStore) ->
     assert 71 not in (await links.jobs(queue_items=[71])).queue_items
 
 
+async def test_a_send_names_its_item_before_a_reprint_or_a_link(links: PrintLinkStore) -> None:
+    """#3741 review: `jobs` reads an item's records in a fixed order, the send first, so
+    an item with more than one record always names the send's run."""
+    await links.record_reprint(OTH, PrintReprint(queue_item_id=80, archive_id=18))
+    await links.record(LIBRARY, link(19, queue_item_id=80))
+    await links.record_sends(OUT, [PrintSend(queue_item_id=80, run_id="r1")])
+
+    job = (await links.jobs(queue_items=[80])).queue_items[80]
+
+    assert (job.subject, job.run_id) == (OUT.key, "r1")
+
+
 async def test_a_library_send_is_pending_until_its_archive_is_linked(
     links: PrintLinkStore,
 ) -> None:

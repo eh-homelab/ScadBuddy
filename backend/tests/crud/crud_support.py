@@ -439,8 +439,8 @@ def print_crud_app(
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
-    through ``operations`` of ``kinds``, printer rows through ``printers``, and queue
-    item sends through ``links``."""
+    through ``operations`` of ``kinds``, printer rows through ``printers``, and the queue
+    item a reprint queued through ``links``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),

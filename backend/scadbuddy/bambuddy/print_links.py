@@ -181,10 +181,12 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
 
 #: The queue items a send recorded, each with the archive linked by that item; those a
 #: reprint recorded, each with the archive it reprints; then those only a link names by
-#: the item (a send from before ``print_sends``, #1750). Bambuddy gives each queue item
-#: its own id, so no item is in two of them.
+#: the item (a send from before ``print_sends``, #1750). Each row has its kind's
+#: ``rank``, and the rows come ordered by item and rank, so an item with records of
+#: more than one kind is named by the first: the send, then the reprint, then the link.
 _QUEUE_JOBS = (
-    "SELECT s.queue_item_id, s.subject, s.run_id,"
+    "SELECT * FROM ("
+    "SELECT 0 AS rank, s.queue_item_id, s.subject, s.run_id,"
     " COALESCE(o.slug, r.slug) AS slug,"
     " (SELECT l.archive_id FROM print_links l WHERE l.queue_item_id = s.queue_item_id"
     "  AND l.subject = s.subject ORDER BY l.first_seen LIMIT 1) AS archive_id"
@@ -193,19 +195,21 @@ _QUEUE_JOBS = (
     f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('s.subject')}"
     " WHERE s.queue_item_id = ANY(%(ids)s)"
     " UNION ALL"
-    " SELECT p.queue_item_id, p.subject, NULL::text AS run_id, o.slug, p.archive_id"
+    " SELECT 1 AS rank, p.queue_item_id, p.subject, NULL::text AS run_id, o.slug,"
+    " p.archive_id"
     " FROM print_reprints p"
     f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('p.subject')}"
     " WHERE p.queue_item_id = ANY(%(ids)s)"
     " UNION ALL"
-    " SELECT * FROM (SELECT DISTINCT ON (l.queue_item_id) l.queue_item_id, l.subject,"
-    " NULL::text AS run_id, o.slug, l.archive_id"
+    " SELECT * FROM (SELECT DISTINCT ON (l.queue_item_id) 2 AS rank, l.queue_item_id,"
+    " l.subject, NULL::text AS run_id, o.slug, l.archive_id"
     " FROM print_links l"
     f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('l.subject')}"
     " WHERE l.queue_item_id = ANY(%(ids)s) AND NOT EXISTS"
     "  (SELECT 1 FROM print_sends s WHERE s.queue_item_id = l.queue_item_id)"
     " ORDER BY l.queue_item_id, (l.subject LIKE 'library:%%'), l.first_seen, l.subject)"
     " AS legacy"
+    ") AS jobs ORDER BY queue_item_id, rank"
 )
 
 #: The runs on these printers whose result records a LAN start under one of these
@@ -560,7 +564,7 @@ class PrintLinkStore:
         with self._pool.connection() as conn:
             if queue_items:
                 for row in conn.execute(_QUEUE_JOBS, {"ids": queue_items}).fetchall():
-                    # A send first: the legacy branch reads only items no send names.
+                    # The rows come by rank, so the first record of the item is kept.
                     matches.queue_items.setdefault(
                         row["queue_item_id"],
                         _job(dict(row), PrintSubject.parse(row["subject"]), "queue_item"),

@@ -31,6 +31,7 @@ from tests.printers.conftest import KEK
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000001"
+NOW = "/api/v1/print/printers/now"
 
 
 def configure(client: TestClient) -> None:
@@ -633,11 +634,17 @@ def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> 
 
 @respx.mock
 def test_an_unreadable_queue_costs_only_the_marks(client: TestClient) -> None:
-    """#3741: Bambuddy's queue not answering leaves the cards, unmarked."""
+    """#3741: Bambuddy's queue not answering leaves the cards, unmarked. A Bambuddy card
+    is then not matched by a LAN start either (#3741 review): its job may be a queue item
+    Bambuddy could not name, its reprint of that print for one."""
     configure_bambuddy(client)
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
-    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, subtask_name="scadbuddy-blip-p1"))
+    )
     respx.get(f"{API}/queue/").mock(return_value=httpx.Response(500, json={"detail": "boom"}))
+    (first,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    _lan_run(client, first["id"], "scadbuddy-blip-p1", run_id="blip")
 
     response = client.get("/api/v1/print/printers/now")
 
@@ -773,3 +780,46 @@ def test_a_bambuddy_item_decides_alone_never_the_lan_start(client: TestClient) -
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
 
     assert card["scadbuddy"] is None
+
+
+@respx.mock
+def test_a_bambuddy_card_uses_a_lan_start_only_when_its_queue_names_nothing(
+    client: TestClient,
+) -> None:
+    """#3741 review: a Bambuddy card is matched by a LAN start only when Bambuddy's queue
+    was read and names no printing item on its printer (printer 3). An item there that
+    the card cannot take (its archive is not the card's, printer 2) still means
+    Bambuddy runs a job of its own, so the card gets no badge."""
+    configure_bambuddy(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(2), printer(3)])
+    )
+    for printer_id in (2, 3):
+        respx.get(f"{API}/printers/{printer_id}/status").mock(
+            return_value=httpx.Response(
+                200,
+                json=status(
+                    printer_id, subtask_name=f"scadbuddy-own{printer_id}-p1", current_archive_id=90
+                ),
+            )
+        )
+    respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(200, json=[printing_item(301, 2, 91)])
+    )
+    first = {c["printer_id"]: c for c in client.get(NOW).json()["printers"]}
+    for printer_id in (2, 3):
+        _lan_run(
+            client,
+            first[printer_id]["id"],
+            f"scadbuddy-own{printer_id}-p1",
+            run_id=f"own{printer_id}",
+        )
+
+    cards = {c["printer_id"]: c for c in client.get(NOW).json()["printers"]}
+
+    assert cards[2]["scadbuddy"] is None
+    assert cards[3]["scadbuddy"] is not None
+    assert (cards[3]["scadbuddy"]["run_id"], cards[3]["scadbuddy"]["matched_by"]) == (
+        "own3",
+        "lan_start",
+    )

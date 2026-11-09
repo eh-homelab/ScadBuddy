@@ -113,7 +113,7 @@ def bambuddy_kinds_over(
     reads its outputs (#1060) and native library files (#3827) through the API.
     ``printers`` and ``reports`` are the registry the background slice decides its run's
     path from (plan 2026-10-18 D2); required, so neither process can leave a native
-    printer's slice on Bambuddy's path by omission. ``sends`` records the queue item a
+    printer's slice on Bambuddy's path by omission. ``reprints`` records the queue item a
     reprint queued (#3741): the API's own store, or the print worker's CRUD route, so
     the worker writes no SQL for it (#5295); required for the same reason."""
     cache = archive_cache
