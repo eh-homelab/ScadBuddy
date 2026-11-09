@@ -1,0 +1,638 @@
+/*
+ * The public storefront page (#5282, spec 2026-11-02 §12): its own look, apart from the
+ * back office's. The idea is the print itself: a light aluminium build plate, ink-dark
+ * text, one cobalt filament colour for every action, and headlines drawn in visible layer
+ * lines, the way a printed part shows them. Tailwind is here for the shared viewer
+ * (components/Preview.tsx), which reads the shadcn variables and the `--sb-*` plate colours
+ * set below; the page's own parts are the `sf-*` classes.
+ */
+@import 'tailwindcss' source(none);
+@source './';
+@source '../components/Preview.tsx';
+@source '../components/ErrorBoundary.tsx';
+@source '../components/ui';
+@import 'tw-animate-css';
+@import '../styles/shadcn-tailwind.css';
+@import '@fontsource-variable/geist';
+
+:root {
+  color-scheme: light;
+
+  /* The palette. */
+  --sf-plate: #e7eaee;
+  --sf-panel: #ffffff;
+  --sf-ink: #14202c;
+  --sf-ink-soft: #4a5868;
+  --sf-line: #c6ccd4;
+  --sf-cobalt: #2343d6;
+  --sf-cobalt-ink: #ffffff;
+  --sf-signal: #ffd23f;
+  --sf-bad: #b42318;
+
+  /* What the shared viewer reads: shadcn's names, set from the palette. */
+  --radius: 0.5rem;
+  --background: var(--sf-panel);
+  --foreground: var(--sf-ink);
+  --card: var(--sf-panel);
+  --card-foreground: var(--sf-ink);
+  --popover: var(--sf-panel);
+  --popover-foreground: var(--sf-ink);
+  --primary: var(--sf-cobalt);
+  --primary-foreground: var(--sf-cobalt-ink);
+  --secondary: #eef1f4;
+  --secondary-foreground: var(--sf-ink);
+  --muted: #eef1f4;
+  --muted-foreground: var(--sf-ink-soft);
+  --accent: #eef1f4;
+  --accent-foreground: var(--sf-ink);
+  --destructive: var(--sf-bad);
+  --border: var(--sf-line);
+  --input: var(--sf-line);
+  --ring: var(--sf-cobalt);
+  --sb-bg: #f3f5f7;
+  --sb-plate-cell: #d5dae0;
+  --sb-plate-section: #aab3bd;
+  --sb-plate-edge: #8b96a3;
+  --sb-accent: var(--sf-cobalt);
+  --sb-focus: var(--sf-cobalt);
+}
+
+@theme inline {
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+@theme {
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    background: var(--sf-plate);
+  }
+  body {
+    margin: 0;
+    background: var(--sf-plate);
+    color: var(--sf-ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  :focus-visible {
+    outline: 3px solid var(--sf-cobalt);
+    outline-offset: 2px;
+  }
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+  a {
+    color: var(--sf-cobalt);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* The page's frame. */
+.sf-page {
+  min-height: 100vh;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 16px 64px;
+}
+.sf-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--sf-line);
+}
+.sf-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 750;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  color: var(--sf-ink);
+  text-decoration: none;
+}
+/* Three printed layers, each wider than the one above: the shop's one mark. */
+.sf-mark-layers {
+  width: 22px;
+  height: 18px;
+  background:
+    linear-gradient(var(--sf-cobalt), var(--sf-cobalt)) 6px 0 / 10px 4px no-repeat,
+    linear-gradient(var(--sf-cobalt), var(--sf-cobalt)) 3px 7px / 16px 4px no-repeat,
+    linear-gradient(var(--sf-cobalt), var(--sf-cobalt)) 0 14px / 22px 4px no-repeat;
+}
+.sf-cart {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  font-weight: 600;
+  color: var(--sf-ink);
+  text-decoration: none;
+}
+.sf-cart-count {
+  min-width: 1.6rem;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--sf-cobalt);
+  color: var(--sf-cobalt-ink);
+  font-size: 0.85rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.sf-main {
+  padding-top: 28px;
+}
+
+/*
+ * Layer lines: the headline is filled with thin horizontal bands of ink, as a print's
+ * walls show its layers. The one bold device on the page.
+ */
+.sf-layered {
+  background: repeating-linear-gradient(to bottom, var(--sf-ink) 0 0.11em, color-mix(in srgb, var(--sf-ink) 72%, transparent) 0.11em 0.14em);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@media (forced-colors: active) {
+  .sf-layered {
+    background: none;
+    color: CanvasText;
+  }
+}
+
+.sf-hero {
+  max-width: 44rem;
+  padding: 12px 0 36px;
+}
+.sf-hero h1 {
+  margin: 0 0 14px;
+  font-size: clamp(2.3rem, 9vw, 4.4rem);
+  line-height: 1;
+  font-weight: 850;
+  letter-spacing: -0.035em;
+}
+.sf-h1 {
+  margin: 0 0 12px;
+  font-size: clamp(1.8rem, 6vw, 2.6rem);
+  line-height: 1.05;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+.sf-h2 {
+  margin: 0 0 8px;
+  font-size: 1.35rem;
+  font-weight: 750;
+  letter-spacing: -0.015em;
+}
+.sf-lead {
+  margin: 0 0 20px;
+  max-width: 38rem;
+  font-size: 1.1rem;
+  color: var(--sf-ink-soft);
+}
+.sf-hint {
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+  color: var(--sf-ink-soft);
+}
+.sf-hint-bad,
+.sf-error {
+  color: var(--sf-bad);
+}
+.sf-error {
+  margin: 12px 0;
+  font-weight: 550;
+}
+.sf-done {
+  margin: 12px 0;
+  font-weight: 600;
+}
+
+/* Buttons and links. */
+.sf-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 22px;
+  border: 2px solid var(--sf-cobalt);
+  border-radius: 999px;
+  background: var(--sf-cobalt);
+  color: var(--sf-cobalt-ink);
+  font-weight: 650;
+  text-decoration: none;
+  cursor: pointer;
+}
+.sf-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sf-cobalt) 86%, black);
+}
+.sf-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sf-button-quiet {
+  background: transparent;
+  color: var(--sf-cobalt);
+}
+.sf-button-quiet:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--sf-cobalt) 8%, transparent);
+}
+.sf-link {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sf-cobalt);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.sf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  margin: 20px 0 0;
+}
+
+/* The listings. */
+.sf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  gap: 20px;
+}
+.sf-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--sf-panel);
+  border: 1px solid var(--sf-line);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.sf-card-media {
+  aspect-ratio: 4 / 3;
+  background: var(--sb-bg);
+}
+.sf-card-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* No photo: the plate's own texture, so the card is never an empty box. */
+.sf-card-blank {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 23px, var(--sb-plate-cell) 23px 24px),
+    repeating-linear-gradient(90deg, transparent 0 23px, var(--sb-plate-cell) 23px 24px);
+}
+.sf-card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px 18px;
+}
+.sf-card-title {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 720;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.sf-card-text {
+  margin: 0;
+  color: var(--sf-ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.sf-card-link {
+  align-self: flex-start;
+  margin-top: auto;
+  padding-top: 6px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 650;
+}
+.sf-tag-bad {
+  margin: 0;
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--sf-bad) 10%, transparent);
+  color: var(--sf-bad);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.sf-ask {
+  margin-top: 48px;
+  padding: 24px;
+  border-radius: 14px;
+  background: var(--sf-ink);
+  color: #f3f5f7;
+}
+.sf-ask p {
+  margin: 0 0 18px;
+  max-width: 34rem;
+  color: #c9d1da;
+}
+
+/* Customize. */
+.sf-customize {
+  display: grid;
+  gap: 24px;
+}
+@media (min-width: 900px) {
+  .sf-customize {
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    align-items: start;
+  }
+  .sf-stage {
+    position: sticky;
+    top: 16px;
+  }
+}
+.sf-stage {
+  position: relative;
+  height: min(70vw, 34rem);
+  min-height: 260px;
+  border: 1px solid var(--sf-line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--sb-bg);
+}
+.sf-stage > * {
+  height: 100%;
+}
+.sf-stage-image {
+  width: 100%;
+  object-fit: cover;
+}
+.sf-stage-empty {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--sf-ink-soft);
+}
+.sf-controls {
+  min-width: 0;
+}
+.sf-back {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  font-weight: 600;
+}
+.sf-description {
+  margin: 0 0 20px;
+  color: var(--sf-ink-soft);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.sf-fields {
+  display: grid;
+  gap: 18px;
+}
+.sf-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.sf-label {
+  display: block;
+  margin-bottom: 6px;
+  padding: 0;
+  font-weight: 650;
+}
+.sf-input {
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--sf-line);
+  border-radius: 10px;
+  background: var(--sf-panel);
+}
+.sf-input[aria-invalid='true'] {
+  border-color: var(--sf-bad);
+}
+.sf-textarea {
+  min-height: 9rem;
+  resize: vertical;
+}
+.sf-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.sf-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 6px 14px;
+  border: 1.5px solid var(--sf-line);
+  border-radius: 999px;
+  background: var(--sf-panel);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.sf-choice[data-state='on'] {
+  border-color: var(--sf-cobalt);
+  box-shadow: inset 0 0 0 1.5px var(--sf-cobalt);
+}
+.sf-swatch {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--sf-ink) 25%, transparent);
+}
+.sf-order {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--sf-line);
+}
+.sf-order .sf-label {
+  flex-basis: 100%;
+  margin: 0;
+}
+.sf-qty {
+  display: inline-flex;
+  align-items: center;
+  border: 1.5px solid var(--sf-line);
+  border-radius: 999px;
+  background: var(--sf-panel);
+}
+.sf-qty button {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  font-size: 1.3rem;
+  cursor: pointer;
+}
+.sf-qty button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.sf-qty output {
+  min-width: 2ch;
+  text-align: center;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The estimate: a price tag, never a quote. */
+.sf-estimate {
+  margin: 20px 0 0;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: var(--sf-signal);
+  color: var(--sf-ink);
+}
+.sf-estimate-price {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sf-estimate-note {
+  margin: 2px 0 0;
+  font-size: 0.9rem;
+}
+
+/* The order. */
+.sf-panel {
+  padding: 20px;
+  border: 1px solid var(--sf-line);
+  border-radius: 14px;
+  background: var(--sf-panel);
+}
+.sf-form {
+  display: grid;
+  gap: 18px;
+  max-width: 40rem;
+}
+.sf-form .sf-button {
+  justify-self: start;
+}
+.sf-file {
+  max-width: 100%;
+}
+.sf-filelist {
+  margin: 8px 0 0;
+  padding-left: 1.2rem;
+  overflow-wrap: anywhere;
+}
+.sf-items {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 44rem;
+}
+.sf-item {
+  padding: 18px 20px;
+  border: 1px solid var(--sf-line);
+  border-radius: 14px;
+  background: var(--sf-panel);
+}
+.sf-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+}
+.sf-item-title {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.sf-item-qty {
+  color: var(--sf-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.sf-values {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+}
+.sf-values div {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+.sf-values dt {
+  color: var(--sf-ink-soft);
+}
+.sf-values dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.sf-notes {
+  margin: 10px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

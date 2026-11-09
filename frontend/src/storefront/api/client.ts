@@ -1,0 +1,151 @@
+/**
+ * The public storefront page's client (#5282, spec 2026-11-02 §5.1): the edge's routes
+ * under `/api/store/v1`, typed from the edge's own spec (`schema.d.ts`, written by
+ * `pnpm gen:api` from `export_openapi --storefront`; never committed). It shares nothing
+ * with the back office's `api/client`.
+ *
+ * Every write carries an `Idempotency-Key`: one UUID per visitor action, the same one when
+ * that action is sent again (`ActionKey`). A refusal is a `StoreError` with the problem's
+ * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
+ * seconds the edge says to wait.
+ */
+import type { components } from './schema'
+
+type Schemas = components['schemas']
+export type Listing = Schemas['PublicListing']
+export type Listings = Schemas['PublicListings']
+export type PublicParam = Listing['params'][string]
+export type Filament = Schemas['PublicFilament']
+export type StoreRender = Schemas['StoreRender']
+export type StoreEstimate = Schemas['StoreEstimate']
+export type Draft = Schemas['DraftView']
+export type DraftItem = Schemas['DraftItem']
+export type ParamValue = boolean | number | string
+
+export const BASE = '/api/store/v1'
+export const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
+
+/** What a visitor reads when the edge said nothing more useful. */
+const FALLBACK = 'The shop could not answer. Try again in a moment.'
+
+export class StoreError extends Error {
+  readonly status: number
+  /** The problem's `type`, or null when the answer was not a problem document. */
+  readonly type: string | null
+  /** Seconds to wait, from `Retry-After`; null when the edge sent none. */
+  readonly retryAfter: number | null
+
+  constructor(status: number, type: string | null, detail: string, retryAfter: number | null) {
+    super(detail)
+    this.name = 'StoreError'
+    this.status = status
+    this.type = type
+    this.retryAfter = retryAfter
+  }
+
+  /** The problem's slug: `render_limited` for `…/storefront/render_limited`. */
+  get slug(): string | null {
+    return this.type?.startsWith(PROBLEMS) ? this.type.slice(PROBLEMS.length) : null
+  }
+}
+
+function retryAfter(response: Response): number | null {
+  const header = response.headers.get('Retry-After')
+  if (header === null) return null
+  const seconds = Number(header)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds)
+  const date = Date.parse(header)
+  return Number.isNaN(date) ? null : Math.max(0, Math.ceil((date - Date.now()) / 1000))
+}
+
+async function refusal(response: Response): Promise<StoreError> {
+  let type: string | null = null
+  let detail = FALLBACK
+  try {
+    const body = (await response.json()) as { type?: unknown; detail?: unknown }
+    if (typeof body.type === 'string') type = body.type
+    if (typeof body.detail === 'string' && body.detail.trim()) detail = body.detail
+  } catch {
+    // Not JSON: the fallback text stands.
+  }
+  return new StoreError(response.status, type, detail, retryAfter(response))
+}
+
+interface CallOptions {
+  method?: 'GET' | 'POST' | 'DELETE'
+  json?: unknown
+  form?: FormData
+  key?: string
+}
+
+async function call<T>(path: string, { method = 'GET', json, form, key }: CallOptions = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (key) headers['Idempotency-Key'] = key
+  let body: BodyInit | undefined
+  if (json !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(json)
+  } else if (form) {
+    body = form
+  }
+  let response: Response
+  try {
+    response = await fetch(`${BASE}${path}`, { method, headers, body, credentials: 'same-origin' })
+  } catch {
+    throw new StoreError(0, null, 'The shop is out of reach. Check your connection and try again.', null)
+  }
+  if (!response.ok) throw await refusal(response)
+  return (await response.json()) as T
+}
+
+export interface RenderInput {
+  listing_id: string
+  listing_updated_at: string
+  /** Only the parameters the listing offers: never a locked one (spec §5.4). */
+  values: Record<string, ParamValue>
+  /** The listing filament for each colour slot of the render, by slot. */
+  colours: Record<string, string>
+}
+
+export const store = {
+  listings: () => call<Listings>('/listings'),
+  listing: (id: string) => call<Listing>(`/listings/${encodeURIComponent(id)}`),
+  startRender: (input: RenderInput, key: string) => call<StoreRender>('/renders', { method: 'POST', json: input, key }),
+  render: (jobId: string) => call<StoreRender>(`/renders/${encodeURIComponent(jobId)}`),
+  estimate: (jobId: string) => call<StoreEstimate>(`/renders/${encodeURIComponent(jobId)}/estimate`),
+  draft: () => call<Draft | null>('/draft'),
+  addItem: (input: RenderInput & { quantity: number }, key: string) =>
+    call<Draft>('/draft/items', { method: 'POST', json: input, key }),
+  removeItem: (itemId: string, key: string) =>
+    call<Draft>(`/draft/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', key }),
+  addRequest: (text: string, files: readonly File[], key: string) => {
+    const form = new FormData()
+    form.append('text', text)
+    for (const file of files) form.append('files', file, file.name)
+    return call<Draft>('/draft/requests', { method: 'POST', form, key })
+  },
+}
+
+/**
+ * One `Idempotency-Key` per visitor action: `for(what)` answers the same key while `what`
+ * (the action and its inputs, as one string) stays the same and `done()` was not called,
+ * so a retry of a failed or lost request is the same request to the shop. A different
+ * action, or one after `done()`, gets a fresh key.
+ */
+export class ActionKey {
+  private current: { what: string; key: string } | null = null
+
+  for(what: string): string {
+    if (this.current?.what !== what) this.current = { what, key: crypto.randomUUID() }
+    return this.current.key
+  }
+
+  done(): void {
+    this.current = null
+  }
+}
+
+/** The text a visitor reads for `error`. */
+export function errorText(error: unknown): string {
+  return error instanceof StoreError ? error.message : FALLBACK
+}

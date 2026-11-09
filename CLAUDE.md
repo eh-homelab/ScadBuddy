@@ -61,7 +61,10 @@ Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.t
 client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
 uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
 the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
-from its `api-spec` stage. A frontend vitest run outside `pnpm test` (`pnpm exec vitest
+from its `api-spec` stage. The frontend's `gen:api` also writes
+`src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
+(`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
+`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
 <file>`) needs `pnpm gen:api` first, or `SCADBUDDY_OPENAPI_JSON` set, because some unit
 tests read bounds from the exported spec (`components/settings/Printers.test.tsx`
 `specAccessCodeMax`, #4502). The `freshness` job no longer commits anything. It checks

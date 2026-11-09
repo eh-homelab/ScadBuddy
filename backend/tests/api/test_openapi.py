@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES, _name_in_openapi
-from scadbuddy.tools.export_openapi import export
+from scadbuddy.tools.export_openapi import export, export_storefront
 
 
 def test_the_spec_publishes_every_http_route_and_nothing_else(tmp_path: Path) -> None:
@@ -169,3 +169,20 @@ def test_naming_two_models_with_one_name_is_refused() -> None:
     _name_in_openapi(app, first, Upload)
     with pytest.raises(ValueError, match="Upload"):
         app.openapi()
+
+
+def test_the_storefront_spec_types_the_edge_from_its_crud_routes(tmp_path: Path) -> None:
+    """#5282: the edge's spec, which types the public page, has every edge route under
+    ``/api/store/v1`` and nothing else, each answer typed by its CRUD route's model."""
+    spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
+    assert all(path.startswith("/api/store/v1/") for path in spec["paths"])
+    ok = spec["paths"]["/api/store/v1/listings"]["get"]["responses"]["200"]
+    assert ok["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicListings"
+    }
+    render = spec["paths"]["/api/store/v1/renders"]["post"]
+    assert "202" in render["responses"]
+    assert "requestBody" in render
+    assert {"PublicListing", "StoreRender", "StoreEstimate", "DraftView"} <= set(
+        spec["components"]["schemas"]
+    )

@@ -131,8 +131,16 @@ export interface PreviewCapture {
   cameraView: () => CameraView
 }
 
+/**
+ * The fields of a render the viewer reads. The back office passes its `Job`; the public
+ * storefront page (#5282) its `StoreRender`, which has the first group under the same
+ * names and none of the rest.
+ */
+export type PreviewJob = Pick<Job, 'id' | 'status' | 'preview_url' | 'plates' | 'bbox_mm' | 'colors' | 'error'> &
+  Partial<Pick<Job, 'notes' | 'warnings' | 'diagnostics' | 'log_tail' | 'queue_position' | 'created_at'>>
+
 interface Props {
-  job: Job | undefined
+  job: PreviewJob | undefined
   rendering: boolean
   /** #267 — what the render is doing, when known. */
   stage?: RenderStage | undefined
@@ -443,7 +451,7 @@ export function Preview({
                 {rendering && stage && live?.status !== 'pending' && !compact && (
                   <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
                 )}
-                {live && <RenderElapsed since={live.created_at} />}
+                {live?.created_at && <RenderElapsed since={live.created_at} />}
               </Badge>
             )}
             {live && onCancel && (

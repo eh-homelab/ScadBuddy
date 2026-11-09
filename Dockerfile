@@ -126,7 +126,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 # The venv's python, not `uv run`: that would sync the dev group too.
 COPY backend/ ./
 RUN uv sync --frozen --no-dev \
-    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi --storefront /src/storefront-openapi.json
 
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
@@ -161,9 +162,11 @@ RUN corepack enable
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# After the install, so an API change does not re-download node_modules.
-COPY --from=api-spec /src/openapi.json /src/openapi.json
-ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+# After the install, so an API change does not re-download node_modules. The storefront
+# edge's spec types the public page (src/storefront/api/schema.d.ts, #5282).
+COPY --from=api-spec /src/openapi.json /src/storefront-openapi.json /src/
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json \
+    SCADBUDDY_STOREFRONT_OPENAPI_JSON=/src/storefront-openapi.json
 
 COPY frontend/ ./
 # The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
