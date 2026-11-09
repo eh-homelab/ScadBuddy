@@ -230,7 +230,8 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   revision), and it first runs the quote's own check on the body alone (`quote_check`
   `body_only`: the cart, the filaments, the support slots, the price book and the machine
   rate), so a refusal there writes nothing and leaves an accepted item's one revise after
-  acceptance unused. The same design makes no revision, so two first sends of one key
+  acceptance unused. The same design makes no revision (`add_revision` `reuse_current`
+  compares it under the order's lock and writes nothing), so two first sends of one key
   that race make one. The new revision has no colour slots until it renders, so the
   route carries the item's pinned filaments with it (`carried_filaments`), and the
   render's slots take them by slot number where the body names none (`quote.py`

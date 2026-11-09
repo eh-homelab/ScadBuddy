@@ -1356,7 +1356,8 @@ export function PrintPicker({
     if ((known && printerId !== wanted) || !filaments || !planReady || (!project && ownProjects.loading)) return
     seeding.current = 'done'
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
-    const chosen = seed.filament_plan.slots ?? []
+    // An item print's quote with no plan seeds none (#4673): the picks stay.
+    const chosen = (seed.filament_plan as PrintRunRequest['filament_plan'] | undefined)?.slots ?? []
     const mine = slotKeys(filaments)
     const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
     if (!seeded.seedIsOwn && !same) return

@@ -2427,7 +2427,7 @@ async def _slice_revision(
     by = current_actor()
     revision = await _run_linked(
         lambda: orders.lifecycle.add_revision(
-            order_id, item_id, by, resolved, after_acceptance=after_acceptance
+            order_id, item_id, by, resolved, after_acceptance=after_acceptance, reuse_current=True
         ),
         order_id,
         payments,

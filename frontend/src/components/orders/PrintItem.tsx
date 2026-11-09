@@ -28,7 +28,8 @@ function quotedSeed(quote: Quote | undefined): PrintRunRequest | null {
   if (!quote || !setup?.choices) return null
   return {
     printer_id: setup.printer_id ?? undefined,
-    filament_plan: (quote.filament_plan ?? { slots: [] }) as PrintRunRequest['filament_plan'],
+    // No plan seed for a quote with none: the dialog keeps its own spool picks.
+    ...(quote.filament_plan ? { filament_plan: quote.filament_plan as PrintRunRequest['filament_plan'] } : {}),
     choices: setup.choices,
     all_plates: true,
     ...(setup.prime_tower ? { prime_tower: setup.prime_tower } : {}),

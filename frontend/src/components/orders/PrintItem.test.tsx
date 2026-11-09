@@ -86,6 +86,34 @@ describe('PrintItem', () => {
     expect(body).not.toHaveProperty('print_sequence')
   })
 
+  // #5761 review — a quote with a setup but no spools seeds no plan: the dialog's own picks
+  // (21 then 27) are what Print sends.
+  it('keeps the dialog spools for a quote with choices and no filament plan', async () => {
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: null },
+          filament_plan: null,
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    const body = printed.mock.calls[0]![2]
+    expect(body.choices).toMatchObject({ tier: 'draft' })
+    expect(body.filament_plan?.slots).toEqual([
+      { slot_id: 1, spool_id: 21 },
+      { slot_id: 2, spool_id: 27 },
+    ])
+  })
+
   // #5544 — a library file item prints its file: the dialog opens on the file, not an output.
   it('prints an approved library file item on its file', async () => {
     Object.assign(state.items.find((i) => i.id === ITEM_APPROVED)!, {

@@ -880,3 +880,28 @@ def test_a_short_commit_of_the_items_design_makes_no_revision(bambuddy: TestClie
     assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
     malformed = shop.post(commit="not-a-commit")
     assert malformed.status_code == 422, malformed.text
+
+
+def test_two_racing_slices_with_one_design_make_one_revision(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5761 review: two first sends both read the old design before either revises.
+    The second one's revision, under the order's lock, finds the design already made
+    and writes nothing, so the quote is of the one revision."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    real = Lifecycle.add_revision
+    raced: list[bool] = []
+
+    def add_revision(self: Lifecycle, *args: Any, **kwargs: Any) -> Any:
+        if not raced:
+            raced.append(True)
+            real(self, *args, **kwargs)  # the other send, which read the same old design
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Lifecycle, "add_revision", add_revision)
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1, 2]
+    assert quote["revision_id"] == item["current_revision_id"]

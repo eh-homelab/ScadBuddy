@@ -296,8 +296,10 @@ def quote_check(
     """Ruling 8's refusals, from the rows (with ``expected_revision_id``, the revision a
     slice's new inputs made, 409 ``revision_superseded`` once another is current, #4673):
     With ``body_only`` (a slice whose new design the route revises first, #5761
-    review) only what the revision cannot change is checked: the cart, the filaments and
-    the price book; the item's state is the revise path's to refuse.
+    review) the item's state is the revise path's to refuse, and the rest is checked
+    against the item as it is before that revision: the cart, that it has a design
+    (``check_design``), the slots the body names against its current colour slots, the
+    filaments merged over them, the support slots and the price book.
     404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
