@@ -65,6 +65,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
 )
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.workflows.commands import (
@@ -146,6 +147,8 @@ class SettingsView(BaseModel):
     orders_deposit_policy: list[DepositRule] = Field(default_factory=list)
     storefront_shipping_options: list[ShippingOption] = Field(default_factory=list)
     storefront_payment_instructions: str | None = None
+    #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
+    orders_customer_messaging: MessagingBinding | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -436,6 +439,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
+        orders_customer_messaging=stored.orders_customer_messaging,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
         sources=snapshot.sources,

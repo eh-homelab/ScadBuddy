@@ -120,6 +120,8 @@ PERSON_ENDPOINTS = frozenset(
         # A suggested deposit is recorded or dismissed by the shop on the order (#4961).
         "scadbuddy.api.order_bank_deposits.record_order_bank_deposit",
         "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit",
+        # Only a person says a message whose outcome is unknown reached the customer (#5660).
+        "scadbuddy.api.order_messages.mark_order_message_sent",
     }
 )
 #: The public routes the projects worker's flow host functions and grant checks call
