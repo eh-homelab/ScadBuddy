@@ -281,38 +281,92 @@ def _index(slug: str) -> int:
     return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
 
 
+_DOT3 = "\u2022\u2022\u2022"
+
+
+def _deposit(conn: psycopg.Connection[tuple[object, ...]], tx: str, text: str) -> None:
+    conn.execute(
+        "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
+        " posted_on, description) VALUES (%s, 'item', 100, 'USD', '2026-11-01', %s)",
+        (tx, text),
+    )
+
+
 @pytest.mark.requires_postgres
 def test_the_remask_migration_masks_text_stored_under_the_old_rule(pg_conninfo: str) -> None:
     # #5852 review: before it, the mask kept any order-number match as written, so an
     # account number written as one could be stored. Every order number and every run of
-    # four or more digits is masked; a real order's number goes too.
+    # four or more digits, counted across single spaces and hyphens as `mask` counts
+    # them, is masked; a real order's number goes too.
     column = _index("bank_deposits_remask")
     stored = [
         "PAY ORD-2026-000123456789 THANKS",
         "PAY ORD-2026-12 3456",
         "pay ord-2026-12-34 and ORD-2026-7",
         "ACCT 1234 REF 567",
-        "REF 123 ACCT \u2022\u2022\u2022",
+        f"REF 123 ACCT {_DOT3}",
+        "ACCT 12 34 56 78 END",
+        "ACCT 12-34-5 REF 1 2",
     ]
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[:column])
         for i, text in enumerate(stored):
-            conn.execute(
-                "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
-                " posted_on, description) VALUES (%s, 'item', 100, 'USD', '2026-11-01', %s)",
-                (f"t{i}", text),
-            )
+            _deposit(conn, f"t{i}", text)
         assert migrate(conn)[0] == MIGRATIONS[column].id
         rows = conn.execute(
             "SELECT description FROM bank_deposits ORDER BY transaction_id"
         ).fetchall()
     assert [r[0] for r in rows] == [
-        "PAY ORD-\u2022\u2022\u2022 THANKS",
-        "PAY ORD-\u2022\u2022\u2022",
-        "pay ORD-\u2022\u2022\u2022 and ORD-\u2022\u2022\u2022",
-        "ACCT \u2022\u2022\u2022 REF 567",
-        "REF 123 ACCT \u2022\u2022\u2022",
+        f"PAY ORD-{_DOT3} THANKS",
+        f"PAY ORD-{_DOT3}",
+        f"pay ORD-{_DOT3} and ORD-{_DOT3}",
+        f"ACCT {_DOT3} REF 567",
+        f"REF 123 ACCT {_DOT3}",
+        f"ACCT {_DOT3} END",
+        f"ACCT {_DOT3} REF 1 2",
     ]
+
+
+@pytest.mark.requires_postgres
+def test_the_remask_migration_masks_the_notes_a_confirmed_deposit_copied(
+    pg_conninfo: str,
+) -> None:
+    # #5852 security review: "Record this deposit as payment" copies the description
+    # into the payment's notes (`record_deposit`), so that copy is masked too: the
+    # payment the deposit row names, and a `bank_transfer` payment whose reference is a
+    # deposit's transaction id. A payment typed by hand keeps its notes.
+    column = _index("bank_deposits_remask")
+    leaked = "PAY ORD-2026-000123456789"
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:column])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        _deposit(conn, "t-linked", leaked)
+        _deposit(conn, "t-ref", leaked)
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, amount_minor, method, reference, notes)"
+            " VALUES ('linked', 'o', 100, 'bank_transfer', 'other', %(n)s),"
+            "        ('ref', 'o', 100, 'bank_transfer', 't-ref', %(n)s),"
+            "        ('cash', 'o', 100, 'cash', 't-ref', 'TILL 12345678'),"
+            "        ('typed', 'o', 100, 'bank_transfer', 'cheque 9', 'CHEQUE 12345678')",
+            {"n": leaked},
+        )
+        conn.execute(
+            "UPDATE bank_deposits SET payment_id = 'linked' WHERE transaction_id = 't-linked'"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[column].id
+        notes: dict[object, object] = dict(
+            conn.execute("SELECT id, notes FROM order_payments").fetchall()
+        )
+    assert notes == {
+        "linked": f"PAY ORD-{_DOT3}",
+        "ref": f"PAY ORD-{_DOT3}",
+        "cash": "TILL 12345678",
+        "typed": "CHEQUE 12345678",
+    }
 
 
 @pytest.mark.requires_postgres

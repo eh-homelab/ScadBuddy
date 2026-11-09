@@ -695,8 +695,9 @@ text is kept with every run of five or more digits masked, a run going on across
 spaces or hyphens (so an IBAN printed in groups is masked); an order number is masked
 too, and only the number of an order that exists is put back, written as ScadBuddy writes it
 (so an account number dressed as an order number never survives). The migration
-`20261109T1420Z_bank_deposits_remask.sql` masks the text stored before this rule: every
-order number and every run of four or more digits. The page's Content-Security-Policy allows Link's one
+`20261109T1420Z_bank_deposits_remask.sql` masks the text stored before this rule, in
+`bank_deposits` and in the notes of a payment recorded from a deposit: every order number,
+and every run of four or more digits (a run going on across single spaces or hyphens). The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 
