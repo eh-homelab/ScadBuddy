@@ -380,7 +380,9 @@ class Metrics:
             "area (the first path segment after the caller) and outcome: ok, refused, "
             "route_missing (an old API pod), unavailable (5xx), transport or reexchange "
             "(a 401 or out-of-scope 403: the credential is stale, so the call retries with "
-            "a backoff until a new one is exchanged or its 30 s budget ends).",
+            "a backoff until a new one is exchanged or its 30 s budget ends). A streamed answer "
+            "(the storefront's preview) is counted when its body ends: ok once relayed to "
+            "the end, relay_failed when it broke or was closed before.",
             ["caller", "area", "outcome"],
             buckets=HTTP_BUCKETS,
             registry=r,

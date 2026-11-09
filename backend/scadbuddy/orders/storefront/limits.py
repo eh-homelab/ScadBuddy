@@ -2,8 +2,8 @@
 
 Each render a visitor asks for is a ``storefront_renders`` row. A render that costs the
 shop a run is ``counted``; a render the visitor shares with another (an open job of the
-same inputs, or a finished one still held) is not (`free`). `admit` counts the rows of
-the visitor and of the client address in the last minute and the last day against
+same inputs, or a finished one still held) is not (`free`). `admit` counts the counted
+rows of the visitor and of the client address in the last minute and the last day against
 ``storefront_renders_per_minute`` and ``storefront_renders_per_day``, and the counted
 rows still open across every visitor against ``storefront_render_concurrency``. It holds
 transaction-scoped advisory locks on the visitor, on the client and on the open renders,
@@ -253,6 +253,15 @@ class RenderLimits:
             ).rowcount
         if moved != 1:
             raise LookupError(f"no storefront render row {row_id}")
+
+    def state_of(self, row_id: int) -> tuple[str | None, bool] | None:
+        """The row's job (None until `attach`) and whether it counts; None when the row
+        is gone."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT job_id, counted FROM storefront_renders WHERE id = %s", (row_id,)
+            ).fetchone()
+        return None if row is None else (row["job_id"], row["counted"])
 
     def set_counted(self, row_id: int, counted: bool) -> None:
         """Whether the row counts, as its submit answered: a run of its own counts, even

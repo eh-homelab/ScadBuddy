@@ -51,13 +51,42 @@ class OrderEstimate(BaseModel):
     unknown_parts: int
 
 
-class StoreEstimate(OrderEstimate):
-    """The storefront's estimate of a render (spec 2026-11-02 §5.4): a price with every
-    line of a quote's formula but machine time. The public page shows it as "about $X,
-    confirmed after we check it", never as a quote."""
+class RoughEstimate(OrderEstimate):
+    """A render's estimate (spec 2026-11-02 §5.4): a price with every line of a quote's
+    formula but machine time. Its lines name the price book's rates, so a visitor gets
+    only its `StoreEstimate`."""
 
     price_minor: Money
     lines: list[QuoteLine]
+
+    def public(self) -> StoreEstimate:
+        """What a visitor may read: the price, never the cost, the markup or a rate."""
+        return StoreEstimate(
+            price_minor=self.price_minor,
+            currency=self.currency,
+            minor_exponent=self.minor_exponent,
+            grams=self.grams,
+            parts=self.parts,
+            unknown_parts=self.unknown_parts,
+        )
+
+
+class StoreEstimate(BaseModel):
+    """The storefront's estimate of a render, as a visitor reads it. The public page
+    shows it as "about $X, confirmed after we check it", never as a quote. It carries no
+    line, no filament cost and no label that names a rate (the edge sends on only these
+    fields, `storefront/routes.py` `ESTIMATE_FIELDS`)."""
+
+    #: Always true: this is an estimate.
+    estimate: bool = True
+    price_minor: Money
+    currency: str
+    minor_exponent: int
+    #: Decimal string, to the hundredth of a gram.
+    grams: str
+    parts: list[EstimatedPart]
+    #: How many parts have no volume and are left out of ``grams``.
+    unknown_parts: int
 
 
 def part_volumes(model_3mf: Path, plates: int, warnings: Sequence[str]) -> list[EstimatedPart]:
@@ -115,7 +144,7 @@ def rough_estimate(
     currency: str,
     factor: str,
     quantity: int = 1,
-) -> StoreEstimate:
+) -> RoughEstimate:
     """Each part's grams at the filament ``filament_for`` gives for its colour, priced
     under ``policy`` as a quote is but with no machine time: a filament line per
     filament, a setup line per plate, labour, markup and rounding. ``ValueError`` for a
@@ -141,7 +170,7 @@ def rough_estimate(
             used.append(PlateFilament(slot=slot, used_g=grams))
         plates.append(Plate(index=index, print_seconds=0, filaments=used))
     priced = price(plates, records, policy, currency=currency, quantity=quantity, estimated=True)
-    return StoreEstimate(
+    return RoughEstimate(
         grams=format(total, "f"),
         filament_minor=sum(line.amount_minor for line in priced.lines if line.kind == "filament"),
         currency=currency,

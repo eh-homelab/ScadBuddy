@@ -524,16 +524,28 @@ class PrinterStore:
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         """Take the Bambuddy link off, and remember which it was, so the next strip read
         (`ensure_bambuddy`) gives that Bambuddy printer its own synthetic row rather than
-        link this one again by its serial. Under the lock `ensure_bambuddy` takes."""
+        link this one again by its serial. Under the lock `ensure_bambuddy` takes.
+
+        The machine rate's maintenance intervals read from that Bambuddy printer (#4625)
+        stay as typed ones: none counts as read, so a link made later counts none until
+        Bambuddy is read again."""
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            return self._update(
+            was = self._one(conn, "id", printer_id)
+            row = self._update(
                 conn,
                 printer_id,
                 "bambuddy_unlinked_id = COALESCE(bambuddy_printer_id, bambuddy_unlinked_id),"
                 " bambuddy_printer_id = NULL",
                 (),
             )
+            if was is not None and was.bambuddy_printer_id is not None:
+                conn.execute(
+                    "UPDATE printer_maintenance_costs SET interval_read_at = NULL"
+                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
+                    (printer_uuid(row.id),),
+                )
+            return row
 
     def link_lan(
         self,

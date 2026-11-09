@@ -645,6 +645,11 @@ def test_a_quote_is_refused_before_anything_is_written(bambuddy: TestClient) -> 
     assert nothing.status_code == 422, nothing.text
     assert nothing.json()["type"].endswith("/price_book")
     assert shop.post(created_by={"kind": "agent"}).status_code == 422
+    # A registry printer gone since the dialog named it, with no Bambuddy printer beside
+    # it (#4625): refused, never priced at the default printer's rate.
+    gone = shop.post(printer="00000000-0000-0000-0000-000000000000", printer_id=None)
+    assert gone.status_code == 422, gone.text
+    assert "no printer" in gone.json()["detail"]
     assert slices.posted.call_count == 0
     item = shop.get_item()
     assert item["quotes"] == [] and item["status"] == "draft"

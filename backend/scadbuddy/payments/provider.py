@@ -65,6 +65,10 @@ class PaymentProvider(Protocol):
     id: str
     label: str
     fields: Sequence[ProviderField]
+    #: Whether an account takes one currency, which `verify` gives as
+    #: `Verified.currency` (#5666: a Square location). Settings asks to reconnect such
+    #: an account whose currency was never kept.
+    reports_currency: bool
 
     async def verify(self, credential: Credential) -> Verified:
         """Check the credential; the account label for "Connected as ..." and the

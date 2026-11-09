@@ -4,10 +4,12 @@ raises, a stale credential is replaced once, and a retry keeps its idempotency k
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import http.server
 import threading
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -531,3 +533,42 @@ async def test_the_storefront_counts_its_areas_and_waits_on_its_own_routes() -> 
         {"caller": "storefront", "area": "listings", "outcome": "ok"},
     )
     assert sample == 1
+
+
+class _Body(httpx.AsyncByteStream):
+    """A body of two chunks; ``fail`` breaks it after the first."""
+
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"glTF"
+        if self.fail:
+            raise httpx.ReadError("the API went away")
+        yield b"rest"
+
+
+@pytest.mark.parametrize(
+    ("fail", "read", "outcome"),
+    [(False, True, "ok"), (True, True, "relay_failed"), (False, False, "relay_failed")],
+    ids=["relayed", "broken mid-stream", "left unread"],
+)
+async def test_a_stream_is_counted_once_its_body_is_relayed(
+    fail: bool, read: bool, outcome: str
+) -> None:
+    """Review of #5758: a stream's outcome is known only after its body: ``ok`` once it was
+    read to the end, ``relay_failed`` when it broke or was closed before."""
+    metrics = Metrics(CollectorRegistry())
+    client, _ = make(Script(httpx.Response(200, headers=HEADER, stream=_Body(fail))), metrics)
+    opened = await client.stream("GET", PATH)
+    assert count(metrics, "ok") == 0
+    try:
+        if read:
+            with contextlib.suppress(httpx.ReadError):
+                async for _ in opened.aiter_bytes():
+                    pass
+    finally:
+        await opened.aclose()
+    assert (count(metrics, "ok"), count(metrics, "relay_failed")) == (
+        (1, 0) if outcome == "ok" else (0, 1)
+    )

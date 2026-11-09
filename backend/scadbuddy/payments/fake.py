@@ -45,6 +45,7 @@ def signed_event(secret: str, event: Mapping[str, object]) -> tuple[bytes, dict[
 class FakeProvider:
     id = "fake"
     label = "Fake provider (development)"
+    reports_currency = False
     fields: Sequence[ProviderField] = (
         ProviderField(name="account", label="Account", secret=False),
         ProviderField(name="signing_secret", label="Signing secret", secret=True),

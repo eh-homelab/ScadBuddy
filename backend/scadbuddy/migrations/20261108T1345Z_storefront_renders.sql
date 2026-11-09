@@ -1,7 +1,7 @@
 -- #5282 (storefront phase 3, spec 2026-11-02 §5.4): a visitor's renders. A row is what one
 -- visitor asked for: `counted` when the render cost the shop a run, and not when the
 -- visitor joined an open render or reused a finished one of the same inputs. The render
--- limits count the rows of a visitor and of a client address; the concurrency limit
+-- limits count the counted rows of a visitor and of a client address; the concurrency limit
 -- counts the counted rows whose job is still open. A visitor reads only the jobs its rows
 -- name. `colours` is the visitor's choice of listing filament for each colour slot, which
 -- the estimate prices.
