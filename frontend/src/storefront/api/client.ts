@@ -5,7 +5,10 @@
  * with the back office's `api/client`.
  *
  * Every write carries an `Idempotency-Key`: one UUID per visitor action, the same one when
- * that action is sent again (`ActionKey`). A refusal is a `StoreError` with the problem's
+ * that action is sent again (`ActionKey`). The edge requires it (428 without) and forwards
+ * it bound to the visitor (`backend/scadbuddy/storefront/routes.py` `_request_key`), and
+ * the CRUD side keeps one answer per key, so a render, an add, a removal or a design
+ * request sent again after a lost answer is done once. A refusal is a `StoreError` with the problem's
  * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
  * seconds the edge says to wait.
  */

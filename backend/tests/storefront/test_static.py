@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -100,6 +101,27 @@ def test_the_page_is_revalidated_and_has_a_policy(dist: Path) -> None:
 )
 def test_everything_else_is_404(dist: Path, path: str) -> None:
     assert TestClient(static_app(dist)).get(path).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "/assets/..%2Findex.html",
+        "/assets/%2e%2e/index.html",
+        "/assets/%2E%2E%2Findex.html",
+        "/assets%2F..%2Findex.html",
+        "/assets%2F..%2F.vite%2Fmanifest.json",
+        "/l/x%2F..%2F..%2Findex.html",
+        "/%2e%2e/storefront.html",
+    ],
+)
+def test_an_encoded_traversal_is_404(dist: Path, raw: str) -> None:
+    """Sent as written: httpx removes literal dot segments, not encoded ones."""
+    url = httpx.URL(f"http://testserver{raw}")
+    assert url.raw_path == raw.encode()
+    response = TestClient(static_app(dist)).get(url)
+    assert response.status_code == 404
+    assert response.text == "Not Found"
 
 
 def test_a_write_is_refused(dist: Path) -> None:

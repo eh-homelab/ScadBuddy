@@ -46,7 +46,9 @@ TOKEN_B = "B" * 43
 COMMIT = "c" * 40
 SCHEMA = CustomizerSchema(
     parameters=[
-        Parameter(name="width", type="number", initial=50, min=10, max=100, step=1),
+        Parameter(
+            name="width", type="number", initial=50, min=10, max=100, step=1, caption="Width (mm)"
+        ),
         Parameter(name="height", type="number", initial=5),
     ]
 )
@@ -210,6 +212,8 @@ def test_add_to_order_makes_revision_one(
             "quantity": 2,
             # Only what the listing offered: never its locks or the template's defaults.
             "inputs": {"width": 40},
+            # What the page shows beside each value: the schema's caption (#5282).
+            "labels": {"width": "Width (mm)"},
             "notes": None,
             "attachments": [],
         }

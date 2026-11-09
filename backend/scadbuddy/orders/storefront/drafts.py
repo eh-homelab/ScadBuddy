@@ -60,6 +60,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftFileKind,
     DraftItem,
     DraftView,
+    Listing,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -164,18 +165,48 @@ def _inputs(item: OrderItem, offered: list[str] | None) -> dict[str, Any] | None
     return {name: params[name] for name in offered if name in params}
 
 
+def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, str]]:
+    """Each published template commit's parameter captions, by (slug, commit): what a
+    draft item's values are called on the page."""
+    found: dict[tuple[str, str], dict[str, str]] = {}
+    for listing in listings:
+        if listing.snapshot is None:
+            continue
+        found.setdefault((listing.slug, listing.commit), {}).update(
+            {p.name: p.caption for p in listing.snapshot.schema_.parameters if p.caption}
+        )
+    return found
+
+
+def _labels(
+    item: OrderItem,
+    inputs: dict[str, Any] | None,
+    captions: dict[tuple[str, str], dict[str, str]],
+) -> dict[str, str]:
+    if not inputs or item.reference is None:
+        return {}
+    known = captions.get((item.reference.slug, item.reference.commit), {})
+    return {name: known.get(name, name) for name in inputs}
+
+
 async def _view(state: AppState, order: Order) -> DraftView:
     """The visitor's view of ``order``."""
     orders = _orders(state)
 
-    def read() -> tuple[list[OrderItem], dict[str, list[str] | None], list[Attachment]]:
+    def read() -> tuple[
+        list[OrderItem], dict[str, list[str] | None], list[Attachment], list[Listing]
+    ]:
+        offered = orders.store.storefront_offered(order.id)
         return (
             orders.store.items(order.id),
-            orders.store.storefront_offered(order.id),
+            offered,
             orders.store.attachments(order.id),
+            # The captions of a listing item's values: only when the draft has one.
+            orders.listings.all() if any(offered.values()) else [],
         )
 
-    rows, offered, files = await asyncio.to_thread(read)
+    rows, offered, files, listings = await asyncio.to_thread(read)
+    captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
         by_subject.setdefault(attachment.subject, []).append(attachment)
@@ -202,7 +233,8 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 kind=item.kind,
                 title=item.title,
                 quantity=item.quantity,
-                inputs=_inputs(item, offered.get(item.id)),
+                inputs=(inputs := _inputs(item, offered.get(item.id))),
+                labels=_labels(item, inputs, captions),
                 notes=item.notes if item.kind == "request" else None,
                 attachments=attachments,
             )

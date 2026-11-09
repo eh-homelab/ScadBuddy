@@ -13,6 +13,8 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES, _name_in_openapi
+from scadbuddy.orders.estimate import StoreEstimate
+from scadbuddy.storefront.routes import ESTIMATE_FIELDS
 from scadbuddy.tools.export_openapi import export, export_storefront
 
 
@@ -186,3 +188,27 @@ def test_the_storefront_spec_types_the_edge_from_its_crud_routes(tmp_path: Path)
     assert {"PublicListing", "StoreRender", "StoreEstimate", "DraftView"} <= set(
         spec["components"]["schemas"]
     )
+
+
+def test_the_storefront_estimate_is_typed_as_the_edge_sends_it(tmp_path: Path) -> None:
+    """The edge sends on only `ESTIMATE_FIELDS` of the CRUD side's estimate: the page's
+    type names those and no others, and the model has each of them (#5282)."""
+    spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
+    op = spec["paths"]["/api/store/v1/renders/{job_id}/estimate"]["get"]
+    ref = op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    schema = spec["components"]["schemas"][ref.rsplit("/", 1)[1]]
+    assert set(schema["properties"]) == ESTIMATE_FIELDS
+    assert set(schema.get("required", [])) <= ESTIMATE_FIELDS
+    assert set(StoreEstimate.model_fields) >= ESTIMATE_FIELDS
+
+
+def test_the_storefront_estimate_type_follows_what_the_edge_sends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scadbuddy.storefront.routes as edge_routes
+
+    monkeypatch.setattr(edge_routes, "ESTIMATE_FIELDS", frozenset({"estimate", "price_minor"}))
+    spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
+    schema = spec["components"]["schemas"]["StoreEstimate"]
+    assert set(schema["properties"]) == {"estimate", "price_minor"}
+    assert set(schema.get("required", [])) <= {"estimate", "price_minor"}

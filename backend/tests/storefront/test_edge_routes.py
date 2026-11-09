@@ -437,7 +437,7 @@ RENDER: dict[str, Any] = {
 
 def test_the_edge_passes_a_429_through(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
     crud_mock["renders"].respond(429, headers={"Retry-After": "42", **CRUD}, json=LIMITED)
-    r = edge.post("/api/store/v1/renders", json=BODY, headers={"Origin": PUBLIC_URL})
+    r = edge.post("/api/store/v1/renders", json=BODY, headers=_keyed())
     assert (r.status_code, r.headers["retry-after"]) == (429, "42")
     assert r.json()["type"] == LIMITED["type"]
     assert r.json()["instance"] == "/api/store/v1/renders"
@@ -453,14 +453,14 @@ def test_a_render_is_forwarded_as_sent_with_a_key(
     r = edge.post(
         "/api/store/v1/renders",
         content=raw,
-        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+        headers={**_keyed(), "Content-Type": "application/json"},
     )
     assert r.status_code == 202 and r.json() == RENDER
     sent = route.calls.last.request
     assert sent.content == raw.encode()
     assert sent.headers["content-type"] == "application/json"
-    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
-    edge.post("/api/store/v1/renders", json=BODY, headers={"Origin": PUBLIC_URL})
+    assert len(sent.headers["idempotency-key"]) == 64
+    edge.post("/api/store/v1/renders", json=BODY, headers=_keyed())
     assert route.calls.last.request.headers["idempotency-key"] != sent.headers["idempotency-key"]
 
 
@@ -472,7 +472,7 @@ def test_a_render_body_too_large_never_reaches_the_crud_side(
     r = edge.post(
         "/api/store/v1/renders",
         content=b"{" + b" " * (MAX_RENDER_BODY + 1) + b"}",
-        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+        headers={**_keyed(), "Content-Type": "application/json"},
     )
     assert r.status_code == 413
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}render_body_invalid"
@@ -689,12 +689,12 @@ def test_an_item_is_forwarded_as_sent_with_a_key(
     r = edge.post(
         "/api/store/v1/draft/items",
         content=raw,
-        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+        headers={**_keyed(), "Content-Type": "application/json"},
     )
     assert r.status_code == 200 and r.json() == VIEW
     sent = route.calls.last.request
     assert sent.content == raw.encode()
-    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
+    assert len(sent.headers["idempotency-key"]) == 64
 
 
 def test_an_item_body_too_large_never_reaches_the_crud_side(
@@ -705,7 +705,7 @@ def test_an_item_body_too_large_never_reaches_the_crud_side(
     r = edge.post(
         "/api/store/v1/draft/items",
         content=b"{" + b" " * (MAX_RENDER_BODY + 1) + b"}",
-        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+        headers={**_keyed(), "Content-Type": "application/json"},
     )
     assert r.status_code == 413
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
@@ -729,9 +729,9 @@ def test_a_removal_is_forwarded_with_a_key(
     crud_mock: respx.Router,  # noqa: F811
 ) -> None:
     route = crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(200, json=VIEW, headers=CRUD)
-    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers=_keyed())
     assert r.status_code == 200 and r.json() == VIEW
-    assert uuid.UUID(route.calls.last.request.headers["idempotency-key"]).version == 4
+    assert len(route.calls.last.request.headers["idempotency-key"]) == 64
 
 
 def test_another_visitors_item_passes_through_as_404(
@@ -745,7 +745,7 @@ def test_another_visitors_item_passes_through_as_404(
         "detail": "There is no such item.",
     }
     crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(404, json=missing, headers=CRUD)
-    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers=_keyed())
     assert r.status_code == 404 and r.json()["type"] == missing["type"]
 
 
@@ -1150,3 +1150,73 @@ def test_a_crud_side_5xx_that_is_not_busy_is_still_lost(
     r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
     assert r.status_code == 503
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_unavailable"
+
+
+def _keyed(key: str | None = None) -> dict[str, str]:
+    return {"Origin": PUBLIC_URL, "Idempotency-Key": key or str(uuid.uuid4())}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/store/v1/renders"),
+        ("POST", "/api/store/v1/draft/items"),
+        ("DELETE", f"/api/store/v1/draft/items/{ITEM}"),
+    ],
+)
+def test_a_write_without_a_browser_key_is_428_before_any_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    method: str,
+    path: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.request(
+        method, path, json=BODY if method == "POST" else None, headers={"Origin": PUBLIC_URL}
+    )
+    assert r.status_code == 428
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}idempotency_key_required"
+    assert len(crud_mock.calls) == before
+
+
+def test_the_same_browser_key_twice_adds_one_item(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """A lost answer sent again with the browser's key is the same request to the CRUD
+    side, which keeps one answer per key (`crud/idempotency.py`)."""
+    items: dict[str, dict[str, Any]] = {}
+
+    def add(request: httpx.Request) -> httpx.Response:
+        key = request.headers["idempotency-key"]
+        items.setdefault(key, {"id": str(uuid.uuid4())})
+        return httpx.Response(200, json={**VIEW, "items": list(items.values())}, headers=CRUD)
+
+    route = crud_mock.post(f"{DRAFT}/items").mock(side_effect=add)
+    key = str(uuid.uuid4())
+    first = edge.post("/api/store/v1/draft/items", json=BODY, headers=_keyed(key))
+    again = edge.post("/api/store/v1/draft/items", json=BODY, headers=_keyed(key))
+    assert (first.status_code, again.status_code) == (200, 200)
+    assert len(again.json()["items"]) == 1
+    sent = [call.request.headers["idempotency-key"] for call in route.calls]
+    assert sent[0] == sent[1] and len(sent[0]) == 64 and key not in sent[0]
+    # Another action is another key.
+    edge.post("/api/store/v1/draft/items", json=BODY, headers=_keyed())
+    assert len(items) == 2
+
+
+@pytest.mark.parametrize("path", ["/api/store/v1/renders", "/api/store/v1/draft/items"])
+def test_a_browser_key_on_a_write_is_bound_to_its_visitor(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+    path: str,
+) -> None:
+    route = crud_mock.post(
+        path.replace("/api/store/v1", "/api/v1/internal/crud/storefront")
+    ).respond(200, json=RENDER, headers=CRUD)
+    key = str(uuid.uuid4())
+    for _ in range(2):
+        with TestClient(create_app(load()), base_url="https://testserver", client=CLIENT) as client:
+            client.post(path, json=BODY, headers=_keyed(key))
+    one, two = (call.request.headers["idempotency-key"] for call in route.calls)
+    assert one != two

@@ -30,6 +30,9 @@ describe('the storefront lint rule', () => {
     ["import { X } from '../components/settings/Printers'\n", 'src/storefront/App.tsx'],
     ["import { X } from '../agent/useFillable'\n", 'src/storefront/App.tsx'],
     ["import { X } from '../../pages/CustomizePage'\n", 'src/storefront/components/Estimate.tsx'],
+    // Any back-office API module, not only the client: one could pull the client in.
+    ["import { X } from '../api/schema'\n", 'src/storefront/App.tsx'],
+    ["import { X } from '../../api/realtime'\n", 'src/storefront/pages/DraftPage.tsx'],
   ])('refuses %s', async (code, filePath) => {
     expect(await restricted(code, filePath)).not.toEqual([])
   })
@@ -40,6 +43,10 @@ describe('the storefront lint rule', () => {
     ["import { store } from '../api/client'\n", 'src/storefront/pages/DraftPage.tsx'],
     ["import { Preview } from '../../components/Preview'\n", 'src/storefront/pages/CustomizePage.tsx'],
     ["import { ParamWidget } from '../../components/widgets/ParamWidget'\n", 'src/storefront/pages/CustomizePage.tsx'],
+    ["import type { components } from './schema'\n", 'src/storefront/api/client.ts'],
+    ["import type { Listing } from '../api/client'\n", 'src/storefront/components/ListingView.tsx'],
+    ["import type { Job } from '../../api/types'\n", 'src/storefront/pages/CustomizePage.tsx'],
+    ["import type { Job } from '../api/types'\n", 'src/storefront/App.tsx'],
   ])('allows %s', async (code, filePath) => {
     expect(await restricted(code, filePath)).toEqual([])
   })

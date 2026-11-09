@@ -8,7 +8,9 @@ under ``/api/store/v1``, from which the frontend types the public page
 (``src/storefront/api/schema.d.ts``). The edge relays each CRUD answer as it comes and
 declares no shapes itself (it never imports the models, `test_edge.py`), so each edge
 operation takes its request body and its answer's schema from the CRUD route at the same
-place under ``/internal/crud/storefront`` (`api/crud_storefront.py`).
+place under ``/internal/crud/storefront`` (`api/crud_storefront.py`). Where the edge
+reshapes an answer, the schema says what the edge sends: the estimate keeps only
+`storefront/routes.py` `ESTIMATE_FIELDS`.
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ def _refs(node: Any) -> set[str]:
 
 def storefront_spec() -> dict[str, Any]:
     from scadbuddy.api.crud_storefront import router as crud_router
+    from scadbuddy.storefront import routes as edge_routes
     from scadbuddy.storefront.routes import visitor_router
     from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 
@@ -110,9 +113,14 @@ def storefront_spec() -> dict[str, Any]:
         name = pending.pop()
         pending |= _refs(schemas[name]) - used
         used |= _refs(schemas[name])
-    spec.setdefault("components", {}).setdefault("schemas", {}).update(
-        {name: schemas[name] for name in sorted(used) if name in schemas}
-    )
+    shown_schemas = {name: copy.deepcopy(schemas[name]) for name in sorted(used) if name in schemas}
+    # The edge sends on only these fields of an estimate (no cost, markup or rate).
+    estimate = shown_schemas["StoreEstimate"]
+    kept = edge_routes.ESTIMATE_FIELDS
+    estimate["properties"] = {k: v for k, v in estimate["properties"].items() if k in kept}
+    if "required" in estimate:
+        estimate["required"] = [k for k in estimate["required"] if k in kept]
+    spec.setdefault("components", {}).setdefault("schemas", {}).update(shown_schemas)
     return spec
 
 

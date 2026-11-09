@@ -57,9 +57,17 @@ same way, `vite.config.ts`).
   (`backend/scadbuddy/storefront/static.py`: the page and only the chunks the
   `storefront.html` entry loads, read from `dist/.vite/manifest.json`). Its client
   (`api/client.ts`) calls the edge's `/api/store/v1`, typed by `api/schema.d.ts` from the
-  edge's spec; every write sends one `Idempotency-Key` per visitor action. It imports
-  nothing from the back office: `eslint.config.js` `storefrontImports` refuses its pages,
-  its `api/client`, its feature components and `agent/` (`lint.test.ts`). `vite dev` and
+  edge's spec; every write sends one `Idempotency-Key` per visitor action, which the edge
+  forwards bound to the visitor. It imports nothing from the back office:
+  `eslint.config.js` `storefrontImports` refuses its pages, any `api/*` module but the
+  types-only `api/types`, its feature components and `agent/` (`lint.test.ts`), and CI's
+  `frontend` job runs `pnpm check:storefront-bundle` after the build
+  (`scripts/check-storefront-bundle.mjs`: no back-office API path and no mocks in the
+  entry's closure). So the shared viewer takes its unit as a prop (`Preview` `unit`), and
+  only the back office fetches the stored one (`lib/loadDisplayUnit.ts`). The customer's
+  form is `components/ListingView.tsx`, which the back office's Storefront page mounts as
+  its live preview (the back office may import from `src/storefront`, never the reverse).
+  `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
 

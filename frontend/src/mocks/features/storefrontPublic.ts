@@ -8,8 +8,8 @@ import { problem } from '../handlers'
  * `/api/store/v1`. Two listings: a keychain that offers a name, a size and a colour, and a
  * tag whose one colour choice lost every filament (all archived), so it cannot be ordered.
  * A render is pending once, then done, with an estimate of $12.40. A write without an
- * `Idempotency-Key` is refused, as the edge's request route refuses it (428); a value the
- * listing does not offer is refused as the CRUD side refuses it (422).
+ * `Idempotency-Key` is refused, as the edge refuses it (428); a value the listing does not
+ * offer is refused as the CRUD side refuses it (422).
  *
  * The draft is kept in `sessionStorage` too, so a reload or a new page shows the cart, as
  * the edge's cookie would; `reset` clears it.
@@ -133,6 +133,8 @@ export const handlers = [
     return listing ? HttpResponse.json(listing) : refused(404, 'listing_not_found', 'There is no such listing.')
   }),
   http.post(`${base}/renders`, async ({ request }) => {
+    const missing = keyMissing(request)
+    if (missing) return missing
     const checked = outside((await request.json()) as Body)
     if (checked instanceof Response) return checked
     const id = next()
@@ -176,6 +178,8 @@ export const handlers = [
   ),
   http.get(`${base}/draft`, () => HttpResponse.json(draft)),
   http.post(`${base}/draft/items`, async ({ request }) => {
+    const missing = keyMissing(request)
+    if (missing) return missing
     const body = (await request.json()) as Body
     const checked = outside(body)
     if (checked instanceof Response) return checked
@@ -186,13 +190,16 @@ export const handlers = [
       title: checked.title,
       quantity: body.quantity ?? 1,
       inputs: (body.values ?? {}) as Record<string, string | number | boolean>,
+      labels: Object.fromEntries(Object.keys(body.values ?? {}).map((name) => [name, checked.params[name]?.label ?? name])),
       notes: null,
       attachments: [],
     })
     save()
     return HttpResponse.json(current)
   }),
-  http.delete(`${base}/draft/items/:id`, ({ params }) => {
+  http.delete(`${base}/draft/items/:id`, ({ request, params }) => {
+    const missing = keyMissing(request)
+    if (missing) return missing
     const current = ensureDraft()
     if (!current.items.some((item) => item.id === params.id)) {
       return refused(404, 'item_not_found', 'There is no such item.')
@@ -214,6 +221,7 @@ export const handlers = [
       title: 'Design request',
       quantity: 1,
       inputs: null,
+      labels: {},
       notes: text,
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
     })

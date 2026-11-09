@@ -76,7 +76,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { cn } from '@/lib/utils'
 import { Spinner } from './ui/spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
-import { useLoadDisplayUnit } from '../lib/units'
+import { useLoadDisplayUnit } from '../lib/loadDisplayUnit'
 import { leaveFullscreen } from '../lib/useFullscreen'
 import { ModalCompanionContext, escapeTaken, focusInto, topmostDialog } from '../lib/modal'
 import { useMediaQuery } from '../lib/useMediaQuery'

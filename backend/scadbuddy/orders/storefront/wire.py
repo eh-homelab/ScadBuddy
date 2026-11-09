@@ -284,14 +284,18 @@ class DraftAttachment(BaseModel):
 
 
 class DraftItem(BaseModel):
-    """An item of the visitor's draft. ``inputs`` are a model item's parameter values,
-    ``notes`` a request's text; each is None on the other kind."""
+    """An item of the visitor's draft. ``inputs`` are a model item's parameter values
+    (``labels`` names each as the page shows it), ``notes`` a request's text; each is None
+    on the other kind."""
 
     id: str
     kind: ItemKind
     title: str
     quantity: int
     inputs: dict[str, ParamValue] | None
+    #: What the page shows beside each of ``inputs``: the schema's caption at the item's
+    #: commit, else the parameter's name. Empty for an item with no inputs.
+    labels: dict[str, str] = Field(default_factory=dict)
     notes: str | None
     attachments: list[DraftAttachment]
 

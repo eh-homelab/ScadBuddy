@@ -3,6 +3,18 @@ import type { Filament, Listing, ParamValue, PublicParam } from './api/client'
 /** How far a number may sit from a step, to a float's rounding (`inputs.py` `_STEP_TOLERANCE`). */
 const STEP_TOLERANCE = 1e-9
 
+/** A plain decimal, as typed: digits, one optional point, an optional leading minus. */
+const DECIMAL = /^-?(?:\d+\.?\d*|\.\d+)$/
+
+/**
+ * The number `text` means, or NaN for anything but a plain decimal: never hex ("0x10"),
+ * an exponent or "Infinity", which `Number()` would take while the box still shows them.
+ */
+export function parseNumber(text: string): number {
+  const trimmed = text.trim()
+  return DECIMAL.test(trimmed) ? Number(trimmed) : Number.NaN
+}
+
 /** The code points of `text`: the backend counts a name's length so, not in UTF-16 units. */
 export function textLength(text: string): number {
   return Array.from(text).length
@@ -61,4 +73,14 @@ export function slotFilaments(colors: readonly string[] | null | undefined, fila
     if (filament) chosen[String(slot)] = filament.id
   })
   return chosen
+}
+
+/** Of `values`, those `listing` still offers and allows: what survives a reload of it. */
+export function keepOffered(listing: Listing, values: Readonly<Record<string, ParamValue>>): Record<string, ParamValue> {
+  const kept: Record<string, ParamValue> = {}
+  for (const [name, value] of Object.entries(values)) {
+    const param = listing.params[name]
+    if (param && valueProblem(param, value) === null) kept[name] = value
+  }
+  return kept
 }

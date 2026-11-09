@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import type { Draft } from '../api/client'
@@ -14,7 +14,17 @@ const DRAFT: Draft = {
   minor_exponent: 2,
   items: [
     { id: 'i1', kind: 'request', title: 'Design request', quantity: 1, inputs: null, notes: HOSTILE, attachments: [] },
-    { id: 'i2', kind: 'model', title: 'Name keychain', quantity: 2, inputs: { name: 'Ada' }, notes: null, attachments: [] },
+    {
+      id: 'i2',
+      kind: 'model',
+      title: 'Name keychain',
+      quantity: 2,
+      inputs: { name: 'Ada', base_colour: '#E8532F' },
+      labels: { name: 'Name', base_colour: 'Base colour' },
+      notes: null,
+      attachments: [],
+    },
+    { id: 'i3', kind: 'model', title: 'Luggage tag', quantity: 1, inputs: {}, labels: {}, notes: null, attachments: [] },
   ],
 }
 
@@ -48,5 +58,38 @@ describe('DraftPage', () => {
     renderPage(<DraftPage />)
     expect(await screen.findByText('Your order is empty.')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Browse the designs' })).toHaveAttribute('href', '/')
+  })
+
+  it('names each value by its label', async () => {
+    server.use(http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)))
+    renderPage(<DraftPage />)
+    const item = (await screen.findByText('Name keychain')).closest('li')!
+    expect(within(item).getByText('Base colour')).toBeInTheDocument()
+    expect(within(item).queryByText('base_colour')).toBeNull()
+  })
+
+  it('removes one item at a time, so a late answer never puts one back', async () => {
+    const answers: (() => void)[] = []
+    let current = DRAFT
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)),
+      http.delete('/api/store/v1/draft/items/:id', async ({ params }) => {
+        current = { ...current, items: current.items.filter((item) => item.id !== params.id) }
+        const answer = current
+        await new Promise<void>((resolve) => answers.push(resolve))
+        return HttpResponse.json(answer)
+      }),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.click(await screen.findByRole('button', { name: 'Remove Name keychain' }))
+    expect(screen.getByRole('button', { name: 'Remove Luggage tag' })).toBeDisabled()
+    await waitFor(() => expect(answers).toHaveLength(1))
+    answers[0]!()
+    await waitFor(() => expect(screen.queryByText('Name keychain')).toBeNull())
+    await user.click(screen.getByRole('button', { name: 'Remove Luggage tag' }))
+    await waitFor(() => expect(answers).toHaveLength(2))
+    answers[1]!()
+    await waitFor(() => expect(screen.queryByText('Luggage tag')).toBeNull())
+    expect(screen.queryByText('Name keychain')).toBeNull()
   })
 })

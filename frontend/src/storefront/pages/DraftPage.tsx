@@ -4,8 +4,10 @@ import { ActionKey, errorText, store, type Draft, type DraftItem } from '../api/
 import { useDraftChanged } from '../draftCount'
 
 /**
- * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed.
- * A request's text, a file's name and each value are the visitor's own, shown as text.
+ * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed,
+ * one at a time: every Remove waits while one runs, so the answers come back in order and
+ * the last one is the cart. A request's text, a file's name and each value are the
+ * visitor's own, shown as text; each value is named by its label.
  */
 export function DraftPage() {
   const [draft, setDraft] = useState<Draft | null>()
@@ -30,6 +32,7 @@ export function DraftPage() {
   }, [draftChanged])
 
   const remove = async (item: DraftItem) => {
+    if (removing !== null) return
     setRemoving(item.id)
     setError(null)
     try {
@@ -74,7 +77,7 @@ export function DraftPage() {
                 <dl className="sf-values">
                   {Object.entries(item.inputs).map(([name, value]) => (
                     <div key={name}>
-                      <dt>{name}</dt>
+                      <dt>{item.labels?.[name] ?? name}</dt>
                       <dd>{String(value)}</dd>
                     </div>
                   ))}
@@ -97,7 +100,7 @@ export function DraftPage() {
                 type="button"
                 className="sf-link"
                 aria-label={`Remove ${item.title}`}
-                disabled={removing === item.id}
+                disabled={removing !== null}
                 onClick={() => void remove(item)}
               >
                 {removing === item.id ? 'Removing…' : 'Remove'}

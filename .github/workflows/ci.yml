@@ -487,6 +487,11 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # #5282, spec 2026-11-02 §5.1: the public storefront page's closure in this
+      # production build holds no back-office API module and no mocks.
+      - name: Storefront bundle
+        run: pnpm check:storefront-bundle
+
   # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
   #
   # The MSW-BACKED half of the e2e suite lives here and NOT in the image
@@ -1867,7 +1872,8 @@ jobs:
   #      the FastAPI app with `frontend_dir=/nonexistent` and dumps
   #      `app.openapi()` with `indent=2, sort_keys=True`, so two exports of one
   #      tree must be byte-identical. The clients, the image's `api-spec` stage
-  #      and the diff below all depend on that.
+  #      and the diff below all depend on that. The storefront edge's spec
+  #      (`--storefront`, the public page's client) is checked the same way.
   #
   #   2. frontend/public/mockServiceWorker.js matches the installed msw. It
   #      stays committed: it is a verbatim copy out of the msw package, not
@@ -1993,6 +1999,15 @@ jobs:
             exit 1
           fi
           echo "Two exports are byte-identical."
+          # The storefront edge's spec too (#5282): the public page's client is typed from it.
+          uv run --frozen python -m scadbuddy.tools.export_openapi --storefront "$RUNNER_TEMP/store.json" >/dev/null
+          uv run --frozen python -m scadbuddy.tools.export_openapi --storefront "$RUNNER_TEMP/store-again.json" >/dev/null
+          if ! cmp -s "$RUNNER_TEMP/store.json" "$RUNNER_TEMP/store-again.json"; then
+            echo "::error::Two exports of the storefront spec differ, so the public page's client is not a function of the source."
+            diff -u "$RUNNER_TEMP/store.json" "$RUNNER_TEMP/store-again.json" | head -200 || true
+            exit 1
+          fi
+          echo "Two storefront exports are byte-identical."
 
       # Here, not in pytest: the pytest step runs in the test image, which has no
       # frontend tree, so `test_the_page_carries_the_csp` skips its comparison with

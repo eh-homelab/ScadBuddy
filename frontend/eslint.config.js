@@ -12,10 +12,11 @@ const BACK_OFFICE_COMPONENTS = [
 ].map((folder) => `**/components/${folder}/**`)
 
 /**
- * `no-restricted-imports` for the storefront's files at `files`. `ownPages` and
- * `ownClient` re-allow the storefront's own `pages/` and `api/client` as written there.
+ * `no-restricted-imports` for the storefront's files at `files`. `ownPages` and `ownApi`
+ * re-allow the storefront's own `pages/` and `api/` as written there, and the back
+ * office's `api/types`, which holds types only.
  */
-function storefrontImports(files, ownPages, ownClient) {
+function storefrontImports(files, ownPages, ownApi) {
   return {
     files: [files],
     rules: {
@@ -24,7 +25,7 @@ function storefrontImports(files, ownPages, ownClient) {
         {
           patterns: [
             { group: ['**/pages/**', ...ownPages], message: BACK_OFFICE },
-            { group: ['**/api/client', ...ownClient], message: BACK_OFFICE },
+            { group: ['**/api/*', ...ownApi], message: BACK_OFFICE },
             { group: BACK_OFFICE_COMPONENTS, message: BACK_OFFICE },
             { group: ['**/agent/**'], message: BACK_OFFICE },
           ],
@@ -67,12 +68,13 @@ export default tseslint.config(
     },
   },
   // The public storefront page (spec 2026-11-02 §5.1) imports nothing from the back
-  // office: not its pages, its API client, its feature components or the agent. It may
-  // share components/Preview.tsx, components/widgets and lib/. The patterns read the
-  // import's text, not the file it resolves to, so `../api/client` is the storefront's
-  // own client one folder down and the back office's at the top: one block per depth.
-  storefrontImports('src/storefront/*.{ts,tsx}', ['!./pages/**'], ['!./api/client']),
-  storefrontImports('src/storefront/*/**/*.{ts,tsx}', ['!../pages/**'], ['!../api/client', '!./client']),
+  // office: not its pages, any module of its API (the client, or one that imports it),
+  // its feature components or the agent. It may share components/Preview.tsx,
+  // components/widgets and lib/. The patterns read the import's text, not the file it
+  // resolves to, so `../api/client` is the storefront's own client one folder down and
+  // the back office's at the top: one block per depth.
+  storefrontImports('src/storefront/*.{ts,tsx}', ['!./pages/**'], ['!./api/*', '!../api/types']),
+  storefrontImports('src/storefront/*/**/*.{ts,tsx}', ['!../pages/**'], ['!../api/*', '!../../api/types']),
   {
     // Copies of bundled template UIs (models/*/ui/*.js): plain browser modules.
     files: ['src/mocks/ui/**/*.js'],

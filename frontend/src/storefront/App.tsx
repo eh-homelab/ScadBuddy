@@ -52,8 +52,13 @@ export function App() {
             Print shop
           </Link>
           <nav aria-label="Shop">
-            <Link className="sf-cart" to="/draft">
-              Your order{count ? <span className="sf-cart-count">{count}</span> : null}
+            <Link className="sf-cart" to="/draft" aria-label={count ? `Your order, ${count} ${count === 1 ? 'item' : 'items'}` : 'Your order'}>
+              Your order
+              {count ? (
+                <span className="sf-cart-count" aria-hidden="true">
+                  {count}
+                </span>
+              ) : null}
             </Link>
           </nav>
         </header>

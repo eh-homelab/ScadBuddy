@@ -1131,6 +1131,7 @@ export function CustomizePage() {
     >
       <Preview
         job={job}
+        unit={unit}
         rendering={rendering || !settled}
         stage={renderStage}
         plate={plate}

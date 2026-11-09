@@ -1,5 +1,5 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
-import type { ParamValues, PublicListing, PublicParam } from '../../storefront/components/ListingView'
+import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
 
 /**
  * #5282 (spec 2026-11-02 §5.3) — a listing as the Storefront page edits it, and what the
@@ -148,7 +148,7 @@ export function previewListing(
   for (const param of schema?.parameters ?? []) {
     const bound = input.params?.[param.name]
     if (!bound) continue
-    params[param.name] = { ...bound, label: param.caption || param.name, help: null, group: param.group, colour: param.type === 'color' }
+    params[param.name] = { ...bound, label: param.caption || param.name, group: param.group ?? '', colour: param.type === 'color' } as PublicParam
   }
   return {
     id: 'preview',
@@ -165,24 +165,4 @@ export function previewListing(
     }),
     updated_at: '',
   }
-}
-
-/** A value inside each offered bound to start the preview at: the schema's default when it fits. */
-export function startingValues(listing: PublicListing, schema: CustomizerSchema | undefined): ParamValues {
-  const values: ParamValues = {}
-  for (const [name, param] of Object.entries(listing.params)) {
-    const initial = schema?.parameters?.find((p) => p.name === name)?.initial ?? undefined
-    if (param.kind === 'number') {
-      const start = typeof initial === 'number' ? initial : param.min
-      values[name] = Math.min(Math.max(start, param.min), param.max)
-    } else if (param.kind === 'choice') {
-      const first = param.choices[0]
-      const fits = initial !== undefined && param.choices.includes(initial)
-      if (fits) values[name] = initial
-      else if (first !== undefined) values[name] = first
-    } else {
-      values[name] = typeof initial === 'string' ? initial.slice(0, param.max_length) : ''
-    }
-  }
-  return values
 }
