@@ -18,8 +18,8 @@
   - migrations are new files only;
   - no generated API file is committed.
 - No token in a path. The order link token and the pay token travel in request bodies only. The page carries the order link in the URL fragment, `/o#<token>`, which the browser never sends. The CRUD side stores only sha256 (hex) of each token. Tokens are 32 random bytes, URL-safe base64.
-- Mail is sent only by the CRUD service. It writes an outbox row in the same transaction as the change that causes it, and sends after the commit. The SMTP password is sealed under the CRUD service's KEK (`core/secrets.py` `seal_secret`), as payment credentials are (`payments/credentials.py`). With no SMTP host set, mail rows stay queued and the shop sees them as not sent. Nothing fails.
-- Mail templates are plain text. Each link they carry is built from `storefront_public_url` (`https://michaels-workshop.nullreference.io` in prod). Customer text in a mail is never HTML.
+- Mail is sent only by the CRUD service. It writes an outbox row in the same transaction as the change that causes it, and sends after the commit. The SMTP password is sealed under the CRUD service's KEK (`core/secrets.py` `seal_secret`), as payment credentials are (`payments/credentials.py`). With no SMTP host set, the `order_link` and `sign_in_code` rows stay queued and the shop sees them as not sent. The four order events (`revision_ready`, `price_ready`, `payment_requested`, `shipped`) queue only when `storefront_mail_covers` is true, which needs a host; without one they leave no row and stay #5660's plugin's job. Nothing fails.
+- Mail templates are plain text. Each link they carry is built from the existing env-only `storefront_public_url` (`SCADBUDDY_STOREFRONT_PUBLIC_URL`, `https://michaels-workshop.nullreference.io` in prod). It is never a stored setting: a stored value could point customers' links anywhere (`core/settings.py`). Customer text in a mail is never HTML.
 - The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's or account's row id. Only the CRUD side builds it.
 - A submitted order stays `draft` in `OrderStatus`. "Submitted" is `orders.submitted_at` (§5.5).
 - After submit, the customer may only answer revisions, accept quotes, pay, and cancel while nothing is approved (§5.5). Every other customer write gets 409 `order_submitted`.
@@ -32,7 +32,7 @@
 - **This session:** Tasks 1–7 (the customer actor, mail, submit, the order link, the customer's order page, the pay page, back-office link controls).
 - **scadsy:** Tasks 8–9 (accounts, Turnstile).
 
-Task 1 lands first: Tasks 4, 6 and 8 send mail through it. Task 9's edge check (`storefront/turnstile.py` `require_turnstile`) lands before Task 3 and Task 8 call it. Until then, Task 3 calls the stub that Task 3 defines, which always passes. Task 9 replaces the stub in place.
+Task 2 lands first: Tasks 3, 4 and 8 send mail through it. Task 9's edge check (`storefront/turnstile.py` `require_turnstile`) lands before Task 3 and Task 8 call it. Until then, Task 3 calls the stub that Task 3 defines, which always passes. Task 9 replaces the stub in place.
 
 ## Review Focus
 
@@ -68,11 +68,12 @@ def test_the_last_customer_acceptance_accepts_a_storefront_order(lifecycle, subm
     assert last_event(a.order_id).actor.kind == "customer"
 
 def test_the_shop_accepts_for_the_customer_only_with_a_reason(client, storefront_order_with_sent_revision):
+    o, i, rev = storefront_order_with_sent_revision  # the order, its item, the item's newest sent revision
     r = client.post(f"/api/v1/orders/{o.id}/items/{i.id}/revisions/{rev.id}/answer", json={"answer": "accepted"})
     assert r.status_code == 409 and r.json()["type"].endswith("customer_accepts")
     r = client.post(f"/api/v1/orders/{o.id}/items/{i.id}/accept-for-customer", json={"what": "revision", "target_id": rev.id, "reason": ""})
     assert r.status_code == 422
-    r = client.post(..., json={"what": "revision", "target_id": rev.id, "reason": "By phone, 9 Nov"})
+    r = client.post(f"/api/v1/orders/{o.id}/items/{i.id}/accept-for-customer", json={"what": "revision", "target_id": rev.id, "reason": "By phone, 9 Nov"})
     assert r.status_code == 200 and "By phone, 9 Nov" in events_text(o.id)
 
 def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchanged behaviour
@@ -87,7 +88,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 
 **Files:**
 - Create: the migration `<ts>_storefront_mail.sql`, `backend/scadbuddy/orders/storefront/mail.py`, `backend/scadbuddy/orders/storefront/mail_templates.py`
-- Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_starttls` true, and `storefront_public_url`), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
+- Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_starttls` true; not `storefront_public_url`, which stays env-only), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
 - Test: `backend/tests/orders/storefront/test_mail.py`, `test_housekeeping*.py`, the settings test
 
 **Interfaces:**
@@ -204,7 +205,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 6: The pay page (this session)
 
 **Files:**
-- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`)
+- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`; `pay_link` returns `f"{storefront_url}/pay#{token}"`, not `/pay/{token}`, with its test in `tests/payments/test_venmo.py`; and the docstrings that describe the path form: `payments/venmo.py` (module and `pay_link`), `crud/storefront.py`, `api/crud_storefront.py` (module and the checkout route) and `api/crud_areas.py`). The merged migration `20261108T0512Z_payment_requests_pay_token.sql` keeps its comment: a merged migration is never edited.
 - Create: `frontend/src/storefront/pages/PayPage.tsx`
 - Test: `backend/tests/storefront/test_static.py` (the CSP for each path), `backend/tests/storefront/test_edge_routes.py` (an empty CRUD 404 maps to the edge's own 404), `backend/tests/payments/test_venmo.py`, `frontend/src/storefront/pages/PayPage.test.tsx`
 
