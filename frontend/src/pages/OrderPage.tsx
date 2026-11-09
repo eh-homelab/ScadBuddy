@@ -619,7 +619,8 @@ function ItemDrawer({
   // after this component's own effects run), and scrolled to; another section's attaches in its
   // place, so a second ⋯ section for this item scrolls again.
   const [target, setTarget] = useState<HTMLDivElement | null>(null)
-  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  // Slice… (#4673) opens the quote's section with its dialog.
+  const sectionRef = (name: ItemSection) => (name === section || (name === 'quote' && section === 'slice') ? setTarget : undefined)
   useEffect(() => {
     target?.scrollIntoView?.({ block: 'start' })
   }, [target])
@@ -822,7 +823,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={section === 'slice'} />
       )}
       </div>
       )}

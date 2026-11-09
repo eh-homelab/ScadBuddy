@@ -460,14 +460,16 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     expect(screen.getByTestId(`item-source-${ITEM_DRAFT}`)).toHaveTextContent(/^(model|output)$/)
   })
 
-  it("offers a draft item's actions, and opens the drawer at its quote", async () => {
+  it("offers a draft item's actions, and opens the drawer at its quote with Slice…", async () => {
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })
     await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
     const names = (await screen.findAllByRole('menuitem')).map((m) => m.textContent)
-    expect(names).toEqual(['Open details', 'Quote from a slice…', 'Duplicate', 'Delete item'])
-    await user.click(screen.getByRole('menuitem', { name: 'Quote from a slice…' }))
-    const drawer = await screen.findByRole('dialog', { name: 'Name Keychain' })
+    expect(names).toEqual(['Open details', 'Slice…', 'Duplicate', 'Delete item'])
+    await user.click(screen.getByRole('menuitem', { name: 'Slice…' }))
+    // #4673: the drawer opens at the item's print setups, with the slice dialog on top.
+    expect(await screen.findByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+    const drawer = screen.getByRole('dialog', { name: 'Name Keychain', hidden: true })
     expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
   })
 
@@ -489,7 +491,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
       const { user } = render(ORDER_DRAFT)
       await screen.findByRole('heading', { name: 'ORD-2026-3' })
       await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
-      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
       await screen.findByRole('dialog', { name: 'Name Keychain' })
       await waitFor(() => expect(scrolled).toContain('item-section-quote'))
       await user.keyboard('{Escape}')
@@ -522,7 +524,7 @@ describe('OrderItemsTable · the items card (#4955)', () => {
       const { user } = render(ORDER_DRAFT)
       await screen.findByRole('heading', { name: 'ORD-2026-3' })
       await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
-      await user.click(await screen.findByRole('menuitem', { name: 'Quote from a slice…' }))
+      await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
       await screen.findByRole('dialog', { name: 'Name Keychain' })
       await waitFor(() => expect(scrolled).toContain('item-section-quote'))
       scrolled.length = 0

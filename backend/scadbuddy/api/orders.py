@@ -129,7 +129,12 @@ from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
-from scadbuddy.orders.quote import ArchiveQuoteRequest, ItemSliceQuoteRequest, subject_of
+from scadbuddy.orders.quote import (
+    ArchiveQuoteRequest,
+    ItemSliceQuoteRequest,
+    plate_image,
+    subject_of,
+)
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
@@ -2396,6 +2401,42 @@ async def accept_quote(
     by = current_actor()
     return await _run_linked(
         lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by), order_id, service
+    )
+
+
+@router.get(
+    "/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}, 404: {"description": "No such image"}},
+    summary="A slice quote's plate image",
+    description=(
+        "The image the quote's sliced file holds for plate `plate` (its plates' `index`), "
+        "as the item's print setups show it (#4673). 404 for a quote of another item, a "
+        "plate it did not slice, a quote with no sliced file (manual, archive) or one "
+        "whose file holds no image."
+    ),
+)
+async def quote_plate_thumbnail(
+    order_id: str, item_id: str, quote_id: str, plate: int, orders: OrdersDep, state: StateDep
+) -> Response:
+    check_path(order_id, item_id, quote_id)
+    item = await asyncio.to_thread(orders.store.item, item_id)
+    quote = await asyncio.to_thread(orders.store.quote, quote_id)
+    if item is None or item.order_id != order_id or quote is None or quote.order_item_id != item_id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no quote {quote_id!r} of item {item_id!r}")
+    image = await plate_image(state.store.blobs, quote, plate)
+    if image is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"quote {quote_id!r} has no image of plate {plate}"
+        )
+    # A quote's sliced file never changes: its key is its digest.
+    return Response(
+        image,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

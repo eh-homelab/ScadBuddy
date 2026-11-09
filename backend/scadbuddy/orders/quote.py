@@ -33,6 +33,7 @@ import hashlib
 import logging
 import os
 import uuid
+import zipfile
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -356,7 +357,10 @@ def quote_check(
     if body_only:
         # The pins the revision carries price it too, when they still stand.
         pinned = (store.filament(f) for slot, f in slots.items() if f and slot not in judged)
-        named = [*named, *(record for record in pinned if record is not None)]
+        named = [
+            *named,
+            *(record for record in pinned if record is not None and record.archived_at is None),
+        ]
     if prices_nothing(policy, named):
         raise _unprocessable(
             "price_book",
@@ -376,17 +380,27 @@ def _superseded(item_id: str) -> LifecycleError:
     )
 
 
+#: After a slice's new design rendered (#5761 review): the revision stands, so the way
+#: out is the same slice without that support slot.
+RENDERED_SUPPORT_HINT = (
+    ": the new design's render made it a colour slot, and its revision stays;"
+    " send the slice again without that support slot"
+)
+
+
 def support_check(
     store: OrderStore,
     item_id: str,
     request: SliceQuoteRequest,
     *,
     colours: Collection[int] | None = None,
+    hint: str = "",
 ) -> None:
     """422 ``support_filaments`` for a support slot that is a colour slot of the item (its
     filament is the slot's own), or below 0, or a support filament unknown or archived
     (§6.3). Blocking; writes nothing. ``colours`` stands in for the item's slots: before a
-    slice's new design renders, the slots its body names (#5761 review)."""
+    slice's new design renders, the slots its body names (#5761 review). ``hint`` follows
+    a colour slot's refusal."""
     item = store.item(item_id)
     if item is None:
         return
@@ -396,7 +410,7 @@ def support_check(
         if slot < 0 or slot in colours:
             raise _unprocessable(
                 "support_filaments",
-                f"colour slot {slot} is priced with its own filament, not as support"
+                f"colour slot {slot} is priced with its own filament, not as support{hint}"
                 if slot in colours
                 else f"slot {slot} is no slot",
             )
@@ -799,6 +813,25 @@ def unsliced_slots(plates: Sequence[Plate], item: OrderItem) -> None:
             )
 
 
+async def plate_image(blobs: BlobStore, quote: Quote, plate: int) -> bytes | None:
+    """The image a slice quote's sliced file holds for ``plate`` (``Metadata/plate_<n>.png``,
+    #4673 PR 4): the quote's "Print setups" preview. None for a plate the quote lacks, a
+    file gone or with no such image."""
+    found = next((row for row in quote.plates if row.get("index") == plate), None)
+    key = found.get("blob_key") if found is not None else None
+    if not isinstance(key, str) or not await blobs.fetch(key):
+        return None
+
+    def read() -> bytes | None:
+        try:
+            with zipfile.ZipFile(blobs.dir_for(key) / SLICED_NAME) as archive:
+                return archive.read(f"Metadata/plate_{plate}.png")
+        except (FileNotFoundError, KeyError, zipfile.BadZipFile):
+            return None
+
+    return await asyncio.to_thread(read)
+
+
 def sliced_key(sha256: str) -> str:
     """The blob key a quote keeps a sliced file under (Ruling 3)."""
     return f"quote-{sha256}"
@@ -998,7 +1031,9 @@ async def quote_run(
     if expected_revision_id is not None:
         # A slice's new design has its colour slots only now: its support slots are
         # judged against them here (#5761 review).
-        await asyncio.to_thread(support_check, store, item_id, request)
+        await asyncio.to_thread(
+            lambda: support_check(store, item_id, request, hint=RENDERED_SUPPORT_HINT)
+        )
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every

@@ -202,7 +202,7 @@ describe('OrderPage (#4249)', () => {
     let drawer = await screen.findByRole('dialog', { name: approved.title })
     // Accepted: the price is pinned, and a new design goes through the confirm.
     expect(within(drawer).getByLabelText('Quantity')).toBeDisabled()
-    expect(within(drawer).queryByRole('button', { name: 'Quote from a slice…' })).toBeNull()
+    expect(within(drawer).queryByRole('button', { name: 'Slice…' })).toBeNull()
     expect(within(drawer).queryByRole('button', { name: 'Record and accept' })).toBeNull()
     first.unmount()
 
@@ -211,7 +211,7 @@ describe('OrderPage (#4249)', () => {
     drawer = await screen.findByRole('dialog', { name: approved.title })
     await within(drawer).findByTestId('revised-after-acceptance')
     // `priceOpen`: the new design takes a quote (its filaments with it) and more revisions, as the backend allows.
-    expect(within(drawer).getByRole('button', { name: 'Quote from a slice…' })).toBeEnabled()
+    expect(within(drawer).getByRole('button', { name: 'Slice…' })).toBeEnabled()
     expect(within(drawer).getByRole('button', { name: 'Record and accept' })).toBeInTheDocument()
     expect(within(drawer).getByRole('button', { name: 'New revision' })).toBeEnabled()
     // The quantity stays pinned: it would reprice the old quote.
