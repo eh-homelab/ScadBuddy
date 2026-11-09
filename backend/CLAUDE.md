@@ -1053,8 +1053,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   writes no second payment, matched by the order) and its closes run, and one that leaves
   the request `pending` (`currency_mismatch`, `ignored`, `unmatched`) counts as an
   unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), not
-  counted, and is `failed` (`capture_pending_unsettled`) once the approval is
-  `CAPTURE_PENDING_GIVE_UP_DAYS` (30) old; a request whose settling raises is logged and counted, and
+  counted, and is `failed` (`capture_pending_unsettled`) once `capture_pending_at` (the
+  latest approval, or the backfill's run) is `CAPTURE_PENDING_GIVE_UP_DAYS` (30) old; a request whose settling raises is logged and counted, and
   the batch (`CAPTURE_SETTLE_BATCH`, 4) goes on; an `APPROVED` order with no capture is captured again under the approval's
   key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
   (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
