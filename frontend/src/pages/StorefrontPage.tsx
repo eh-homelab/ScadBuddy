@@ -3,8 +3,9 @@ import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, startingValues, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
+import type { ParamValue } from '../storefront/api/client'
 import { useAsync } from '../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -71,7 +72,8 @@ export function StorefrontPage() {
   const [error, setError] = useState<{ key: symbol; text: string } | null>(null)
   const [requests, setRequests] = useState<boolean | null>(null)
   const [dragging, setDragging] = useState<number | null>(null)
-  const [values, setValues] = useState<ParamValues | null>(null)
+  // The customer's form starts empty, as on the public page: each field shows the shop's choice.
+  const [values, setValues] = useState<ParamValues>({})
   const requestsId = useId()
 
   const rows = order ?? listings.data ?? []
@@ -127,7 +129,6 @@ export function StorefrontPage() {
     () => (draft ? previewListing(draft, schema.data, filaments, media, (item) => api.mediaUrl(slug, item)) : null),
     [draft, schema.data, filaments, media, slug],
   )
-  const shownValues = useMemo(() => (preview ? { ...startingValues(preview, schema.data), ...values } : {}), [preview, schema.data, values])
 
   function changed(next: ListingDraft) {
     if (!open) return
@@ -272,7 +273,7 @@ export function StorefrontPage() {
             <Button
               onClick={() => {
                 setOpen(fresh())
-                setValues(null)
+                setValues({})
                 setError(null)
               }}
             >
@@ -318,7 +319,7 @@ export function StorefrontPage() {
                     className="flex min-w-0 flex-1 flex-col items-start text-left text-sm"
                     onClick={() => {
                       setOpen(opened(row))
-                      setValues(null)
+                      setValues({})
                       setError(null)
                     }}
                   >
@@ -382,7 +383,14 @@ export function StorefrontPage() {
             <h2 className="text-sm font-medium">What a customer sees</h2>
             <div data-testid="listing-preview" className="rounded-md border p-3">
               {preview ? (
-                <ListingView listing={preview} values={shownValues} onChange={setValues} />
+                <ListingView
+                  listing={preview}
+                  values={values}
+                  headingLevel={2}
+                  onChange={(name: string, next: ParamValue | undefined) =>
+                    setValues(({ [name]: _old, ...rest }) => (next === undefined ? rest : { ...rest, [name]: next }))
+                  }
+                />
               ) : (
                 <p className="text-sm text-muted-foreground">Nothing open.</p>
               )}

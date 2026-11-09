@@ -42,7 +42,7 @@ describe('Preview', () => {
   it('keeps a preview that fails to load to the viewer, with a retry (#361)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     scene.failure = new Error('Could not load /api/v1/jobs/aaaa/preview.glb: 422')
-    render(<Preview job={job({})} rendering={false} controls={<button type="button">Full screen</button>} />)
+    render(<Preview unit="mm" job={job({})} rendering={false} controls={<button type="button">Full screen</button>} />)
 
     expect(screen.getByTestId('preview-failed')).toHaveTextContent('Could not load the preview.')
     // The rest of the viewer stays: its readouts and the page's own buttons.
@@ -70,7 +70,7 @@ describe('Preview', () => {
       },
     }
     scene.failure = new Error('boom')
-    render(<Preview job={job({})} rendering={false} captureRef={captureRef} />)
+    render(<Preview unit="mm" job={job({})} rendering={false} captureRef={captureRef} />)
     expect(screen.getByTestId('preview-failed')).toBeInTheDocument()
     expect(captureRef.current).toBeNull()
   })
@@ -78,18 +78,18 @@ describe('Preview', () => {
   it('tries again by itself when the next render arrives (#361)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     scene.failure = new Error('boom')
-    const { rerender } = render(<Preview job={job({})} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({})} rendering={false} />)
     expect(screen.getByTestId('preview-failed')).toBeInTheDocument()
 
     scene.failure = null
     rerender(
-      <Preview job={job({ id: 'b'.repeat(32), preview_url: '/api/v1/jobs/bbbb/preview.glb' })} rendering={false} />,
+      <Preview unit="mm" job={job({ id: 'b'.repeat(32), preview_url: '/api/v1/jobs/bbbb/preview.glb' })} rendering={false} />,
     )
     expect(screen.queryByTestId('preview-failed')).not.toBeInTheDocument()
   })
 
   it("shows a successful render's template notes (#285)", () => {
-    render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
 
     const notes = screen.getByRole('region', { name: 'Notes from the template' })
     expect(within(notes).getAllByRole('listitem').map((item) => item.textContent)).toEqual(
@@ -100,22 +100,22 @@ describe('Preview', () => {
   })
 
   it('shows nothing extra when the template had nothing to say', () => {
-    render(<Preview job={job({ notes: [] })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: [] })} rendering={false} />)
     expect(screen.queryByTestId('render-notes')).not.toBeInTheDocument()
   })
 
   it('keeps the notes of the render on screen while the next one runs', () => {
-    const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
-      <Preview job={job({ id: 'b'.repeat(32), status: 'running', notes: null })} rendering />,
+      <Preview unit="mm" job={job({ id: 'b'.repeat(32), status: 'running', notes: null })} rendering />,
     )
     expect(screen.getByTestId('render-notes')).toHaveTextContent(TEMPLATE_NOTES[0]!)
   })
 
   it('gives a failed render the log instead', () => {
-    const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
-      <Preview
+      <Preview unit="mm"
         job={job({ id: 'b'.repeat(32), status: 'failed', log_tail: ['ERROR: boom'] })}
         rendering={false}
       />,
@@ -126,16 +126,16 @@ describe('Preview', () => {
 
   it('does not blame OpenSCAD for a failure that has no OpenSCAD log (#952)', () => {
     const error = 'building the per-colour solids failed: BadZipFile: File is not a zip file'
-    render(<Preview job={job({ status: 'failed', error, log_tail: [] })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ status: 'failed', error, log_tail: [] })} rendering={false} />)
     expect(screen.getByText(/ScadBuddy could not finish this render/i)).toBeInTheDocument()
     expect(screen.getByTestId('render-log')).toHaveTextContent(error)
     expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
   })
 
   it('tells a cancelled render apart from a failure: it keeps the log but not the OpenSCAD copy', () => {
-    const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
-      <Preview
+      <Preview unit="mm"
         job={job({
           id: 'b'.repeat(32),
           status: 'cancelled',
@@ -155,22 +155,22 @@ describe('Preview', () => {
   it('offers Cancel on a render in flight, and only then (#4968)', () => {
     const onCancel = vi.fn()
     const { rerender } = render(
-      <Preview job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} />,
+      <Preview unit="mm" job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(onCancel).toHaveBeenCalledTimes(1)
     rerender(
-      <Preview job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} cancelling />,
+      <Preview unit="mm" job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} cancelling />,
     )
     expect(screen.getByRole('button', { name: 'Cancelling…' })).toBeDisabled()
-    rerender(<Preview job={job({ status: 'done' })} rendering={false} onCancel={onCancel} />)
+    rerender(<Preview unit="mm" job={job({ status: 'done' })} rendering={false} onCancel={onCancel} />)
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
   it('says a render this page withdrew was the reader’s own cancel, with no log', () => {
     const id = 'c'.repeat(32)
     render(
-      <Preview
+      <Preview unit="mm"
         job={job({ id, status: 'cancelled', error: CANCELLED_ERROR, log_tail: [CANCELLED_ERROR] })}
         rendering={false}
         withdrawn={id}
@@ -182,25 +182,25 @@ describe('Preview', () => {
   })
 
   it('invites a parameter change before the first render', () => {
-    render(<Preview job={undefined} rendering={false} />)
+    render(<Preview unit="mm" job={undefined} rendering={false} />)
     expect(screen.getByText('Change a parameter to render.')).toBeInTheDocument()
   })
 
   it('does not invite a parameter change over a render the server refused (#367)', () => {
-    render(<Preview job={undefined} rendering={false} rejected />)
+    render(<Preview unit="mm" job={undefined} rendering={false} rejected />)
     expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
   })
 
   // #2444 — "Change a parameter to render." read as if nothing were wrong while a
   // parameter was the very reason nothing rendered.
   it('says why nothing renders, in place of inviting a change', () => {
-    render(<Preview job={undefined} rendering={false} blocked="Letter size must be between 8 and 30." />)
+    render(<Preview unit="mm" job={undefined} rendering={false} blocked="Letter size must be between 8 and 30." />)
     expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
     expect(screen.getByTestId('preview-blocked')).toHaveTextContent('Letter size must be between 8 and 30. Fix it to render.')
   })
 
   it('keeps the last render on show while a value blocks the next, and says it is the last one', () => {
-    render(<Preview job={job({})} rendering={false} blocked="Letter size must be between 8 and 30." />)
+    render(<Preview unit="mm" job={job({})} rendering={false} blocked="Letter size must be between 8 and 30." />)
     expect(screen.getByTestId('preview-blocked')).toHaveTextContent(
       'Showing the last render. Letter size must be between 8 and 30. Fix it to render again.',
     )
@@ -208,7 +208,7 @@ describe('Preview', () => {
   })
 
   it('names the step a running render is on (#267)', () => {
-    render(<Preview job={undefined} rendering stage="solids" />)
+    render(<Preview unit="mm" job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')
   })
 
@@ -220,7 +220,7 @@ describe('Preview', () => {
     it('says a render is waiting, where it waits and for how long', () => {
       vi.useFakeTimers({ now: Date.parse('2026-09-27T10:00:14Z') })
       render(
-        <Preview
+        <Preview unit="mm"
           job={job({ status: 'pending', preview_url: null, queue_position: 3 })}
           rendering
           stage="solids"
@@ -241,7 +241,7 @@ describe('Preview', () => {
     it('says rendering once a worker has it, with its step and time since submit', () => {
       vi.useFakeTimers({ now: Date.parse('2026-09-27T10:04:12Z') })
       render(
-        <Preview
+        <Preview unit="mm"
           job={job({ status: 'running', preview_url: null, started_at: '2026-09-27T10:03:00Z' })}
           rendering
           stage="render"
@@ -254,14 +254,14 @@ describe('Preview', () => {
     })
 
     it('shows no time for the finished render still on screen', () => {
-      render(<Preview job={job({})} rendering />)
+      render(<Preview unit="mm" job={job({})} rendering />)
       expect(screen.getByTestId('preview-rendering')).toHaveTextContent('Rendering')
       expect(screen.queryByTestId('render-elapsed')).toBeNull()
     })
   })
 
   it("shows ScadBuddy's own job warnings next to the template notes, apart from them (#383)", () => {
-    render(<Preview job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
 
     const warnings = screen.getByRole('region', { name: 'Render warnings' })
     expect(within(warnings).getAllByRole('listitem').map((item) => item.textContent)).toEqual(
@@ -276,7 +276,7 @@ describe('Preview', () => {
 
   it("shows OpenSCAD's warnings from a render that finished, with their lines (#937)", () => {
     render(
-      <Preview
+      <Preview unit="mm"
         job={job({
           diagnostics: [
             {
@@ -304,26 +304,26 @@ describe('Preview', () => {
   })
 
   it('shows no OpenSCAD warnings box when the render logged none', () => {
-    render(<Preview job={job({ diagnostics: [] })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ diagnostics: [] })} rendering={false} />)
     expect(screen.queryByRole('region', { name: 'OpenSCAD warnings' })).not.toBeInTheDocument()
   })
 
   it('shows no warnings box when the job has none', () => {
-    render(<Preview job={job({ warnings: [] })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ warnings: [] })} rendering={false} />)
     expect(screen.queryByTestId('render-warnings')).not.toBeInTheDocument()
   })
 
   it('keeps the warnings of the render on screen while the next one runs', () => {
-    const { rerender } = render(<Preview job={job({ warnings: JOB_WARNINGS })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({ warnings: JOB_WARNINGS })} rendering={false} />)
     rerender(
-      <Preview job={job({ id: 'b'.repeat(32), status: 'running', warnings: null })} rendering />,
+      <Preview unit="mm" job={job({ id: 'b'.repeat(32), status: 'running', warnings: null })} rendering />,
     )
     expect(screen.getByTestId('render-warnings')).toHaveTextContent(JOB_WARNINGS[0]!)
   })
 
   it('shows a failed render its warnings above the log (#383)', () => {
     render(
-      <Preview
+      <Preview unit="mm"
         job={job({ status: 'failed', warnings: JOB_WARNINGS, log_tail: ['ERROR: boom'] })}
         rendering={false}
       />,
@@ -335,9 +335,9 @@ describe('Preview', () => {
   })
 
   it("does not carry an earlier render's warnings onto a failure", () => {
-    const { rerender } = render(<Preview job={job({ warnings: JOB_WARNINGS })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job({ warnings: JOB_WARNINGS })} rendering={false} />)
     rerender(
-      <Preview
+      <Preview unit="mm"
         job={job({ id: 'b'.repeat(32), status: 'failed', warnings: null, log_tail: ['ERROR: boom'] })}
         rendering={false}
       />,
@@ -368,7 +368,7 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
 
   it('keeps the full readouts on a preview with room for them', () => {
     previewSized(1080, 582)
-    render(<Preview job={job({})} rendering={false} plate={H2C} />)
+    render(<Preview unit="mm" job={job({})} rendering={false} plate={H2C} />)
     expect(screen.getByTestId('preview')).toHaveClass('overflow-hidden')
     expect(screen.getByTestId('plate-badge')).toHaveTextContent('H2C · 330 × 320 mm plate')
     expect(within(screen.getByTestId('bbox-readout')).getByText('Bounding box')).toBeVisible()
@@ -376,7 +376,7 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
 
   it('shrinks the plate badge and the bounding box to one-line chips below 200 px tall', () => {
     previewSized(390, 120)
-    render(<Preview job={job({ plates: [{}, {}] as Job['plates'] })} rendering={false} plate={H2C} />)
+    render(<Preview unit="mm" job={job({ plates: [{}, {}] as Job['plates'] })} rendering={false} plate={H2C} />)
     expect(screen.getByTestId('plate-badge')).toHaveTextContent(/^330 × 320 mm$/)
     const bbox = screen.getByTestId('bbox-readout')
     expect(bbox).toHaveTextContent('10.0 × 10.0 × 5.0 mm')
@@ -388,14 +388,14 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
 
   it('compacts a preview narrower than 360 px, however tall', () => {
     previewSized(340, 600)
-    render(<Preview job={job({})} rendering={false} plate={H2C} />)
+    render(<Preview unit="mm" job={job({})} rendering={false} plate={H2C} />)
     expect(screen.getByTestId('plate-badge')).toHaveTextContent(/^330 × 320 mm$/)
   })
 
   it('folds the notes and warnings into one chip on a short preview, which opens them', async () => {
     previewSized(390, 120)
     render(
-      <Preview
+      <Preview unit="mm"
         job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS, diagnostics: [OPENSCAD_WARNING] })}
         rendering={false}
         sourceLink={<a href="/m/name-puzzle/source">Edit source</a>}
@@ -427,14 +427,14 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
 
   it('names a chip of notes alone by its notes', () => {
     previewSized(390, 120)
-    render(<Preview job={job({ notes: TEMPLATE_NOTES.slice(0, 1) })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES.slice(0, 1) })} rendering={false} />)
     expect(screen.getByRole('button', { name: '1 note' })).toBeInTheDocument()
   })
 
   it('folds the panels into the chip when together they would take over a third of the preview', () => {
     previewSized(920, 385)
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(180)
-    render(<Preview job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
     expect(screen.queryByRole('region', { name: 'Notes from the template' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '1 warning · 2 notes' })).toBeInTheDocument()
   })
@@ -442,7 +442,7 @@ describe('Preview overlays on a short preview (#1743, #1744)', () => {
   it('leaves the panels open when they fit, and lets a drag over them reach the scene', () => {
     previewSized(1080, 582)
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(120)
-    render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    render(<Preview unit="mm" job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     const notes = screen.getByRole('region', { name: 'Notes from the template' })
     expect(notes).toHaveClass('pointer-events-none')
     expect(screen.queryByRole('button', { name: /notes?$/ })).not.toBeInTheDocument()

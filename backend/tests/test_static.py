@@ -26,6 +26,7 @@ def client(tmp_path: Path) -> TestClient:
     (dist / "index.html").write_text("<!doctype html><title>ScadBuddy</title>", encoding="utf-8")
     (dist / "assets" / "index-abc123.js").write_text("export {}", encoding="utf-8")
     (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    (dist / "storefront.html").write_text("<!doctype html><title>Shop</title>", encoding="utf-8")
     # As main.py composes it: the problem handlers answer any HTTPException the mount raises.
     app = FastAPI()
     install_problem_handlers(app)
@@ -238,3 +239,12 @@ def test_the_probe_works_under_a_root_path(tmp_path: Path) -> None:
     assert slash.json()["detail"] == (
         "no API route matches GET /api/v1/things/a/; did you mean /api/v1/things/a?"
     )
+
+
+@pytest.mark.parametrize("path", ["/storefront.html", "/storefront.html?x=1"])
+def test_the_public_storefront_page_is_not_served_here(client: TestClient, path: str) -> None:
+    """#5282: the bundle holds the storefront's entry too, but only the storefront edge
+    serves it, on its own host (spec 2026-11-02 §5.1)."""
+    response = client.get(path)
+    assert response.status_code == 404
+    assert "Shop" not in response.text

@@ -283,6 +283,20 @@ class ListingStore:
             ).fetchall()
         return [_listing(row) for row in rows]
 
+    def at_commits(self, pairs: Collection[tuple[str, str]]) -> list[Listing]:
+        """The listings at any of ``pairs`` (slug, commit), in one query; none for none."""
+        if not pairs:
+            return []
+        slugs, commits = zip(*sorted(pairs), strict=True)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings"
+                " WHERE (slug, commit) IN (SELECT * FROM unnest(%s::text[], %s::text[]))"
+                " ORDER BY position, id",
+                (list(slugs), list(commits)),
+            ).fetchall()
+        return [_listing(row) for row in rows]
+
     def all(self) -> list[Listing]:
         """Every listing, in the shop's order."""
         with self.pool.connection() as conn:

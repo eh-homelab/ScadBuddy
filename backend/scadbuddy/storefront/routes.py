@@ -3,8 +3,10 @@ of which forwards to the CRUD client with the verified visitor id and the browse
 address. `app.py` answers a CRUD refusal.
 
 A render's body, and a draft item's, goes on as the visitor sent it (at most
-`MAX_RENDER_BODY` bytes). Each write gets a new ``Idempotency-Key`` (a UUID 4) per browser
-request, which the CRUD client keeps across its retries (plan point 21). A render's preview
+`MAX_RENDER_BODY` bytes). Each write needs the browser's ``Idempotency-Key`` (a UUID, one
+per visitor action; 428 without one), forwarded bound to the visitor (`_request_key`): a
+visitor's resend of a request whose answer was lost is the same request to the CRUD side,
+and the CRUD client keeps that key across its own retries (plan point 21). A render's preview
 is relayed as a stream, never held whole, as ``model/gltf-binary``. A design request is
 read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
 spooled, then sent on as multipart a chunk at a time."""
@@ -109,8 +111,8 @@ async def _body(request: Request, slug: str) -> bytes:
 
 @visitor_router.post("/renders", status_code=status.HTTP_202_ACCEPTED)
 async def render(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    key = _request_key(request, visitor_id)
     body = await _body(request, "render_body_invalid")
-    key = str(uuid.uuid4())
     return await crud.render(body, key=key, visitor_id=visitor_id, client=client)
 
 
@@ -139,16 +141,18 @@ async def draft(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
 
 @visitor_router.post("/draft/items")
 async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    key = _request_key(request, visitor_id)
     body = await _body(request, "draft_body_invalid")
-    key = str(uuid.uuid4())
     return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
 
 
 @visitor_router.delete("/draft/items/{item_id}")
-async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+async def remove_item(
+    item_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
     if ITEM_ID.fullmatch(item_id) is None:
         raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
-    key = str(uuid.uuid4())
+    key = _request_key(request, visitor_id)
     return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
 
 
@@ -177,15 +181,15 @@ class RequestsEnabled:
 
 
 def _request_key(request: Request, visitor_id: str) -> str:
-    """The forwarded ``Idempotency-Key``: the browser's own (a UUID), so a visitor's
-    resend of one request is one request; 428 ``idempotency_key_required`` without one,
+    """The forwarded ``Idempotency-Key`` of every write: the browser's own (a UUID), so a
+    visitor's resend of one request is one request; 428 ``idempotency_key_required`` without one,
     since a request whose answer is lost could not be sent again safely. Bound to the
     visitor, so two visitors' keys never meet."""
     sent = request.headers.get("idempotency-key")
     if sent is None:
         raise ApiError(
             428,
-            "Send an Idempotency-Key with a design request.",
+            "Send an Idempotency-Key with this request.",
             type_=f"{STOREFRONT_PROBLEMS}idempotency_key_required",
         )
     try:

@@ -10,6 +10,10 @@ send the ``SameSite=Lax`` visitor cookie on one, so a page elsewhere cannot writ
 visitor. A request with no ``Origin`` is not a browser page (curl), and it has no
 visitor but the one it makes up itself.
 
+Mounted last, `static.py` `StorefrontStatic` serves the page (``storefront.html``) and
+its own chunks from the built bundle (``SCADBUDDY_FRONTEND_DIR``, else the repo's or the
+image's ``frontend/dist``); with none, the edge serves its routes only.
+
 Its lifespan waits until the CRUD service serves every area the edge calls
 (`EDGE_AREAS`), then serves; a SIGTERM or SIGINT ends that wait, and the edge then
 closes its client and never serves. A CRUD route's refusal
@@ -46,6 +50,7 @@ from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
 from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
+from scadbuddy.storefront.static import StorefrontStatic
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
 
@@ -142,6 +147,12 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
 
     app.include_router(router)
     app.include_router(visitor_router)
+    # Last, so every route wins the match: the page and its own chunks (`static.py`).
+    frontend = settings.resolve_frontend_dir()
+    if frontend is not None:
+        app.mount("/", StorefrontStatic(frontend), name="storefront-page")
+    else:
+        logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()
     # The last added runs first.
     app.add_middleware(VisitorCookie, key=key, prefix=STOREFRONT_PREFIX)
