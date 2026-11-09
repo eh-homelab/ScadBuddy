@@ -257,6 +257,8 @@ async def test_a_failing_sweep_fails_its_activity(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
     monkeypatch.setattr(main, "sync_printers", _broken_async)
+    # #4961: the deposit sync, which calls Plaid.
+    monkeypatch.setattr(main, "sync_deposits", _broken_async)
     # #5282: the idle storefront carts.
     monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     monkeypatch.setattr(
@@ -286,6 +288,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 sessions=SimpleNamespace(delete_expired=_broken(OSError("the database is gone"))),
                 # #5700: the payment pages whose close failed.
                 service=SimpleNamespace(retry_closes=_broken_async, settle_captures=_broken_async),
+                bank=None,  # #4961: the linked account, read by the stubbed sync
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -428,6 +431,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         await asyncio.sleep(0.1)
         return 0
 
+    # #4961: the deposit sync, Plaid pages and the matches.
+    async def slow_deposits(bank: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sync_deposits", slow_deposits)
+
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -449,6 +459,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             # #5700: the payment pages whose close failed, a provider call per page.
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
+            bank=None,  # #4961: the linked account, read by the stubbed sync
             temporal=object,
             store=None,
             refs=None,

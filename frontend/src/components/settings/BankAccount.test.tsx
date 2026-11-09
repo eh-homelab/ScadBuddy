@@ -71,6 +71,17 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     expect(screen.queryByText('Plaid Checking')).not.toBeInTheDocument()
   })
 
+  it('says when the deposits were last read, and why the last read failed', async () => {
+    mockBankLink({ linked: true, synced: true })
+    const first = renderSettingsSection(<BankAccount />, { route })
+    expect(await screen.findByText(/Deposits last read/)).toBeInTheDocument()
+    first.unmount()
+    mockBankLink({ linked: true, syncError: 'ITEM_LOGIN_REQUIRED' })
+    renderSettingsSection(<BankAccount />, { route })
+    expect(await screen.findByRole('status')).toHaveTextContent('Plaid could not be read (ITEM_LOGIN_REQUIRED)')
+    expect(screen.getByText(/Deposits not read yet/)).toHaveTextContent('the housekeeping sweeps must be on')
+  })
+
   it('unlinks the account and keeps the keys', async () => {
     mockBankLink({ linked: true })
     const { user } = renderSettingsSection(<BankAccount />, { route })

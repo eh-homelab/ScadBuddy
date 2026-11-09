@@ -170,3 +170,44 @@ async def test_removing_an_item_plaid_no_longer_has_is_no_error() -> None:
         return_value=httpx.Response(400, json=payload("error.item_not_found.json"))
     )
     await plaid.remove_item(KEYS, ACCESS)
+
+
+@respx.mock
+async def test_a_sync_page_from_the_start_and_from_a_cursor() -> None:
+    route = respx.post(f"{SANDBOX}/transactions/sync").mock(
+        return_value=httpx.Response(200, json=payload("transactions.sync.json"))
+    )
+    page = await plaid.transactions_sync(KEYS, ACCESS, None)
+    body = sent(route)
+    assert body == {
+        "access_token": ACCESS,
+        "count": plaid.SYNC_COUNT,
+        "options": {"include_original_description": True},
+    }
+    assert [t["transaction_id"] for t in page.added] == [
+        "lPNjeW1nR6CDn5okmGQ6hEpMo4lLNoSrzqDje",
+        "yhnUVvtcGGcCKU0bcz8PDQr5ZUxUXebUvbKC0",
+    ]
+    assert page.modified == [] and page.removed == ["CmdQTNgems8BT1B7ibkoUXVPyAeehT3Tmzk0l"]
+    assert page.next_cursor.startswith("tVUUL15l") and page.has_more is False
+    await plaid.transactions_sync(KEYS, ACCESS, "cursor-1")
+    assert sent(route)["cursor"] == "cursor-1"
+
+
+@respx.mock
+async def test_a_mutation_during_pagination_is_its_own_code() -> None:
+    respx.post(f"{SANDBOX}/transactions/sync").mock(
+        return_value=httpx.Response(400, json=payload("error.sync_mutation.json"))
+    )
+    with pytest.raises(PlaidError) as err:
+        await plaid.transactions_sync(KEYS, ACCESS, "cursor-1")
+    assert err.value.code == plaid.SYNC_MUTATION
+
+
+@respx.mock
+async def test_a_sync_answer_without_its_lists_is_a_plaid_error() -> None:
+    respx.post(f"{SANDBOX}/transactions/sync").mock(
+        return_value=httpx.Response(200, json={"next_cursor": "c", "has_more": False})
+    )
+    with pytest.raises(PlaidError, match="transactions"):
+        await plaid.transactions_sync(KEYS, ACCESS, None)

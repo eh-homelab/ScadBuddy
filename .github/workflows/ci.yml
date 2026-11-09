@@ -1835,8 +1835,8 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
 
-      # Its own `scope=slicer`, which build-image.yml's `slicer` job writes. The
-      # build already runs `scadbuddy-slicer --check-cli` as root; the two runs
+      # The GHCR registry cache that build-image.yml's `slicer` job writes (#4059).
+      # The build already runs `scadbuddy-slicer --check-cli` as root; the two runs
       # below repeat it as the image's own user, the way the cluster runs it.
       - name: Build the slicer image
         uses: docker/build-push-action@v7
@@ -1845,9 +1845,10 @@ jobs:
           target: slicer
           load: true
           tags: scadbuddy-slicer:ci
-          # Read-only: the repo's Actions cache is at its ceiling (#743); build-image.yml's
-          # `slicer` job is the scope's only writer.
-          cache-from: type=gha,scope=slicer
+          # Read-only: build-image.yml's `slicer` job is the cache's only writer, so
+          # this job needs no `packages: write` and a fork PR reads it the same way
+          # (the package is public). With no cache, the build only runs slower.
+          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache
 
       - name: Slicer smoke
         run: |

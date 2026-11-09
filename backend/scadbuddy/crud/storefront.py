@@ -33,8 +33,9 @@ from scadbuddy.crud.wire import PREFIX
 from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
-#: task that adds an area to both sides adds it here.
-EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts", "requests"})
+#: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
+#: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
+EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts", "requests", "pay"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 #: A design request's one call: the CRUD side answers only once every file is checked
 #: and stored.
