@@ -32,7 +32,7 @@
 - **This session:** Tasks 1–7 (the customer actor, mail, submit, the order link, the customer's order page, the pay page, back-office link controls).
 - **scadsy:** Tasks 8–9 (accounts, Turnstile).
 
-Task 2 lands first: Tasks 3, 4 and 8 send mail through it. Task 9's edge check (`storefront/turnstile.py` `require_turnstile`) lands before Task 3 and Task 8 call it. Until then, Task 3 calls the stub that Task 3 defines, which always passes. Task 9 replaces the stub in place.
+Task 2 lands first: Tasks 3, 4 and 8 send mail through it. Task 9 (scadsy's accounts PR 1) lands first and defines `storefront/turnstile.py` `require_turnstile`. Task 3 imports it and adds no stub; if Task 3 is ready earlier, it waits or is sequenced with scadsy.
 
 ## Review Focus
 
@@ -121,13 +121,13 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 3: Submit (this session)
 
 **Files:**
-- Create: the migration `<ts>_storefront_order_links.sql`, `backend/scadbuddy/orders/storefront/submit.py`, and `backend/scadbuddy/storefront/turnstile.py` (the stub, replaced by Task 9)
+- Create: `backend/scadbuddy/orders/storefront/submit.py` (the `storefront_order_links` table comes from Task 2's migration)
 - Modify: `backend/scadbuddy/orders/lifecycle.py` (`submit_order`), `api/crud_storefront.py` (area `drafts`: `POST …/draft/submit`), `crud/storefront.py`, `storefront/routes.py` (`POST /api/store/v1/draft/submit`), `frontend/src/storefront/pages/DraftPage.tsx` and a new `components/SubmitForm.tsx`
 - Test: `backend/tests/orders/storefront/test_submit.py`, `backend/tests/storefront/test_edge_routes.py`, `frontend/src/storefront/pages/DraftPage.test.tsx`
 
 **Interfaces:**
 - Produces:
-  - Table `storefront_order_links`: `id`, `order_id`, `token_sha256` (unique), `created_at`, `revoked_at`, `sent_to`, `opened_at`.
+  - Uses Task 2's `storefront_order_links` (`id`, `order_id`, `token_sha256` unique, `token_sealed`, `created_at`, `revoked_at`, `sent_to`, `opened_at`).
   - `SubmitInput`: `name` (1–200), `email` (an address, at most 254), `shipping_option_id: str | None`, `address: Address | None`, and `account_id`, which comes only from the CRUD side's session lookup, never from the body.
   - `Lifecycle.submit_order(order_id, body: SubmitInput, by: Actor) -> tuple[Order, str]` returns the order and the new link token, in one transaction under the order lock:
     1. It links or makes the customer. It links an existing customer only when exactly one customer has that email as a contact. Otherwise it makes a new customer with the name and the email contact.
@@ -139,7 +139,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
     7. It creates the link.
     8. It queues `order_link` mail to the email.
   - An empty cart gets 409 `draft_empty`. A second submit with a new key gets 409 `order_submitted`. A replay with the same key answers the first reply and sends no second mail.
-  - `require_turnstile(request) -> None`: the stub that always passes.
+  - The edge's submit route calls `await require_turnstile(request, "submit")` (Task 9) before the CRUD call. The page renders Task 9's Turnstile widget component and sends its token in `X-Turnstile-Token`.
 
 - [ ] **Step 1: Write the failing tests.**
   - One order, one number and one queued `order_link` row, with the key replayed twice.
@@ -241,10 +241,26 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 
 ### Task 9: Turnstile (scadsy)
 
+As built by scadsy's accounts PR 1 (see #5283). The secret is sealed under the CRUD service's KEK (#5295), so Siteverify runs on the CRUD side, and the edge only forwards the token.
+
 **Files:**
-- Modify: `backend/scadbuddy/storefront/turnstile.py` (it replaces Task 3's stub in place), `storefront/settings.py` (`SCADBUDDY_TURNSTILE_SITE_KEY`, `SCADBUDDY_TURNSTILE_SECRET_FILE`), and `storefront/routes.py`, so that design requests and sign-up call `require_turnstile`, as submit does
+- Create: `backend/scadbuddy/storefront/turnstile.py`.
+- Modify:
+  - `storefront/routes.py`: `GET /api/store/v1/config`, and the check on `POST /draft/requests`;
+  - `storefront/static.py`: the CSP;
+  - `crud/storefront.py`;
+  - `api/crud_storefront.py`: area `turnstile`, with `GET …/turnstile` and `POST …/turnstile/verify`;
+  - `api/crud_areas.py`;
+  - the settings: the site key, and the secret in `SECRET_FIELDS`;
+  - the storefront page's request form and client, `StorefrontPage.tsx`, and the mocks.
 
 **Interfaces:**
-- `require_turnstile(request) -> None` reads the `cf-turnstile-response` field or the `X-Turnstile-Token` header. It verifies with `https://challenges.cloudflare.com/turnstile/v0/siteverify` and refuses 403 `bot_check_failed`.
-- It is off, and passes everything, when either key is unset.
+- `async require_turnstile(request: Request, action: Literal["submit", "request", "sign_up"]) -> None`:
+  - It reads the `X-Turnstile-Token` header and has the CRUD side verify it.
+  - It refuses with 403 `bot_check_failed`, or with 503 `bot_check_unavailable` when the check cannot be made.
+  - It passes everything when no site key is set. It fails closed when a site key is set but the secret is missing or cannot be opened.
 - `GET /api/store/v1/config` tells the page the site key.
+- CSP:
+  - When a site key is set, every storefront page allows `https://challenges.cloudflare.com` in `script-src` and `frame-src`. A per-path CSP binds only on a full document load, and the storefront is one SPA. The script loads lazily, only when a form renders the widget.
+  - With no site key, the CSP stays first-party.
+  - PayPal's origins stay on the `/pay` document only (Task 6). The order page's "Pay" is a plain `<a href>` full navigation.
