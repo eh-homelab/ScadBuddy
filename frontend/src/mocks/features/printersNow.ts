@@ -32,7 +32,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     bambuddy_archive_page: true,
     error: null,
     // #3742 — Bambuddy's cover of the job, through ScadBuddy's farm proxy.
-    picture: '/api/v1/farm/printers/1/cover?job=Bracket',
+    picture: '/api/v1/farm/printers/1/cover?archive=90',
   },
   {
     id: '00000000-0000-4000-8000-000000000002',

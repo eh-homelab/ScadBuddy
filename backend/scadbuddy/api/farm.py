@@ -95,7 +95,8 @@ async def get_queue(
 
 
 #: How long the browser keeps a picture (#3742). A library file's or an archive's
-#: thumbnail is the same image while its id stands; a cover's URL names its job.
+#: thumbnail is the same image while its id stands; a printer's cover is kept only when
+#: its URL names the job's archive, one per print (`get_printer_cover`).
 PICTURE_CACHE_CONTROL = "private, max-age=3600"
 PictureId = Annotated[int, Path(ge=1)]
 
@@ -155,15 +156,22 @@ async def get_printer_cover(
     printer_id: PictureId,
     request: Request,
     store: SettingsStoreDep,
+    archive: Annotated[
+        int | None,
+        Query(ge=1, description="The job's archive, one per print: the browser keeps it"),
+    ] = None,
     job: Annotated[
         str | None,
-        Query(max_length=512, description="The job's name: keys the browser's copy only"),
+        Query(max_length=512, description="The job's name, with no archive: never kept"),
     ] = None,
 ) -> Response:
     """Bambuddy's cover image of the job a Bambuddy printer prints (#3742), the status's
     ``cover_url``: maziggy/bambuddy f9080d1 ``backend/app/api/routes/printers.py``
     lines 506-509 (set while it runs or is paused) and 1128 (the route, which takes an
-    API key with ``printers:read``). ``job`` is not sent to Bambuddy."""
+    API key with ``printers:read``). Neither ``archive`` nor ``job`` is sent to Bambuddy:
+    they key the browser's copy (`bambuddy/pictures.py` `printer_cover`). Only a cover
+    keyed by its archive is kept; job names repeat, so one keyed by its name, or by
+    nothing, is fetched again on each load (``no-store``)."""
     del job
     return await _proxy(
         store,
@@ -171,7 +179,7 @@ async def get_printer_cover(
         f"/printers/{printer_id}/cover",
         operation="printers.cover",
         what="show the cover of the printer's job",
-        cache_control=PICTURE_CACHE_CONTROL,
+        cache_control=PICTURE_CACHE_CONTROL if archive is not None else "no-store",
     )
 
 

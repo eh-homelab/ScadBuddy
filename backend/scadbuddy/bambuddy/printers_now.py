@@ -387,7 +387,9 @@ async def printer_now(
             "archive_id": archive_id,
             "linked": linked,
             "picture": (
-                printer_cover(printer.id, card.job_name) if working and status.cover_url else None
+                printer_cover(printer.id, archive_id, card.job_name)
+                if working and status.cover_url
+                else None
             ),
             "bambuddy_url": (
                 client.config.web_url(ARCHIVES_PAGE)

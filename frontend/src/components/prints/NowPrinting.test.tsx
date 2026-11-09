@@ -121,7 +121,7 @@ describe('NowPrinting (#977)', () => {
     renderPage(<NowPrinting />)
 
     const cover = within(await screen.findByTestId('printer-now-1')).getByTestId('job-picture')
-    expect(cover.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/printers/1/cover?job=Bracket')
+    expect(cover.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/printers/1/cover?archive=90')
     // The job's name is beside it.
     expect(cover.querySelector('img')).toHaveAttribute('alt', '')
     const render = within(screen.getByTestId('printer-now-2')).getByTestId('job-picture')

@@ -44,8 +44,17 @@ def queue_item_picture(item: QueueItem, job: ScadBuddyJob | None) -> str | None:
     return None
 
 
-def printer_cover(printer_id: int, job_name: str | None) -> str:
-    """Bambuddy's cover of the job a printer prints. The job's name keys the URL, so the
-    browser's copy of one job's cover is never shown for the next job."""
+def printer_cover(printer_id: int, archive_id: int | None, job_name: str | None) -> str:
+    """Bambuddy's cover of the job a printer prints, keyed for the browser's cache.
+
+    The job's archive keys it: Bambuddy makes one archive per print and its status names
+    it while the job runs or is paused (``current_archive_id``, maziggy/bambuddy f9080d1
+    ``backend/app/api/routes/printers.py`` lines 730-748), so the browser's copy of one
+    print's cover is never shown for another. Job names repeat (every keychain variant
+    prints as ``Name_Keychain_Font_Basic_Plate_1``), so with no archive the name only
+    changes the URL when the job's name changes, and the route lets no browser keep that
+    cover (`api/farm.py` `get_printer_cover`); with neither, nothing keys it."""
     url = f"{FARM}/printers/{printer_id}/cover"
+    if archive_id is not None:
+        return f"{url}?{urlencode({'archive': archive_id})}"
     return f"{url}?{urlencode({'job': job_name})}" if job_name else url

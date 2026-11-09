@@ -205,7 +205,7 @@ def test_each_queue_item_has_a_picture_and_no_bambuddy_path(client: TestClient) 
     [
         ("/api/v1/farm/library/1615/thumbnail", "/library/files/1615/thumbnail"),
         ("/api/v1/farm/archives/107/thumbnail", "/archives/107/thumbnail"),
-        ("/api/v1/farm/printers/1/cover?job=Bracket", "/printers/1/cover"),
+        ("/api/v1/farm/printers/1/cover?archive=90", "/printers/1/cover"),
     ],
 )
 def test_the_farm_serves_bambuddys_pictures(
@@ -228,7 +228,28 @@ def test_the_farm_serves_bambuddys_pictures(
     assert response.headers["cache-control"].startswith("private, max-age=")
     assert upstream.calls.last.request.headers["x-api-key"] == "s3cret"
     # The cover's key is ScadBuddy's own, for the browser's cache; Bambuddy is not sent it.
-    assert "job" not in upstream.calls.last.request.url.params
+    assert not upstream.calls.last.request.url.params
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "query", ["?job=Name_Keychain_Font_Basic_Plate_1", ""], ids=["job name", "no key"]
+)
+def test_a_cover_not_keyed_by_its_archive_is_never_kept(client: TestClient, query: str) -> None:
+    """#3742 review: Bambu job names repeat (every keychain variant prints as
+    ``Name_Keychain_Font_Basic_Plate_1``), so only the archive, one per print, keys a
+    cover the browser may keep. A cover keyed by its job's name, or by nothing, is
+    fetched again on each load, never an earlier job's."""
+    configure(client)
+    upstream = respx.get(f"{API}/printers/1/cover").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    response = client.get(f"/api/v1/farm/printers/1/cover{query}")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert not upstream.calls.last.request.url.params
 
 
 @respx.mock
