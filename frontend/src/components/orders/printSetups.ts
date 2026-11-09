@@ -136,3 +136,14 @@ export function inputsToSend(
   const base = { ...defaults, ...own }
   return sameParams({ ...base, ...edits }, base) ? null : { ...inputs, params: { ...own, ...edits } }
 }
+
+/**
+ * A print setups group's name: its revision's number, or the first 8 characters of its id
+ * for a revision the item's list lacks, and whether it is the current one; "No revision"
+ * for quotes that name none.
+ */
+export function groupName(group: SetupGroup): string {
+  if (!group.key) return 'No revision'
+  const name = group.revision ? String(group.revision.number) : group.key.slice(0, 8)
+  return `Revision ${name}${group.current ? ' (current)' : ''}`
+}

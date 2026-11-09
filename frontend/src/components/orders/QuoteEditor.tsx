@@ -20,7 +20,7 @@ import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
-import { OLD_REVISION_TEXT, oldRevision, setupChanges, setupGroups, setupPlates, setupStats, type SetupGroup } from './printSetups'
+import { groupName, OLD_REVISION_TEXT, oldRevision, setupChanges, setupGroups, setupPlates, setupStats } from './printSetups'
 
 /** How long the typed price must stay still before the warning asks the route about it. */
 export const CHECK_DEBOUNCE_MS = 300
@@ -74,12 +74,6 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
       </CollapsibleContent>
     </Collapsible>
   )
-}
-
-/** A print setups group's name: its revision's number, and whether it is the current one. */
-function groupName(group: SetupGroup): string {
-  if (!group.revision) return group.key ? `Revision ${group.key.slice(0, 8)}` : 'No revision'
-  return `Revision ${group.revision.number}${group.current ? ' (current)' : ''}`
 }
 
 /**
