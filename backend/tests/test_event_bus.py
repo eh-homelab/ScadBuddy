@@ -181,12 +181,23 @@ def test_events_round_trip_through_their_wire_form() -> None:
 
 def test_order_events_round_trip() -> None:
     # #4249: ids and the new status only, as spec 2026-10-18 §7.1 has them, and whether
-    # the order is a storefront cart (#5282), which the flow triggers skip.
+    # the order is a storefront cart (#5282), which the flow triggers skip, or a cart the
+    # draft sweep deleted.
     order = OrderChanged(order_id="o1", status="accepted")
     assert decode_event(encode_event(order)) == order
-    assert set(order.model_dump()) == {"id", "at", "kind", "order_id", "status", "cart"}
+    assert set(order.model_dump()) == {
+        "id",
+        "at",
+        "kind",
+        "order_id",
+        "status",
+        "cart",
+        "deleted",
+    }
     cart = OrderChanged(order_id="o2", status="draft", cart=True)
     assert decode_event(encode_event(cart)) == cart
+    swept = OrderChanged(order_id="o3", status="draft", cart=True, deleted=True)
+    assert decode_event(encode_event(swept)) == swept
     item = OrderItemChanged(order_id="o1", item_id="i1", status="fulfilled", attempt=2)
     assert decode_event(encode_event(item)) == item
     assert set(item.model_dump()) == {

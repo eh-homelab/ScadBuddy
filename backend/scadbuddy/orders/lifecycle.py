@@ -781,14 +781,20 @@ class Lifecycle:
         (`OrderStore.claim_idle_draft`), so a cart a visitor touched, changed, wrote to
         or submitted since the listing loses nothing; then its attachments with their
         holds (`OrderStore.delete_attachment`), then the order, whose items cascade.
-        Whether it was deleted."""
+        Once committed, ``order.changed`` with ``deleted``, so an open orders list or
+        ``order:<id>`` page drops it. Whether it was deleted."""
         with self.store.transaction() as conn:
             if not self.store.claim_idle_draft(conn, order_id, before=before):
                 return False
+            order = self._lock(conn, order_id)
             for attachment in self.store.attachments(order_id, conn=conn):
                 self.store.delete_attachment(conn, attachment.id)
             if not self.store.delete_draft(conn, order_id):
                 raise RuntimeError(f"cart {order_id} was claimed but not deleted")
+        emit(
+            self.bus,
+            OrderChanged(order_id=order.id, status=order.status, cart=True, deleted=True),
+        )
         return True
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
@@ -1897,6 +1903,8 @@ class Lifecycle:
     # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
     # A record of what the job took, allowed in every status, ended and on hold included:
     # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+    # A visitor's cart is no job yet, and the draft sweep would drop its entries with it:
+    # ``order_not_submitted`` (#5282).
 
     def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
         return [] if item_id is None else [self._item_of(conn, order, item_id)]
@@ -1907,9 +1915,10 @@ class Lifecycle:
         """Time spent, at the labour rate now (copied, in the order's minor units, under
         the order's lock, so a currency change cannot slip in between), and whether this
         call wrote it: a second write of one ``source`` returns the first entry and writes
-        nothing, not even an audit row."""
+        nothing, not even an audit row. ``order_not_submitted`` on a cart."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             items = self._entry_item(conn, order, body.order_item_id)
             rate = (
                 to_minor(labour_rate.per_hour, order.currency)
@@ -1961,9 +1970,11 @@ class Lifecycle:
         self, order_id: str, body: CostEntryInput, by: Actor
     ) -> tuple[CostEntry, bool]:
         """Money spent, and whether this call wrote it: a second write of one ``source``
-        returns the first entry and writes nothing, not even an audit row."""
+        returns the first entry and writes nothing, not even an audit row.
+        ``order_not_submitted`` on a cart."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            check_submitted(order)
             items = self._entry_item(conn, order, body.order_item_id)
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
