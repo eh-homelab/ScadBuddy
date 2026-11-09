@@ -1238,7 +1238,7 @@ async def _sync_bank_deposits_logged(state: AppState) -> None:
     """#4961: read the linked bank account's new deposits and suggest their orders."""
     payments = state.components.get(PAYMENTS)
     try:
-        suggested = await sync_deposits(payments.bank)
+        suggested = await sync_deposits(payments.bank, state.events)
     except Exception:
         logger.exception("could not sync the bank deposits")
         raise

@@ -1223,6 +1223,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
   method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
   deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
-  currency); "Not this order" (`…/{tx}/dismiss`) sets `dismissed_at`, which a later sync
-  keeps. Both are in `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and
-  its reference) is never suggested again, after a new link too.
+  currency); the lock is taken in the payment's own transaction (`add_payment`'s
+  `on_insert`), so a confirmation holds one connection. "Not this order" (`…/{tx}/dismiss`)
+  writes a `bank_deposit_dismissals` row (transaction id and order), kept apart from the
+  Item's deposits, so a later sync, an unlink and a new link all keep it. Both are in
+  `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and its reference) is
+  never suggested again, after a new link too. A recorded deposit whose amount Plaid
+  changed since is listed with `reason` `changed` and `recorded_minor`, which the page
+  shows as a warning with no action. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  topic `order:<id>`) per order it suggested a deposit for, so an open order page reloads.

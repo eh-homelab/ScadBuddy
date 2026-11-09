@@ -61,6 +61,7 @@ def test_a_suggestion_is_listed_then_recorded_once(client: TestClient) -> None:
         "posted_on": "2026-11-06",
         "description": "ACH ACCT •••",
         "reason": "amount",
+        "recorded_minor": None,
     }
     # Listing records nothing.
     assert client.get(f"/api/v1/orders/{order['id']}").json()["payments"] == []

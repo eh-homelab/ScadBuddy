@@ -4,6 +4,7 @@ transaction id as ``reference``; "Not this order" dismisses the suggestion."""
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import Any
 
@@ -155,3 +156,73 @@ async def test_a_recorded_deposit_is_not_suggested_again_after_a_new_link(bank: 
         await bank.bank.link("public-sandbox-2", [CHECKING])
     await synced(bank, transaction("t1", -10, "ACH"))
     assert suggestions(bank.rows, other.id) == []
+
+
+async def test_a_dismissed_suggestion_stays_dismissed_after_a_new_link(bank: Bank) -> None:
+    """Unlink drops the Item's deposits; "Not this order" is kept apart from them."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    dismiss_deposit(bank.rows, owing.id, "t1")
+    with respx.mock as router:
+        router.post(f"{SANDBOX}/item/remove").mock(
+            return_value=httpx.Response(200, json=payload("item.remove.json"))
+        )
+        await bank.bank.unlink()
+        plaid_answers(router)
+        await bank.bank.link("public-sandbox-2", [CHECKING])
+    with respx.mock as router:
+        router.post(SYNC).mock(return_value=page([transaction("t1", -10, "ACH")]))
+        # The sync makes no suggestion of a dismissed pair.
+        assert await sync_deposits(bank.bank) == 0
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_recording_holds_one_connection(bank: Bank, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deposit's lock is taken in the payment's own transaction, not around it."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    depth = threading.local()
+    deepest: list[int] = []
+    real = OrderStore.transaction
+
+    @contextlib.contextmanager
+    def counted(self: OrderStore, *args: Any, **kwargs: Any) -> Any:
+        depth.n = getattr(depth, "n", 0) + 1
+        deepest.append(depth.n)
+        try:
+            with real(self, *args, **kwargs) as conn:
+                yield conn
+        finally:
+            depth.n -= 1
+
+    monkeypatch.setattr(OrderStore, "transaction", counted)
+    record(bank, owing, "t1")
+    assert max(deepest) == 1
+
+
+async def test_a_recorded_deposit_plaid_changes_is_shown_on_its_order(bank: Bank) -> None:
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    assert suggestions(bank.rows, owing.id) == []
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page(modified=[transaction("t1", -12, "ACH")], cursor="c2")
+        )
+        await sync_deposits(bank.bank)
+    [changed] = suggestions(bank.rows, owing.id)
+    assert (changed.reason, changed.amount_minor, changed.recorded_minor) == ("changed", 1200, 1000)
+
+
+async def test_a_sync_tells_each_suggested_order_s_page(bank: Bank) -> None:
+    owing = bank.owing()
+    heard: list[Any] = []
+
+    class Bus:
+        def publish(self, event: Any) -> None:
+            heard.append(event)
+
+    with respx.mock as router:
+        router.post(SYNC).mock(return_value=page([transaction("t1", -10, "ACH")]))
+        await sync_deposits(bank.bank, Bus())  # type: ignore[arg-type]
+    assert [(e.kind, e.order_id) for e in heard] == [("order.bank_deposits", owing.id)]

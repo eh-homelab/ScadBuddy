@@ -6,7 +6,8 @@ import { newId, now, Refused, state } from './state'
 /**
  * #4961 — the deposits of the Plaid-linked account suggested for an order
  * (`api/order_bank_deposits.py`). Recording one adds a `bank_transfer` payment whose reference is
- * the transaction id, once; dismissing one hides it.
+ * the transaction id, once; dismissing one hides it. A test pushes `order.bank_deposits` on
+ * `order:<id>` with `emitRealtime`, as a sync does.
  */
 
 type Suggested = DepositSuggestion & { order_id: string; dismissed: boolean }
@@ -25,6 +26,7 @@ export function mockDepositSuggestion(orderId: string, deposit: Partial<DepositS
     posted_on: '2026-11-06',
     description: 'ACH CREDIT ACCT •••',
     reason: 'amount',
+    recorded_minor: null,
     ...deposit,
   }
   suggested.push({ ...made, order_id: orderId, dismissed: false })
@@ -46,7 +48,8 @@ export const handlers = [
     } catch (error) {
       return refused(request, error)
     }
-    const shown = suggested.filter((s) => s.order_id === params.id && !s.dismissed && !recorded(s.transaction_id))
+    // A 'changed' row is a recorded deposit whose amount the bank changed since; it stays shown.
+    const shown = suggested.filter((s) => s.order_id === params.id && !s.dismissed && (s.reason === 'changed' || !recorded(s.transaction_id)))
     return HttpResponse.json(shown.map(({ order_id: _order, dismissed: _dismissed, ...deposit }) => deposit))
   }),
   http.post('/api/v1/orders/:id/bank-deposits/:tx/record', ({ request, params }) => {

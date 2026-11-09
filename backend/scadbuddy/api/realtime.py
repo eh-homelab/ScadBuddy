@@ -129,6 +129,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OperationEvent,
+    OrderBankDepositsChanged,
     OrderChanged,
     OrderItemChanged,
     OutputEvent,
@@ -258,6 +259,8 @@ def topics_of(event: Event) -> list[str]:
             return ["activity", f"activity:{event.activity_id}"]
         case OrderChanged() | OrderItemChanged():
             return ["orders", f"order:{event.order_id}"]
+        case OrderBankDepositsChanged():
+            return [f"order:{event.order_id}"]
         case AgentOperationEvent():
             return []
         case AuthSessionRevoked():

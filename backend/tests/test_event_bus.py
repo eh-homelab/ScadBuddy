@@ -253,6 +253,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         # Orders (#4249, spec 2026-10-18 §7.1).
         "order.changed",
         "order_item.changed",
+        # A deposit sync suggested a bank deposit for an order (#4961).
+        "order.bank_deposits",
         # The agent service's own (#300, agent/src/sessions/busEvents.ts).
         "session.started",
         "session.owner",
