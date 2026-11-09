@@ -561,3 +561,23 @@ async def test_a_lookup_nobody_waits_for_any_more_logs_nothing(bank: BankLinks) 
     finally:
         loop.set_exception_handler(None)
     assert [c.get("message") for c in seen] == []
+
+
+def test_refused_sources_never_push_out_another_source_s_bucket(clock: Clock) -> None:
+    """A sender cycling addresses while the process bucket is empty keeps no bucket, so a
+    source that spent its own burst is not pushed out and refilled."""
+    lookups = bank_module.KeyLookups(clock=clock, burst=1, source_burst=1)
+    assert lookups.take("192.0.2.1") == 0
+    for n in range(bank_module.MAX_LOOKUP_SOURCES + 5):
+        assert lookups.take(f"198.51.100.{n}") > 0
+    clock.now += bank_module.KEY_LOOKUP_SECONDS
+    # The process bucket holds a token again, but the first source's own is still spent.
+    assert lookups.take("192.0.2.1") > 0
+
+
+def test_the_webhook_route_names_every_503() -> None:
+    from scadbuddy.api.bank_link import router
+
+    [hook] = [r for r in router.routes if getattr(r, "path", "") == "/payments/bank/webhook"]
+    text = getattr(hook, "description", "")
+    assert "`provider_unavailable`" in text and "`credential_unreadable`" in text

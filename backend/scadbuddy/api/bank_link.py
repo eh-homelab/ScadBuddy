@@ -223,7 +223,8 @@ async def _sync_logged(payments: PaymentsDep, bus: EventBus) -> None:
     description=(
         "Public: the `Plaid-Verification` JWT is the credential. 400 when it does not"
         " verify or Plaid has no key with its `kid` (nothing changes), 413 above 256 KiB,"
-        " 503 `provider_unavailable` when Plaid could not give its key, 429 with"
+        " 503 `provider_unavailable` when Plaid could not give its key, 503"
+        " `credential_unreadable` when the link's keys or access token cannot be read, 429 with"
         " `Retry-After` when the sender or the process asked Plaid for keys too often (Plaid"
         " sends it again in both cases). `SYNC_UPDATES_AVAILABLE`"
         " syncs the deposits once the answer is sent; an `ITEM` `ERROR` with"
