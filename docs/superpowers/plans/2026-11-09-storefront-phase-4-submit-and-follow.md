@@ -1,0 +1,248 @@
+# Storefront Phase 4: Submit and Follow Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** A visitor submits their cart as an order and then follows it: they get an order link by mail, answer revisions, accept quotes, cancel, and pay. An account keeps their orders together.
+
+**Architecture:** As in phase 3, everything that reads or writes the database runs in the CRUD service, behind routes under `/api/v1/internal/crud/storefront/*`. The edge only checks the cookie, the session and the bot check, then forwards. Mail goes through an outbox table, written in the transaction that causes it and sent after the commit, so a rolled-back change sends nothing. The order link's token never travels in a URL path: the page reads it from the URL fragment (`/o#<token>`) and sends it in a request body.
+
+**Tech Stack:** Python 3.12, FastAPI, psycopg 3, Postgres 18, `smtplib` (stdlib), React 19 + Vite (the `storefront` entry), msw, Playwright.
+
+**Spec:** `docs/superpowers/specs/2026-11-02-storefront-design.md` (§5.2, §5.5–§5.8, §6.1–§6.4, §7). Phase 4 is §11 item 4 (#5283).
+
+## Global Constraints
+
+- Every phase 3 constraint still holds (`docs/superpowers/plans/2026-11-07-storefront-phase-3-public-site.md` "Global Constraints" and "Trust model"):
+  - the edge holds no database secret, no KEK and no SMTP password;
+  - the CRUD routes are the boundary, and they check ownership themselves;
+  - migrations are new files only;
+  - no generated API file is committed.
+- No token in a path. The order link token and the pay token travel in request bodies only. The page carries the order link in the URL fragment, `/o#<token>`, which the browser never sends. The CRUD side stores only sha256 (hex) of each token. Tokens are 32 random bytes, URL-safe base64.
+- Mail is sent only by the CRUD service. It writes an outbox row in the same transaction as the change that causes it, and sends after the commit. The SMTP password is sealed under the CRUD service's KEK (`core/secrets.py` `seal_secret`), as payment credentials are (`payments/credentials.py`). With no SMTP host set, mail rows stay queued and the shop sees them as not sent. Nothing fails.
+- Mail templates are plain text. Each link they carry is built from `storefront_public_url` (`https://michaels-workshop.nullreference.io` in prod). Customer text in a mail is never HTML.
+- The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's or account's row id. Only the CRUD side builds it.
+- A submitted order stays `draft` in `OrderStatus`. "Submitted" is `orders.submitted_at` (§5.5).
+- After submit, the customer may only answer revisions, accept quotes, pay, and cancel while nothing is approved (§5.5). Every other customer write gets 409 `order_submitted`.
+- The bot check (§5.8): Cloudflare Turnstile on sign-up, submit and design requests, on only when both `SCADBUDDY_TURNSTILE_SITE_KEY` and the secret file are set. The edge verifies the token and holds the secret. The CRUD side never sees it.
+- Problem types stay under `https://scadbuddy.dev/problems/storefront/`.
+- PR titles are conventional commits with scope `storefront`. Each PR body says `Part of #5283`, and the last one says `Fixes #5283`.
+
+## Ownership (proposed on #5283; scadsy to confirm)
+
+- **This session:** Tasks 1–7 (the customer actor, mail, submit, the order link, the customer's order page, the pay page, back-office link controls).
+- **scadsy:** Tasks 8–9 (accounts, Turnstile).
+
+Task 1 lands first: Tasks 4, 6 and 8 send mail through it. Task 9's edge check (`storefront/turnstile.py` `require_turnstile`) lands before Task 3 and Task 8 call it. Until then, Task 3 calls the stub that Task 3 defines, which always passes. Task 9 replaces the stub in place.
+
+## Review Focus
+
+1. **A replayed submit.** The same Idempotency-Key twice gives one order, one number and one mail (Task 3).
+2. **A stolen or revoked link.** A revoked token answers 404 with an empty body, exactly like an unknown one. A token for order A never reads order B (Task 5).
+3. **Mail after a rollback.** A transition that fails after it queued mail leaves no outbox row (Task 2).
+4. **Two answers at once.** Two tabs answer the same revision. One wins, and the other gets 409 `revision_answered` (Task 5).
+5. **The last acceptance on a storefront order.** The answer or quote acceptance that approves the last open item accepts the order in the same transaction, as the customer. A back-office order does not (Task 1).
+
+---
+
+### Task 1: The customer actor and storefront acceptance rules (this session)
+
+**Files:**
+- Modify: `backend/scadbuddy/orders/models.py` (`Actor.kind` gains `"customer"`), `backend/scadbuddy/orders/lifecycle.py` (`answer_revision`, `_accept_quote`, a new `accept_for_customer`), `backend/scadbuddy/api/orders.py` (route), `agent/src/tools/coverage.ts`
+- Create: `backend/scadbuddy/orders/storefront/customers.py`
+- Test: `backend/tests/orders/storefront/test_customer_actor.py`
+
+**Interfaces:**
+- Produces:
+  - `customer_actor(customer_id: str, session: str) -> Actor`.
+  - `Lifecycle.accept_for_customer(order_id: str, item_id: str, what: Literal["revision", "quote"], target_id: str, reason: str, by: Actor) -> OrderItem`, with the route `POST /api/v1/orders/{order_id}/items/{item_id}/accept-for-customer` and body `{what, target_id, reason}`.
+  - On a `storefront` order, the back office's own `answer_revision`/`accept_quote` is refused with 409 `customer_accepts`. The shop accepts only through `accept_for_customer`, which records the reason in `order_events`.
+  - On a `storefront` order, the customer's `answer_revision(accepted)` or `accept_quote` that leaves every open item `approved` calls `accept_order` in the same transaction, `by` the customer (§6.2).
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_the_last_customer_acceptance_accepts_a_storefront_order(lifecycle, submitted_storefront_order_with_two_items, customer):
+    a, b = submitted_storefront_order_with_two_items.items
+    accept_both_revisions_but_last(lifecycle, a, b, customer)
+    assert lifecycle.store.order(a.order_id).status == "accepted"
+    assert last_event(a.order_id).actor.kind == "customer"
+
+def test_the_shop_accepts_for_the_customer_only_with_a_reason(client, storefront_order_with_sent_revision):
+    r = client.post(f"/api/v1/orders/{o.id}/items/{i.id}/revisions/{rev.id}/answer", json={"answer": "accepted"})
+    assert r.status_code == 409 and r.json()["type"].endswith("customer_accepts")
+    r = client.post(f"/api/v1/orders/{o.id}/items/{i.id}/accept-for-customer", json={"what": "revision", "target_id": rev.id, "reason": ""})
+    assert r.status_code == 422
+    r = client.post(..., json={"what": "revision", "target_id": rev.id, "reason": "By phone, 9 Nov"})
+    assert r.status_code == 200 and "By phone, 9 Nov" in events_text(o.id)
+
+def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchanged behaviour
+```
+
+- [ ] **Step 2: Run them and confirm they fail.** Run `cd backend && uv run --frozen pytest tests/orders/storefront/test_customer_actor.py -v`.
+- [ ] **Step 3: Implement the Interfaces block.** Add the agent tool coverage entry for the new route.
+- [ ] **Step 4: Run them again and confirm they pass.** Also run `tests/orders`.
+- [ ] **Step 5: Commit.** `feat(storefront): the customer actor; a storefront order accepts on the customer's last answer`
+
+### Task 2: Mail, through an outbox (this session)
+
+**Files:**
+- Create: the migration `<ts>_storefront_mail.sql`, `backend/scadbuddy/orders/storefront/mail.py`, `backend/scadbuddy/orders/storefront/mail_templates.py`
+- Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_starttls` true, and `storefront_public_url`), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
+- Test: `backend/tests/orders/storefront/test_mail.py`, `test_housekeeping*.py`, the settings test
+
+**Interfaces:**
+- Produces:
+  - Table `storefront_mail`: `id`, `order_id` (null for a sign-in code), `to_address`, `template`, `context jsonb`, `created_at`, `sent_at`, `attempts`, `last_error`.
+  - Table `storefront_mail_secret` (one row): the sealed password envelope.
+  - `MailEvent = Literal["sign_in_code", "order_link", "revision_ready", "price_ready", "payment_requested", "shipped"]`.
+  - `queue_mail(conn, event: MailEvent, to: str, context: dict, order_id: str | None) -> str`.
+  - `send_queued(limit: int = 50) -> int`. It claims rows with `FOR UPDATE SKIP LOCKED`, sends each one with `smtplib.SMTP` and STARTTLS in a thread with a 20 s timeout, and stamps `sent_at` or `last_error`. It stops retrying a row after 8 attempts.
+  - `storefront_mail_covers(conn, order_id: str, event: MailEvent) -> bool`: true when the order has a live (unrevoked) order link and a mail host is set. #5660's plugin reads it.
+  - Routes that queue mail call `send_queued` after their commit, as a background task. The housekeeping step retries what is left.
+  - Hooks:
+    - `send_revision` queues `revision_ready`;
+    - recording a quote that the customer can accept queues `price_ready`;
+    - `open_payment_request` queues `payment_requested`;
+    - `add_shipment` queues `shipped`.
+    Each queues only when `storefront_mail_covers` is true, in the same transaction.
+
+- [ ] **Step 1: Write the failing tests**
+  - A queued row in a transaction that rolls back is gone.
+  - `send_queued` against a local `aiosmtpd` server (or a fake `SMTP` object) sends the template's subject and body and stamps `sent_at`.
+  - With no host, nothing is sent and nothing raises.
+  - The template renders customer text as plain text.
+  - Each of the four hooks queues exactly one row when a live link exists, and none without one.
+- [ ] **Step 2: Run them and confirm they fail.**
+- [ ] **Step 3: Implement.** The templates are short plain text: a subject plus a body with the link `{public_url}/o#{token}`. A sign-in code mail carries the code and no link.
+- [ ] **Step 4: Run them again and confirm they pass.** Also run `tests/test_housekeeping.py` and `tests/test_housekeeping_replay.py`, the latter with a recorded fixture `storefront_mail.json`.
+- [ ] **Step 5: Commit, then open PR 1.** `feat(storefront): mail through an outbox, sent by the CRUD service`
+
+### Task 3: Submit (this session)
+
+**Files:**
+- Create: the migration `<ts>_storefront_order_links.sql`, `backend/scadbuddy/orders/storefront/submit.py`, and `backend/scadbuddy/storefront/turnstile.py` (the stub, replaced by Task 9)
+- Modify: `backend/scadbuddy/orders/lifecycle.py` (`submit_order`), `api/crud_storefront.py` (area `drafts`: `POST …/draft/submit`), `crud/storefront.py`, `storefront/routes.py` (`POST /api/store/v1/draft/submit`), `frontend/src/storefront/pages/DraftPage.tsx` and a new `components/SubmitForm.tsx`
+- Test: `backend/tests/orders/storefront/test_submit.py`, `backend/tests/storefront/test_edge_routes.py`, `frontend/src/storefront/pages/DraftPage.test.tsx`
+
+**Interfaces:**
+- Produces:
+  - Table `storefront_order_links`: `id`, `order_id`, `token_sha256` (unique), `created_at`, `revoked_at`, `sent_to`, `opened_at`.
+  - `SubmitInput`: `name` (1–200), `email` (an address, at most 254), `shipping_option_id: str | None`, `address: Address | None`, and `account_id`, which comes only from the CRUD side's session lookup, never from the body.
+  - `Lifecycle.submit_order(order_id, body: SubmitInput, by: Actor) -> tuple[Order, str]` returns the order and the new link token, in one transaction under the order lock:
+    1. It links or makes the customer. It links an existing customer only when exactly one customer has that email as a contact. Otherwise it makes a new customer with the name and the email contact.
+    2. It takes the number from `order_numbers`.
+    3. It runs `set_shipping_option`, which refuses 422 `address_required` for an option that ships with no address.
+    4. It recomputes the auto tax.
+    5. It runs `apply_deposit_policy`.
+    6. It stamps `submitted_at`.
+    7. It creates the link.
+    8. It queues `order_link` mail to the email.
+  - An empty cart gets 409 `draft_empty`. A second submit with a new key gets 409 `order_submitted`. A replay with the same key answers the first reply and sends no second mail.
+  - `require_turnstile(request) -> None`: the stub that always passes.
+
+- [ ] **Step 1: Write the failing tests.**
+  - One order, one number and one queued `order_link` row, with the key replayed twice.
+  - An existing single contact is linked.
+  - Two customers with that email give a new customer.
+  - A shipping option that ships, without an address, gets 422.
+  - The deposit policy applies.
+  - Another visitor's submit sees no draft (404 `draft_not_found`).
+  - On the edge: 428 without a key, and the stub is called.
+  - On the page: the form shows the shipping options with their prices, asks for an address only when the option ships, and on success shows "We have your order. We sent a link to {email}."
+- [ ] **Step 2: Run them and confirm they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them again and confirm they pass.** Also run `tests/orders`, `tests/storefront`, the frontend lint, typecheck, `vitest run src/storefront` and `check:storefront-bundle`.
+- [ ] **Step 5: Commit, then open PR 2.** `feat(storefront): submit a cart as an order`
+
+### Task 4: The order link in the back office (this session)
+
+**Files:**
+- Modify: `backend/scadbuddy/api/orders.py` (`POST /api/v1/orders/{order_id}/customer-link` sends a new link and revokes the old ones; `DELETE` revokes; `GET` shows the link's state without its token), `orders/storefront/submit.py` (`issue_link`, `revoke_links`), `frontend/src/pages/OrderPage.tsx` (a "Customer link" card), `agent/src/tools/coverage.ts`
+- Test: `backend/tests/api/test_order_customer_link.py`, the OrderPage test
+
+**Interfaces:**
+- `issue_link(conn, order_id, to: str) -> str` revokes every live link of the order and queues `order_link` mail. A `back_office` order can get a link too. It needs a customer with an email contact, or an explicit `to` in the body. Otherwise it gets 422 `no_email`.
+- Agent tools: `order_customer_link_send`, which is outward and returns a pending action, as other mail-sending tools do; and `order_customer_link_revoke`.
+
+- [ ] **Steps 1–5:** test first, implement, then commit `feat(storefront): send or revoke an order's customer link`.
+
+### Task 5: The customer's order page (this session)
+
+**Files:**
+- Modify: `api/crud_storefront.py` (area `order`), `crud/storefront.py`, `storefront/routes.py`, `crud_areas.py`
+- Create: `backend/scadbuddy/orders/storefront/order_page.py`, `frontend/src/storefront/pages/OrderPage.tsx`
+- Test: `backend/tests/orders/storefront/test_order_page.py`, `backend/tests/storefront/test_edge_routes.py`, `frontend/src/storefront/pages/OrderPage.test.tsx`, `frontend/e2e/storefront.spec.ts`
+
+**Interfaces:**
+- CRUD routes. Each takes `{"token": …}` in the body, or an account session id that owns the order. Each answers an empty 404 for a token that reads nothing:
+  - `POST …/order/view` returns a `CustomerOrderView`:
+    - status in the customer's words (a mapping table in `order_page.py`);
+    - each item with its revisions (the pictures as presigned URLs), "Accept" or "Ask for changes" on the newest sent one, and the quote and its price;
+    - the open payment requests (`payments/store.py` `open_requests_for_order`), each with its pay link;
+    - the shipments with their tracking text.
+    It never shows costs, margins, internal notes or the shop's events.
+  - `POST …/order/revisions/{revision_id}/answer` with `{token, answer, note}`.
+  - `POST …/order/quotes/{quote_id}/accept` with `{token}`.
+  - `POST …/order/cancel` with `{token, reason}`. It refuses 409 when anything is approved.
+  - Each write takes an Idempotency-Key and runs as `customer_actor`. The first view stamps `opened_at`.
+- Edge routes: `/api/store/v1/order/*`, the same shapes. The page lives at `/o`, reads the token from `location.hash`, and never puts the token into history or a path.
+
+- [ ] **Step 1: Write the failing tests.**
+  - A token reads only its own order.
+  - A revoked token gets the same 404 as an unknown one.
+  - Two answers to one revision: the second gets 409 `revision_answered`.
+  - The last acceptance accepts the order (Task 1).
+  - Cancel is refused after an approval.
+  - The view has no cost field. An allowlist test, as in phase 3's `ESTIMATE_FIELDS`, keeps it that way.
+  - On the page: a revision's "Ask for changes" needs a note. A paid request shows "Paid" only after a fresh read, never right after the redirect (§7).
+  - The e2e is mocked: open `/o#tok`, accept a revision, see the price, then see "Pay".
+- [ ] **Step 2: Run them and confirm they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them again and confirm they pass.** Run every frontend and backend check, as in Task 3.
+- [ ] **Step 5: Commit, then open PR 3.** `feat(storefront): the customer's order page`
+
+### Task 6: The pay page (this session)
+
+**Files:**
+- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`)
+- Create: `frontend/src/storefront/pages/PayPage.tsx`
+- Test: `backend/tests/storefront/test_static.py` (the CSP for each path), `backend/tests/storefront/test_edge_routes.py` (an empty CRUD 404 maps to the edge's own 404), `backend/tests/payments/test_venmo.py`, `frontend/src/storefront/pages/PayPage.test.tsx`
+
+**Interfaces:**
+- The page is `/pay#<token>`, read from the hash, never from the path.
+- It loads the PayPal JS SDK with the checkout's client id, currency and `enable-funding=venmo`.
+- It shows the amount and what it is for. On approval, it says "Thanks. We will confirm your payment shortly." and links to the order page. The webhook settles the payment, not the page.
+- With the fake provider (`SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), a request's hosted URL is the fake's own page. "Pay" on the order page links there, and the pay page is not used.
+
+- [ ] **Steps 1–5:** test first, implement, then commit and open PR 4: `feat(storefront): the pay page for Venmo through PayPal`.
+
+### Task 7: The order link's state, and mail, in the back office (this session)
+
+**Files:**
+- Modify: `frontend/src/pages/OrderPage.tsx` (the link card shows "Sent to … on …, opened on …", or "not opened"), and the outbox state for each order (`GET /api/v1/orders/{order_id}/mail`: event, to, sent_at, last_error, never the body)
+- Test: the OrderPage test, `backend/tests/api/test_order_mail.py`
+
+- [ ] **Steps 1–5:** test first, implement, then commit and open PR 5: `feat(storefront): the shop sees each order's customer mail`.
+
+### Task 8: Accounts (scadsy)
+
+**Files:**
+- Create: the migration `<ts>_storefront_accounts.sql` (`storefront_accounts`, `storefront_sign_in_codes`, `storefront_sessions`; `storefront_visitors.account_id`), `backend/scadbuddy/orders/storefront/accounts.py`, and the edge's session cookie `sb_session`, signed as `sb_visitor` is
+- Modify: `api/crud_storefront.py` (area `accounts`), `crud/storefront.py`, `storefront/routes.py`, the storefront page (sign up, sign in, "Your orders")
+
+**Interfaces** (what Tasks 3 and 5 rely on):
+- `account_for_session(conn, session_sha256: str) -> Account | None`.
+- The edge sends the verified session id in the header `X-ScadBuddy-Store-Session`. The CRUD side takes it only from a `storefront` credential, as with `X-ScadBuddy-Visitor`.
+- `orders_of_account(conn, account_id) -> list[str]`: the orders the account's visitors made, plus the orders whose link was opened while signed in (§5.2).
+- Codes are six digits, valid for 10 minutes and good for 5 tries, with only their sha256 stored. They are sent with `queue_mail(conn, "sign_in_code", email, {"code": …}, None)` (Task 2).
+- On verify, the visitor joins the account. The account links to a customer only when exactly one customer has that email as a contact.
+
+### Task 9: Turnstile (scadsy)
+
+**Files:**
+- Modify: `backend/scadbuddy/storefront/turnstile.py` (it replaces Task 3's stub in place), `storefront/settings.py` (`SCADBUDDY_TURNSTILE_SITE_KEY`, `SCADBUDDY_TURNSTILE_SECRET_FILE`), and `storefront/routes.py`, so that design requests and sign-up call `require_turnstile`, as submit does
+
+**Interfaces:**
+- `require_turnstile(request) -> None` reads the `cf-turnstile-response` field or the `X-Turnstile-Token` header. It verifies with `https://challenges.cloudflare.com/turnstile/v0/siteverify` and refuses 403 `bot_check_failed`.
+- It is off, and passes everything, when either key is unset.
+- `GET /api/store/v1/config` tells the page the site key.
