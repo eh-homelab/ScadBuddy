@@ -782,7 +782,7 @@ class Lifecycle:
         or submitted since the listing loses nothing; then its attachments with their
         holds (`OrderStore.delete_attachment`), then the order, whose items cascade.
         Once committed, ``order.changed`` with ``deleted``: an open orders list reads again
-        without it, and an open ``order:<id>`` page reads again and shows it not found.
+        without it, and an open ``order:<id>`` page shows it not found on that frame.
         Whether it was deleted."""
         with self.store.transaction() as conn:
             if not self.store.claim_idle_draft(conn, order_id, before=before):
