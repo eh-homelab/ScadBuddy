@@ -54,11 +54,14 @@ CAPTURE_DAILY_ATTEMPTS = 5
 #: order's cancel and the disconnect for good. A read is counted when it found the
 #: outcome unknown, when the lifecycle did not take its event, or when its settling
 #: raised (about five days with the backoff: 1 + 2 + ... + 16 hours, then a day each).
-#: After a pending read the count is at least `CAPTURE_DAILY_ATTEMPTS`, so four more
-#: counted reads, a day apart, give up.
+#: After a pending read the count is at least `CAPTURE_DAILY_ATTEMPTS`, so at most four
+#: more counted reads, a day apart, give up.
 CAPTURE_GIVE_UP_ATTEMPTS = 9
 #: A capture still pending at the provider this many days after the approval marks the
-#: request `failed` (`capture_pending_unsettled`). PayPal says an eCheck usually clears
+#: request `failed` (`capture_pending_unsettled`). It is counted from
+#: `capture_pending_at`: for a request the backfill
+#: (`20261109T0026Z_payment_capture_backfill.sql`) marked, that is when the migration ran,
+#: so its bound comes later than the approval's would. PayPal says an eCheck usually clears
 #: in 4 to 7 business days and can take longer
 #: (https://www.paypal.com/us/cshelp/article/what-is-an-echeck-help285); 30 days is more
 #: than twice that with weekends and holidays, so a capture that is only slow is not
