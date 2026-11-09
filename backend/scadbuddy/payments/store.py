@@ -249,8 +249,9 @@ def capture_read_daily(conn: Conn, request_id: str) -> bool:
     """The capture was made and is pending at the provider (#4959): its own event
     settles it, as a bank debit's does, and the sweep reads it once a day in case that
     event is lost (`CAPTURE_DAILY_ATTEMPTS`). The read is not counted toward
-    `CAPTURE_GIVE_UP_ATTEMPTS`: True once the approval is `CAPTURE_PENDING_GIVE_UP_DAYS`
-    old. A request no longer marked is left as it is (False)."""
+    `CAPTURE_GIVE_UP_ATTEMPTS`: True once ``capture_pending_at`` (the latest approval, or
+    the backfill's run) is `CAPTURE_PENDING_GIVE_UP_DAYS` old. A request no longer marked
+    is left as it is (False)."""
     row = conn.execute(
         "UPDATE payment_requests SET capture_attempts = GREATEST(capture_attempts, %s),"
         " capture_tried_at = clock_timestamp()"
