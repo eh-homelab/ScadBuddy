@@ -152,6 +152,6 @@ async def test_a_recorded_deposit_is_not_suggested_again_after_a_new_link(bank: 
         )
         await bank.bank.unlink()
         plaid_answers(router)
-        await bank.bank.link("public-sandbox-2", CHECKING)
+        await bank.bank.link("public-sandbox-2", [CHECKING])
     await synced(bank, transaction("t1", -10, "ACH"))
     assert suggestions(bank.rows, other.id) == []
