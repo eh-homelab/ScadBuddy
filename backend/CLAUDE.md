@@ -1203,3 +1203,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
   allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.
   Tests replay `tests/payments/plaid_payloads/` (Plaid's sandbox examples) through respx.
+  The deposit sync (`payments/deposits.py` `sync_deposits`) is the housekeeping sweep
+  `housekeeping_sync_bank_deposits` (the sweep Schedule only, behind its patch, never a loop
+  in the API): `/transactions/sync` from `bank_links.sync_cursor`, at most `MAX_PAGES` pages,
+  the loop started again from its first cursor on a mutation during pagination (an update
+  `MAX_PAGES` cut short keeps that first cursor in `sync_loop_cursor` for the next run); each
+  open order's balance is read once per sync (`_Balances`); keys that will not open, or a
+  link with no access token, set `sync_error` instead of failing every run; the cursor
+  is stored only when the link and the cursor are still the ones it started from. Posted
+  deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
+  (`mask`: every run of five or more digits, a run going on across single spaces or
+  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
+  deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.

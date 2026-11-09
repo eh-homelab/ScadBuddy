@@ -116,6 +116,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.payments.component import PAYMENTS
+from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
@@ -180,6 +181,7 @@ from scadbuddy.workflows.housekeeping import (
     ATTACHMENTS_SWEEP,
     AUTH_SESSIONS_SWEEP,
     BACKFILL_SWEEP,
+    BANK_DEPOSITS_SWEEP,
     FLOWS_SWEEP,
     GIT_REMOTE_SWEEP,
     GIT_SWEEP,
@@ -719,6 +721,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def settle_payment_captures() -> None:
         await _heartbeating(_settle_payment_captures_logged(state))
 
+    @activity.defn(name=BANK_DEPOSITS_SWEEP)
+    async def sync_bank_deposits() -> None:
+        await _heartbeating(_sync_bank_deposits_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -745,6 +751,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_auth_sessions,
         retry_payment_closes,
         settle_payment_captures,
+        sync_bank_deposits,
     ]
 
 
@@ -1225,6 +1232,18 @@ async def _settle_payment_captures_logged(state: AppState) -> None:
         raise
     if settled:
         logger.info("settled pending payment captures", extra={"count": settled})
+
+
+async def _sync_bank_deposits_logged(state: AppState) -> None:
+    """#4961: read the linked bank account's new deposits and suggest their orders."""
+    payments = state.components.get(PAYMENTS)
+    try:
+        suggested = await sync_deposits(payments.bank)
+    except Exception:
+        logger.exception("could not sync the bank deposits")
+        raise
+    if suggested:
+        logger.info("suggested deposit matches", extra={"count": suggested})
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:

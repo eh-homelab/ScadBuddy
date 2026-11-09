@@ -34,7 +34,7 @@ export function setMockKeysUnreadable(unreadable: boolean): void {
   keysUnreadable = unreadable
 }
 
-const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null }
+const EMPTY: BankStatus = { configured: false, environment: null, account: null, linked_at: null, synced_at: null, sync_error: null }
 let bank: BankStatus = { ...EMPTY }
 
 export function reset(): void {
@@ -43,9 +43,19 @@ export function reset(): void {
   keysUnreadable = false
 }
 
-/** Saved keys and, with `linked`, the sandbox checking account, for a test's setup. */
-export function mockBankLink({ linked }: { linked: boolean }): void {
-  bank = { configured: true, environment: 'sandbox', account: linked ? ACCOUNTS[MOCK_CHECKING]! : null, linked_at: linked ? now() : null }
+/**
+ * Saved keys and, with `linked`, the sandbox checking account, for a test's setup; `synced`
+ * says the deposit sync read Plaid, `syncError` that its last read failed with that code.
+ */
+export function mockBankLink({ linked, synced = false, syncError = null }: { linked: boolean; synced?: boolean; syncError?: string | null }): void {
+  bank = {
+    configured: true,
+    environment: 'sandbox',
+    account: linked ? ACCOUNTS[MOCK_CHECKING]! : null,
+    linked_at: linked ? now() : null,
+    synced_at: linked && synced ? now() : null,
+    sync_error: linked ? syncError : null,
+  }
 }
 
 const linkedRefusal = (request: Request) => problem(request, 409, 'a bank account is already linked; unlink it first', PROBLEMS + 'bank_linked')
@@ -88,7 +98,7 @@ export const handlers = [
       bank = { ...EMPTY }
       return HttpResponse.json({ removed_at_plaid: false, note: MOCK_KEYS_UNREADABLE })
     }
-    bank = { ...bank, account: null, linked_at: null }
+    bank = { ...bank, account: null, linked_at: null, synced_at: null, sync_error: null }
     return HttpResponse.json(keysRefused ? { removed_at_plaid: false, note: MOCK_REMOVE_AT_PLAID } : { removed_at_plaid: true, note: null })
   }),
 ]
