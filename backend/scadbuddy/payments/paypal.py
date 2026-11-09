@@ -113,6 +113,7 @@ from scadbuddy.payments.provider import (
     Verified,
 )
 from scadbuddy.payments.venmo import PAY_PAGE_MISSING, PAY_PAGE_READY
+from scadbuddy.payments.venmo import SETTING as VENMO_SETTING
 
 logger = logging.getLogger(__name__)
 
@@ -225,8 +226,13 @@ class PayPalProvider:
     #: The wallet under ``payment_source``; Venmo (#4960) is the same order with ``venmo``.
     funding_source = "paypal"
     fields: Sequence[ProviderField] = (
+        # The form opens on sandbox, the choice that moves no money (#5769 review).
         ProviderField(
-            name="environment", label="Environment", secret=False, choices=["sandbox", "live"]
+            name="environment",
+            label="Environment",
+            secret=False,
+            choices=["sandbox", "live"],
+            default="sandbox",
         ),
         ProviderField(name="client_id", label="Client ID", secret=False),
         ProviderField(name="webhook_id", label="Webhook ID", secret=False),
@@ -566,7 +572,10 @@ class PayPalProvider:
             return await self._approved(credential, event_id, resource)
         if kind in _CAPTURE_KINDS:
             found = _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
-            if found.kind == "paid" and found.provider_ref is not None:
+            # The funding source is read only while Venmo is on (#5769 review): a shop
+            # that never turns it on makes no extra call per capture.
+            venmo_on = credential.settings.get(VENMO_SETTING) == "on"
+            if found.kind == "paid" and found.provider_ref is not None and venmo_on:
                 found = found.model_copy(
                     update={"method": await self._funding(credential, found.provider_ref)}
                 )
