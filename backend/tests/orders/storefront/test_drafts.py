@@ -746,6 +746,14 @@ def test_the_crud_side_holds_a_spool_budget(
     assert stored_objects(s3_api) == 0
 
 
+def _unsigned(draft: dict[str, Any]) -> dict[str, Any]:
+    """``draft`` with each attachment's signed link cut to its path."""
+    for item in draft["items"]:
+        for attachment in item.get("attachments") or []:
+            attachment["url"] = urlsplit(attachment["url"]).path
+    return draft
+
+
 def test_a_retried_request_makes_one_item_whatever_changed_since(
     asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -758,7 +766,9 @@ def test_a_retried_request_makes_one_item_whatever_changed_since(
     # A replay stores nothing: it answers the first request before any other work.
     monkeypatch.setattr(drafts_module, "keep_file", stored_again)
     again = ask(asks, files, key="r6")
-    assert (again.status_code, again.json()) == (200, first.json())
+    # Each answer signs its file links afresh (their ``Expires`` moves with the clock), so
+    # the replay is compared without them.
+    assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
     assert len(asks.get("/draft").json()["items"]) == 1
 
 
