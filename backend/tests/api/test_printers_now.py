@@ -213,17 +213,24 @@ def test_a_bambuddy_job_links_its_archive_only_where_bambuddy_has_that_page(
 
 
 @pytest.mark.parametrize(
-    "body",
-    [["1.3.0"], "1.3.0", 130, None],
-    ids=["array", "string", "number", "null"],
+    "answer",
+    [
+        httpx.Response(200, json=["1.3.0"]),
+        httpx.Response(200, json="1.3.0"),
+        httpx.Response(200, json=130),
+        httpx.Response(200, json=None),
+        httpx.Response(200, text="<html>Bambuddy</html>"),
+    ],
+    ids=["array", "string", "number", "null", "not-json"],
 )
 @respx.mock
 def test_a_version_body_that_is_not_an_object_gives_the_archives_page(
-    client: TestClient, body: Any
+    client: TestClient, answer: httpx.Response
 ) -> None:
-    """#5840: a 200 whose body is not an object is no version, never a failed strip."""
+    """#5840: a 200 whose body is not an object, or not JSON (#5841), is no version,
+    never a failed strip."""
     version = configure(client)
-    version.mock(return_value=httpx.Response(200, json=body))
+    version.mock(return_value=answer)
     _bambuddy_job()
 
     response = client.get(NOW)
