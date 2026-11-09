@@ -152,6 +152,36 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
     # #3632: a failed read does not know the plate is clear, so it never says so.
     assert cards[3]["awaiting_plate_clear"] is None
 
+    # #3742: a job not ScadBuddy's shows Bambuddy's cover (its status's `cover_url`)
+    # through ScadBuddy's farm proxy, keyed by the job; a failed read shows none.
+    cover = "/api/v1/farm/printers/1/cover?job=Name_Keychain_Font_Basic_Plate_1"
+    assert running["picture"] == cover
+    assert paused["picture"] == "/api/v1/farm/printers/2/cover?job=Bracket"
+    assert cards[3]["picture"] is None
+
+
+@respx.mock
+def test_a_job_bambuddy_gives_no_cover_has_no_picture(client: TestClient) -> None:
+    """#3742: Bambuddy names a cover only while a job is running or paused
+    (`cover_url`); an idle printer, or a job it gives none, has no picture."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+    )
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, cover_url=None))
+    )
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(200, json=status(2, state="IDLE", subtask_name=None))
+    )
+
+    response = client.get(NOW)
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card for card in response.json()["printers"]}
+    assert (cards[1]["activity"], cards[1]["picture"]) == ("printing", None)
+    assert (cards[2]["activity"], cards[2]["picture"]) == ("idle", None)
+
 
 @pytest.mark.parametrize(
     ("version", "has_page"),
@@ -763,6 +793,9 @@ def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> 
     }
     assert cards[2]["scadbuddy"] is None
     assert cards[3]["scadbuddy"] is None
+    # #3742: ScadBuddy's job shows ScadBuddy's own picture, not Bambuddy's cover.
+    assert cards[1]["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert cards[2]["picture"] == "/api/v1/farm/printers/2/cover?job=Bracket"
 
 
 @respx.mock
@@ -847,6 +880,9 @@ def test_a_job_a_run_started_over_the_lan_is_marked(client: TestClient) -> None:
     }
     assert cards[shed]["scadbuddy"] is None
     assert cards[loft]["scadbuddy"] is None
+    # #3742: a LAN card asks Bambuddy nothing, so only ScadBuddy's job has a picture.
+    assert cards[garage]["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert cards[loft]["picture"] is None
 
 
 def test_a_lan_start_two_runs_share_is_not_marked(client: TestClient) -> None:

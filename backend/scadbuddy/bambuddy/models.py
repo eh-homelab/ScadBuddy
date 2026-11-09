@@ -1182,6 +1182,14 @@ class QueueItem(BambuddyModel):
     filament_color: str | None = None
     batch_name: str | None = None
     created_at: datetime | None = None
+    #: Bambuddy's paths on its own disk of the item's thumbnails (#3742), set only when
+    #: it has one: Bambuddy's ``PrintQueueItemResponse`` at maziggy/bambuddy f9080d1,
+    #: ``backend/app/schemas/print_queue.py`` lines 232-241. Read only to say whether
+    #: there is a thumbnail to show (`bambuddy/pictures.py`), and never forwarded.
+    library_file_thumbnail: str | None = Field(default=None, exclude=True)
+    archive_thumbnail: str | None = Field(default=None, exclude=True)
+    #: Bambuddy soft-deleted the archive: its files, the thumbnail too, are gone.
+    archive_deleted: bool = Field(default=False, exclude=True)
 
 
 class ArchiveStats(BambuddyModel):
