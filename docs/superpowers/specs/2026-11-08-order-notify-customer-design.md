@@ -1,7 +1,8 @@
 # `order_notify_customer` sends through a messaging plugin
 
 Issue #5660. Follow-up to #4252 (orders spec `2026-10-18-orders-design.md` §7.3 and §12).
-Status: design, for the owner's approval. No product code is in this PR.
+Status: **approved by the owner on 2026-11-09**, with the calls in §12. The storefront
+facts in §2 and §8 are scadify's answers (#5283) of the same day.
 
 ## 1. Intent
 
@@ -63,14 +64,20 @@ messaging plugin keeps the compose-only tool as it is.
   the storefront sends: the sign-in code, the order link, "a revision is ready", "your
   price is ready", "payment requested", "shipped". It says "Every other customer
   notification stays a plugin's job (orders spec §12)". #5283 owns it and is open; no
-  SMTP code exists yet. The comment on #5283 for this design says the storefront sends
-  these "for an order with a storefront visitor only" and proposes "the plugin skips
-  events 2 to 6 for an order that has a storefront visitor". `orders.source`
-  (`back_office` or `storefront`) and `orders.storefront_visitor_id` exist
-  (`backend/scadbuddy/orders/models.py`, migration `20261107T2235Z_storefront_drafts.sql`).
-  Note: spec §5.7 says the CRUD service sends this mail with SMTP settings sealed under
-  its KEK. The brief for this design says the sender lives in the storefront edge. This
-  design does not depend on which one is right (§8), but the owner must confirm it (Q2).
+  SMTP code exists yet on main. The event list is
+  [#5283's comment](https://github.com/eh-homelab/ScadBuddy/issues/5283#issuecomment-6729346808).
+  scadify's answers for this design (2026-11-09), which replace that comment's
+  "storefront visitor only" rule:
+  - The **CRUD service** sends storefront mail, after the transaction that causes the
+    event commits. The storefront edge holds no database secret and no KEK under #5295;
+    scadify's mail PR corrects storefront spec §10 to say so.
+  - Storefront mail goes to **every order with a live (unrevoked) order link**,
+    `back_office` orders included ("Send customer link", spec §5.2). A revoked link stops
+    it. It does not depend on `orders.source` or `orders.storefront_visitor_id`.
+  - The seam is `storefront_mail_covers(conn, order_id, event) -> bool`: true when the
+    order has a live order link and storefront mail is configured. Its events are
+    `order_link`, `revision_ready`, `price_ready`, `payment_requested`, `shipped`. It lands
+    in scadify's branch `feat/storefront-follow` (PR 1 of #5283).
 
 ## 3. Goals, non-goals, anti-goals
 
@@ -84,8 +91,8 @@ Goals:
    through which plugin and tool, and the outcome.
 4. One request never sends twice: a retry, a lost answer or a re-run approval is safe.
 5. With no messaging plugin, `order_notify_customer` works as it does today.
-6. A storefront order never gets the same notice from the storefront mail and from the
-   plugin.
+6. An order that gets storefront mail never gets the same notice from the storefront
+   mail and from the plugin.
 7. It works the same in every agent path: a session turn (in-process and as a ToolCall
    activity), `/mcp`, and a flow run.
 
@@ -193,8 +200,8 @@ is a failed send (§7).
 
 Reason: a tier is per tool. One tool with a `send` flag would need an input-dependent tier
 that Settings cannot lower, which is the fixed tier #4208 rejected. Two tools keep each
-tier honest and each one configurable. The cost: the issue title names one tool. Q1 asks
-the owner to confirm.
+tier honest and each one configurable. The cost: the issue title names one tool. The
+owner approved two tools (§12).
 
 ### 5.2 Approval binds the exact message
 
@@ -240,14 +247,15 @@ plugin off, tool not listed), or `unknown` (the request was written and no answe
 
 ### 6.2 The built-in flow
 
-A new built-in version of `order-fulfilment`: with `notify` true and the order `ready`, it
-composes, and when `send_ready` is true it calls `order_notify_customer_send` with
-`template: "ready"`. Its standing grant gains the rule
+A new built-in version of `order-fulfilment` takes a new opt-in input `send` (boolean,
+default false; the owner's call, §12). `notify` keeps its meaning: compose the `ready`
+message. Only with `notify` and `send` both true, the order `ready` and `send_ready` true
+does it call `order_notify_customer_send` with `template: "ready"`. Its run grant for
+that call is the rule
 `{"fn": "tool", "tool": "order_notify_customer_send", "orders": [<order>], "max_calls": 1}`.
 `move_triggers` (`builtin_flow.py`) moves a trigger only when its approved grant admits
-the new call, so today's triggers get `NEWER_NOTICE` and keep composing until a person
-approves the new grant. No send starts without a person's yes. Q3 asks whether `notify`
-should mean "send" or whether a new input `send` is wanted.
+every new call, so today's triggers get `NEWER_NOTICE`. A moved trigger still sends
+nothing until a person sets `send` true. No send starts without a person's yes.
 
 ## 7. The audit record, failure and retry
 
@@ -279,6 +287,7 @@ Routes (`backend/scadbuddy/api/order_messages.py`, all under `/api/v1/orders/{id
 - `POST` (claim). Header `Idempotency-Key`. Under the order's row lock (`lock_order`):
   1. A row with that key exists: answer it as it is (200). Nothing new is written.
   2. §8 says skip: write a `skipped` row and the audit row `message.skipped`; answer it.
+     (PR 5. Until then this step is absent and nothing is skipped.)
   3. A `sent` row of the same template and `episode` exists and the body has no
      `resend_of`: refuse 409 `already_notified`, naming that row. This stops a flow
      re-run or a second session from telling the customer twice for one status change.
@@ -291,7 +300,8 @@ Routes (`backend/scadbuddy/api/order_messages.py`, all under `/api/v1/orders/{id
 - `GET`: the order's messages, newest first. `order_get` also returns the latest one per
   template.
 
-The text is the customer's data; it lives and goes with the order (Q6).
+The text is the customer's data. It is kept as long as the order exists and goes with
+the order (the owner's call, §12).
 
 ### 7.2 One send per key
 
@@ -324,40 +334,43 @@ housekeeping sweep (`workflows/housekeeping.py` `SWEEPS`, behind its patch) writ
 ### 8.1 The starting rule, judged
 
 "The plugin path skips an event that storefront mail already sends when the order has a
-storefront visitor." It is right in intent. It has three gaps:
+storefront visitor." It is right in intent. It had four gaps, which scadify's answers
+(§2) close:
 
-1. **Mail not set up.** A storefront order on a shop with no SMTP settings gets no
-   storefront mail. Skipping there tells the customer nothing. The rule must ask whether
-   the storefront mail *will send* this notice, not only whether a visitor exists.
-2. **The event map.** Only two of the four templates overlap: `quoted` is "your price is
-   ready" and `shipped` is "shipped". `accepted` and `ready` have no storefront mail, so
-   the plugin sends them. The order link, "a revision is ready" and "payment requested"
-   have no plugin template, so nothing is skipped for them.
-3. **Who knows.** The plugin path runs in the agent, which reads no storefront table. The
-   rule must be one function in the CRUD service, owned with the storefront mail, so the
-   two senders never disagree.
+1. **Mail not set up.** An order on a shop with no storefront mail gets none. Skipping
+   there tells the customer nothing. So the rule asks whether storefront mail *will send*
+   this notice: the seam is true only when storefront mail is configured.
+2. **Who gets storefront mail.** Not "a storefront visitor": every order with a live
+   order link, `back_office` orders included. A revoked link stops it. A rule keyed on the
+   visitor would send twice to a `back_office` order with a link, and skip wrongly for a
+   storefront order whose link was revoked.
+3. **The event map.** Only two of the four templates overlap: `quoted` is `price_ready`
+   and `shipped` is `shipped`. `accepted` and `ready` have no storefront mail, so the
+   plugin sends them. `order_link`, `revision_ready` and `payment_requested` have no plugin
+   template, so nothing is skipped for them.
+4. **Who knows.** The plugin path runs in the agent, which reads no storefront table. The
+   rule is one function in the CRUD service, owned with the storefront mail, so the two
+   senders never disagree.
 
 ### 8.2 The rule
 
-In the CRUD service, `orders/notify_overlap.py`:
+scadify's seam (PR 1 of #5283, branch `feat/storefront-follow`) is
+`storefront_mail_covers(conn, order_id, event) -> bool`: true when the order has a live
+order link and storefront mail is configured. It does not read `source` or the visitor.
+This design only consumes it (PR 5), in the CRUD service:
 
 ```python
-STOREFRONT_MAILS = {"quoted": "price_ready", "shipped": "shipped"}
+STOREFRONT_EVENT = {"quoted": "price_ready", "shipped": "shipped"}
 
-def storefront_mail_covers(order, template, settings) -> bool:
-    event = STOREFRONT_MAILS.get(template)
-    return (
-        event is not None
-        and order.source == "storefront"
-        and order.storefront_visitor_id is not None
-        and storefront_mail_enabled(settings, event)   # #5283's: SMTP set and that mail on
-    )
+def skipped_for_storefront(conn, order_id: str, template: str) -> bool:
+    event = STOREFRONT_EVENT.get(template)
+    return event is not None and storefront_mail_covers(conn, order_id, event)
 ```
 
-- The claim route (§7.1 step 2) and `prepareApproval` (§5.2) both call it through the
-  route; the agent never decides it.
-- Until #5283's mail PR lands, `storefront_mail_enabled` returns false, so nothing is
-  skipped. That PR fills it and names its event ids (the #5283 comment promises this).
+- The claim route (§7.1 step 2) calls it under the order's row lock. `prepareApproval`
+  (§5.2) reads the same answer through a route; the agent never decides it.
+- PR 5 starts only when `storefront_mail_covers` is on main. Until then nothing is
+  skipped; storefront mail does not send on main before that seam lands either.
 - `also_when_storefront_mails: true` sends anyway. The approval summary says "the
   storefront mail also sends this". It exists for a second channel (an SMS nudge); a flow
   never sets it.
@@ -372,7 +385,8 @@ Backend (`backend/tests/`, Postgres):
   `resend_of` passes; a new status change (new episode) passes.
 - Outcome moves only from `sending`; `mark-sent` only from `unknown` and only for a person.
 - Each write and its `order_events` row commit together; `by` comes from the header.
-- `storefront_mail_covers` matrix: source × visitor × mail on/off × each template.
+- (PR 5) The skip: each template × `storefront_mail_covers` true or false, with a fake
+  seam; only `quoted` and `shipped` can skip.
 - The stale-`sending` sweep writes `unknown` and sends nothing.
 - The setting's schema: secret-looking `fixed_args` keys refused.
 
@@ -385,15 +399,18 @@ Agent (`agent/test/`, a fake http MCP server through the real forwarder):
 - Lost answer, no key arg: the second run posts `unknown` and the fake sees one call.
 - Lost answer, key arg bound: the second run calls again with the same key.
 - `message_changed`: the order changes between park and approve; nothing is sent.
-- Storefront skip and `also_when_storefront_mails`.
+- (PR 5) Storefront skip and `also_when_storefront_mails`.
+- The e2e test binds a fake SMTP-sending MCP server (the owner's choice for the first real
+  binding) and checks one mail reaches a fake SMTP server per approved send.
 - Binding validation: a stdio package server refused; a missing or non-string argument
   refused; a disabled tool refused at send.
 - Every path: in-process (`/mcp` + `confirm_action`), ToolCall activity in an
   AgentSession, and a `flow-<id>` call under a grant (Temporal tests); each sends once.
 - `coverage.test.ts` covers the new routes.
 
-Flow (`backend/tests/`, Temporal): the new built-in version sends under its grant; an
-older trigger gets `NEWER_NOTICE`; a replay of
+Flow (`backend/tests/`, Temporal): the new built-in version sends under its grant only
+with `send` true, and only composes with `send` false; an older trigger gets
+`NEWER_NOTICE`; a replay of
 `tests/fixtures/project_workflow_histories/` still passes.
 
 Frontend (vitest + msw): the Settings binding form and its test send; the order page's
@@ -402,18 +419,19 @@ messages list with "Mark sent" and "Send again"; the panel's approval shows the 
 ## 10. PR breakdown
 
 1. **Backend record.** Migration `order_messages`, the routes of §7.1, the audit kinds,
-   the setting `orders_customer_messaging`, `notify_overlap.py` with
-   `storefront_mail_enabled` returning false, the stale sweep. Tests.
+   the setting `orders_customer_messaging`, the stale sweep. No storefront skip yet. Tests.
 2. **Agent send.** `orders/messaging.ts`, the binding route and validation (§4.3),
    `order_notify_customer_send` with `prepareApproval` and `flowBinding`, the new answer
    fields of `order_notify_customer`, `ToolServices` wiring in sidecar and worker. Tests on
    every path.
 3. **Frontend.** Settings → Orders "Customer messages" (bind, test send, unbind), the
    order page's messages, the approval text. msw mocks.
-4. **Built-in flow.** The new version and its grant rule; docs (orders spec §7.3 "As built",
-   `backend/CLAUDE.md`, `agent/CLAUDE.md`).
-5. **Overlap fill-in** (with #5283's mail PR, by the storefront session):
-   `storefront_mail_enabled` reads the real mail settings and event switches.
+4. **Built-in flow.** The new version, its opt-in input `send` and its grant rule; docs
+   (orders spec §7.3 "As built", `backend/CLAUDE.md`, `agent/CLAUDE.md`).
+5. **Overlap.** Waits for `storefront_mail_covers` on main (scadify's
+   `feat/storefront-follow`, PR 1 of #5283). Then: the claim route's skip step,
+   `skipped_for_storefront`, `also_when_storefront_mails`, and the answer in
+   `prepareApproval`.
 
 Each PR is `Refs #5660`; the last of 1–4 to merge says `Fixes #5660`.
 
@@ -430,26 +448,19 @@ Each PR is `Refs #5660`; the last of 1–4 to merge says `Fixes #5660`.
 - Error categories only, no plugin text stored (§7.1): untrusted text stays out of the
   record. Cost: less detail for debugging; the agent log has the call's span.
 
-## 12. Open questions for the owner (priority order)
+## 12. The owner's decisions (2026-11-09)
 
-1. **One tool or two?** The issue says `order_notify_customer` sends. This design keeps it
-   compose-only and adds `order_notify_customer_send` (§5.1), because one tool with a
-   `send` flag needs a tier Settings cannot lower (#4208). Confirm, or choose one tool
-   whose tier is always `outward` (then a compose-only call also asks a person).
-2. **Where the storefront mail lives, and what it covers.** Spec §5.7 says the CRUD
-   service sends it; the brief for this work says the storefront edge does. The overlap
-   rule needs a CRUD-side fact either way (`storefront_mail_enabled`). Also: does a
-   `back_office` order that got a customer link ("Send customer link", spec §5.2) get
-   storefront "shipped" mail? This design says no (it needs `source = storefront` and a
-   visitor). And should the plugin still skip when its channel is not email (SMS)? This
-   design skips anyway, with `also_when_storefront_mails` as the way to send both.
-3. **The built-in flow's `notify`.** Should `notify: true` send once a binding exists
-   (this design, after a person approves the new grant), or should "send" be a new input?
-4. **Which plugin first.** No messaging plugin is installed or in the repo. Which channel
-   should the first dogfood binding and the e2e test use (an SMTP MCP, Gmail's MCP, an SMS
-   gateway)?
-5. **Shop-edited templates.** Out of scope here. Is a template editor wanted next, or are
-   the four fixed texts enough?
-6. **Keeping message text.** `order_messages` keeps the full text and recipients for as
-   long as the order exists. Is that the retention you want, or should text be dropped
-   after a period (keeping a hash)?
+The owner approved this design on 2026-11-09 with these calls:
+
+1. **Two tools.** `order_notify_customer` stays compose-only (`read`);
+   `order_notify_customer_send` is the `outward` send (§5.1).
+2. **Storefront mail** is the CRUD service's, sent after the causing transaction commits;
+   it goes to every order with a live order link, `back_office` orders included; the seam
+   is scadify's `storefront_mail_covers(conn, order_id, event)` (§2, §8). The plugin skips
+   `quoted` and `shipped` when the seam says the storefront mail sends them, whatever the
+   plugin's channel; `also_when_storefront_mails` sends both on purpose.
+3. **The built-in flow** sends only with a new opt-in input `send` (default false). `notify`
+   alone still only composes (§6.2).
+4. **The first real binding and the e2e test** use an SMTP-sending MCP server (§9).
+5. **Templates:** the four fixed templates for now. A template editor is not planned.
+6. **Retention:** message text and recipients are kept as long as the order exists (§7.1).
