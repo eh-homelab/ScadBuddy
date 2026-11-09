@@ -35,6 +35,12 @@ CaptureOutcome = Literal["captured", "declined"]
 #: A method a provider can name for its payment, other than itself (#4960: a PayPal
 #: capture funded by Venmo). A payment's ``method`` is this, or the provider's id.
 ProviderEventMethod = Literal["venmo"]
+
+#: ``read_capture``'s answers that are not an event (#4959): ``uncaptured``, the order is
+#: approved and holds no capture, so a capture may be made again; ``unknown``, the
+#: outcome cannot be told yet; ``gone``, the order can no longer be captured and holds
+#: no capture (voided, or no longer known to the provider).
+CaptureState = Literal["uncaptured", "unknown", "gone"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]

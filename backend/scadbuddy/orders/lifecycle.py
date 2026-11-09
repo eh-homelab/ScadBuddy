@@ -1539,21 +1539,63 @@ class Lifecycle:
         ``pending`` (its audit row names it), so a replay of an older approval captures
         nothing. A row written before the id was kept names none, and counts."""
         with self.store.transaction() as conn:
-            found = payments.request(conn, request_id)
-            if found is None:
-                return False
-            moved = [
-                e.detail
-                for e in self.store.events(found.order_id, conn=conn)
-                if e.kind == "payment_request.pending"
-                and e.detail.get("request_id") == request_id
-                and e.detail.get("approved")
-            ]
+            moved = self._approvals(conn, request_id)
         return bool(moved) and moved[-1].get("event_id", event_id) == event_id
 
-    def capture_failed(self, provider: str, request_id: str) -> None:
+    def _approvals(self, conn: Conn, request_id: str) -> list[dict[str, Any]]:
+        """The detail of each audit row where an approval moved the request to
+        ``pending``, oldest first."""
+        found = payments.request(conn, request_id)
+        if found is None:
+            return []
+        return [
+            e.detail
+            for e in self.store.events(found.order_id, conn=conn)
+            if e.kind == "payment_request.pending"
+            and e.detail.get("request_id") == request_id
+            and e.detail.get("approved")
+        ]
+
+    def recapture_key(self, provider: str, request_id: str) -> str | None:
+        """#4959, the housekeeping sweep: the key to capture a still ``pending`` request
+        again with, once its order reads approved with no capture. Checked under the
+        order lock, as ``_capture`` checks it: an order that no longer takes money (ended,
+        or a storefront cart) is never captured, and its request is marked ``failed`` with
+        the reason on its audit row, so the sweep never reads it again. The key is the
+        approval that last moved it to ``pending`` (PayPal keys a capture by it), else
+        the request's own."""
+        by = Actor(kind="provider", principal=f"payment:{provider}")
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                return None
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status != "pending":
+                return None
+            if order.status in ENDED or order.unsubmitted:
+                payments.set_request_status(conn, found.id, "failed")
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "payment_request.failed",
+                    request_id=found.id,
+                    reason="order_not_taking_money",
+                )
+                change = _Change(order)
+            else:
+                moved = self._approvals(conn, request_id)
+                event_id = moved[-1].get("event_id") if moved else None
+                return event_id if isinstance(event_id, str) else f"request-{found.id}"
+        self._told(change)
+        return None
+
+    def capture_failed(self, provider: str, request_id: str, *, reason: str | None = None) -> None:
         """#4959: the provider refused or declined the capture after an ``approved``
-        event. A request still ``pending`` goes back to ``failed``, which the shop sees."""
+        event, or the housekeeping sweep gave up reading it (``reason``
+        ``capture_unsettled``). A request still ``pending`` goes back to ``failed``, which
+        the shop sees; ``reason`` goes on its audit row."""
         by = Actor(kind="provider", principal=f"payment:{provider}")
         with self.store.transaction() as conn:
             found = payments.request(conn, request_id)
@@ -1564,7 +1606,8 @@ class Lifecycle:
             if found.status != "pending":
                 return
             payments.set_request_status(conn, found.id, "failed")
-            self._event(conn, order, by, "payment_request.failed", request_id=found.id)
+            detail = {} if reason is None else {"reason": reason}
+            self._event(conn, order, by, "payment_request.failed", request_id=found.id, **detail)
         self._told(_Change(order))
 
     def _provider_payment(
@@ -1628,6 +1671,7 @@ class Lifecycle:
                 )
                 return "ignored", None
             payments.set_request_status(conn, found.id, "pending")
+            payments.mark_capture_pending(conn, found.id)
             self._event(
                 conn,
                 order,

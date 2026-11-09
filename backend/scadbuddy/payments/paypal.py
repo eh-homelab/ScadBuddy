@@ -59,6 +59,23 @@ PayPal's documented behaviour this relies on:
   event must be posted back exactly as it was received: re-serialising it can fail
   verification. PayPal retries a delivery that gets no 2xx up to 25 times over 3 days
   (https://developer.paypal.com/api/rest/webhooks/rest/).
+- ``GET /v2/checkout/orders/{id}`` shows the order (https://developer.paypal.com/docs/api/orders/v2/#orders_get).
+  Its ``status`` is one of ``CREATED``, ``SAVED``, ``APPROVED``, ``VOIDED`` ("All purchase
+  units in the order are voided"), ``COMPLETED`` ("Check the payment status in
+  ``purchase_units[].payments.captures[].status``": a completed order can also mean a
+  declined payment) and ``PAYER_ACTION_REQUIRED``. A capture's ``status`` is one of
+  ``COMPLETED``, ``DECLINED`` ("The funds could not be captured"), ``PARTIALLY_REFUNDED``,
+  ``PENDING``, ``REFUNDED`` and ``FAILED`` ("There was an error while capturing payment")
+  (the ``order_status`` and ``capture_status`` schemas in
+  https://developer.paypal.com/api/orders/v2/schema.json, read 2026-11-08).
+- PayPal documents neither how long it keeps a ``PayPal-Request-Id`` for Orders v2 (the
+  idempotency guide says "for a period of time" and defers to each API's reference,
+  https://developer.paypal.com/api/rest/reference/idempotency/, and the Orders v2 schema
+  says only "A unique ID identifying the request header for idempotency purposes") nor
+  how long an ``APPROVED`` order can still be captured. So the housekeeping sweep never
+  relies on either: it reads the order first and captures again only an ``APPROVED``
+  order that holds no capture (``read_capture``), and a capture PayPal refuses then
+  (an expired or voided order among them) marks the request ``failed``.
 """
 
 from __future__ import annotations
@@ -80,6 +97,7 @@ from pydantic import ValidationError
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.payments.models import (
     CaptureOutcome,
+    CaptureState,
     HostedRequest,
     PaymentRequestView,
     ProviderEvent,
@@ -141,6 +159,17 @@ _CAPTURE_KINDS: Final[Mapping[str, ProviderEventKind]] = {
 #: The funding sources under an order's ``payment_source`` that a payment names as its
 #: method; any other (``paypal``, ``card``) is recorded as ``paypal``.
 _METHODS: Final[Mapping[str, ProviderEventMethod]] = {"venmo": "venmo"}
+
+#: A capture's status, read from its order, as the event it settles (``read_capture``).
+#: A refunded capture was captured first; the refund is its own event.
+_READ_KINDS: Final[Mapping[object, ProviderEventKind]] = {
+    "COMPLETED": "paid",
+    "PARTIALLY_REFUNDED": "paid",
+    "REFUNDED": "paid",
+    "PENDING": "pending",
+    "DECLINED": "failed",
+    "FAILED": "failed",
+}
 #: A PayPal object id (order, capture, refund); nothing else goes in a path.
 _PAYPAL_ID: Final = re.compile(r"[A-Z0-9]{1,36}")
 #: The verify call's own pattern for a webhook id.
@@ -600,10 +629,51 @@ class PayPalProvider:
         except ProviderUnavailableError:
             # The capture is recorded without its method rather than held back.
             return None
-        source = order.get("payment_source")
-        if not isinstance(source, dict):
-            return None
-        return next((_METHODS[key] for key in source if key in _METHODS), None)
+        return _method_of(order)
+
+    async def read_capture(
+        self, credential: Credential, provider_ref: str
+    ) -> ProviderEvent | CaptureState:
+        """#4959: read the order of an approval whose capture outcome was never told. A
+        capture made is its ``paid``, ``pending`` or ``failed`` event, keyed by the
+        capture (a later webhook for it writes no second payment, the payment being
+        matched by the order). An ``APPROVED`` order with no capture is ``uncaptured``,
+        a voided or unknown order ``gone``; anything else, or a failed call, ``unknown``."""
+        order_id = _path_id(provider_ref)
+        try:
+            order = await self._call(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        except _NoAnswerError:
+            logger.warning("PayPal did not answer the read of order %s", order_id)
+            return "unknown"
+        except _RefusedError as refused:
+            if refused.status == 404:
+                return "gone"
+            logger.warning("PayPal answered %s to the read of order %s", refused.status, order_id)
+            return "unknown"
+        try:
+            captures = [
+                capture
+                for unit in order.get("purchase_units") or []
+                for capture in ((unit.get("payments") or {}).get("captures") or [])
+                if isinstance(capture, dict)
+            ]
+            status = order.get("status")
+            if status == "VOIDED" and not captures:
+                return "gone"
+            if status == "APPROVED" and not captures:
+                return "uncaptured"
+            for capture in captures:
+                kind = _READ_KINDS.get(capture.get("status"))
+                if kind is not None:
+                    capture_id = _path_id(capture.get("id"))
+                    found = _capture_event(f"capture:{capture_id}", kind, capture, order_id)
+                    if kind == "paid":
+                        # The order read names the funding source (#4960), as `_funding`.
+                        found = found.model_copy(update={"method": _method_of(order)})
+                    return found
+        except (KeyError, TypeError, AttributeError, ValueError, ValidationError, ProviderError):
+            logger.warning("PayPal's order %s did not read as expected", order_id)
+        return "unknown"
 
     async def _refund(
         self, credential: Credential, event_id: str, refund: dict[str, Any]
@@ -697,10 +767,20 @@ def _order_of(capture: Mapping[str, Any]) -> str:
     return _path_id(capture["supplementary_data"]["related_ids"]["order_id"])
 
 
+def _method_of(order: Mapping[str, Any]) -> ProviderEventMethod | None:
+    """The method an order's ``payment_source`` names, when ScadBuddy names it (#4960)."""
+    source = order.get("payment_source")
+    if not isinstance(source, dict):
+        return None
+    return next((_METHODS[key] for key in source if key in _METHODS), None)
+
+
 def _capture_event(
-    event_id: str, kind: ProviderEventKind, capture: dict[str, Any]
+    event_id: str, kind: ProviderEventKind, capture: dict[str, Any], order_id: str | None = None
 ) -> ProviderEvent:
-    order_id = _order_of(capture)
+    """A capture as its event. A webhook's capture names its order; one read from its
+    order (``read_capture``) is given the order's id."""
+    order_id = _order_of(capture) if order_id is None else order_id
     if kind == "failed":
         return ProviderEvent(event_id=event_id, kind=kind, provider_ref=order_id)
     amount, currency = _money(capture["amount"])

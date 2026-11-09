@@ -4,7 +4,14 @@ import type { AuditDeps } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import type { Credential } from '../credentials.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { type CredentialSource, type PooledCredential, runWithFallback } from '../harness/fallback.js'
+import {
+  type AttemptOutcome,
+  CredentialFailedError,
+  type CredentialSource,
+  NoUsableCredentialError,
+  type PooledCredential,
+  runWithFallback,
+} from '../harness/fallback.js'
 import type { ApprovalGate, TierResolver } from '../harness/permissions.js'
 import type { QuestionGate } from '../harness/questions.js'
 import { redact } from '../secrets.js'
@@ -29,7 +36,25 @@ import type { Continuation } from '../temporal/session/models.js'
 // how its end is written (`tallyTurn` gives both the cost, the turns and the closing events).
 
 /** A turn that ended on a failed model request (fallback.ts `onRefused`). */
-export type Refused = { evidence: FailureEvidence; probe?: ProbeVerdict['verdict'] }
+/** `shownAs`: the refused credential's `displayLabel` (#3710), for the error the person sees only. */
+export type Refused = { evidence: FailureEvidence; probe?: ProbeVerdict['verdict']; shownAs?: string }
+
+/** The event that tells the person a turn moved to another credential (#3710), naming both by their names. */
+export function credentialFallbackEvent(
+  sessionId: string,
+  from: Pick<PooledCredential, 'label' | 'displayLabel'>,
+  outcome: AttemptOutcome,
+  to: Pick<PooledCredential, 'label' | 'displayLabel'>,
+): ServerEvent {
+  return event({
+    type: 'credential.fallback',
+    sessionId,
+    from: from.displayLabel ?? from.label,
+    to: to.displayLabel ?? to.label,
+    outcome: outcome.class === 'permanent' ? 'refused' : outcome.class === 'rate_limited' ? 'rate_limited' : 'failed',
+    ...(outcome.class === 'rate_limited' ? { until: outcome.until.toISOString() } : {}),
+  })
+}
 
 /** What a turn's process needs besides the session: the manager's, shared by every turn on this replica. */
 export type TurnCoreDeps = {
@@ -99,6 +124,8 @@ export type CoreTurnRun = {
   refused?: Refused
   /** Why it ended without a result, when it was not stopped. */
   failure?: string
+  /** `failure` in the words the person sees (#3710): with the credential's name, never logged. */
+  failureShown?: string
   secrets: readonly string[]
   /** What the attempts' results priced (warmTurn.ts `spentUsd`). */
   spentUsd: number
@@ -175,6 +202,10 @@ export class CoreTurn {
       : undefined
     let result: SDKResultMessage | undefined
     let failure: string | undefined
+    /** `failure` with the credential's name, for the person only (#3710). */
+    let failureShown: string | undefined
+    /** Each move to another credential (#3710), logged before the next attempt's messages. */
+    const fallbacks: ServerEvent[] = []
     /** The model request the turn is cut off in, if it is: Claude Code never prices it (#991). */
     const unpriced = this.#unpriced
     /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
@@ -297,7 +328,11 @@ export class CoreTurn {
           // continues there (fallback.ts `session`).
           session: id,
           onRefused: (evidence, judged) => {
-            refused = { evidence, ...judged }
+            const shownAs = onCredential.current?.displayLabel
+            refused = { evidence, ...judged, ...(shownAs === undefined ? {} : { shownAs }) }
+          },
+          onFallback: (from, outcome, to) => {
+            fallbacks.push(credentialFallbackEvent(id, from, outcome, to))
           },
           // Every attempt, the first included: an empty pool starts none, so a
           // WebFetch there has no credential and fails closed (#3508 review).
@@ -311,6 +346,8 @@ export class CoreTurn {
         },
       )
       for await (const message of stream) {
+        // Before the next attempt's messages: the person sees the move where it happened.
+        if (fallbacks.length) await log(fallbacks.splice(0))
         unpriced.observe(message)
         this.#args.onMessage?.(message)
         if (message.type === 'assistant' && message.error) {
@@ -326,17 +363,26 @@ export class CoreTurn {
         await flushErrors()
         await show(message)
       }
+      // A move whose next credential showed nothing (it was refused at once, or its init was
+      // the turn's first): written here, before the turn's end says anything.
+      if (fallbacks.length) await log(fallbacks.splice(0))
       await flushErrors()
     } catch (err) {
       // An assembly that failed released what it held, and says which secrets it had read.
       if (err instanceof TurnAssemblyError) secrets = err.secrets
       const cause = err instanceof TurnAssemblyError ? err.cause : err
+      // The same for a turn that ends by throwing (the last credential refused, or an attempt
+      // that did not start): the move is written before its error.
+      if (fallbacks.length) await log(fallbacks.splice(0)).catch(() => {})
       if (!refused) await flushErrors().catch(() => {})
       // For an error result the SDK yields the result and then throws
       // ("Claude Code returned an error result", test/run.test.ts); the
       // result is what counts then.
       if (!result && !signal.aborted) {
         failure = redact(describe(cause), secrets)
+        if (cause instanceof NoUsableCredentialError || cause instanceof CredentialFailedError) {
+          failureShown = redact(cause.shown, secrets)
+        }
         traced.fail(cause)
       }
     } finally {
@@ -349,6 +395,7 @@ export class CoreTurn {
       ...(result ? { result } : {}),
       ...(refused ? { refused } : {}),
       ...(failure !== undefined ? { failure } : {}),
+      ...(failureShown !== undefined ? { failureShown } : {}),
       secrets,
       spentUsd: attempts?.spentUsd() ?? 0,
       cutUsd: unpriced.usd(),
@@ -419,6 +466,8 @@ export type TallyInput = {
   result: SDKResultMessage | undefined
   refused: Refused | undefined
   failure: string | undefined
+  /** `failure` as the person sees it (#3710), the `error` event's `shown`; its `message` and the outcome keep `failure`. */
+  failureShown?: string | undefined
   secrets: readonly string[]
   /** What the turn's attempts spent as their results priced it (warm.ts `turnCostUsd`). */
   turnUsd: number
@@ -431,7 +480,7 @@ export type TallyInput = {
 
 export function tallyTurn(session: Pick<ClaimedSession, 'id' | 'ownCostUsd' | 'turns'>, end: TallyInput): TurnTally {
   const id = session.id
-  const { stopped, interrupted, result, refused, failure, secrets, turnUsd, cutUsd } = end
+  const { stopped, interrupted, result, refused, failure, failureShown, secrets, turnUsd, cutUsd } = end
   let status: SessionStatus
   let outcome: TurnTally['outcome']
   const tail: ServerEvent[] = []
@@ -458,11 +507,14 @@ export function tallyTurn(session: Pick<ClaimedSession, 'id' | 'ownCostUsd' | 't
       // (#1101). Redacted here too: the outcome reaches MCP callers without
       // scrubForLog. The refused request is not a turn; any before it are.
       const refusal = redact(describeApiFailure(refused.evidence, refused), secrets)
+      // The person is told which credential, by its name (#3710), in `shown`, which only the
+      // panel reads; `message`, which logs, flows and the outcome read, is not.
+      const shown = refused.shownAs ? redact(describeApiFailure(refused.evidence, refused, refused.shownAs), secrets) : refusal
       // `num_turns` counts the refused request (fallback.ts `onRefused`).
       turns = session.turns + Math.max(result.num_turns - 1, 0)
       status = 'failed'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'api_error', message: refusal, ...(shown !== refusal ? { shown } : {}) }))
       outcome = { kind: 'failed', message: refusal }
     } else {
       turns = session.turns + result.num_turns
@@ -496,7 +548,7 @@ export function tallyTurn(session: Pick<ClaimedSession, 'id' | 'ownCostUsd' | 't
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
     }
     const message = failure ?? 'the turn ended without a result'
-    tail.push(event({ type: 'error', sessionId: id, code: 'turn_failed', message }))
+    tail.push(event({ type: 'error', sessionId: id, code: 'turn_failed', message, ...(failureShown !== undefined && failureShown !== message ? { shown: failureShown } : {}) }))
     outcome = { kind: 'failed', message }
   }
   tail.push(event({ type: 'session.status', sessionId: id, status }))

@@ -553,6 +553,12 @@ a cancel or a manual payment on it is refused, until PayPal's capture event or i
 approval settles it. Every webhook is checked with
 PayPal's verify-webhook-signature call before ScadBuddy reads it
 ([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
+When neither comes (PayPal retries an event for 3 days), the housekeeping sweep reads the
+PayPal order, from an hour after the approval, then with a backoff: a capture it finds is
+recorded as its event would be, an order still approved with no capture is captured again
+while the order takes money (else the request is failed), and a voided order, or one
+never told after about five days of reads, leaves the request failed. So a pending
+request never blocks its order's cancel for good.
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. A refund that is
 still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal
@@ -1656,7 +1662,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Settings → Assistant → **Claude credentials**, a list in the order the
   assistant tries them (#1000, #1093). Each shows whether it is active, rate
   limited until a time, or disabled and why, and can be moved, tested, reset,
-  given a new key or deleted. Underneath, and from a loopback shell when there
+  renamed, given a new key or deleted. Each can have an optional name (#3710),
+  shown as the row's title and in the messages that name it to you; logs and
+  audit rows leave it out. Underneath, and from a loopback shell when there
   is no UI (`docs/ai/operating.md`), they are `/api/v1/ai/credentials/entries`,
   tested with `POST …/entries/{id}/test` (one test at a time, at most
   one per 10 s; otherwise `429` with `Retry-After`). No route returns the

@@ -483,6 +483,7 @@ async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
     assert view.breakdown.intervals == "bambuddy"
     assert view.inputs.maintenance[0].interval_hours == "50"
     assert view.bambuddy_tasks == ["Lubricate rods"]
+    assert live.asked == [7]  # one read serves the breakdown and the names
 
 
 async def test_the_view_of_a_linked_printer_with_no_profile_names_bambuddys_tasks(
@@ -500,6 +501,7 @@ async def test_the_view_of_a_linked_printer_with_no_profile_names_bambuddys_task
     assert view is not None and view.inputs is None
     assert view.breakdown.source == "price_book"
     assert view.bambuddy_tasks == ["Lubricate rods", "Check belts"]
+    assert live.asked == [7]
     silent = await rates(store, printers, settings_store, FakeBambuddy(None)).view(printer.id)
     assert silent is not None and silent.bambuddy_tasks == []
     lan = await rates(store, printers, settings_store, live).view(lan_printer(printers).id)

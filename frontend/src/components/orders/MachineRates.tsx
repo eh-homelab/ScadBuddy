@@ -12,7 +12,7 @@ import { refusalText } from './refusal'
 const TENTHS = 1
 const AMOUNT = 4
 const decimal = (text: string, places: number) => new RegExp(`^\\d+(\\.\\d{1,${places}})?$`).test(text.trim())
-const placesText = (places: number) => (places === TENTHS ? 'with at most 1 decimal place, such as 12.5' : 'with at most 4 decimal places, such as 12.5')
+const placesText = (places: number) => (places === TENTHS ? 'with at most 1 decimal place, such as 12.5' : 'with at most 4 decimal places, such as 0.1234')
 
 type Profile = { purchase_price: string; life_hours: string; watts: string; kwh_price: string; labour_rate_per_hour: string }
 type Wear = { name: string; cost: string; life_hours: string }

@@ -1030,7 +1030,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   answer) leaves it `pending` and keeps the event's row, so PayPal's retry reads `replayed`
   and captures again under the same key, only for the approval that last moved it to `pending` (named on that audit row,
   `Lifecycle.approval_pending`) and
-  never on an order ended since. The capture's events record the money. Each
+  never on an order ended since. When PayPal stops retrying, the
+  `housekeeping_settle_payment_captures` sweep (both Schedules, behind its patch) calls
+  `Payments.settle_captures`: the requests an approval moved to `pending`
+  (`capture_pending_at`, set by `mark_capture_pending`, cleared once the request leaves
+  `pending`) whose wait is over (`captures_due`: `CAPTURE_SETTLE_FIRST_MINUTES` after the
+  approval or the last read, doubled per unknown read, at most a day; claimed `FOR UPDATE
+  SKIP LOCKED`), read with no lock held (`CapturingProvider.read_capture`). A capture
+  found is recorded through `record_provider_event` (keyed `capture:<id>`; a later webhook
+  writes no second payment, matched by the order) and its closes run; a pending one stops
+  the reads; an `APPROVED` order with no capture is captured again under the approval's
+  key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
+  (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
+  `CAPTURE_GIVE_UP_ATTEMPTS` unknown reads (`capture_unsettled`) mark it `failed`. The capture's events record the money. Each
   webhook is checked by PayPal's verify-webhook-signature call with the raw body; the
   OAuth token is cached in memory, never stored; a cancel ends open and failed requests
   (`CAPTURABLE`) and marks the order's `custom_id` as defence in depth (a failed mark is

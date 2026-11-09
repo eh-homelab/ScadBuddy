@@ -696,9 +696,11 @@ class MachineRates:
             inputs = MachineRateInputs(
                 profile=stored.profile, wear_parts=stored.wear, maintenance=stored.costs
             )
-            if breakdown.intervals == "bambuddy":
-                names = [m.task for m in breakdown.maintenance if m.why != "not_in_bambuddy"]
-        elif (tasks := await self._read_tasks(row)) is not None:
+        # One Bambuddy read: the breakdown's when it priced a profile (even one deleted
+        # since), else one of its own for the book's rate.
+        if breakdown.intervals == "bambuddy":
+            names = [m.task for m in breakdown.maintenance if m.why != "not_in_bambuddy"]
+        elif breakdown.source == "price_book" and (tasks := await self._read_tasks(row)):
             names = [task.task for task in tasks]
         return MachineRateView(
             printer=row.id,

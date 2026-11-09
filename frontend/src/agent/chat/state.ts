@@ -99,6 +99,15 @@ export type FeedItem =
     }
   /** #2399 — a file uploaded to, or deleted from, the session's workspace through the panel's Files: a quiet line. */
   | { kind: 'file'; id: string; path: string; change: 'uploaded' | 'deleted'; by: Owner; size?: number }
+  /** #3710 — the turn moved from one Claude credential to the next: a quiet line naming both. */
+  | {
+      kind: 'credential'
+      id: string
+      from: string
+      to: string
+      outcome: 'refused' | 'rate_limited' | 'failed'
+      until?: string
+    }
 
 export interface SessionState {
   id: string
@@ -521,6 +530,18 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         }),
       )
 
+    case 'credential.fallback':
+      return patchSession(state, event.sessionId, (s) =>
+        push(s, {
+          kind: 'credential',
+          id: freshId(s, 'credential'),
+          from: event.from,
+          to: event.to,
+          outcome: event.outcome,
+          ...(event.until === undefined ? {} : { until: event.until }),
+        }),
+      )
+
     case 'workspace.file':
       // The Files list reads again on the count; the feed notes the change where it happened (#2399).
       return patchSession(state, event.sessionId, (s) =>
@@ -542,7 +563,8 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         // Shown once, in the panel's words (`budgetSpent`), not as the agent's text.
         return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
       }
-      const message = errorMessage(event.code, event.message)
+      // #3710: the agent's words that name the credential, when it gives them.
+      const message = errorMessage(event.code, event.shown ?? event.message)
       // #940: an answer the agent refused resolves nothing, and a question has no
       // expiry, so its card must be answerable again. The agent names the question
       // (`questionId`) on every error that refused an answer, even a malformed one; no

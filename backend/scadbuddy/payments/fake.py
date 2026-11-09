@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from scadbuddy.payments.models import (
     CaptureOutcome,
+    CaptureState,
     HostedRequest,
     PaymentRequestView,
     ProviderEvent,
@@ -57,6 +58,9 @@ class FakeProvider:
         self.cancelled: list[str] = []
         #: Each ``(provider_ref, event_id)`` captured after an ``approved`` event (#4959).
         self.captured: list[tuple[str, str]] = []
+        #: What ``read_capture`` answers for a ``provider_ref`` (#4959); ``unknown`` when
+        #: a test set nothing.
+        self.capture_reads: dict[str, ProviderEvent | CaptureState] = {}
 
     async def verify(self, credential: Credential) -> Verified:
         return Verified(account_label=f"Fake account {credential.settings.get('account', '')}")
@@ -83,6 +87,11 @@ class FakeProvider:
     ) -> CaptureOutcome:
         self.captured.append((provider_ref, event_id))
         return "captured"
+
+    async def read_capture(
+        self, credential: Credential, provider_ref: str
+    ) -> ProviderEvent | CaptureState:
+        return self.capture_reads.get(provider_ref, "unknown")
 
     async def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes
