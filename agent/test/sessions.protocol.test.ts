@@ -284,6 +284,17 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'deleted', by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
     event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer waiting', questionId: 'q1' }),
+    // #5772: the same text with the credential's name, which the panel shows in place of `message`.
+    event({
+      type: 'error',
+      sessionId: S,
+      code: 'turn_failed',
+      message: 'the Claude credential (credential 1 (API key …abcd)) was refused: HTTP 401',
+      shown: 'the Claude credential (credential 1 "Work" (API key …abcd)) was refused: HTTP 401',
+    }),
+    // #5772: the turn moved to another credential, both named for the person.
+    event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 "Work" (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'rate_limited', until: '2026-10-09T01:00:00.000Z' }),
+    event({ type: 'credential.fallback', sessionId: S, from: 'credential 1 (API key …abcd)', to: 'credential 2 (OAuth token …wxyz)', outcome: 'refused' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]

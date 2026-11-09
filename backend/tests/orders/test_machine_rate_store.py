@@ -23,6 +23,7 @@ from scadbuddy.orders.machine_rate import (
     MachineRates,
     MachineRateStore,
     MaintenanceCost,
+    Stored,
     WearPart,
 )
 from scadbuddy.printers.models import PrinterCreate, PrinterRow
@@ -367,6 +368,50 @@ async def test_a_read_that_ends_after_an_unlink_keeps_nothing(
     assert [part.why for part in rate.maintenance] == ["not_read"]
 
 
+async def test_a_printer_the_sync_links_to_another_bambuddy_printer_counts_no_old_interval(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(printer)
+    read = await rates(store, printers, settings_store).breakdown(printer, live=False)
+    assert [part.why for part in read.maintenance] == [None]
+    # Bambuddy printer 7 is gone from the strip; its serial now reports as printer 8.
+    relinked = printers.ensure_bambuddy(
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+    )
+    assert relinked.id == printer.id and relinked.bambuddy_printer_id == 8
+    rate = await rates(store, printers, settings_store, live).breakdown(relinked, live=False)
+    assert [part.why for part in rate.maintenance] == ["not_read"]
+
+
+async def test_intervals_read_on_the_synthetic_row_survive_its_merge_into_a_relinked_printer(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    printer = linked_printer(printers)
+    # Bambuddy printer 8 is listed before its serial is known: a synthetic row, whose
+    # intervals are read from printer 8.
+    synthetic = printers.ensure_bambuddy(8, serial=None, name="H2C", model="H2C")
+    assert synthetic.id != printer.id
+    store.replace(synthetic.id, INPUTS)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    await rates(store, printers, settings_store, live).breakdown(synthetic)
+    # Printer 8 reports the serial of printer 7's row: the synthetic row merges into it.
+    relinked = printers.ensure_bambuddy(
+        8, serial=printer.serial, name="H2C", model="H2C", listed={8}
+    )
+    assert relinked.id == printer.id and printers.get(synthetic.id) is None
+    rate = await rates(store, printers, settings_store).breakdown(relinked, live=False)
+    assert rate.intervals == "stored"
+    assert [part.why for part in rate.maintenance] == [None]
+    assert rate.maintenance_per_hour != "0"
+
+
 def test_an_unlink_of_a_printer_never_linked_leaves_its_rows_alone(
     store: MachineRateStore, printers: PrinterStore, pg_pool: PgPool
 ) -> None:
@@ -438,6 +483,57 @@ async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
     assert view is not None and view.inputs is not None
     assert view.breakdown.intervals == "bambuddy"
     assert view.inputs.maintenance[0].interval_hours == "50"
+    assert view.bambuddy_tasks == ["Lubricate rods"]
+    assert live.asked == [7]  # one read serves the breakdown and the names
+
+
+async def test_a_profile_deleted_during_the_view_takes_bambuddys_names_from_the_one_read(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    real = store.stored
+
+    def stored_then_deleted(key: str) -> Stored:
+        # The breakdown's read sees the profile; a delete lands before the view's own.
+        seen = real(key)
+        store.delete(key)
+        return seen
+
+    monkeypatch.setattr(store, "stored", stored_then_deleted)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    view = await rates(store, printers, settings_store, live).view(printer.id)
+    assert view is not None and view.inputs is None
+    assert view.breakdown.intervals == "bambuddy"
+    assert view.bambuddy_tasks == ["Lubricate rods"]
+    assert live.asked == [7]
+
+
+async def test_the_view_of_a_linked_printer_with_no_profile_names_bambuddys_tasks(
+    store: MachineRateStore, printers: PrinterStore, settings_store: SettingsStore
+) -> None:
+    # The first person to type its tasks gets Bambuddy's names; the rate is the book's.
+    printer = linked_printer(printers)
+    live = FakeBambuddy(
+        [
+            MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours"),
+            MaintenanceTask(task="Check belts", interval_hours=30, interval_type="days"),
+        ]
+    )
+    view = await rates(store, printers, settings_store, live).view(printer.id)
+    assert view is not None and view.inputs is None
+    assert view.breakdown.source == "price_book"
+    assert view.bambuddy_tasks == ["Lubricate rods", "Check belts"]
+    assert live.asked == [7]
+    silent = await rates(store, printers, settings_store, FakeBambuddy(None)).view(printer.id)
+    assert silent is not None and silent.bambuddy_tasks == []
+    lan = await rates(store, printers, settings_store, live).view(lan_printer(printers).id)
+    assert lan is not None and lan.bambuddy_tasks == []
 
 
 def test_keeping_intervals_waits_for_a_replace_of_the_same_printer(

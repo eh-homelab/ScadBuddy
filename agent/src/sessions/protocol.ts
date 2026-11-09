@@ -254,8 +254,27 @@ export type ServerEvent = V &
         mediaType?: string
         sha256?: string
       }
-    /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
-    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
+    /**
+     * `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again.
+     * `shown`: `message` with the credential named by its name (#3710, credentials.ts `credentialDisplayLabel`),
+     * which the panel shows in its place. Only the panel reads it: logs, a flow's failure and the turn's
+     * outcome read `message`.
+     */
+    | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string; shown?: string }
+    /**
+     * #3710: a model request failed on one Claude credential, and the turn continues on the
+     * next (harness/fallback.ts `onFallback`). Both are named for the person, with their names
+     * (credentials.ts `credentialDisplayLabel`); the model is never told which. `until` is a
+     * rate limit's end. The turn goes on, so this is not an `error`.
+     */
+    | {
+        type: 'credential.fallback'
+        sessionId: string
+        from: string
+        to: string
+        outcome: 'refused' | 'rate_limited' | 'failed'
+        until?: string
+      }
     /**
      * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A
      * retain finishes after its turn, so this can follow the turn's last

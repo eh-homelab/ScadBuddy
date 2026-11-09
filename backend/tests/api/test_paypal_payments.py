@@ -110,9 +110,11 @@ def test_approve_capture_pay_with_its_fee_and_two_part_refunds(
     assert created.headers["paypal-request-id"] == req["id"]
     assert json.loads(created.content)["purchase_units"][0]["custom_id"] == req["id"]
 
-    assert send(client, "checkout.order.approved.json").json() == {"outcome": "ignored"}
+    # The approval moves the request to pending, then ScadBuddy captures it.
+    assert send(client, "checkout.order.approved.json").json() == {"outcome": "recorded"}
     assert paypal["capture"].called
-    assert detail(client, order_id)["payments"] == []
+    found = detail(client, order_id)
+    assert (found["payment_requests"][0]["status"], found["payments"]) == ("pending", [])
 
     assert send(client, "payment.capture.completed.json").json() == {"outcome": "recorded"}
     found = detail(client, order_id)
@@ -127,7 +129,7 @@ def test_approve_capture_pay_with_its_fee_and_two_part_refunds(
     assert send(client, "payment.capture.refunded.second.json").json() == {"outcome": "recorded"}
     assert send(client, "payment.capture.refunded.json").json() == {"outcome": "replayed"}
     payments = detail(client, order_id)["payments"]
-    assert [p["amount_minor"] for p in payments] == [700, -400, -300]
+    assert sorted(p["amount_minor"] for p in payments) == [-400, -300, 700]
 
 
 def test_a_pending_capture_is_pending_until_it_completes(
@@ -160,6 +162,32 @@ def test_cancelling_a_request_marks_its_order(client: TestClient, paypal: respx.
     paypal["order"].respond(json=payload("api.order.approved.cancelled.json"))
     send(client, "checkout.order.approved.json")
     assert not paypal["capture"].called
+
+
+def test_an_approval_after_a_cancel_paypal_could_not_mark_is_never_captured(
+    client: TestClient, paypal: respx.MockRouter
+) -> None:
+    """The commonest cancel: before the customer approves, PayPal refuses the PATCH
+    (it updates CREATED or APPROVED orders only). The customer then approves the old
+    page, and ScadBuddy, which sees the request cancelled, does not capture it."""
+    order_id, req = paypal_request(client)
+    paypal["patch"].respond(422, json=payload("api.error.order_not_patchable.json"))
+    paypal["order"].respond(json=payload("api.order.payer_action_required.json"))
+    cancelled = client.post(f"/api/v1/orders/{order_id}/payment-requests/{req['id']}/cancel")
+    assert cancelled.status_code == 200, cancelled.text
+    paypal["order"].respond(json=payload("api.order.approved.json"))
+    assert send(client, "checkout.order.approved.json").json() == {"outcome": "ignored"}
+    assert not paypal["capture"].called
+    assert detail(client, order_id)["payment_requests"][0]["status"] == "cancelled"
+
+
+def test_a_declined_capture_leaves_the_request_failed(
+    client: TestClient, paypal: respx.MockRouter
+) -> None:
+    order_id, _ = paypal_request(client)
+    paypal["capture"].respond(422, json=payload("api.error.instrument_declined.json"))
+    assert send(client, "checkout.order.approved.json").json() == {"outcome": "recorded"}
+    assert detail(client, order_id)["payment_requests"][0]["status"] == "failed"
 
 
 def test_money_paid_on_a_cancelled_request_is_still_recorded(

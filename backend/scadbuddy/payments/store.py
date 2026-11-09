@@ -37,6 +37,17 @@ CLOSE_RETRY_BATCH = 8
 #: (10 + 20 + ... + 1280 minutes, then a day): long enough for a shop to reconnect, and
 #: a reconnect starts the tries over (`resume_closes`).
 CLOSE_GIVE_UP_ATTEMPTS = 10
+#: #4959: how long after an approval moved a request to `pending` (or after the sweep's
+#: last read) the sweep reads its capture. PayPal's own capture event usually settles it
+#: well within this. Each read that finds the outcome still unknown doubles the wait, up
+#: to a day.
+CAPTURE_SETTLE_FIRST_MINUTES = 60
+#: The most pending captures one sweep reads.
+CAPTURE_SETTLE_BATCH = 8
+#: After this many reads that found the outcome unknown (about five days with the
+#: backoff: 1 + 2 + ... + 16 hours, then a day each), the request is marked `failed`, so
+#: it never blocks its order's cancel and the disconnect for good.
+CAPTURE_GIVE_UP_ATTEMPTS = 9
 
 
 def insert_request(
@@ -122,7 +133,10 @@ def set_request_status(
         " close_attempts = CASE WHEN m.mark OR %(status)s = 'paid' THEN 0"
         "  ELSE r.close_attempts END,"
         " close_tried_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"
-        "  ELSE r.close_tried_at END"
+        "  ELSE r.close_tried_at END,"
+        " capture_pending_at = CASE WHEN %(status)s = 'pending' THEN r.capture_pending_at END,"
+        " capture_tried_at = CASE WHEN %(status)s = 'pending' THEN r.capture_tried_at END,"
+        " capture_attempts = CASE WHEN %(status)s = 'pending' THEN r.capture_attempts ELSE 0 END"
         " FROM (SELECT q.provider_ref IS NOT NULL AND (%(status)s = 'cancelled' OR"
         "   (%(status)s = 'paid' AND EXISTS (SELECT 1 FROM order_payments p"
         "    WHERE p.id = %(payment)s"
@@ -157,6 +171,66 @@ def closes_due(conn: Conn, limit: int = CLOSE_RETRY_BATCH) -> list[PaymentReques
     ).fetchall()
     found = [PaymentRequestView.model_validate(r) for r in rows]
     return sorted(found, key=lambda r: (r.close_pending_at or r.created_at, r.id))
+
+
+def mark_capture_pending(conn: Conn, request_id: str) -> None:
+    """#4959: an approval moved the request to `pending`; its capture is read again by
+    the sweep (`captures_due`) until the request leaves `pending`, which clears the
+    mark (`set_request_status`). A new approval starts the reads over."""
+    conn.execute(
+        "UPDATE payment_requests SET capture_pending_at = clock_timestamp(),"
+        " capture_tried_at = NULL, capture_attempts = 0 WHERE id = %s",
+        (request_id,),
+    )
+
+
+def captures_due(
+    conn: Conn, providers: Collection[str], limit: int = CAPTURE_SETTLE_BATCH
+) -> list[PaymentRequestView]:
+    """Claim the pending captures of ``providers`` whose wait is over:
+    `CAPTURE_SETTLE_FIRST_MINUTES` after the approval or the last read, doubled for each
+    read that found the outcome unknown, at most a day. Oldest first. As `closes_due`:
+    taken ``FOR UPDATE SKIP LOCKED`` with ``capture_tried_at`` stamped, so the two
+    Schedules' runs never read one request at once."""
+    if not providers:
+        return []
+    rows = conn.execute(
+        "UPDATE payment_requests SET capture_tried_at = clock_timestamp()"
+        " WHERE id IN (SELECT id FROM payment_requests WHERE status = 'pending'"
+        "  AND capture_pending_at IS NOT NULL AND provider = ANY(%s)"
+        "  AND provider_ref IS NOT NULL"
+        "  AND COALESCE(capture_tried_at, capture_pending_at) <= clock_timestamp() - LEAST("
+        "   %s * interval '1 minute' * power(2, LEAST(capture_attempts, 16)),"
+        "   interval '1 day')"
+        "  ORDER BY capture_pending_at, id LIMIT %s FOR UPDATE SKIP LOCKED)"
+        f" RETURNING {_VIEW}",
+        (list(providers), CAPTURE_SETTLE_FIRST_MINUTES, limit),
+    ).fetchall()
+    found = [PaymentRequestView.model_validate(r) for r in rows]
+    return sorted(found, key=lambda r: (r.created_at, r.id))
+
+
+def capture_unsettled(conn: Conn, request_id: str) -> int:
+    """One more read that found the capture's outcome unknown; how many there were. A
+    request no longer marked is left as it is (0)."""
+    row = conn.execute(
+        "UPDATE payment_requests SET capture_attempts = capture_attempts + 1,"
+        " capture_tried_at = clock_timestamp()"
+        " WHERE id = %s AND status = 'pending' AND capture_pending_at IS NOT NULL"
+        " RETURNING capture_attempts",
+        (request_id,),
+    ).fetchone()
+    return 0 if row is None else int(row["capture_attempts"])
+
+
+def capture_settled(conn: Conn, request_id: str) -> None:
+    """The capture was made and is pending at the provider (#4959): its own event settles
+    it, as a bank debit's does, so the sweep stops reading it."""
+    conn.execute(
+        "UPDATE payment_requests SET capture_pending_at = NULL, capture_tried_at = NULL,"
+        " capture_attempts = 0 WHERE id = %s",
+        (request_id,),
+    )
 
 
 def close_confirmed(conn: Conn, request_id: str, provider_ref: str) -> None:
@@ -248,6 +322,15 @@ def told_event(conn: Conn, provider: str, event_id: str) -> tuple[bool, str | No
     return True, row["payment_id"] if row["outcome"] == "recorded" else None
 
 
+def event_outcome(conn: Conn, provider: str, event_id: str) -> str | None:
+    """The outcome a provider's event was recorded with, or None when it was never told."""
+    row = conn.execute(
+        "SELECT outcome FROM payment_events WHERE provider = %s AND event_id = %s",
+        (provider, event_id),
+    ).fetchone()
+    return None if row is None else str(row["outcome"])
+
+
 def finish_event(
     conn: Conn,
     event_row: int,
@@ -286,10 +369,12 @@ def hold_provider(conn: Conn, provider: str) -> bool:
 
 
 def has_open_requests(conn: Conn, provider: str) -> bool:
-    """An open request, or a pending one: its settling event still needs the credential."""
+    """An open request, a pending one (its settling event still needs the credential), or
+    a failed one: it holds its provider until it is cancelled (#4959; PayPal's page of a
+    failed request can still be approved, and only a connected provider captures it)."""
     row = conn.execute(
         "SELECT EXISTS (SELECT 1 FROM payment_requests WHERE provider = %s"
-        " AND status IN ('open', 'pending'))"
+        " AND status IN ('open', 'pending', 'failed'))"
         " AS found",
         (provider,),
     ).fetchone()

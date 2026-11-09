@@ -1,0 +1,12 @@
+{
+  "name": "INVALID_REQUEST",
+  "details": [
+    {
+      "issue": "MALFORMED_REQUEST_JSON",
+      "description": "The request JSON is not well formed."
+    }
+  ],
+  "message": "Request is not well-formed, syntactically incorrect, or violates schema.",
+  "debug_id": "d4b5c6e7f8091",
+  "links": []
+}

@@ -182,6 +182,13 @@ AUTH_SESSIONS_PATCH = "housekeeping-sweep-auth-sessions"
 #: close it at the provider. Any other failure is tried again at most a day apart.
 PAYMENT_CLOSES_SWEEP = "housekeeping_retry_payment_closes"
 PAYMENT_CLOSES_PATCH = "housekeeping-retry-payment-closes"
+#: #4959: settle each PayPal capture whose outcome was never told
+#: (`payments.service.Payments.settle_captures`): the order is read, a capture made is
+#: recorded, an approved order with no capture is captured again while the order still
+#: takes money, and one never told after the backoff's last read is marked failed. Last,
+#: behind its own patch; on the prune Schedule too, so it runs with the sweeps off as well.
+PAYMENT_CAPTURES_SWEEP = "housekeeping_settle_payment_captures"
+PAYMENT_CAPTURES_PATCH = "housekeeping-settle-payment-captures"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -208,6 +215,7 @@ SWEEPS = (
     GIT_REMOTE_SWEEP,
     AUTH_SESSIONS_SWEEP,
     PAYMENT_CLOSES_SWEEP,
+    PAYMENT_CAPTURES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -231,7 +239,8 @@ SWEEPS = (
 #: write run it besides. And the git remote's push (#4974), behind `GIT_REMOTE_PATCH`:
 #: a commit whose own push failed reaches the remote within the interval. And the expired
 #: signed-in sessions (#4975), behind `AUTH_SESSIONS_PATCH`. And the payment pages whose
-#: close failed (#5700), behind `PAYMENT_CLOSES_PATCH`.
+#: close failed (#5700), behind `PAYMENT_CLOSES_PATCH`. And the PayPal captures whose
+#: outcome was never told (#4959), behind `PAYMENT_CAPTURES_PATCH`.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -245,6 +254,7 @@ PRUNE_SWEEPS = (
     GIT_REMOTE_SWEEP,
     AUTH_SESSIONS_SWEEP,
     PAYMENT_CLOSES_SWEEP,
+    PAYMENT_CAPTURES_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -299,6 +309,10 @@ AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
 #: three provider calls (a token, the close, a read) of at most 20 s (`stripe.TIMEOUT`,
 #: `paypal.TIMEOUT`): 8 minutes, and a margin.
 PAYMENT_CLOSES_TIMEOUT = timedelta(minutes=10)
+#: Up to `payments.store.CAPTURE_SETTLE_BATCH` (8) requests, one after another, each up to
+#: three provider calls (a token, the read, a capture) of at most 20 s
+#: (`paypal.TIMEOUT`), and the closes a payment settles: 10 minutes, and a margin.
+PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=12)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -339,6 +353,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return AUTH_SESSIONS_TIMEOUT
     if sweep == PAYMENT_CLOSES_SWEEP:
         return PAYMENT_CLOSES_TIMEOUT
+    if sweep == PAYMENT_CAPTURES_SWEEP:
+        return PAYMENT_CAPTURES_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -391,6 +407,8 @@ class Housekeeping:
             if sweep == AUTH_SESSIONS_SWEEP and not workflow.patched(AUTH_SESSIONS_PATCH):
                 continue
             if sweep == PAYMENT_CLOSES_SWEEP and not workflow.patched(PAYMENT_CLOSES_PATCH):
+                continue
+            if sweep == PAYMENT_CAPTURES_SWEEP and not workflow.patched(PAYMENT_CAPTURES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

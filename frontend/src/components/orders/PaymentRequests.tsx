@@ -164,7 +164,7 @@ export function PaymentRequests({
                 </span>
                 <span className="sb-num">{money(r.amount_minor)}</span>
               </div>
-              {r.status === 'pending' && <span className="text-xs text-muted-foreground">The bank payment is on its way</span>}
+              {r.status === 'pending' && <span className="text-xs text-muted-foreground">The payment is on its way</span>}
               {/* #5700: the provider's page may still take money until the provider confirms the close; once the sweep gives up (a provider not connected), the shop closes it there. */}
               {r.close_pending_at && r.close_abandoned_at ? (
                 <span className="text-xs text-warn">{`Could not close; close it at ${label(r.provider)}`}</span>
@@ -206,6 +206,16 @@ export function PaymentRequests({
                     </>
                   ) : (
                     <span className="text-xs text-muted-foreground">Record the payment below when it arrives</span>
+                  )}
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => api.cancelPaymentRequest(order.id, r.id))}>
+                    Cancel
+                  </Button>
+                </div>
+              )}
+              {r.status === 'failed' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {(providers ?? []).find((p) => p.id === r.provider)?.reapprovable && (
+                    <span className="text-xs text-muted-foreground">The customer can still pay this link. Cancel it to stop that.</span>
                   )}
                   <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => api.cancelPaymentRequest(order.id, r.id))}>
                     Cancel

@@ -265,6 +265,18 @@ def access_code_aad(printer_id: str, serial: str) -> str:
     return f"printer:{printer_id}:{serial}"
 
 
+def _forget_read_intervals(conn: Connection[DictRow], printer_id: str) -> None:
+    """The machine rate's maintenance intervals read from the Bambuddy printer a row
+    linked (#4625) kept as typed ones: none counts as read, so a link made since counts
+    none until Bambuddy is read again. Called where a row's Bambuddy link is taken off or
+    replaced."""
+    conn.execute(
+        "UPDATE printer_maintenance_costs SET interval_read_at = NULL"
+        " WHERE printer = %s AND interval_read_at IS NOT NULL",
+        (printer_uuid(printer_id),),
+    )
+
+
 def printer_uuid(printer_id: str) -> uuid.UUID | None:
     """``printer_id`` as the column's uuid; ``None`` for anything that is not one, which
     then names no printer."""
@@ -540,11 +552,7 @@ class PrinterStore:
                 (),
             )
             if was is not None and was.bambuddy_printer_id is not None:
-                conn.execute(
-                    "UPDATE printer_maintenance_costs SET interval_read_at = NULL"
-                    " WHERE printer = %s AND interval_read_at IS NOT NULL",
-                    (printer_uuid(row.id),),
-                )
+                _forget_read_intervals(conn, row.id)
             return row
 
     def link_lan(
@@ -729,6 +737,10 @@ class PrinterStore:
                 and holder.kind == "physical"
                 and not live(holder.bambuddy_printer_id)
             ):
+                if holder.bambuddy_printer_id not in (None, bambuddy_printer_id):
+                    # Its old link's intervals are not this Bambuddy printer's (#4625).
+                    # Before the merge: the synthetic row's were read from this one.
+                    _forget_read_intervals(conn, holder.id)
                 merged = None
                 if linked is not None:  # the synthetic row made meanwhile is this printer
                     self._merge(conn, linked.id, holder.id)

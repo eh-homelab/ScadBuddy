@@ -109,6 +109,7 @@ function credentialVerb(method: string, path: string): string | undefined {
   if (path === `${base}/entries`) return method === 'POST' ? 'create' : undefined
   if (path === `${base}/order`) return method === 'PUT' ? 'reorder' : undefined
   if (/^\/api\/v1\/ai\/credentials\/entries\/[^/]+\/reset$/.test(path)) return method === 'POST' ? 'reset' : undefined
+  if (/^\/api\/v1\/ai\/credentials\/entries\/[^/]+\/name$/.test(path)) return method === 'PUT' ? 'rename' : undefined
   if (/^\/api\/v1\/ai\/credentials\/entries\/[^/]+$/.test(path)) {
     return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
   }

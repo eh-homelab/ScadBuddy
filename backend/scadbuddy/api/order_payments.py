@@ -104,7 +104,7 @@ class CancelRequestBody(BaseModel):
 @router.post(
     "/{order_id}/payment-requests/{request_id}/cancel",
     response_model=PaymentRequestView,
-    summary="Cancel an open payment request",
+    summary="Cancel an open or failed payment request",
     description=(
         "`reason` (optional) goes on the audit line. Cancelling the `balance` request lifts"
         " `balance_unpaid`, so the order may ship unpaid; give the reason then."

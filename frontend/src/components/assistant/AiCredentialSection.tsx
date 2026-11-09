@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { recheckAiAvailability, useAiAvailability } from '../../agent/chat/availability'
 import { USER_ONLY } from '../../agent/dom'
-import type {
-  AiConnectionTest,
-  AiCredentialEntry,
-  AiCredentialKind,
-  AiCredentialList,
+import {
+  AI_CREDENTIAL_NAME_MAX,
+  type AiConnectionTest,
+  type AiCredentialEntry,
+  type AiCredentialKind,
+  type AiCredentialList,
 } from '../../api/aiCredential'
 import { AI_NOT_ROUTED, api, ApiError } from '../../api/client'
 import { timeAgo } from '../../lib/format'
@@ -108,6 +109,12 @@ function noneUsable(credentials: readonly AiCredentialEntry[], canSave: boolean)
   return 'No credential is usable now: each one needs a reset or a new key.'
 }
 
+/** ", “Work”," for the named credential that recovers at `at` (#3710); empty when it has no name. */
+function recovering(credentials: readonly AiCredentialEntry[], at: string): string {
+  const name = credentials.find((c) => c.status === 'cooling_down' && c.cooldown_until === at)?.name
+  return name ? `, “${name}”,` : ''
+}
+
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -143,15 +150,18 @@ function clock(iso: string, now = new Date()): string {
 
 /**
  * How a credential is named in labels and messages, no secret: "credential 2 (Anthropic API key
- * ••••abcd)". The position keeps two of one kind apart, even with no last four (a short secret).
+ * ••••abcd)", or with its name (#3710) "credential 2 “Work” (Anthropic API key ••••abcd)". The
+ * position keeps two of one kind apart, even with no last four (a short secret) or one name.
  */
 function nameOf(entry: AiCredentialEntry, list: readonly AiCredentialEntry[]): string {
   const at = list.findIndex((c) => c.id === entry.id)
   const what = `${KIND_LABEL[entry.kind]}${entry.last4 ? ` ••••${entry.last4}` : ''}`
-  return at < 0 ? what : `credential ${at + 1} (${what})`
+  const named = entry.name ? `“${entry.name}” ` : ''
+  if (at >= 0) return `credential ${at + 1} ${named}(${what})`
+  return entry.name ? `${named}(${what})` : what
 }
 
-type Busy = { id: string; action: 'add' | 'up' | 'down' | 'test' | 'reset' | 'replace' | 'delete' } | null
+type Busy = { id: string; action: 'add' | 'up' | 'down' | 'test' | 'reset' | 'replace' | 'rename' | 'delete' } | null
 
 /** How long after a cooldown ends the list is read again, so the agent sees it ended too. */
 const REFRESH_SLACK_MS = 500
@@ -178,8 +188,8 @@ function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[])
  * order it tries them (`/api/v1/ai/credentials/entries`, agent `routes/credentials.ts`). A
  * query uses the first usable one and falls back to the next when a credential is refused
  * (disabled until reset or given a new key) or rate limited (usable again on its own at
- * `cooldown_until`). Reads give the kind, the gateway's base URL, the last four characters
- * and the status; the secret is never returned, so every key field starts empty and a save
+ * `cooldown_until`). Reads give the kind, the optional name (#3710), the gateway's base URL,
+ * the last four characters and the status; the secret is never returned, so every key field starts empty and a save
  * sends what was typed, once.
  *
  * Shown whenever the agent answers the read, not only when the assistant is available: no
@@ -194,9 +204,14 @@ export function AiCredentialSection() {
   const [kind, setKind] = useState<AiCredentialKind>('anthropic_api_key')
   const [baseUrl, setBaseUrl] = useState('')
   const [secret, setSecret] = useState('')
+  /** The add form's optional name (#3710). Not secret, so a change of kind keeps it. */
+  const [name, setName] = useState('')
   const [busy, setBusy] = useState<Busy>(null)
   const [replacing, setReplacing] = useState<string | null>(null)
   const [replacement, setReplacement] = useState('')
+  /** The row whose rename form is open, and what is typed in it (#3710). */
+  const [renaming, setRenaming] = useState<string | null>(null)
+  const [newName, setNewName] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<AiCredentialEntry | null>(null)
   /** The Delete that asked for the confirm: focus goes back to it when the dialog closes. */
   const deleteButton = useRef<HTMLElement | null>(null)
@@ -364,6 +379,7 @@ export function AiCredentialSection() {
       () =>
         api.createAiCredential({
           kind,
+          ...(name.trim() ? { name: name.trim() } : {}),
           ...(kind === 'gateway' ? { base_url: baseUrl.trim() } : {}),
           secret: secret.trim(),
         }),
@@ -373,6 +389,7 @@ export function AiCredentialSection() {
     if (!created.ok) return
     setSecret('')
     setBaseUrl('')
+    setName('')
     setNotice(
       credentials.length === 0 ? 'Saved. Use Test to check it works.' : 'Added last; it is tried after the others.',
     )
@@ -418,6 +435,20 @@ export function AiCredentialSection() {
     }
   }
 
+  async function rename(event: FormEvent, entry: AiCredentialEntry) {
+    event.preventDefault()
+    const saved = await act(
+      { id: entry.id, action: 'rename' },
+      () => api.renameAiCredential(entry.id, newName.trim() || null),
+      (answer) => `Renamed ${nameOf(answer, credentials)}.`,
+      'Could not rename the credential',
+    )
+    if (saved.ok) {
+      setRenaming(null)
+      setNewName('')
+    }
+  }
+
   async function remove(entry: AiCredentialEntry) {
     const deleted = await act(
       { id: entry.id, action: 'delete' },
@@ -448,7 +479,7 @@ export function AiCredentialSection() {
           {!current.usable_now && (
             <p role="status" data-testid="ai-credentials-none-usable" className="text-warn">
               {current.recovers_at
-                ? `No credential is usable now. The first rate-limited one is usable again at ${clock(current.recovers_at)}.`
+                ? `No credential is usable now. The first rate-limited one${recovering(credentials, current.recovers_at)} is usable again at ${clock(current.recovers_at)}.`
                 : noneUsable(credentials, current.can_save)}
             </p>
           )}
@@ -461,12 +492,24 @@ export function AiCredentialSection() {
                 onOpenChange={(next) => {
                   setReplacing(next ? entry.id : null)
                   setReplacement('')
+                  // One form open on a row at a time.
+                  if (next) setRenaming(null)
                 }}
               >
               <li className="flex flex-col gap-2 px-3 py-2.5" data-testid="ai-credential">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="text-muted-foreground">{index + 1}.</span>
-                  <span className="font-medium">{KIND_LABEL[entry.kind]}</span>
+                  {entry.name ? (
+                    <>
+                      {/* Text, never markup: React escapes it (#3710). */}
+                      <span className="font-medium break-all" data-testid="ai-credential-name">
+                        {entry.name}
+                      </span>
+                      <span className="text-muted-foreground">{KIND_LABEL[entry.kind]}</span>
+                    </>
+                  ) : (
+                    <span className="font-medium">{KIND_LABEL[entry.kind]}</span>
+                  )}
                   {entry.base_url && <span className="text-muted-foreground">at {entry.base_url}</span>}
                   {entry.last4 && (
                     <span className="font-mono text-muted-foreground" data-testid="ai-credential-last4">
@@ -545,6 +588,24 @@ export function AiCredentialSection() {
                       Reset
                     </Button>
                   )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const open = renaming !== entry.id
+                      setRenaming(open ? entry.id : null)
+                      setNewName(open ? (entry.name ?? '') : '')
+                      if (open) {
+                        setReplacing(null)
+                        setReplacement('')
+                      }
+                    }}
+                    disabled={busy !== null}
+                    aria-expanded={renaming === entry.id}
+                    aria-label={`Rename ${nameOf(entry, credentials)}`}
+                  >
+                    Rename
+                  </Button>
                   <CollapsibleTrigger asChild>
                     <Button
                       size="sm"
@@ -606,12 +667,35 @@ export function AiCredentialSection() {
                     </Button>
                   </form>
                 </CollapsibleContent>
+                {renaming === entry.id && (
+                  <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void rename(event, entry)}>
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor={`ai-credential-rename-${entry.id}`} className="text-[13px] font-normal">
+                        Name
+                      </Label>
+                      <Input
+                        id={`ai-credential-rename-${entry.id}`}
+                        value={newName}
+                        onChange={(event) => setNewName(event.target.value)}
+                        maxLength={AI_CREDENTIAL_NAME_MAX}
+                        placeholder="Empty for no name"
+                        className="w-72 max-w-full"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <Button type="submit" disabled={busy !== null} aria-busy={isBusy(entry.id, 'rename')}>
+                      {isBusy(entry.id, 'rename') && <Spinner />}
+                      Save name
+                    </Button>
+                  </form>
+                )}
                 {tests[entry.id] && (
                   <p
                     role="status"
                     data-testid="ai-credential-test"
                     className={`text-xs ${tests[entry.id]!.ok ? 'text-ok' : 'text-warn'}`}
                   >
+                    {entry.name && `${entry.name}: `}
                     {tests[entry.id]!.ok
                       ? `Works${tests[entry.id]!.model ? ` (${tests[entry.id]!.model})` : ''}, ${(tests[entry.id]!.duration_ms / 1000).toFixed(1)} s.`
                       : `Failed: ${tests[entry.id]!.detail}`}
@@ -660,6 +744,21 @@ export function AiCredentialSection() {
             ))}
           </RadioGroup>
         </fieldset>
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="ai-credential-name" className="text-[13px] font-normal">
+            Name (optional)
+          </Label>
+          <Input
+            id="ai-credential-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            disabled={!current.can_save}
+            maxLength={AI_CREDENTIAL_NAME_MAX}
+            placeholder="e.g. Personal Max"
+            className="max-w-md"
+            autoComplete="off"
+          />
+        </div>
         {kind === 'gateway' && (
           <div className="flex flex-col gap-1">
             <Label htmlFor="ai-credential-base-url" className="text-[13px] font-normal">

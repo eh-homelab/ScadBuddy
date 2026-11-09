@@ -11,7 +11,13 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from scadbuddy.payments.models import HostedRequest, PaymentRequestView, ProviderEvent
+from scadbuddy.payments.models import (
+    CaptureOutcome,
+    CaptureState,
+    HostedRequest,
+    PaymentRequestView,
+    ProviderEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -96,4 +102,32 @@ class PaymentProvider(Protocol):
         """Raises `BadSignatureError` before it parses anything. Once the signature holds
         it may call the provider (#4958: Stripe's fee and a refund's session); a failed
         call is `ProviderUnavailableError`."""
+        ...
+
+
+class CapturingProvider(PaymentProvider, Protocol):
+    """A provider whose customer approves a payment that ScadBuddy then captures
+    (PayPal, #4959). Only such a provider's ``parse_webhook`` returns ``approved``. The
+    service moves an open or failed request to ``pending`` under the order lock, commits,
+    and only then calls ``capture_request``; a cancelled or paid request is never
+    captured."""
+
+    async def capture_request(
+        self, credential: Credential, provider_ref: str, event_id: str
+    ) -> CaptureOutcome:
+        """Capture the approved payment, keyed on ``event_id`` so a retry captures once.
+        ``ProviderUnavailableError`` when the provider did not answer (the request stays
+        ``pending`` and the event's row is kept, so the provider's retry of the event reads
+        ``replayed`` and captures again under the same key);
+        ``ProviderError`` for a refusal a retry would meet again."""
+        ...
+
+    async def read_capture(
+        self, credential: Credential, provider_ref: str
+    ) -> ProviderEvent | CaptureState:
+        """#4959, the housekeeping sweep: what became of the capture of an approved
+        payment whose capture outcome was never told. A capture made: its ``paid`` event
+        (keyed by the capture, so a later webhook writes no second payment) or its
+        ``failed`` one. Otherwise a `CaptureState`. Never raises for a failed call: one
+        that cannot be told is ``unknown``."""
         ...

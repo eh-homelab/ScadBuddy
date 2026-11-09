@@ -116,6 +116,23 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
   })
 
+  it('names the first rate-limited one by its name when it has one (#3710)', async () => {
+    setCredentials([
+      credentialEntry({ id: 'n1', name: 'Work', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-01T12:30:00Z' }),
+    ])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credentials-none-usable')).toHaveTextContent(
+      /The first rate-limited one, “Work”, is usable again at/,
+    )
+  })
+
+  it('names a credential in its test result by its name (#3710)', async () => {
+    setCredentials([credentialEntry({ id: 'n1', name: 'Personal Max', last4: 'Q7xA' })])
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: 'Test credential 1 “Personal Max” (Anthropic API key ••••Q7xA)' }))
+    expect(await screen.findByTestId('ai-credential-test')).toHaveTextContent(/^Personal Max: Works/)
+  })
+
   it('says when the first rate-limited one is usable again', async () => {
     setCredentials([
       credentialEntry({ id: 'default', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-01T12:30:00Z' }),
@@ -187,6 +204,78 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(rows()[2]).toHaveTextContent('3.Claude Code OAuth token')
     expect(within(rows()[2]!).getByTestId('ai-credential-last4')).toHaveTextContent('ending in abcd')
     expect(creates).toEqual([{ kind: 'claude_oauth_token', secret: 'sk-ant-oat01-ZZ34abcd' }])
+  })
+
+  it('adds a credential with a name, shown as its title with the kind beside it (#3710)', async () => {
+    const creates = bodiesOf('POST', entries)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('radio', { name: 'Claude Code OAuth token' }))
+    const name = screen.getByLabelText('Name (optional)')
+    expect(name).toHaveAttribute('maxLength', '60')
+    await user.type(name, '  Personal Max ')
+    await user.type(screen.getByLabelText('OAuth token'), 'sk-ant-oat01-ZZ34GwAA')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    expect(within(rows()[2]!).getByTestId('ai-credential-name')).toHaveTextContent('Personal Max')
+    expect(rows()[2]).toHaveTextContent('3.Personal MaxClaude Code OAuth token')
+    expect(
+      screen.getByRole('button', { name: 'Test credential 3 “Personal Max” (Claude Code OAuth token ••••GwAA)' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Name (optional)')).toHaveValue('')
+    expect(creates).toEqual([{ kind: 'claude_oauth_token', name: 'Personal Max', secret: 'sk-ant-oat01-ZZ34GwAA' }])
+  })
+
+  it('keeps the name typed when the kind changes, as it is not secret (#3710)', async () => {
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.type(await screen.findByLabelText('Name (optional)'), 'Work')
+    await user.click(screen.getByRole('radio', { name: 'Gateway (base URL and token)' }))
+    expect(screen.getByLabelText('Name (optional)')).toHaveValue('Work')
+  })
+
+  it('renames a credential without its key, and clears the name (#3710)', async () => {
+    const renames = bodiesOf('PUT', `${entries}/default/name`)
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Rename ${KEY}` }))
+    const field = screen.getByLabelText('Name')
+    expect(field).toHaveValue('')
+    expect(field).toHaveAttribute('maxLength', '60')
+    await user.type(field, 'Work API')
+    await user.click(screen.getByRole('button', { name: 'Save name' }))
+    await waitFor(() => expect(within(rows()[0]!).getByTestId('ai-credential-name')).toHaveTextContent('Work API'))
+    expect(rows()[0]).toHaveTextContent('1.Work APIAnthropic API key')
+    expect(screen.queryByLabelText('Name')).not.toBeInTheDocument()
+    const named = 'credential 1 “Work API” (Anthropic API key ••••Q7xA)'
+    expect(await screen.findByRole('status')).toHaveTextContent(`Renamed ${named}.`)
+
+    await user.click(screen.getByRole('button', { name: `Rename ${named}` }))
+    expect(screen.getByLabelText('Name')).toHaveValue('Work API')
+    await user.clear(screen.getByLabelText('Name'))
+    await user.click(screen.getByRole('button', { name: 'Save name' }))
+    await waitFor(() => expect(within(rows()[0]!).queryByTestId('ai-credential-name')).not.toBeInTheDocument())
+    expect(rows()[0]).toHaveTextContent('1.Anthropic API key')
+    expect(renames).toEqual([{ name: 'Work API' }, { name: null }])
+  })
+
+  it('keeps the rename form open when the agent refuses the name (#3710)', async () => {
+    server.use(
+      http.put(`${entries}/default/name`, () =>
+        HttpResponse.json({ detail: 'name must be one line of plain text' }, { status: 400 }),
+      ),
+    )
+    const { user } = renderPage(<AiCredentialSection />)
+    await user.click(await screen.findByRole('button', { name: `Rename ${KEY}` }))
+    await user.type(screen.getByLabelText('Name'), 'x')
+    await user.click(screen.getByRole('button', { name: 'Save name' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('name must be one line of plain text')
+    expect(screen.getByLabelText('Name')).toHaveValue('x')
+  })
+
+  it('shows a stored name as text, never as markup (#3710)', async () => {
+    setCredentials([credentialEntry({ id: 'n1', name: '<b>Team</b>', last4: 'AB12' })])
+    renderPage(<AiCredentialSection />)
+    expect(await screen.findByTestId('ai-credential-name')).toHaveTextContent('<b>Team</b>')
+    expect(rows()[0]!.querySelector('b')).toBeNull()
   })
 
   it('warns, without blocking, when a secret looks like the other Anthropic kind', async () => {

@@ -13,6 +13,8 @@ from typing import Final
 from pydantic import ValidationError
 
 from scadbuddy.payments.models import (
+    CaptureOutcome,
+    CaptureState,
     HostedRequest,
     PaymentRequestView,
     ProviderEvent,
@@ -28,7 +30,7 @@ from scadbuddy.payments.provider import (
 
 SIGNATURE_HEADER: Final = "x-fake-signature"
 _KINDS: Final[frozenset[str]] = frozenset(
-    {"paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee"}
+    {"paid", "pending", "failed", "refunded", "refund_failed", "expired", "fee", "approved"}
 )
 
 
@@ -54,6 +56,11 @@ class FakeProvider:
     def __init__(self) -> None:
         #: Each ``provider_ref`` whose page was closed, in order, for tests to read.
         self.cancelled: list[str] = []
+        #: Each ``(provider_ref, event_id)`` captured after an ``approved`` event (#4959).
+        self.captured: list[tuple[str, str]] = []
+        #: What ``read_capture`` answers for a ``provider_ref`` (#4959); ``unknown`` when
+        #: a test set nothing.
+        self.capture_reads: dict[str, ProviderEvent | CaptureState] = {}
 
     async def verify(self, credential: Credential) -> Verified:
         return Verified(account_label=f"Fake account {credential.settings.get('account', '')}")
@@ -74,6 +81,17 @@ class FakeProvider:
 
     async def cancel_request(self, credential: Credential, provider_ref: str) -> None:
         self.cancelled.append(provider_ref)
+
+    async def capture_request(
+        self, credential: Credential, provider_ref: str, event_id: str
+    ) -> CaptureOutcome:
+        self.captured.append((provider_ref, event_id))
+        return "captured"
+
+    async def read_capture(
+        self, credential: Credential, provider_ref: str
+    ) -> ProviderEvent | CaptureState:
+        return self.capture_reads.get(provider_ref, "unknown")
 
     async def parse_webhook(
         self, credential: Credential, headers: Mapping[str, str], body: bytes

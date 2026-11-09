@@ -73,17 +73,19 @@ describe('PaymentRequests (#4957)', () => {
   it('shows a bank payment as pending until it settles, with no link and no cancel (#4958)', async () => {
     await setup((id) => mockPaymentEvent(ORDER_ACCEPTED, id, 'pending'))
     expect(await screen.findByText('Pending')).toBeInTheDocument()
-    expect(screen.getByText('The bank payment is on its way')).toBeInTheDocument()
+    expect(screen.getByText('The payment is on its way')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
-  it('keeps the provider connected while a request is pending, as the backend does (#4958)', async () => {
+  it('keeps the provider connected while a request is pending or failed, as the backend does (#4958, #4959)', async () => {
     mockConnectProvider()
     const opened = await api.requestPayment(ORDER_ACCEPTED, {})
     mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'pending')
     await expect(api.disconnectPaymentProvider('fake')).rejects.toThrow('open payment requests')
     mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'failed')
+    await expect(api.disconnectPaymentProvider('fake')).rejects.toThrow('open payment requests')
+    await api.cancelPaymentRequest(ORDER_ACCEPTED, opened.id)
     await expect(api.disconnectPaymentProvider('fake')).resolves.toBeUndefined()
   })
 
@@ -93,7 +95,7 @@ describe('PaymentRequests (#4957)', () => {
       mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
     })
     expect(await screen.findByText('Failed')).toBeInTheDocument()
-    expect(screen.queryByText('The bank payment is on its way')).not.toBeInTheDocument()
+    expect(screen.queryByText('The payment is on its way')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
   })
 
@@ -133,6 +135,37 @@ describe('PaymentRequests (#4957)', () => {
     await user.click(await screen.findByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText('Cancelled')).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument())
+  })
+
+  it('cancels a failed request, which a customer could still approve again (#4959)', async () => {
+    const { user } = await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument())
+  })
+
+  it('says a failed request can still be paid when its provider says the page can be approved again (#4959)', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+    })
+    expect(await screen.findByText('The customer can still pay this link. Cancel it to stop that.')).toBeInTheDocument()
+  })
+
+  it('says nothing of paying again when the provider does not say so, as for Stripe', async () => {
+    await setup((id) => {
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'pending')
+      mockPaymentEvent(ORDER_ACCEPTED, id, 'failed')
+      state.paymentRequests.find((r) => r.id === id)!.provider = 'stripe'
+    })
+    expect(await screen.findByText('Failed')).toBeInTheDocument()
+    await screen.findByText('stripe')
+    expect(screen.queryByText(/can still pay this link/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
   })
 
   it('says when the provider has not yet confirmed a cancelled page closed (#5700)', async () => {

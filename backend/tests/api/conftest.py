@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from temporalio.client import Client
 
+from scadbuddy import main as main_module
 from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.activity.index import ActivityIndex, Attribution
 from scadbuddy.activity.models import ActivityRow, ActivityStatus
@@ -210,6 +211,23 @@ def agent_tools(monkeypatch: pytest.MonkeyPatch) -> FakeAgentTools:
 @pytest.fixture
 def app(settings: Settings) -> FastAPI:
     return create_app(settings)
+
+
+@pytest.fixture(autouse=True)
+def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#5754: the app's own payment-close sweep does nothing. The prune Schedule runs it
+    once at boot (`PRUNE_SWEEPS`, `ensure_workflow_schedule`'s trigger), with the
+    sweeps off too, at a time the test does not choose. It claims a due page as the
+    test's own `Payments.retry_closes` does, so the test's next call finds the page not
+    due, or closed already. Every api test gets this: none relies on the app's own
+    close sweep, and a test that drives `retry_closes` itself must not race it. The
+    pending captures' sweep (#4959) is off for the same reason."""
+
+    async def off(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
+    monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
 
 
 @pytest.fixture(autouse=True)

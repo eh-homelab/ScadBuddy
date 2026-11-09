@@ -119,6 +119,9 @@ logger = logging.getLogger(__name__)
 
 #: The states a person's decision has ended (nothing else may move).
 ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
+#: The payment requests a customer's approval can still be captured for (#4959), and so
+#: the ones a cancel ends.
+CAPTURABLE: frozenset[str] = frozenset({"open", "failed"})
 #: The states past a person's acceptance, which `derive` writes.
 DERIVED: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready", "shipped"})
 #: An item nothing more happens to.
@@ -984,9 +987,10 @@ class Lifecycle:
     ) -> Payment:
         """Money the shop already received: a record, allowed on hold (Ruling 14). A
         payment that names an open request of this order closes it. Named or not, a
-        payment that brings the balance to zero or below closes the open ``balance``
-        requests. A refund (zero or below) closes nothing. It writes no fee entry: only a
-        provider's event does. A cart (#5282) takes no money: ``order_not_submitted``."""
+        payment that brings the balance to zero or below closes the open and failed
+        ``balance`` requests. A refund (zero or below) closes nothing. It writes no fee
+        entry: only a provider's event does. A cart (#5282) takes no money:
+        ``order_not_submitted``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
@@ -1032,11 +1036,13 @@ class Lifecycle:
     # Its amount is fixed once opened. Its link is made after commit (``set_request_link``).
 
     def _close_balance(self, conn: Conn, order: Order, payment: Payment) -> None:
-        """Once the balance is zero or below, ``payment`` closes the open balance requests."""
+        """Once the balance is zero or below, ``payment`` closes the open and failed balance
+        requests (#4959: a customer can approve a failed one's page again, which would
+        charge twice)."""
         if totals_of(self.store, conn, order.id).balance_minor > 0:
             return
-        for open_request in payments.open_requests_for_order(conn, order.id):
-            if open_request.kind == "balance":
+        for open_request in payments.requests_for_order(conn, order.id):
+            if open_request.kind == "balance" and open_request.status in CAPTURABLE:
                 payments.set_request_status(conn, open_request.id, "paid", payment_id=payment.id)
 
     def _request_of(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
@@ -1046,6 +1052,17 @@ class Lifecycle:
                 "payment_request_not_found",
                 f"no payment request {request_id} of order {order.label}",
                 not_found=True,
+            )
+        return found
+
+    def _cancellable_request(self, conn: Conn, order: Order, request_id: str) -> PaymentRequestView:
+        """An open request, or a failed one (#4959: a customer can approve a failed
+        PayPal order again, so it is ended too). A pending one is refused: money is on
+        its way."""
+        found = self._request_of(conn, order, request_id)
+        if found.status not in CAPTURABLE:
+            raise LifecycleError(
+                "payment_request_not_open", f"payment request {request_id} is {found.status}"
             )
         return found
 
@@ -1112,12 +1129,13 @@ class Lifecycle:
     def cancel_payment_request(
         self, order_id: str, request_id: str, by: Actor, reason: str | None = None
     ) -> PaymentRequestView:
-        """An open request cancelled, with the person's ``reason`` on the audit row when
+        """An open or failed request cancelled (a pending one is refused,
+        `payment_request_not_open`), with the person's ``reason`` on the audit row when
         given. Cancelling the `balance` request lifts `balance_unpaid` (gap 2), so the
         reason says why the order may ship unpaid."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._open_request(conn, order, request_id)
+            self._cancellable_request(conn, order, request_id)
             cancelled = payments.set_request_status(conn, request_id, "cancelled")
             why = {} if reason is None else {"reason": reason}
             self._event(conn, order, by, "payment_request.cancelled", request_id=request_id, **why)
@@ -1153,11 +1171,7 @@ class Lifecycle:
             for found in payments.requests_for_order(conn, order.id)
             if found.kind == "deposit"
         ]
-        if any(found.status == "pending" for found in deposits):
-            raise LifecycleError(
-                "payment_in_flight",
-                f"order {order.label}'s deposit payment is in flight; wait until it settles",
-            )
+        self._no_payment_in_flight(conn, order, kind="deposit")
         due = 0 if amount is None else amount - totals_of(self.store, conn, order.id).paid_minor
         asking = [found for found in deposits if found.status == "open"]
         failed = [found for found in deposits if found.status == "failed"]
@@ -1286,14 +1300,15 @@ class Lifecycle:
             )
 
     def _close_deposit(self, conn: Conn, order: Order, payment: Payment) -> None:
-        """Once the payments reach the deposit, ``payment`` closes the open deposit
-        requests (status `open` only)."""
+        """Once the payments reach the deposit, ``payment`` closes the open and failed
+        deposit requests (#4959: a customer can approve a failed one's page again, which
+        would charge twice)."""
         if order.deposit_minor is None:
             return
         if totals_of(self.store, conn, order.id).paid_minor < order.deposit_minor:
             return
         for found in payments.requests_for_order(conn, order.id):
-            if found.kind == "deposit" and found.status == "open":
+            if found.kind == "deposit" and found.status in CAPTURABLE:
                 payments.set_request_status(conn, found.id, "paid", payment_id=payment.id)
 
     # -- the balance (#5281, storefront spec §9) ------------------------------------------
@@ -1528,6 +1543,82 @@ class Lifecycle:
             self._told(change)
         return outcome
 
+    def approval_pending(self, request_id: str, event_id: str) -> bool:
+        """#4959: whether ``event_id`` is the approval that last moved the request to
+        ``pending`` (its audit row names it), so a replay of an older approval captures
+        nothing. A row written before the id was kept names none, and counts."""
+        with self.store.transaction() as conn:
+            moved = self._approvals(conn, request_id)
+        return bool(moved) and moved[-1].get("event_id", event_id) == event_id
+
+    def _approvals(self, conn: Conn, request_id: str) -> list[dict[str, Any]]:
+        """The detail of each audit row where an approval moved the request to
+        ``pending``, oldest first."""
+        found = payments.request(conn, request_id)
+        if found is None:
+            return []
+        return [
+            e.detail
+            for e in self.store.events(found.order_id, conn=conn)
+            if e.kind == "payment_request.pending"
+            and e.detail.get("request_id") == request_id
+            and e.detail.get("approved")
+        ]
+
+    def recapture_key(self, provider: str, request_id: str) -> str | None:
+        """#4959, the housekeeping sweep: the key to capture a still ``pending`` request
+        again with, once its order reads approved with no capture. Checked under the
+        order lock, as ``_capture`` checks it: an order that no longer takes money (ended,
+        or a storefront cart) is never captured, and its request is marked ``failed`` with
+        the reason on its audit row, so the sweep never reads it again. The key is the
+        approval that last moved it to ``pending`` (PayPal keys a capture by it), else
+        the request's own."""
+        by = Actor(kind="provider", principal=f"payment:{provider}")
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                return None
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status != "pending":
+                return None
+            if order.status in ENDED or order.unsubmitted:
+                payments.set_request_status(conn, found.id, "failed")
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "payment_request.failed",
+                    request_id=found.id,
+                    reason="order_not_taking_money",
+                )
+                change = _Change(order)
+            else:
+                moved = self._approvals(conn, request_id)
+                event_id = moved[-1].get("event_id") if moved else None
+                return event_id if isinstance(event_id, str) else f"request-{found.id}"
+        self._told(change)
+        return None
+
+    def capture_failed(self, provider: str, request_id: str, *, reason: str | None = None) -> None:
+        """#4959: the provider refused or declined the capture after an ``approved``
+        event, or the housekeeping sweep gave up reading it (``reason``
+        ``capture_unsettled``). A request still ``pending`` goes back to ``failed``, which
+        the shop sees; ``reason`` goes on its audit row."""
+        by = Actor(kind="provider", principal=f"payment:{provider}")
+        with self.store.transaction() as conn:
+            found = payments.request(conn, request_id)
+            if found is None:
+                return
+            order = self._lock(conn, found.order_id)
+            found = payments.request(conn, request_id) or found
+            if found.status != "pending":
+                return
+            payments.set_request_status(conn, found.id, "failed")
+            detail = {} if reason is None else {"reason": reason}
+            self._event(conn, order, by, "payment_request.failed", request_id=found.id, **detail)
+        self._told(_Change(order))
+
     def _provider_payment(
         self, conn: Conn, order: Order, found: PaymentRequestView, provider: str
     ) -> Payment | None:
@@ -1572,6 +1663,33 @@ class Lifecycle:
                 return "ignored", None
             payments.set_request_status(conn, found.id, event.kind)
             self._event(conn, order, by, f"payment_request.{event.kind}", request_id=found.id)
+            return "recorded", None
+        if event.kind == "approved":
+            # #4959: ScadBuddy decides whether an approval is captured. Only an open or
+            # failed request moves to ``pending``; the service calls the provider after
+            # this commits, never under the lock. A cancelled or paid request's approval
+            # is left uncaptured.
+            # An order that no longer takes money (ended, or a cart) is never
+            # captured, whatever its request reads.
+            if order.status in ENDED or order.unsubmitted or found.status not in CAPTURABLE:
+                logger.info(
+                    "approval of payment request %s left uncaptured: it is %s, its order %s",
+                    found.id,
+                    found.status,
+                    order.status,
+                )
+                return "ignored", None
+            payments.set_request_status(conn, found.id, "pending")
+            payments.mark_capture_pending(conn, found.id)
+            self._event(
+                conn,
+                order,
+                by,
+                "payment_request.pending",
+                request_id=found.id,
+                approved=True,
+                event_id=event.event_id,
+            )
             return "recorded", None
         if event.kind == "fee":
             return self._late_fee(conn, order, found, provider, event, by)
@@ -1940,13 +2058,7 @@ class Lifecycle:
                     "order_not_acceptable", f"order {order.label} is {order.status}"
                 )
             self._not_on_hold(order)
-            if any(
-                found.status == "pending" for found in payments.requests_for_order(conn, order.id)
-            ):
-                raise LifecycleError(
-                    "payment_in_flight",
-                    f"order {order.label} has a payment in flight; wait until it settles",
-                )
+            self._no_payment_in_flight(conn, order)
             items = self.store.items(order.id, conn=conn)
             open_items = [item for item in items if item.status != "cancelled"]
             if not open_items:
@@ -1979,10 +2091,23 @@ class Lifecycle:
         self._told(_Change(accepted))
         return accepted
 
+    def _no_payment_in_flight(self, conn: Conn, order: Order, *, kind: str | None = None) -> None:
+        """A pending request (of ``kind``, when given) is money on its way: what would end
+        or change what it pays waits until its provider settles it (`payment_in_flight`)."""
+        if any(
+            r.status == "pending" and (kind is None or r.kind == kind)
+            for r in payments.requests_for_order(conn, order.id)
+        ):
+            raise LifecycleError(
+                "payment_in_flight",
+                f"order {order.label} has a payment in flight; wait until it settles",
+            )
+
     def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
         """§3.5: from any state before `shipped`; cancels the open items and the open
-        payment requests, and keeps every fulfilled one's attempts. Allowed on hold
-        (Ruling 14)."""
+        and failed payment requests, and keeps every fulfilled one's attempts. Allowed on
+        hold (Ruling 14). A pending request is money on its way, so it refuses the cancel
+        (`payment_in_flight`, #4959) until its provider settles it."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
@@ -1990,6 +2115,7 @@ class Lifecycle:
                 raise LifecycleError(
                     "order_not_cancellable", f"order {order.label} is {order.status}"
                 )
+            self._no_payment_in_flight(conn, order)
             change = _Change(order)
             every = self.store.items(order.id, conn=conn)
             for item in every:
@@ -1999,8 +2125,11 @@ class Lifecycle:
             # §3.4: cancelling the order releases every quote's sliced file.
             change.released = self._quote_ids(conn, (item.id for item in every))
             change.ended = True
-            # No one pays a cancelled order: its open requests end with it.
-            for open_request in payments.open_requests_for_order(conn, order.id):
+            # No one pays a cancelled order: its open and failed requests end with it
+            # (#4959: a failed one can still be approved again and captured).
+            for open_request in payments.requests_for_order(conn, order.id):
+                if open_request.status not in CAPTURABLE:
+                    continue
                 payments.set_request_status(conn, open_request.id, "cancelled")
                 self._event(
                     conn, order, by, "payment_request.cancelled", request_id=open_request.id

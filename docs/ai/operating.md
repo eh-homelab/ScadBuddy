@@ -484,7 +484,16 @@ fails mid-way (after tool calls ran) resumes the session on the next credential 
 short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
 credential is tried at most once per turn. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
-like `credential 2 (API key …abcd)`, never with the secret. When no credential is
+like `credential 2 (API key …abcd)`, never with the secret or the credential's name.
+What the person sees names a credential by its name too (#3710,
+`credentialDisplayLabel()`), as `credential 2 "Work" (API key …abcd)`. The panel shows
+each fallback as a `credential.fallback` event: which credential failed, how, and which
+one the turn continues on. A turn's `error` event that names a credential also carries
+`shown`, the same text with the name, which the panel shows in place of `message`.
+`message`, which logs, a flow's failure and the turn's outcome read, keeps the label.
+Logs, audit rows, `WebFetch` and `WebSearch` results and the "continue" prompt to the
+model keep the label without the name. The `sessions_*` tools return a session's events,
+so an MCP client sees these messages there, with the name as quoted data. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
 is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with `ai`
 set to one of:
@@ -513,9 +522,10 @@ to use them is Settings → Assistant → **Claude credentials** (`AiCredentialS
 #1000, #1093), a list over the `/entries` and `/order` routes in the order queries try
 the credentials.
 Each row shows the kind, base URL, last four and status (active, rate limited until a
-time, or disabled with the last error), and can be moved up or down, tested (showing
-`Retry-After` on a `429`), reset when not active, given a new key, or deleted after a
-confirmation; a form adds one last. The list is read again just after the earliest
+time, or disabled with the last error). A row with a name (#3710) shows the name as its
+title and the kind beside it. A row can be moved up or down, tested (showing
+`Retry-After` on a `429`), reset when not active, renamed, given a new key, or deleted
+after a confirmation; a form adds one last, with an optional name. The list is read again just after the earliest
 cooldown ends, since the status is worked out at read time. The `curl` below is the
 fallback when there is no UI.
 
@@ -532,11 +542,12 @@ in anything new.
 | `GET /api/v1/ai/credentials` | Read guard (#989) | Returns `configured`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `can_save` and `cannot_save_reason` (`view()`). It never returns the secret. `last4` is empty for a secret shorter than 12 characters (`last4()`, `secrets.ts`). |
 | `PUT /api/v1/ai/credentials` | Yes | Body `{ kind, base_url?, secret? }`, strict (`PutBody`). A `gateway` needs `base_url`, and `anthropic_api_key` and `claude_oauth_token` must not have one. `base_url` must be http(s), with no userinfo, query or fragment. It is normalised without a trailing slash (`normaliseBaseUrl()`). A gateway host is checked against the egress rules first (§5 of [security.md](security.md#egress-check-on-gateway-urls)). The secret must not contain whitespace. **Omitting `secret` keeps the stored one only if `kind` and `base_url` are unchanged**; otherwise the route answers `409` (`planPut()`). |
 | `DELETE /api/v1/ai/credentials` | Yes | Deletes the first credential and answers with the one that moved up into its place (`configured: false` when none is left). |
-| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
-| `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret }`; adds a credential last in priority and answers `201` with its entry. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
+| `GET /api/v1/ai/credentials/entries` | Read guard (#989) | Every credential in priority order, as `{ credentials, usable_now, recovers_at, can_save, cannot_save_reason }`. Each entry has `id`, `priority`, `kind`, `name`, `base_url`, `last4`, `updated_at`, `usable`, `status` (`active`, `cooling_down` or `disabled`), `cooldown_until`, `last_error`, `last_error_at` and `last_used_at` (`entryView()`). |
+| `POST /api/v1/ai/credentials/entries` | Yes | Body `{ kind, base_url?, secret, name? }`; adds a credential last in priority and answers `201` with its entry. `name` is optional, as for the rename route below. At most 100 are stored (`MAX_CREDENTIALS`); past that it answers `409`. |
 | `PUT /api/v1/ai/credentials/order` | Yes | Body `{ ids }`, every credential's id exactly once, first to last; otherwise `409`. Answers with the list. |
 | `PUT /api/v1/ai/credentials/entries/{id}` | Yes | Same body and rules as `PUT /api/v1/ai/credentials`, for one credential. A new secret makes it `active` again. |
 | `DELETE /api/v1/ai/credentials/entries/{id}` | Yes | Deletes one credential and answers with the list. |
+| `PUT /api/v1/ai/credentials/entries/{id}/name` | Yes | Body `{ name }`, strict (#3710). Sets the credential's name, or clears it with `null` or a blank string, and answers with its entry. The secret, status and `epoch` do not change. The name is trimmed. It is refused with `400` past 60 characters (`CREDENTIAL_NAME_MAX`) or with a control, format or line separator character (`normaliseCredentialName()`). It is a display label only: it need not be unique, it is not in the AAD, and it is not written to logs, audit rows or prompts (the audit row names the route, not the body). |
 | `POST /api/v1/ai/credentials/entries/{id}/reset` | Yes | Makes a `disabled` or `cooling_down` credential `active` again. |
 | `POST /api/v1/ai/credentials/entries/{id}/test` | Yes | Tests one credential, as below. A test does not change its status. |
 | `POST /api/v1/ai/credentials/test` | Yes | Runs a one-turn query (`maxTurns: 1`, `maxBudgetUsd: 0.05`, 60 s timeout, prompt `Reply with the single word: ok`) and returns `{ ok, detail, duration_ms, model }` (`testConnection()`, [`agent/src/harness/testConnection.ts`](../../agent/src/harness/testConnection.ts)). Only one test runs at a time, with at most one per 10 s (`DEFAULT_TEST_COOLDOWN_MS`); otherwise it answers `429` with `Retry-After`. The first `api_retry` is treated as the verdict, so a bad key fails fast. The model comes from `ai_settings.model` when set (`main.ts`). A gateway host is re-checked at test time. |

@@ -4,6 +4,7 @@ import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
 import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
+import { machineRateFor } from './machineRates'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
 import { retax } from './money'
@@ -108,24 +109,29 @@ function identity(f: Pick<Filament, 'material' | 'subtype' | 'brand' | 'colour'>
 
 /**
  * `orders/pricing.py` over `plates`: each slot's grams at the filament of the item's colour
- * slot, the plates' seconds at the machine rate, a setup fee per plate.
+ * slot, the plates' seconds at the machine rate, a setup fee per plate. `support` prices a
+ * slot that is no colour slot as its own `Support, …` filament line (#4625 §6.3), and
+ * `machineRate` is the rate of the printer it sliced for, in place of the book's.
  */
 export function pricePlates(
   plates: { index: number; print_seconds: number; filaments: { slot: number; used_g: number }[] }[],
   colours: { slot: number; filament_id?: string | null }[],
   currency: string,
+  { support = {}, machineRate }: { support?: Record<string, string>; machineRate?: string } = {},
 ): Pick<Quote, 'lines' | 'unit_cost_minor' | 'unit_price_minor'> {
   const exponent = minorExponent(currency)
-  const rules = policy()
+  const rules = machineRate === undefined ? policy() : { ...policy(), machine_rate_per_hour: machineRate }
   const lines: QuoteLine[] = []
   const grams = new Map<number, number>()
   for (const plate of plates) for (const f of plate.filaments) grams.set(f.slot, (grams.get(f.slot) ?? 0) + f.used_g)
   for (const [slot, used] of [...grams].sort((a, b) => a[0] - b[0])) {
-    const record = state.filaments.find((f) => f.id === colours.find((c) => c.slot === slot)?.filament_id)
+    const colour = colours.find((c) => c.slot === slot)
+    const record = state.filaments.find((f) => f.id === (colour ? colour.filament_id : support[String(slot)]))
     if (!record) continue
     const amount = toMinor((used * Number(record.cost_per_kg)) / 1000, exponent)
     const name = [record.material, record.subtype, record.colour_name].filter(Boolean).join(' ')
-    lines.push({ kind: 'filament', label: `${name}, ${used} g at ${record.cost_per_kg} per kg`, quantity: 1, unit_minor: amount, amount_minor: amount })
+    const label = `${name}, ${used} g at ${record.cost_per_kg} per kg`
+    lines.push({ kind: 'filament', label: colour ? label : `Support, ${label}`, quantity: 1, unit_minor: amount, amount_minor: amount })
   }
   if (Number(rules.machine_rate_per_hour)) {
     const seconds = plates.reduce((sum, plate) => sum + plate.print_seconds, 0)
@@ -155,9 +161,20 @@ export function pricePlates(
   return { lines, unit_cost_minor: cost, unit_price_minor: price }
 }
 
-/** `orders/pricing.py` over the mock's one plate. */
-function priced(colours: { slot: number; filament_id?: string | null }[], currency: string): Omit<Quote, 'id' | 'order_item_id' | 'created_at' | 'accepted' | 'quantity' | 'total_minor' | 'created_by'> {
-  const filaments = colours.map((colour, index) => ({ slot: colour.slot, used_g: MOCK_SLICE.grams[index] ?? 1 }))
+/** `orders/pricing.py` over the mock's one plate: each support slot uses the grams of
+ * `MOCK_SLICE` at its own index, and the quote is priced at, and records, the machine rate of
+ * the printer it names (#4625). */
+function priced(
+  colours: { slot: number; filament_id?: string | null }[],
+  currency: string,
+  request: Pick<SliceQuoteRequest, 'printer' | 'printer_id' | 'support_filaments'> = {},
+): Omit<Quote, 'id' | 'order_item_id' | 'created_at' | 'accepted' | 'quantity' | 'total_minor' | 'created_by'> {
+  const support = request.support_filaments ?? {}
+  const filaments = [
+    ...colours.map((colour, index) => ({ slot: colour.slot, used_g: MOCK_SLICE.grams[index] ?? 1 })),
+    ...Object.keys(support).map((slot) => ({ slot: Number(slot), used_g: MOCK_SLICE.grams[Number(slot)] ?? 1 })),
+  ]
+  const rate = machineRateFor(request.printer, request.printer_id)
   const sha = 'b'.repeat(64)
   return {
     source: 'slice',
@@ -172,7 +189,12 @@ function priced(colours: { slot: number; filament_id?: string | null }[], curren
         sha256: sha,
       },
     ],
-    ...pricePlates([{ index: 1, print_seconds: MOCK_SLICE.seconds, filaments }], colours, currency),
+    ...pricePlates([{ index: 1, print_seconds: MOCK_SLICE.seconds, filaments }], colours, currency, {
+      support,
+      machineRate: rate?.source === 'profile' ? rate.rate_per_hour : undefined,
+    }),
+    printer: rate?.printer ?? null,
+    machine_rate_breakdown: rate,
   }
 }
 
@@ -311,7 +333,7 @@ export const handlers = [
         accepted: false,
         quantity: found.quantity,
         created_by: BROWSER,
-        ...priced(found.colours, order.currency),
+        ...priced(found.colours, order.currency, body),
         total_minor: 0,
       }
       made.total_minor = made.unit_price_minor * made.quantity

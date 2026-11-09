@@ -768,7 +768,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
   the address while such an option stays (`_no_option_ships`, the same slug). A payment
-  that reaches the deposit pays the open `deposit` requests, a provider's as a manual one
+  that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
+  page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
@@ -1021,13 +1022,32 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `stripe.py` (#4958: a request is a Checkout Session; `Stripe-Signature` checked by our
   own code, no SDK; the facts it rests on, each with its Stripe link, are its docstring),
   `paypal.py` (#4959: a request is an Orders v2 order to capture; `CHECKOUT.ORDER.APPROVED`
-  captures it from the webhook path and the capture's events record it; each webhook is
-  checked by PayPal's verify-webhook-signature call with the raw body; the OAuth token is
-  cached in memory, never stored; a cancel marks the order's `custom_id` so a later
-  approval is not captured (a failed mark is logged and the housekeeping sweep below tries
-  it again with a backoff: 5 minutes first, the wait doubling, at most a day; until a try
-  lands, a later approval is still captured, and such a capture, like one made before the
-  mark, is recorded on the cancelled request); the facts, each with its PayPal link, are its docstring),
+  is the `approved` event, and ScadBuddy captures it (`CapturingProvider.capture_request`):
+  under the order lock the lifecycle moves an open or failed request of an order that
+  still takes money to `pending` and commits, then `Payments._capture` calls PayPal with no
+  lock held; a capture PayPal refused or declined puts the request back to `failed` in a
+  second transaction (`Lifecycle.capture_failed`), and one whose outcome is unknown (no
+  answer) leaves it `pending` and keeps the event's row, so PayPal's retry reads `replayed`
+  and captures again under the same key, only for the approval that last moved it to `pending` (named on that audit row,
+  `Lifecycle.approval_pending`) and
+  never on an order ended since. When PayPal stops retrying, the
+  `housekeeping_settle_payment_captures` sweep (both Schedules, behind its patch) calls
+  `Payments.settle_captures`: the requests an approval moved to `pending`
+  (`capture_pending_at`, set by `mark_capture_pending`, cleared once the request leaves
+  `pending`) whose wait is over (`captures_due`: `CAPTURE_SETTLE_FIRST_MINUTES` after the
+  approval or the last read, doubled per unknown read, at most a day; claimed `FOR UPDATE
+  SKIP LOCKED`), read with no lock held (`CapturingProvider.read_capture`). A capture
+  found is recorded through `record_provider_event` (keyed `capture:<id>`; a later webhook
+  writes no second payment, matched by the order) and its closes run; a pending one stops
+  the reads; an `APPROVED` order with no capture is captured again under the approval's
+  key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
+  (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
+  `CAPTURE_GIVE_UP_ATTEMPTS` unknown reads (`capture_unsettled`) mark it `failed`. The capture's events record the money. Each
+  webhook is checked by PayPal's verify-webhook-signature call with the raw body; the
+  OAuth token is cached in memory, never stored; a cancel ends open and failed requests
+  (`CAPTURABLE`) and marks the order's `custom_id` as defence in depth (a failed mark is
+  tried again by the housekeeping sweep below, with a backoff); the facts, each with its
+  PayPal link, are its docstring),
   `square.py` (#5666: a request is a quick-pay payment link and its reference is the link's
   Square order id, which each payment carries; `x-square-hmacsha256-signature` checked by our
   own code over the notification URL setting and the raw body; a cancel finds the order's
@@ -1075,7 +1095,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Square adds the fee in a later update). A `pending` event (a bank debit on its way)
   moves an open request to `pending`, and `failed` moves an open or pending one to
   `failed`; neither writes money, a pending request is never cancelled or closed by a
-  manual payment, and a disconnect is refused while one is pending. A `refund_failed`
+  manual payment, and refuses its order's cancel (`payment_in_flight`). A disconnect is
+  refused while a request is pending or failed: a failed one holds its provider until it is
+  cancelled (#4959; PayPal's page of a failed request can still be approved, and
+  `ProviderStatus.reapprovable` says so, which the order page's note reads). A cancel (of
+  the request or its order) ends a `failed` request as well as an open one, and asks its
+  provider to close its page too (Stripe's `cancel_request` reads a completed session as
+  closed). A `refund_failed`
   event (#5681; Stripe sends it for every `failed` or `canceled` Refund) names the
   refund's event id (`ProviderEvent.reverses`, kept on its `payment_events` row). When
   that refund was recorded, it writes a positive payment that cancels the refund's row,

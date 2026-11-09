@@ -4,6 +4,7 @@ import {
   type Credential,
   type CredentialEvent,
   type CredentialRepo,
+  credentialDisplayLabel,
   credentialLabel,
   describeUnusable,
   soonestRecovery,
@@ -98,8 +99,10 @@ export type PooledCredential = {
   id: string
   /** The row's epoch when read; a failure recorded against an older one is ignored. */
   epoch: number
-  /** For logs and audit: kind and last four characters, never the secret. */
+  /** For logs, audit and the model: kind and last four characters, never the secret or the name. */
   label: string
+  /** For text the person sees only (#3710): `label` with the credential's name; `label` when omitted. */
+  displayLabel?: string
   credential: Credential
 }
 
@@ -117,13 +120,29 @@ export type CredentialSource = {
   reporter(context: { sessionId?: string; turnId?: string }): FallbackOptions['report']
 }
 
-/** Thrown when no credential can be used now; `recoversAt` is the soonest one usable again, if any will be on its own. */
+/**
+ * Thrown when no credential can be used now; `recoversAt` is the soonest one usable again, if
+ * any will be on its own. `shown` is the same with each credential's name (#3710), for the
+ * person only: `message` is what logs, tool results and the model get.
+ */
 export class NoUsableCredentialError extends Error {
   override name = 'NoUsableCredentialError'
   readonly recoversAt: Date | undefined
-  constructor(message: string, recoversAt: Date | undefined) {
+  readonly shown: string
+  constructor(message: string, recoversAt: Date | undefined, shown: string = message) {
     super(message)
     this.recoversAt = recoversAt
+    this.shown = shown
+  }
+}
+
+/** The last credential failed and no other was tried; `shown` names it by its name (#3710), for the person only. */
+export class CredentialFailedError extends Error {
+  override name = 'CredentialFailedError'
+  readonly shown: string
+  constructor(message: string, shown: string) {
+    super(message)
+    this.shown = shown
   }
 }
 
@@ -170,6 +189,12 @@ export type FallbackOptions = {
    * (#2973), so it need not know which candidate comes first (#3508 review).
    */
   onAttempt?: (credential: PooledCredential, index: number) => void
+  /**
+   * Called when the turn moves from `from` to `to`, after `report` recorded how `from` failed
+   * (#3710): the session manager tells the person which credential failed and which one the
+   * turn continues on. The model is told only CONTINUE_PROMPT, which names neither.
+   */
+  onFallback?: (from: PooledCredential, outcome: AttemptOutcome, to: PooledCredential) => void
   /**
    * The SDK session every attempt runs in, when the caller fixes it: a warm
    * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
@@ -487,6 +512,7 @@ export async function* runWithFallback(
       spend.usd + own >= (base.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD)
     const fallTo = exhausted ? undefined : next
     await options.report(current, outcome, fallTo)
+    if (fallTo) options.onFallback?.(current, outcome, fallTo)
     if (verdict === 'rate_limited' && outcome.class === 'rate_limited') {
       const provisional = outcome.until
       pending.push(
@@ -518,7 +544,10 @@ export async function* runWithFallback(
         const what =
           outcome.class === 'permanent' ? 'was refused' : outcome.class === 'rate_limited' ? 'is rate limited' : 'failed'
         const why = next ? "; no other credential was tried, since the turn's turns or budget are used up" : ''
-        throw new Error(`the Claude credential (${current.label}) ${what}: ${reason}${why}`)
+        throw new CredentialFailedError(
+          `the Claude credential (${current.label}) ${what}: ${reason}${why}`,
+          `the Claude credential (${current.displayLabel ?? current.label}) ${what}: ${reason}${why}`,
+        )
       }
       // With the totals as they were before this attempt: its result already counts itself.
       yield* release()
@@ -571,9 +600,15 @@ export class CredentialPool implements CredentialSource {
     const out: PooledCredential[] = []
     for (const { stored: c, credential } of rows) {
       if (!credential || (c.status !== 'active' && !(options.includeCooling && c.status === 'cooling_down'))) continue
-      out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), credential })
+      out.push({ id: c.id, epoch: c.epoch, label: credentialLabel(c), displayLabel: credentialDisplayLabel(c), credential })
     }
-    if (out.length === 0) throw new NoUsableCredentialError(describeUnusable(list, kek), soonestRecovery(list, kek))
+    if (out.length === 0) {
+      throw new NoUsableCredentialError(
+        describeUnusable(list, kek),
+        soonestRecovery(list, kek),
+        describeUnusable(list, kek, credentialDisplayLabel),
+      )
+    }
     return out
   }
 
