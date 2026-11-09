@@ -58,7 +58,7 @@ KEY_LOOKUP_BURST = 5
 KEY_LOOKUP_SECONDS = 5.0
 SOURCE_LOOKUP_BURST = 2
 SOURCE_LOOKUP_SECONDS = 60.0
-#: Sources with a bucket of their own; the least recently seen is forgotten past it.
+#: Sources with a bucket of their own; the least recently admitted is forgotten past it.
 MAX_LOOKUP_SOURCES = 1024
 
 WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]
@@ -227,18 +227,19 @@ class KeyLookups:
 
     def take(self, source: str) -> float:
         """0 and one token from both buckets, or the seconds until the refusing bucket
-        holds one again."""
+        holds one again. Only an admitted lookup keeps or refreshes its source's bucket, so
+        refused senders cycling addresses cannot push out a bucket that is spent."""
         with self._lock:
             limit = self._sources.get(source)
             if limit is None:
                 limit = RateLimit(self._source_burst, 1 / self._source_every, self._clock)
-            _keep(self._sources, source, limit, MAX_LOOKUP_SOURCES)
             for bucket in (limit, self._process):
                 wait = bucket.retry_after()
                 if wait > 0:
                     return wait
             limit.take()
             self._process.take()
+            _keep(self._sources, source, limit, MAX_LOOKUP_SOURCES)
             return 0.0
 
 
