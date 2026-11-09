@@ -51,8 +51,8 @@ class StorefrontSettings(BaseSettings):
     service_bootstrap_file: Path | None = None
     #: The cookie's signing key: its own, never the KEK.
     storefront_cookie_key_file: Path
-    #: The page's origin, as the browser sees it. A later task's `Origin` check compares
-    #: to it.
+    #: The page's origin, as the browser sees it: a write's ``Origin`` must be it
+    #: (`app.py` `CrossSiteGate`).
     storefront_public_url: str
     trusted_proxies: str = ""
     log_level: str = "INFO"

@@ -1,7 +1,7 @@
 """`/api/v1/storefront` (#5282, spec 2026-11-02 §5.3): the back office's Storefront page.
 The shop lists, makes, edits, orders, publishes and deletes the listings the public site
 offers (`orders/storefront/listings.py`). These routes are the back office's only: the
-public site gets its own read of the published listings in a later task, never these.
+public site reads the published listings through `api/crud_storefront.py`, never these.
 
 An edit names the ``updated_at`` the editor read (409 ``listing_changed`` when the
 listing moved on), and unpublishes the listing. A delete is refused while the listing is
