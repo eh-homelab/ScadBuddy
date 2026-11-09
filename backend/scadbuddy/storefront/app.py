@@ -43,8 +43,8 @@ from scadbuddy.core.problems import (
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
-from scadbuddy.storefront.ratelimit import RequestLimit
-from scadbuddy.storefront.routes import router, visitor_router
+from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
+from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
@@ -113,6 +113,9 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     app.state.crud = client
     # Parsed once here, not on each request (`routes.py` `_client`).
     app.state.trusted_proxies = parse_cidr_list(settings.trusted_proxies)
+    # Design requests: their own allowance per client, and "Ask for a design" as read last.
+    app.state.upload_allowance = UploadAllowance()
+    app.state.requests_enabled = RequestsEnabled()
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)

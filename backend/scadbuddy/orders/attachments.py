@@ -26,7 +26,9 @@ import os
 import re
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders.models import AttachmentKind
@@ -119,13 +121,24 @@ def blob_key(sha256: str) -> str:
     return f"attachment-{sha256}"
 
 
-def _place(blobs: BlobStore, key: str, claims: ClaimStore, claim: str) -> None:
-    """The claim's bytes as the blob's `BLOB_FILE`: linked where the volume allows it
-    (a video runs to a gigabyte), copied otherwise, and moved into place under a name
-    of its own, so two runs of the same bytes never leave half a file for the other."""
+def _place(blobs: BlobStore, key: str, write: Callable[[Path], None]) -> None:
+    """``write``'s file as the blob's `BLOB_FILE`, moved into place under a name of its
+    own, so two runs of the same bytes never leave half a file for the other."""
     directory = blobs.dir_for(key)
     staging = directory / f".{BLOB_FILE}.{uuid.uuid4().hex}"
     try:
+        write(staging)
+        os.replace(staging, directory / BLOB_FILE)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            staging.unlink()
+
+
+def _claimed(claims: ClaimStore, claim: str) -> Callable[[Path], None]:
+    """The claim's bytes at a path: linked where the volume allows it (a video runs to a
+    gigabyte), copied otherwise."""
+
+    def write(staging: Path) -> None:
         try:
             claims.link(claim, staging)
         except OSError as error:
@@ -133,15 +146,36 @@ def _place(blobs: BlobStore, key: str, claims: ClaimStore, claim: str) -> None:
                 raise
             with claims.open(claim) as source, staging.open("xb") as out:
                 shutil.copyfileobj(source, out, 1 << 20)
-        os.replace(staging, directory / BLOB_FILE)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            staging.unlink()
+
+    return write
+
+
+def _copied(source: BinaryIO) -> Callable[[Path], None]:
+    """``source``'s bytes, from its start, at a path."""
+
+    def write(staging: Path) -> None:
+        source.seek(0)
+        with staging.open("xb") as out:
+            shutil.copyfileobj(source, out, 1 << 20)
+
+    return write
 
 
 async def keep(blobs: BlobStore, claims: ClaimStore, claim: str, sha256: str) -> str:
-    """The claim kept and published as the blob ``attachment-<sha256>``; its key.
-    ``LookupError`` when the claim is gone.
+    """The claim kept and published as the blob ``attachment-<sha256>`` (`_keep`); its
+    key. ``LookupError`` when the claim is gone."""
+    return await _keep(blobs, sha256, _claimed(claims, claim))
+
+
+async def keep_file(blobs: BlobStore, source: BinaryIO, sha256: str) -> str:
+    """``source`` (a file whose sha256 is ``sha256``) kept as `keep` keeps a claim: the
+    storefront's design request uploads (#5282)."""
+    return await _keep(blobs, sha256, _copied(source))
+
+
+async def _keep(blobs: BlobStore, sha256: str, write: Callable[[Path], None]) -> str:
+    """The bytes ``write`` writes, kept and published as the blob
+    ``attachment-<sha256>``; its key.
 
     Bytes the store holds already (the same photo on a second item) are its blob as it
     is: a publish over it from a directory fetched before it existed (a cache that
@@ -156,7 +190,7 @@ async def keep(blobs: BlobStore, claims: ClaimStore, claim: str, sha256: str) ->
     key = blob_key(sha256)
     if await blobs.claim(key):
         return key
-    await asyncio.to_thread(_place, blobs, key, claims, claim)
+    await asyncio.to_thread(_place, blobs, key, write)
     try:
         await blobs.publish_fresh(key, scope=BlobScope(), expected=None)
     except StaleBlobError:

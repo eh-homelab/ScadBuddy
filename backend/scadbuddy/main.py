@@ -115,6 +115,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -198,6 +199,7 @@ from scadbuddy.workflows.housekeeping import (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
+    STOREFRONT_DRAFTS_SWEEP,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
     ensure_schedules,
@@ -725,6 +727,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sync_bank_deposits() -> None:
         await _heartbeating(_sync_bank_deposits_logged(state))
 
+    @activity.defn(name=STOREFRONT_DRAFTS_SWEEP)
+    async def sweep_storefront_drafts() -> None:
+        await _heartbeating(_sweep_storefront_drafts_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -752,6 +758,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         retry_payment_closes,
         settle_payment_captures,
         sync_bank_deposits,
+        sweep_storefront_drafts,
     ]
 
 
@@ -1244,6 +1251,40 @@ async def _sync_bank_deposits_logged(state: AppState) -> None:
         raise
     if suggested:
         logger.info("suggested deposit matches", extra={"count": suggested})
+
+
+#: How long a visitor's `storefront_renders` rows are kept: the render limits count a
+#: day at most (#5282).
+STOREFRONT_RENDERS_TTL = timedelta(days=1)
+
+
+def _sweep_storefront(
+    state: AppState, *, now: datetime | None = None
+) -> tuple[list[str], int, int]:
+    days = state.settings_store.snapshot().runtime.storefront_draft_ttl_days
+    now = datetime.now(UTC) if now is None else now
+    before = now - timedelta(days=days)
+    drafts = state.components.get(ORDERS).lifecycle.sweep_drafts(before)
+    with state.projection.pool.connection() as conn:
+        visitors, renders = VisitorStore.sweep(
+            conn, visitors_before=before, renders_before=now - STOREFRONT_RENDERS_TTL
+        )
+    return drafts, visitors, renders
+
+
+async def _sweep_storefront_drafts_logged(state: AppState) -> None:
+    """#5282: the storefront carts idle past ``storefront_draft_ttl_days``, then the
+    visitors idle as long with no order, and the visitors' renders past a day."""
+    try:
+        drafts, visitors, renders = await asyncio.to_thread(_sweep_storefront, state)
+    except Exception:
+        logger.exception("could not sweep the idle storefront carts")
+        raise
+    if drafts or visitors or renders:
+        logger.info(
+            "swept idle storefront carts",
+            extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
+        )
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:

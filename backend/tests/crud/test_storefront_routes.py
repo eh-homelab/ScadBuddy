@@ -57,7 +57,7 @@ class _Noted:
 
 def make_client(mode: str = "off") -> TestClient:
     """The CRUD routers behind the real `auth_check` and gate, as `main.py` mounts them,
-    with a probe route that takes the visitor and client headers (`GET /draft` is Task 8's)
+    with a probe route that takes the visitor and client headers
     and a back-office route (class ``api``)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     auth = SimpleNamespace(would_refuse=_Noted())
@@ -72,8 +72,8 @@ def make_client(mode: str = "off") -> TestClient:
     def orders() -> list[str]:
         return []
 
-    @probe.get("/draft")
-    def draft(
+    @probe.get("/probe")
+    def probe_route(
         visitor: Annotated[str, Depends(visitor_id)], client: Annotated[str, Depends(store_client)]
     ) -> dict[str, str]:
         return {"visitor": visitor, "client": client}
@@ -119,7 +119,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
-    assert r.json() == {"areas": ["listings", "renders", "pay"]}
+    assert r.json() == {"areas": ["listings", "renders", "drafts", "requests", "pay"]}
 
 
 def test_the_storefront_routes_are_not_in_the_schema() -> None:
@@ -139,7 +139,7 @@ def test_a_malformed_visitor_token_is_400(
     client: TestClient, storefront_token: str, token: str
 ) -> None:
     r = client.get(
-        "/api/v1/internal/crud/storefront/draft",
+        "/api/v1/internal/crud/storefront/probe",
         headers={**bearer(storefront_token), VISITOR_HEADER: token, CLIENT_HEADER: "203.0.113.1"},
     )
     assert r.status_code == 400
@@ -149,7 +149,7 @@ def test_a_malformed_visitor_token_is_400(
 
 def test_a_missing_visitor_header_is_400(client: TestClient, storefront_token: str) -> None:
     r = client.get(
-        "/api/v1/internal/crud/storefront/draft",
+        "/api/v1/internal/crud/storefront/probe",
         headers={**bearer(storefront_token), CLIENT_HEADER: "203.0.113.1"},
     )
     assert r.status_code == 400
@@ -163,7 +163,7 @@ def test_a_client_that_is_not_an_ip_address_is_400(
     headers = {**bearer(storefront_token), VISITOR_HEADER: VISITOR}
     if address is not None:
         headers[CLIENT_HEADER] = address
-    r = client.get("/api/v1/internal/crud/storefront/draft", headers=headers)
+    r = client.get("/api/v1/internal/crud/storefront/probe", headers=headers)
     assert r.status_code == 400
     assert r.json()["type"].endswith("/storefront/store_client")
 
@@ -173,7 +173,7 @@ def test_a_well_formed_visitor_and_client_pass(
     client: TestClient, storefront_token: str, address: str
 ) -> None:
     r = client.get(
-        "/api/v1/internal/crud/storefront/draft",
+        "/api/v1/internal/crud/storefront/probe",
         headers={**bearer(storefront_token), VISITOR_HEADER: VISITOR, CLIENT_HEADER: address},
     )
     assert r.status_code == 200
@@ -193,7 +193,7 @@ def test_the_other_callers_keep_their_paths(client: TestClient, render_token: st
 def test_the_edge_waits_for_every_area_it_calls() -> None:
     """The edge serves only once the API lists each area it calls, and the API lists
     only areas it serves whole."""
-    assert {"listings", "renders", "pay"} == EDGE_AREAS
+    assert {"listings", "renders", "drafts", "requests", "pay"} == EDGE_AREAS
     assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
 
 

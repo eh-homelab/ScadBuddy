@@ -25,6 +25,20 @@ the visitor who asked for that render, and 404 ``render_not_found`` for any othe
 that is not a render is 422 ``render_body_invalid``: every refusal a visitor can cause is a
 storefront problem, which the edge passes on.
 
+Area ``drafts`` (`orders/storefront/drafts.py`): ``GET …/draft`` is the visitor's draft
+order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at the visitor's
+values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
+``Idempotency-Key``, 428 without). Another visitor's item is 404 ``item_not_found``. A body
+that is not an item is 422 ``draft_body_invalid``.
+
+Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
+the edge refuses a request before it reads the body. ``POST …/draft/requests`` (multipart
+``text`` and ``files``, ``Idempotency-Key`` required) adds a design request with its files.
+It refuses 404 ``requests_disabled`` before it reads the body; then the body is read with
+its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
+each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
+edge's checks.
+
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
 edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
@@ -51,6 +65,13 @@ from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront.drafts import (
+    add_listing_item,
+    add_request,
+    get_draft,
+    remove_item,
+    requests_disabled,
+)
 from scadbuddy.orders.storefront.listings import (
     problem,
     public_content,
@@ -64,12 +85,15 @@ from scadbuddy.orders.storefront.renders import (
     store_render,
 )
 from scadbuddy.orders.storefront.wire import (
+    AddListingItem,
+    DraftView,
     PublicListing,
     PublicListings,
     RenderBody,
     StoreRender,
 )
 from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
+from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
     STORE_CLIENT_PROBLEM,
@@ -145,20 +169,25 @@ async def listing(
     return await public_listing(content, found, filaments)
 
 
-async def _render_body(request: Request) -> RenderBody:
-    """The request's `RenderBody`; 422 ``render_body_invalid`` for any other body. Read
-    with `json.loads`, so a number no float holds reaches `listing_values`, which refuses
-    it as ``input_outside_listing``."""
+async def _body[Body: BaseModel](
+    request: Request, model: type[Body], slug: str, detail: str
+) -> Body:
+    """The request's ``model``; 422 ``slug`` for any other body. Read with `json.loads`,
+    so a number no float holds reaches `listing_values`, which refuses it as
+    ``input_outside_listing``."""
     try:
         raw: Any = json.loads(await request.body())
-        return RenderBody.model_validate(raw)
+        return model.model_validate(raw)
     except (ValueError, RecursionError, ValidationError):
         # A body nested past the parser's depth is a `RecursionError`.
-        raise problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "render_body_invalid",
-            "This request is not a render of a listing.",
-        ) from None
+        raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, slug, detail) from None
+
+
+async def _render_body(request: Request) -> RenderBody:
+    """The request's `RenderBody`; 422 ``render_body_invalid`` for any other body."""
+    return await _body(
+        request, RenderBody, "render_body_invalid", "This request is not a render of a listing."
+    )
 
 
 @router.post(
@@ -231,6 +260,110 @@ async def render_estimate_route(
     """The rough price of the visitor's done render: "about $X, confirmed after we check
     it", never a quote."""
     return await render_estimate(state, visitor, job_id)
+
+
+@router.get("/draft", name="crud_storefront_draft")
+async def draft(state: StateDep, visitor: Visitor, _client: StoreClient) -> DraftView | None:
+    """The visitor's draft order; ``null`` when it has none."""
+    return await get_draft(state, visitor)
+
+
+@router.post(
+    "/draft/items",
+    name="crud_storefront_draft_add",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": AddListingItem.model_json_schema()}},
+        }
+    },
+)
+async def draft_add(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """A listing at the visitor's values added to its draft
+    (`orders/storefront/drafts.py` `add_listing_item`)."""
+    key = required_key(idempotency_key)
+    body = await _body(
+        request, AddListingItem, "draft_body_invalid", "This request is not an item of a listing."
+    )
+    return await add_listing_item(state, visitor, key, body)
+
+
+@router.delete("/draft/items/{item_id}", name="crud_storefront_draft_remove")
+async def draft_remove(
+    item_id: str,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """An item taken off the visitor's draft; 404 ``item_not_found`` unless it is on it."""
+    key = required_key(idempotency_key)
+    return await remove_item(state, visitor, key, item_id)
+
+
+def _requests_enabled(state: StateDep) -> bool:
+    return state.settings_store.snapshot().runtime.storefront_requests_enabled
+
+
+class RequestsEnabled(BaseModel):
+    enabled: bool
+
+
+@router.get("/requests-enabled", name="crud_storefront_requests_enabled")
+async def requests_enabled(
+    state: StateDep, _visitor: Visitor, _client: StoreClient
+) -> RequestsEnabled:
+    """Whether "Ask for a design" is on (``storefront_requests_enabled``)."""
+    return RequestsEnabled(enabled=await asyncio.to_thread(_requests_enabled, state))
+
+
+@router.post(
+    "/draft/requests",
+    name="crud_storefront_draft_request",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                            "text": {"type": "string"},
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string", "format": "binary"},
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def draft_request(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """A design request added to the visitor's draft
+    (`orders/storefront/drafts.py` `add_request`)."""
+    key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state):
+        raise requests_disabled()
+    upload = await read_request(request)
+    try:
+        return await add_request(state, visitor, key, text=upload.text, files=upload.files)
+    finally:
+        await upload.close()
 
 
 class PayCheckoutRead(BaseModel):

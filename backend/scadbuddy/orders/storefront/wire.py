@@ -1,6 +1,7 @@
 """The storefront listing's shapes (#5282, spec 2026-11-02 §5.3): the back office's body,
-the stored row, what publish captures from the template's commit, and the public site's
-view of a published listing (`PublicListing`).
+the stored row, what publish captures from the template's commit, the public site's
+view of a published listing (`PublicListing`), a visitor's render and its draft order
+(`DraftView`).
 
 A listing offers one commit of a template. Each parameter a customer may change has a
 bound (``ParamBound``) inside the schema's own; every other parameter is fixed. Publish
@@ -19,9 +20,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.orders.models import ItemKind
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
+)
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILES as MAX_REQUEST_FILES,
+)
+from scadbuddy.storefront.wire import (
+    REQUEST_KINDS as REQUEST_KINDS,
+)
 
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
@@ -244,3 +255,51 @@ class StoreRender(BaseModel):
     #: The edge's path of the preview, once the render is done.
     preview_url: str | None
     error: str | None
+
+
+# -- the visitor's draft (Task 8) ------------------------------------------------------
+
+
+class AddListingItem(RenderBody):
+    """``POST …/storefront/draft/items``: the listing at the visitor's values, as a render
+    of it takes them, and how many to make. The CRUD side checks every value against the
+    listing (`inputs.py` `listing_values`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int = Field(1, ge=1, le=100, strict=True)
+
+
+#: What a visitor's file is, as its bytes say: one of `REQUEST_KINDS`, else ``other``.
+DraftFileKind = Literal["image", "video", "pdf", "other"]
+
+
+class DraftAttachment(BaseModel):
+    """A file of an item, as a presigned GET (`PUBLIC_MEDIA_TTL`) that downloads it, with
+    its sniffed media type."""
+
+    filename: str
+    kind: DraftFileKind
+    url: str
+
+
+class DraftItem(BaseModel):
+    """An item of the visitor's draft. ``inputs`` are a model item's parameter values,
+    ``notes`` a request's text; each is None on the other kind."""
+
+    id: str
+    kind: ItemKind
+    title: str
+    quantity: int
+    inputs: dict[str, ParamValue] | None
+    notes: str | None
+    attachments: list[DraftAttachment]
+
+
+class DraftView(BaseModel):
+    """The visitor's draft order: no number and no customer until it is submitted."""
+
+    id: str
+    currency: str
+    minor_exponent: int
+    items: list[DraftItem]

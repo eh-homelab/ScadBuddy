@@ -345,6 +345,8 @@ class NewItem:
 class NewModelItem(NewItem):
     resolved: ResolvedReference
     output_id: str | None = None
+    #: The parameter names a storefront listing offered (#5282); None for any other add.
+    storefront_offered: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -602,6 +604,12 @@ class Lifecycle:
                 ),
             )
 
+    def told(self, order: Order, items: Sequence[OrderItem] = ()) -> None:
+        """Tell the bus of a transition that ran in the caller's transaction (``conn``),
+        once that has committed: ``order`` as the caller read it inside that transaction
+        (so a later change, a submit among them, never colours the event), and ``items``."""
+        self._told(_Change(order, [(item, None) for item in items]))
+
     def _lock(self, conn: Conn, order_id: str) -> Order:
         try:
             return self.store.lock_order(conn, order_id)
@@ -635,6 +643,16 @@ class Lifecycle:
     def _not_ended(order: Order) -> None:
         if order.status in ENDED:
             raise LifecycleError(f"order_{order.status}", f"order {order.label} is {order.status}")
+
+    @staticmethod
+    def _visitors_cart(order: Order, visitor_id: str | None) -> None:
+        """For a visitor's write (#5282): `order_not_found` unless ``order`` is the
+        unsubmitted cart of the visitor row ``visitor_id``, so another visitor's cart, or
+        one submitted meanwhile, reads as no order. None checks nothing."""
+        if visitor_id is None:
+            return
+        if order.storefront_visitor_id != visitor_id or not order.unsubmitted:
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)
@@ -748,6 +766,30 @@ class Lifecycle:
             self._event(conn, order, by, "order.created", source="storefront")
         self._told(_Change(order))
         return order
+
+    def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
+        """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
+        housekeeping sweep, after ``storefront_draft_ttl_days``): the candidates
+        (`OrderStore.idle_drafts`), then each in its own transaction (`sweep_draft`). A
+        submitted or back office order is never taken. The ids deleted."""
+        with self.store.transaction() as conn:
+            listed = self.store.idle_drafts(conn, before=before, limit=limit)
+        return [order_id for order_id in listed if self.sweep_draft(order_id, before)]
+
+    def sweep_draft(self, order_id: str, before: datetime) -> bool:
+        """One cart of the sweep, in one transaction: locked and checked again
+        (`OrderStore.claim_idle_draft`), so a cart a visitor touched, changed, wrote to
+        or submitted since the listing loses nothing; then its attachments with their
+        holds (`OrderStore.delete_attachment`), then the order, whose items cascade.
+        Whether it was deleted."""
+        with self.store.transaction() as conn:
+            if not self.store.claim_idle_draft(conn, order_id, before=before):
+                return False
+            for attachment in self.store.attachments(order_id, conn=conn):
+                self.store.delete_attachment(conn, attachment.id)
+            if not self.store.delete_draft(conn, order_id):
+                raise RuntimeError(f"cart {order_id} was claimed but not deleted")
+        return True
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
@@ -2813,10 +2855,12 @@ class Lifecycle:
         entries: Sequence[NewItem],
         *,
         after_acceptance: bool = False,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
     ) -> list[OrderItem]:
         """Each entry added as its single add adds it, in order, in one transaction (#4777,
         order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
-        `add_item`'s, for every entry."""
+        `add_item`'s, for every entry. ``cart_of`` and ``conn`` as `delete_item`'s."""
         for entry in entries:
             if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
                 raise LifecycleError(
@@ -2824,18 +2868,18 @@ class Lifecycle:
                     "accept: an item added after acceptance needs its quote accepted on its own",
                     unprocessable=True,
                 )
-        with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
+        with self.store.transaction(conn) as tx:
+            order = self._lock(tx, order_id)
+            self._visitors_cart(order, cart_of)
             self._takes_item(order, after_acceptance)
             if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
                 self._not_on_hold(order)
-            items = [
-                self._insert_new(conn, order, by, entry, after_acceptance) for entry in entries
-            ]
+            items = [self._insert_new(tx, order, by, entry, after_acceptance) for entry in entries]
             # Once for the whole add, not once per item.
-            self._retax(conn, order, by)
-            order = self._rederive(conn, order, by)
-        self._told(_Change(order, [(item, None) for item in items]))
+            self._retax(tx, order, by)
+            order = self._rederive(tx, order, by)
+        if conn is None:
+            self._told(_Change(order, [(item, None) for item in items]))
         return items
 
     def duplicate_item(
@@ -2988,6 +3032,7 @@ class Lifecycle:
             notes=entry.notes,
             sku=entry.sku,
             origin_archive_ids=entry.origin_archive_ids,
+            storefront_offered=entry.storefront_offered,
         )
         self._added(conn, order, item, by, after_acceptance)
         item, _ = self._revise(
@@ -3283,12 +3328,27 @@ class Lifecycle:
             for slot in slots
         ]
 
-    def delete_item(self, order_id: str, item_id: str, by: Actor) -> None:
+    def delete_item(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        *,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
+    ) -> None:
         """Only a `draft` item with no print attempt, a test print's too, deletes
         (Ruling 6, 10); else `item_not_draft`, and the caller decides whether to cancel
-        it."""
-        with self.store.transaction() as conn:
+        it.
+
+        With ``cart_of`` (a visitor's row id, #5282) the order must be that visitor's
+        unsubmitted cart, checked under the order's lock; any other is `order_not_found`.
+        With ``conn`` the delete runs in the caller's transaction, and the caller tells the
+        bus (`told`) once that commits."""
+        tell = conn is None
+        with self.store.transaction(conn) as conn:
             order = self._lock(conn, order_id)
+            self._visitors_cart(order, cart_of)
             item = self._item_of(conn, order, item_id)
             if self.store.fulfilments(item.id, conn=conn, purpose=None):
                 # A test print's attempt and the sliced file it holds (storefront spec
@@ -3338,7 +3398,8 @@ class Lifecycle:
             self._event(conn, order, by, "item.deleted", item_id=item.id)
             self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
-        self._told(_Change(order))
+        if tell:
+            self._told(_Change(order))
 
     def cancel_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
         """From any open state (§3.5); allowed on hold (Ruling 14)."""
@@ -4856,16 +4917,21 @@ class Lifecycle:
         caption: str,
         fulfilment_id: str | None = None,
         revision_id: str | None = None,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
     ) -> Attachment:
         """The row of a file already kept as ``blob_key``, on the order, one of its
         items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
         holds the blob for it in the same transaction. With ``revision_id`` it is on
         that revision of the item (storefront spec §4): a render, or beside a
-        ``fulfilment_id`` the photo of that revision's test print."""
+        ``fulfilment_id`` the photo of that revision's test print. ``cart_of`` and
+        ``conn`` as `delete_item`'s."""
         if revision_id is None:
             _refuse_revision_role(role)
-        with self.store.transaction() as conn:
+        tell = conn is None
+        with self.store.transaction(conn) as conn:
             order = self._lock(conn, order_id)
+            self._visitors_cart(order, cart_of)
             item = None if item_id is None else self._item_of(conn, order, item_id)
             if revision_id is not None:
                 found = self.store.revision(revision_id, conn=conn)
@@ -4926,7 +4992,8 @@ class Lifecycle:
             )
             change = _Change(order)
             self._subject_item(change, conn, attachment)
-        self._told(change)
+        if tell:
+            self._told(change)
         return attachment
 
     def edit_attachment(

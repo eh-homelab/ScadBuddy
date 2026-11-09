@@ -46,7 +46,8 @@ import functools
 import hashlib
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Collection, Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
@@ -98,14 +99,27 @@ PASSING: frozenset[Failure] = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class Upload:
+    """A body sent once, as it is made (`CrudClient.request`): its ``Content-Type`` and
+    its bytes."""
+
+    content_type: str
+    body: AsyncIterable[bytes]
+
+
 class CrudUnavailableError(Exception):
     """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
     ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
-    passes (`PASSING`), unlike a route's 5xx or a read timeout."""
+    passes (`PASSING`), unlike a route's 5xx or a read timeout. ``problem`` is the last
+    try's 5xx problem document, empty when it had none or no answer came."""
 
-    def __init__(self, message: str, failure: Failure) -> None:
+    def __init__(
+        self, message: str, failure: Failure, problem: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.failure = failure
+        self.problem = problem or {}
 
     @property
     def passes(self) -> bool:
@@ -161,6 +175,7 @@ class _Call:
         self.fresh_connection = False
         self.last = "no attempt"
         self.failure: Failure = "unreached"
+        self.problem: dict[str, Any] = {}
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -172,6 +187,7 @@ class _Call:
     def judge(self, response: httpx.Response, started: float) -> Literal["done", "retry"]:
         """``done``: return it; ``retry``: send again after a backoff. A refusal raises."""
         status = response.status_code
+        self.problem = {}
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
             self.failure = "route_missing"
@@ -183,7 +199,8 @@ class _Call:
             return "done"
         if status >= 500 and _problem(response).get("reason") != NOT_CONFIGURED:
             self.last = f"{status} from the API"
-            database = _problem(response).get("reason") == DATABASE_UNAVAILABLE
+            self.problem = _problem(response)
+            database = self.problem.get("reason") == DATABASE_UNAVAILABLE
             self.failure = "database_unavailable" if database else "unavailable"
             self.observe("unavailable", started)
             return "retry"
@@ -205,6 +222,7 @@ class _Call:
 
     def failed(self, error: Exception, started: float) -> None:
         self.last = f"{type(error).__name__}: {error}"
+        self.problem = {}
         unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
         self.failure = "unreached" if unreached else "transport"
         self.observe("transport", started)
@@ -213,7 +231,9 @@ class _Call:
         """The wait before the next try; raises once the budget is spent."""
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
-            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.failure)
+            raise CrudUnavailableError(
+                f"CRUD route unavailable: {self.last}", self.failure, self.problem
+            )
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
         return wait
@@ -245,12 +265,16 @@ class _Base:
     def _kwargs(
         json: Any,
         key: str | None,
-        timeout: float | None,
+        timeout: float | httpx.Timeout | None,
         headers: Mapping[str, str] | None,
         content: bytes | None = None,
+        upload: Upload | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         sent = dict(headers or {})
+        if upload is not None:
+            kwargs["content"] = upload.body
+            sent["Content-Type"] = upload.content_type
         if json is not None:
             kwargs["json"] = json
         if content is not None:
@@ -348,12 +372,16 @@ class CrudClient(_Base):
         *,
         json: Any = None,
         idempotency_key: str | None = None,
-        timeout: float | None = None,
+        timeout: float | httpx.Timeout | None = None,
         budget: float | None = None,
         headers: Mapping[str, str] | None = None,
         content: bytes | None = None,
+        upload: Upload | None = None,
     ) -> httpx.Response:
-        call = _Call(self, path, budget)
+        """One call, retried as the module says. ``upload`` sends a body that cannot be
+        sent twice: the call is never retried (any failure raises at once), so pass it
+        with a ``timeout`` long enough for the route."""
+        call = _Call(self, path, 0.0 if upload is not None else budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None
@@ -361,7 +389,7 @@ class CrudClient(_Base):
                 response = await (fresh or self._http).request(
                     method,
                     path,
-                    **self._kwargs(json, idempotency_key, timeout, headers, content),
+                    **self._kwargs(json, idempotency_key, timeout, headers, content, upload),
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)

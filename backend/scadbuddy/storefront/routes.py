@@ -2,14 +2,19 @@
 of which forwards to the CRUD client with the verified visitor id and the browser's
 address. `app.py` answers a CRUD refusal.
 
-A render's body goes on as the visitor sent it (at most `MAX_RENDER_BODY` bytes), with
-a new ``Idempotency-Key`` (a UUID 4) per browser request, which the CRUD client keeps
-across its retries (plan point 21). A render's preview is relayed as a stream, never held
-whole, as ``model/gltf-binary``."""
+A render's body, and a draft item's, goes on as the visitor sent it (at most
+`MAX_RENDER_BODY` bytes). Each write gets a new ``Idempotency-Key`` (a UUID 4) per browser
+request, which the CRUD client keeps across its retries (plan point 21). A render's preview
+is relayed as a stream, never held whole, as ``model/gltf-binary``. A design request is
+read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
+spooled, then sent on as multipart a chunk at a time."""
 
 from __future__ import annotations
 
+import hashlib
+import time
 import uuid
+from collections.abc import Callable
 from typing import Annotated, Any, Final
 
 import anyio
@@ -19,12 +24,14 @@ from starlette.types import Receive, Scope, Send
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
-from scadbuddy.crud.client import CrudStream
+from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.wire import JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
+from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
-#: The largest render body the edge relays: far past any listing's values.
+#: The largest render or draft item body the edge relays: far past any listing's values.
 MAX_RENDER_BODY: Final = 64 * 1024
 GLB_MEDIA_TYPE: Final = "model/gltf-binary"
 
@@ -86,8 +93,8 @@ def _job(job_id: str) -> str:
     return job_id
 
 
-async def _render_body(request: Request) -> bytes:
-    """The request's body, read up to `MAX_RENDER_BODY` bytes; 413 past it."""
+async def _body(request: Request, slug: str) -> bytes:
+    """The request's body, read up to `MAX_RENDER_BODY` bytes; 413 ``slug`` past it."""
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -95,14 +102,14 @@ async def _render_body(request: Request) -> bytes:
             raise ApiError(
                 413,
                 "This request is too large.",
-                type_=f"{STOREFRONT_PROBLEMS}render_body_invalid",
+                type_=f"{STOREFRONT_PROBLEMS}{slug}",
             )
     return bytes(body)
 
 
 @visitor_router.post("/renders", status_code=status.HTTP_202_ACCEPTED)
 async def render(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    body = await _render_body(request)
+    body = await _body(request, "render_body_invalid")
     key = str(uuid.uuid4())
     return await crud.render(body, key=key, visitor_id=visitor_id, client=client)
 
@@ -123,6 +130,136 @@ ESTIMATE_FIELDS: Final = frozenset(
 async def render_estimate(job_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     answer = await crud.render_estimate(_job(job_id), visitor_id=visitor_id, client=client)
     return {k: v for k, v in answer.items() if k in ESTIMATE_FIELDS}
+
+
+@visitor_router.get("/draft")
+async def draft(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    return await crud.draft(visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/items")
+async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    body = await _body(request, "draft_body_invalid")
+    key = str(uuid.uuid4())
+    return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.delete("/draft/items/{item_id}")
+async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    if ITEM_ID.fullmatch(item_id) is None:
+        raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
+    key = str(uuid.uuid4())
+    return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
+
+
+#: How long one replica trusts its read of `requests_enabled`.
+ENABLED_TTL: Final = 30.0
+#: What a visitor whose request did not reach the shop reads: it may have arrived.
+UPLOAD_LOST: Final = (
+    "Your request may not have reached the shop. Check your cart before you send it again."
+)
+
+
+class RequestsEnabled:
+    """The CRUD side's ``storefront_requests_enabled``, read at most once per
+    `ENABLED_TTL` per replica."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._read: tuple[float, bool] | None = None
+
+    async def get(self, crud: StorefrontCrud, *, visitor_id: str, client: str) -> bool:
+        now = self._clock()
+        if self._read is None or now - self._read[0] >= ENABLED_TTL:
+            enabled = await crud.requests_enabled(visitor_id=visitor_id, client=client)
+            self._read = (now, enabled)
+        return self._read[1]
+
+
+def _request_key(request: Request, visitor_id: str) -> str:
+    """The forwarded ``Idempotency-Key``: the browser's own (a UUID), so a visitor's
+    resend of one request is one request; 428 ``idempotency_key_required`` without one,
+    since a request whose answer is lost could not be sent again safely. Bound to the
+    visitor, so two visitors' keys never meet."""
+    sent = request.headers.get("idempotency-key")
+    if sent is None:
+        raise ApiError(
+            428,
+            "Send an Idempotency-Key with a design request.",
+            type_=f"{STOREFRONT_PROBLEMS}idempotency_key_required",
+        )
+    try:
+        browser = uuid.UUID(sent)
+    except ValueError:
+        raise ApiError(
+            422,
+            "Idempotency-Key must be a UUID.",
+            type_=f"{STOREFRONT_PROBLEMS}draft_body_invalid",
+        ) from None
+    return hashlib.sha256(f"{visitor_id}\x1f{browser}".encode()).hexdigest()
+
+
+@visitor_router.post("/draft/requests")
+async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """A design request. Refused before its body is read: 404 ``requests_disabled``,
+    428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
+    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    (`uploads.py` `UploadGate`). The body is then read whole with every cap
+    (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
+    "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
+    side reads a byte. The client's turn and the gate's slot are freed once the body is
+    read, before the forward, which the CRUD side's own gate bounds. A CRUD side that is
+    busy is 503 ``uploads_busy`` (it read no byte); any other failed or timed-out call is
+    503 ``upload_unavailable``: it may have committed, and the same browser key sent
+    again is the same request."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise ApiError(
+            404,
+            "This shop does not take design requests.",
+            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+        )
+    key = _request_key(request, visitor_id)
+    allowance: UploadAllowance = state.upload_allowance
+    held = allowance.start(client)
+    if isinstance(held, int):
+        raise ApiError(
+            429,
+            "You have sent a lot of design requests, or one is still sending. Try again later.",
+            type_=REQUEST_LIMITED,
+            headers={"Retry-After": str(held)},
+            retry_after=held,
+        )
+    try:
+        upload = await _read_spent(request, allowance, held)
+    finally:
+        allowance.finish(held)
+    try:
+        upload.release()
+        return await crud.add_request(
+            upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
+        )
+    except CrudUnavailableError as error:
+        if error.problem.get("type") == UPLOADS_BUSY:
+            raise uploads_busy() from None
+        raise ApiError(503, UPLOAD_LOST, type_=f"{STOREFRONT_PROBLEMS}upload_unavailable") from None
+    finally:
+        await upload.close()
+
+
+async def _read_spent(request: Request, allowance: UploadAllowance, key: str) -> RequestUpload:
+    """`read_request`, spending one of ``key``'s allowance unless the gate turned it away
+    as busy: every other refusal (413, 422, 408, a dropped body) is the visitor's
+    doing."""
+    spent = True
+    try:
+        return await read_request(request)
+    except ApiError as error:
+        spent = error.type != UPLOADS_BUSY
+        raise
+    finally:
+        if spent:
+            allowance.spend(key)
 
 
 class _Relayed(StreamingResponse):
