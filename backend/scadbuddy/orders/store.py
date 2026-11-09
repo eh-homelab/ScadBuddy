@@ -856,6 +856,31 @@ class OrderStore:
             ).fetchone()
         return None if row is None else Order.model_validate(row)
 
+    def idle_drafts(self, conn: Conn, *, before: datetime, limit: int) -> list[str]:
+        """Up to ``limit`` unsubmitted storefront carts that neither changed nor had
+        their visitor seen since ``before`` (#5282), locked for the caller's
+        transaction. A cart a visitor's write holds is skipped, not waited for."""
+        rows = conn.execute(
+            "SELECT o.id FROM orders o"
+            " LEFT JOIN storefront_visitors v ON v.id = o.storefront_visitor_id"
+            " WHERE o.source = 'storefront' AND o.submitted_at IS NULL"
+            " AND GREATEST(o.updated_at, v.last_seen_at) < %s"
+            " ORDER BY o.updated_at, o.id LIMIT %s FOR UPDATE OF o SKIP LOCKED",
+            (before, limit),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def delete_draft(self, conn: Conn, order_id: str) -> bool:
+        """The unsubmitted storefront cart's row; its items, revisions and audit rows
+        cascade. Its attachments must be gone first (`delete_attachment`): their foreign
+        key refuses the delete otherwise. Never a submitted or back office order."""
+        row = conn.execute(
+            "DELETE FROM orders WHERE id = %s AND source = 'storefront'"
+            " AND submitted_at IS NULL RETURNING id",
+            (order_id,),
+        ).fetchone()
+        return row is not None
+
     def order(self, order_id: str, *, conn: Conn | None = None) -> Order | None:
         with self._read(conn) as c:
             row = c.execute(f"SELECT {_ORDER} FROM orders WHERE id = %s", (order_id,)).fetchone()
@@ -2550,9 +2575,9 @@ class OrderStore:
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
         once nothing else holds them. The one way an attachment goes: nothing cascades
-        the holds, so an order's delete (none is written yet) must run this for each
-        of its attachments first, which the foreign key (``ON DELETE RESTRICT``,
-        #4678) enforces."""
+        the holds, so an order's delete (only a storefront cart's, `delete_draft`) must
+        run this for each of its attachments first, which the foreign key (``ON DELETE
+        RESTRICT``, #4678) enforces."""
         conn.execute(
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (ATTACHMENT_HOLDER, attachment_id),

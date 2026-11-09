@@ -767,6 +767,26 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
+        """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
+        housekeeping sweep, after ``storefront_draft_ttl_days``), each in its own
+        transaction: its attachments with their holds (`OrderStore.delete_attachment`),
+        then the order, whose items cascade. A cart a visitor's write holds is skipped
+        (`OrderStore.idle_drafts`); a submitted or back office order is never taken.
+        The ids deleted."""
+        swept: list[str] = []
+        while len(swept) < limit:
+            with self.store.transaction() as conn:
+                found = self.store.idle_drafts(conn, before=before, limit=1)
+                if not found:
+                    break
+                [order_id] = found
+                for attachment in self.store.attachments(order_id, conn=conn):
+                    self.store.delete_attachment(conn, attachment.id)
+                self.store.delete_draft(conn, order_id)
+            swept.append(order_id)
+        return swept
+
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own
         customer's) and charges while `draft` or `quoted`. A cart's charges are the

@@ -256,6 +256,8 @@ async def test_a_failing_sweep_fails_its_activity(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
     monkeypatch.setattr(main, "sync_printers", _broken_async)
+    # #5282: the idle storefront carts.
+    monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -401,6 +403,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     monkeypatch.setattr(main, "reap_orphan_quote_holds", slow_quote_holds)
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
+
+    # #5282: the idle storefront carts, a short transaction per cart.
+    def slow_storefront(state: object) -> tuple[list[str], int, int]:
+        time.sleep(0.1)
+        return [], 0, 0
+
+    monkeypatch.setattr(main, "_sweep_storefront", slow_storefront)
 
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:

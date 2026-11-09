@@ -739,7 +739,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   cancel opens none and does not). A storefront cart refuses (`order_not_submitted`) a
   deposit set or applied, both waivers and accept, and refuses its shipping option and its
   charges (`PATCH` with `charges`) to anyone but the visitor (`check_visitors_cart`): the
-  back office never acts on a visitor's cart. A cancelled order reopened past `quoted`
+  back office never acts on a visitor's cart. The `housekeeping_sweep_storefront_drafts`
+  sweep (both Schedules, behind its patch) deletes a cart idle past
+  `storefront_draft_ttl_days` (`Lifecycle.sweep_drafts`: neither the order nor its visitor
+  seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`; its attachments through
+  `delete_attachment`, then the order), then the visitors idle as long with no order and
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance

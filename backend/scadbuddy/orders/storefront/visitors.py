@@ -15,6 +15,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.store import Conn
 
 _VISITOR = "id, created_at, last_seen_at"
 #: The edge's visitor id: 32 random bytes as URL-safe base64, unpadded.
@@ -70,3 +71,22 @@ class VisitorStore:
                 {"hash": token_sha256(visitor_id)},
             ).fetchone()
         return None if row is None else Visitor(**row)
+
+    @staticmethod
+    def sweep(
+        conn: Conn, *, visitors_before: datetime, renders_before: datetime
+    ) -> tuple[int, int]:
+        """The housekeeping pass (#5282), on the caller's connection: the
+        `storefront_renders` rows made before ``renders_before``, then the visitors last
+        seen before ``visitors_before`` that no order names (their newer renders
+        cascade). A visitor with a cart keeps it until the draft sweep takes the cart.
+        The counts deleted: (visitors, renders)."""
+        renders = conn.execute(
+            "DELETE FROM storefront_renders WHERE created_at < %s", (renders_before,)
+        ).rowcount
+        visitors = conn.execute(
+            "DELETE FROM storefront_visitors v WHERE v.last_seen_at < %s"
+            " AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.storefront_visitor_id = v.id)",
+            (visitors_before,),
+        ).rowcount
+        return visitors, renders
