@@ -161,9 +161,14 @@ class StorefrontCrud:
             "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
 
-    async def requests_enabled(self, *, visitor_id: str, client: str) -> bool:
-        """``GET …/storefront/requests-enabled``: whether "Ask for a design" is on."""
-        answer = await self._call("GET", "/requests-enabled", visitor_id=visitor_id, client=client)
+    async def requests_enabled(
+        self, *, visitor_id: str, client: str, key: str | None = None
+    ) -> bool:
+        """``GET …/storefront/requests-enabled``: whether "Ask for a design" is on; with a
+        request's ``key``, also whether that key holds a committed request."""
+        answer = await self._call(
+            "GET", "/requests-enabled", visitor_id=visitor_id, client=client, key=key
+        )
         return bool(answer.get("enabled")) if isinstance(answer, dict) else False
 
     async def add_request(

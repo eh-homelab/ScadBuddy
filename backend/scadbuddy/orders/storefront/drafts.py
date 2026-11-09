@@ -42,7 +42,7 @@ from fastapi import status
 from starlette.datastructures import UploadFile
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
+from scadbuddy.crud.idempotency import Replay, has_reply, idempotent_write, stored
 from scadbuddy.orders.attachments import SNIFF_BYTES, clean_filename, keep_file, sniff
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
@@ -218,6 +218,13 @@ async def _view(state: AppState, order: Order) -> DraftView:
 def _stored(state: AppState, key: str, route: str, asked: Any) -> Replay | None:
     with state.projection.pool.connection() as conn:
         return stored(conn, "storefront", key, route, asked)
+
+
+def request_sent(state: AppState, key: str) -> bool:
+    """Whether ``key`` holds a committed design request: its retry is answered even
+    once "Ask for a design" is off (`add_request`)."""
+    with state.projection.pool.connection() as conn:
+        return has_reply(conn, "storefront", key, REQUEST_ROUTE)
 
 
 async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
@@ -404,8 +411,9 @@ async def add_request(
     ``attachment-<sha256>`` (what the back office reads) and as `request_file_key` (what
     the visitor's presigned GET reads) before the rows; a refused row leaves unheld
     objects for the store's sweeps. A retry of a committed request (the same key)
-    answers its order as it is now and does nothing else. Refusals: 404
-    ``requests_disabled`` unless ``storefront_requests_enabled``; 422 ``request_text``
+    answers its order as it is now and does nothing else, even once requests are off.
+    Refusals: 404 ``requests_disabled`` unless ``storefront_requests_enabled``, after
+    the retry's lookup; 422 ``request_text``
     (`checked_text`: not 1 to `MAX_REQUEST_TEXT` characters of plain text); 422
     ``too_many_files`` past `MAX_REQUEST_FILES`; 413 ``file_too_large``; 415
     ``file_type``; 422 ``draft_full``; 409 ``draft_changed``; 503

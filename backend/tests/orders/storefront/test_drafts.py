@@ -88,8 +88,8 @@ class CrudCaller:
             sent["Idempotency-Key"] = key
         return sent
 
-    def get(self, path: str, *, token: str = TOKEN_A) -> Any:
-        return self.api.get(CRUD + path, headers=self._headers(token, None))
+    def get(self, path: str, *, token: str = TOKEN_A, key: str | None = None) -> Any:
+        return self.api.get(CRUD + path, headers=self._headers(token, key))
 
     def post(
         self,
@@ -769,6 +769,30 @@ def test_a_retried_request_makes_one_item_whatever_changed_since(
     # Each answer signs its file links afresh (their ``Expires`` moves with the clock), so
     # the replay is compared without them.
     assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
+    assert len(asks.get("/draft").json()["items"]) == 1
+
+
+def test_a_committed_request_sent_again_after_requests_went_off_answers_its_reply(
+    asks: CrudCaller, s3_api: TestClient
+) -> None:
+    """Review of #5789: its answer was lost (the edge's 503 ``upload_unavailable`` says
+    "send it again"), then the shop turned requests off. The cart holds the request, so
+    the resend answers it, as any retry does "whatever changed since"."""
+    files = [("files", ("a.png", PNG, "image/png"))]
+    first = ask(asks, files, key="r18")
+    assert first.status_code == 200, first.text
+    off = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": False})
+    assert off.status_code == 200, off.text
+    # The edge's pre-check, with the key: on for this request alone.
+    assert asks.get("/requests-enabled", key="r18").json() == {"enabled": True}
+    assert asks.get("/requests-enabled").json() == {"enabled": False}
+    again = ask(asks, files, key="r18")
+    assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
+    # A new key is still refused, before its body is read.
+    assert asks.get("/requests-enabled", key="r19").json() == {"enabled": False}
+    r = ask(asks, files, key="r19")
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
     assert len(asks.get("/draft").json()["items"]) == 1
 
 

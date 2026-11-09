@@ -199,6 +199,26 @@ def _request_key(request: Request, visitor_id: str) -> str:
     return hashlib.sha256(f"{visitor_id}\x1f{browser}".encode()).hexdigest()
 
 
+async def _refuse_unless_sent(
+    request: Request, crud: StorefrontCrud, visitor_id: str, client: str
+) -> None:
+    """404 ``requests_disabled`` unless the request's key holds a request the CRUD side
+    committed (asked uncached: only while requests are off). A request with no key, or
+    a bad one, is refused as off."""
+    try:
+        key = _request_key(request, visitor_id)
+    except ApiError:
+        key = None
+    if key is None or not await crud.requests_enabled(
+        visitor_id=visitor_id, client=client, key=key
+    ):
+        raise ApiError(
+            404,
+            "This shop does not take design requests.",
+            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+        )
+
+
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
@@ -211,14 +231,12 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
     read, before the forward, which the CRUD side's own gate bounds. A CRUD side that is
     busy is 503 ``uploads_busy`` (it read no byte); any other failed or timed-out call is
     503 ``upload_unavailable``: it may have committed, and the same browser key sent
-    again is the same request."""
+    again is the same request. So while requests are off, the CRUD side is asked about
+    the request's own key: a key that holds a committed request is forwarded, and the
+    CRUD side answers its stored reply."""
     state = request.app.state
     if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
-        raise ApiError(
-            404,
-            "This shop does not take design requests.",
-            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
-        )
+        await _refuse_unless_sent(request, crud, visitor_id, client)
     key = _request_key(request, visitor_id)
     allowance: UploadAllowance = state.upload_allowance
     held = allowance.start(client)
