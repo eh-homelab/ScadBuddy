@@ -58,7 +58,7 @@ KEY_LOOKUP_BURST = 5
 KEY_LOOKUP_SECONDS = 5.0
 SOURCE_LOOKUP_BURST = 2
 SOURCE_LOOKUP_SECONDS = 60.0
-#: Sources with a bucket of their own; the least recently seen is forgotten past it.
+#: Sources with a bucket of their own; the least recently admitted is forgotten past it.
 MAX_LOOKUP_SOURCES = 1024
 
 WebhookOutcome = Literal["sync", "login_required", "login_repaired", "ignored"]

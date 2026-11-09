@@ -575,7 +575,7 @@ def test_refused_sources_never_push_out_another_source_s_bucket(clock: Clock) ->
     assert lookups.take("192.0.2.1") > 0
 
 
-def test_the_webhook_route_names_every_503() -> None:
+def test_the_webhook_route_names_both_its_503s() -> None:
     from scadbuddy.api.bank_link import router
 
     [hook] = [r for r in router.routes if getattr(r, "path", "") == "/payments/bank/webhook"]
