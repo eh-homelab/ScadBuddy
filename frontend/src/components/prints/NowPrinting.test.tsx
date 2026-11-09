@@ -84,7 +84,7 @@ describe('NowPrinting (#977)', () => {
   it('names the archive beside the link where Bambuddy has no page per archive (#3743)', async () => {
     const [paused] = PRINTERS_NOW
     // A Bambuddy before 1.3.0: the server links its archives page.
-    setPrintersNow([{ ...paused!, bambuddy_url: 'http://bambuddy.local/archives' }])
+    setPrintersNow([{ ...paused!, bambuddy_url: 'http://bambuddy.local/archives', bambuddy_archive_page: false }])
     renderPage(<NowPrinting />)
 
     const card = await screen.findByTestId('printer-now-1')
@@ -93,6 +93,21 @@ describe('NowPrinting (#977)', () => {
       'http://bambuddy.local/archives',
     )
     expect(card).toHaveTextContent('Bracket · archive 90')
+  })
+
+  it("takes the server's word that a link is the archive's own page, whatever its shape (#5840)", async () => {
+    const [paused] = PRINTERS_NOW
+    setPrintersNow([
+      { ...paused!, bambuddy_url: 'http://bambuddy.local/archives/90?view=detail', bambuddy_archive_page: true },
+    ])
+    renderPage(<NowPrinting />)
+
+    const card = await screen.findByTestId('printer-now-1')
+    expect(within(card).getByRole('link', { name: 'Bracket, in Bambuddy' })).toHaveAttribute(
+      'href',
+      'http://bambuddy.local/archives/90?view=detail',
+    )
+    expect(card).not.toHaveTextContent('archive 90')
   })
 
   it("links ScadBuddy's job to its subject's page until Bambuddy archives it (#3743)", async () => {

@@ -367,6 +367,7 @@ function printerNow(): PrinterNow {
     archive_id: null,
     linked: false,
     bambuddy_url: null,
+    bambuddy_archive_page: false,
     error: null,
   }
   const job = state.printing

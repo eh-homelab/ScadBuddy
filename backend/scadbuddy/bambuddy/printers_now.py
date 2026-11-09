@@ -116,6 +116,9 @@ class PrinterNow(BaseModel):
     #: (``/archives/{id}``) on a Bambuddy that has one (`has_archive_page`), else the
     #: archives page.
     bambuddy_url: str | None = None
+    #: ``bambuddy_url`` is the archive's own page, not the archives page (#5840): the
+    #: card then names no archive number beside the link.
+    bambuddy_archive_page: bool = False
     #: The status read failed; the rest is unknown.
     error: str | None = None
     #: A native run on this printer with prints still to start (#4942), and its
@@ -287,7 +290,7 @@ def with_archive_pages(
         if printer.bambuddy_url is None or printer.archive_id is None:
             return printer
         page = client.config.web_url(f"{ARCHIVES_PAGE}/{printer.archive_id}")
-        return printer.model_copy(update={"bambuddy_url": page})
+        return printer.model_copy(update={"bambuddy_url": page, "bambuddy_archive_page": True})
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])
 
