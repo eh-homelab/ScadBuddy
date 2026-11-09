@@ -32,6 +32,7 @@ from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.lifecycle import QUOTE_HOLDER, Lifecycle
 from scadbuddy.orders.models import Quote
 from scadbuddy.orders.quote import quote_run
+from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.store.content_models import BlobMissingError
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.api.test_customers import create as create_customer
@@ -717,3 +718,296 @@ def test_a_two_plate_item_is_quoted_on_both_plates_natively(
         ("setup", 50),
     ]
     assert slicer.calls == 2
+
+
+def _slice(shop: Shop, **extra: Any) -> dict[str, Any]:
+    """A slice quote posted with ``extra`` and followed to its end."""
+    started = shop.post(**extra)
+    assert started.status_code == 202, started.text
+    op: dict[str, Any] = follow_operation(shop.client, started.json(), timeout=120, poll=0.2)
+    assert op["status"] == "succeeded", op
+    return op
+
+
+WIDER = {"params": {"width": 14}}
+
+
+def test_a_slice_with_new_inputs_quotes_a_new_revision(bambuddy: TestClient) -> None:
+    """#4673 PR 3 (order operations spec §5.1): new inputs in a slice make a revision
+    first, through the revise path, and the quote is of it. The same inputs again make
+    none: only another print setup under the same revision."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    first = _slice(shop)["result"]
+    [one] = shop.get_item()["revisions"]
+    assert first["revision_id"] == one["id"]
+
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1, 2]
+    two = item["revisions"][-1]
+    assert two["reference"]["inputs"]["params"]["width"] == 14
+    assert item["reference"]["inputs"]["params"]["width"] == 14
+    assert item["current_revision_id"] == two["id"]
+    assert quote["revision_id"] == two["id"]
+
+    again = _slice(shop, inputs=two["reference"]["inputs"])["result"]
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2]
+    assert again["revision_id"] == two["id"]
+
+
+def test_a_resent_slice_with_new_inputs_makes_one_revision(bambuddy: TestClient) -> None:
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    key = "slice-wider"
+    first = shop.post(key, inputs=WIDER)
+    again = shop.post(key, inputs=WIDER)
+    assert first.status_code == again.status_code == 202, again.text
+    assert first.json()["id"] == again.json()["id"]
+    follow_operation(bambuddy, first.json(), timeout=120, poll=0.2)
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2]
+
+
+def test_a_slice_with_new_inputs_after_acceptance_revises_after_acceptance(
+    bambuddy: TestClient,
+) -> None:
+    """On an accepted order the revision is #5350's: the accepted quote stays accepted,
+    and the item is revised after acceptance, so the new quote can be accepted."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert item["revised_after_acceptance"] is True
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert [q["id"] for q in item["quotes"] if q["accepted"]] == [accepted["id"]]
+    events = bambuddy.get(f"/api/v1/orders/{shop.order['id']}/events").json()
+    assert [e["kind"] for e in events].count("revision.added_after_acceptance") == 1
+    assert bambuddy.post(f"{shop.path}/quotes/{quote['id']}/accept").status_code == 200
+
+
+def test_a_slice_with_new_inputs_keeps_the_revise_paths_refusals(bambuddy: TestClient) -> None:
+    """The revise path's refusals apply unchanged (§5.1): on hold, an accepted item takes
+    no new design, so the slice starts nothing. Inputs its template cannot take are 422,
+    as a revision's."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/hold").status_code == 200
+    held = shop.post(inputs=WIDER)
+    assert held.status_code == 409, held.text
+    assert held.json()["type"].endswith("/order_on_hold")
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+
+    bad = shop.post(commit="0" * 40)
+    assert bad.status_code == 422, bad.text
+
+
+def test_a_refused_slice_with_new_inputs_writes_no_revision(bambuddy: TestClient) -> None:
+    """#5761 review: the body's own checks (filaments, support slots, price book, machine
+    rate) run before the revision, so a 422 writes nothing and an accepted item keeps
+    its one revise after acceptance."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    archived = bambuddy.post(f"/api/v1/orders/price-book/filaments/{shop.petg}/archive")
+    assert archived.status_code == 200, archived.text
+
+    refused = shop.post(inputs=WIDER)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["type"].endswith("/filaments")
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1]
+    assert item["revised_after_acceptance"] is False
+
+
+def test_a_replayed_slice_makes_no_revision_after_anothers(bambuddy: TestClient) -> None:
+    """#5761 review: a replayed key is answered from its operation before any revision is
+    made, even when the item's design has changed since."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    first = shop.post("slice-replay", inputs=WIDER)
+    assert first.status_code == 202, first.text
+    op = follow_operation(bambuddy, first.json(), timeout=120, poll=0.2)
+    reference = shop.get_item()["reference"]
+    other = bambuddy.post(
+        f"{shop.path}/revisions",
+        json={
+            "reference": {
+                "slug": reference["slug"],
+                "commit": reference["commit"],
+                "inputs": {"params": {"width": 16}},
+            }
+        },
+    )
+    assert other.status_code == 201, other.text
+
+    again = shop.post("slice-replay", inputs=WIDER)
+    # The finished operation's own answer: its quote.
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == op["result"]["id"]
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1, 2, 3]
+
+
+def test_a_slice_with_new_inputs_and_no_filaments_keeps_the_items(bambuddy: TestClient) -> None:
+    """#5761 review: the new revision has no slots until its render, so the item's own
+    filaments go with the slice: one with new inputs and no `filaments` prices every
+    slot as before, rather than failing after its revision was written."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+
+    quote = _slice(shop, inputs=WIDER, filaments={})["result"]
+    item = shop.get_item()
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert [(c["slot"], c["filament_id"]) for c in item["colours"]] == [
+        (0, shop.pla),
+        (1, shop.petg),
+    ]
+
+
+def test_a_short_commit_of_the_items_design_makes_no_revision(bambuddy: TestClient) -> None:
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    commit = shop.get_item()["reference"]["commit"]
+    _slice(shop, commit=commit[:7])
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+    malformed = shop.post(commit="not-a-commit")
+    assert malformed.status_code == 422, malformed.text
+
+
+def test_two_racing_slices_with_one_design_make_one_revision(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5761 review: two first sends both read the old design before either revises.
+    The second one's revision, under the order's lock, finds the design already made
+    and writes nothing, so the quote is of the one revision."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    real = Lifecycle.add_revision
+    raced: list[bool] = []
+
+    def add_revision(self: Lifecycle, *args: Any, **kwargs: Any) -> Any:
+        if not raced:
+            raced.append(True)
+            real(self, *args, **kwargs)  # the other send, which read the same old design
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Lifecycle, "add_revision", add_revision)
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1, 2]
+    assert quote["revision_id"] == item["current_revision_id"]
+
+
+def test_a_slice_naming_a_slot_its_new_design_adds_quotes_it(
+    bambuddy: TestClient, fake_openscad: str
+) -> None:
+    """#5761 review: the check before the revision judges only the filaments the body
+    names, not the old design's slots, so a new design's added slot named in the body
+    quotes on the first send."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+    directory = Path(fake_openscad).parent
+    drawn = write_openscad_3mf(
+        directory / "three.3mf",
+        [
+            ("Color 1", "#FF000000", trimesh.creation.box(extents=(10, 10, 5))),
+            (
+                "Color 2",
+                "#00FF0000",
+                trimesh.creation.box(extents=(4, 4, 8)).apply_translation((20, 0, 0)),
+            ),
+            (
+                "Color 3",
+                "#0000FF00",
+                trimesh.creation.box(extents=(4, 4, 8)).apply_translation((40, 0, 0)),
+            ),
+        ],
+    )
+    set_fake_env(directory, "FAKE_3MF", str(drawn))
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0, 1.0])})
+
+    plan = {"slots": [{"slot_id": n, "spool_id": spool} for n, spool in ((1, 9), (2, 5), (3, 9))]}
+    quote = _slice(shop, inputs=WIDER, filaments={"2": shop.pla}, filament_plan=plan)["result"]
+    item = shop.get_item()
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert [(c["slot"], c["filament_id"]) for c in item["colours"]] == [
+        (0, shop.pla),
+        (1, shop.petg),
+        (2, shop.pla),
+    ]
+
+
+def test_two_racing_slices_of_different_designs_revise_after_acceptance_once(
+    bambuddy: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5761 review: the path is decided under the order's lock, so a slice that loses
+    the race to another design's takes the plain revise path, as a later send would."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    accepted = _slice(shop)["result"]
+    assert bambuddy.post(f"{shop.path}/quotes/{accepted['id']}/accept").status_code == 200
+    assert bambuddy.post(f"/api/v1/orders/{shop.order['id']}/accept").status_code == 200
+    real = Lifecycle.add_revision
+    raced: list[bool] = []
+
+    def add_revision(
+        self: Lifecycle, order_id: str, item_id: str, by: Any, resolved: Any, **kw: Any
+    ) -> Any:
+        if not raced:
+            raced.append(True)
+            other = resolved.reference.model_copy(update={"inputs": {"params": {"width": 16}}})
+            real(self, order_id, item_id, by, ResolvedReference(other, []), **kw)
+        return real(self, order_id, item_id, by, resolved, **kw)
+
+    monkeypatch.setattr(Lifecycle, "add_revision", add_revision)
+    checks = Lifecycle._revisable_after_acceptance
+    paths: list[str] = []
+
+    def revisable(self: Lifecycle, *args: Any) -> None:
+        paths.append("after acceptance")
+        checks(self, *args)
+
+    monkeypatch.setattr(Lifecycle, "_revisable_after_acceptance", revisable)
+    quote = _slice(shop, inputs=WIDER)["result"]
+    item = shop.get_item()
+    assert [r["number"] for r in item["revisions"]] == [1, 2, 3]
+    assert quote["revision_id"] == item["current_revision_id"]
+    assert paths == ["after acceptance"]
+
+
+def test_a_slices_support_slot_on_its_new_designs_colour_slot_is_refused(
+    bambuddy: TestClient,
+) -> None:
+    """#5761 review: a support slot is judged against the new design's colour slots: one
+    the body also names as a colour is refused before the revision, and one the render
+    gives is refused by the run, never priced with the colour's filament silently."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+
+    both = shop.post(inputs=WIDER, support_filaments={"0": shop.petg})
+    assert both.status_code == 422, both.text
+    assert "support_filaments" in both.text
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+
+    started = shop.post(inputs=WIDER, filaments={}, support_filaments={"1": shop.pla})
+    assert started.status_code == 202, started.text
+    ended = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert ended["status"] == "failed", ended
+    assert "support_filaments" in json.dumps(ended)

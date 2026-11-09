@@ -64,3 +64,25 @@ def test_a_past_prints_quote_is_refused_on_a_cart(client: TestClient, draft_with
     assert refused.status_code == 409, refused.text
     assert refused.json()["type"] == "https://scadbuddy.dev/problems/orders/order_not_submitted"
     assert refused.json()["detail"] == f"cart {draft_with_item} is not yet submitted"
+
+
+def test_a_slice_with_new_inputs_is_refused_on_a_cart(
+    client: TestClient, draft_with_item: str
+) -> None:
+    """#4673 PR 3: a visitor's cart refuses a slice quote before its new inputs are read
+    or any revision made, so nothing of a revision reaches a visitor-facing path."""
+    item = client.get(f"/api/v1/orders/{draft_with_item}").json()["items"][0]
+    refused = client.post(
+        f"/api/v1/orders/{draft_with_item}/items/{item['id']}/quote",
+        json={
+            "filament_plan": {"slots": []},
+            "choices": {"nozzles": [{"size": "0.4"}]},
+            "inputs": {"params": {"width": 99}},
+        },
+        headers={"Idempotency-Key": "cart-slice"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/orders/order_not_submitted"
+    assert "revision" not in refused.text
+    after = client.get(f"/api/v1/orders/{draft_with_item}").json()["items"][0]
+    assert after["current_revision_id"] == item["current_revision_id"]
