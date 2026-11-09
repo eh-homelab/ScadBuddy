@@ -22,8 +22,12 @@ messaging plugin keeps the compose-only tool as it is.
   customer has no contact. A cart (no customer or no number) is refused.
 - The built-in flow `order-fulfilment` (`backend/scadbuddy/orders/builtin_flow.py`) calls
   `tool("order_notify_customer", {"template": "ready"})` when its input `notify` is true
-  and the re-read order is `ready`. Its standing grant names only `order_item_fulfil` and
-  `order_attach`. The compose call needs no grant because it is `read`.
+  and the re-read order is `ready`. It runs on an `order.changed` trigger that the shop
+  makes, with a standing grant that the shop writes and approves; the module docstring
+  says it names `queue_print`, `order_item_fulfil` and `order_attach`, and no code writes
+  or approves it (`builtin_flow.py` lines 12-15). The two-rule grant in the script
+  (`order_item_fulfil`, `order_attach`) is only the grant of its `agent(...)` call, which
+  narrows the run's. The compose call needs no grant because it is `read`.
 - Tool tiers: every tool has a `risk` (`read`, `write`, `outward`) in its `ToolSpec`
   (`agent/src/tools/registry.ts`). Settings can move a tool's tier either way
   (`effectiveTool`, #1953, #2171). Only `pinnedOutward` (`agent/src/tools/pinnedOutward.ts`,
@@ -74,8 +78,9 @@ messaging plugin keeps the compose-only tool as it is.
   - Storefront mail goes to **every order with a live (unrevoked) order link**,
     `back_office` orders included ("Send customer link", spec §5.2). A revoked link stops
     it. It does not depend on `orders.source` or `orders.storefront_visitor_id`.
-  - The seam is `storefront_mail_covers(conn, order_id, event) -> bool`: true when the
-    order has a live order link and storefront mail is configured. Its events are
+  - The seam is `storefront_mail_covers(conn, order_id, event, *, host) -> bool`
+    (`orders/storefront/mail.py`): true when the order has a live order link and a mail
+    host is set. Its events are
     `order_link`, `revision_ready`, `price_ready`, `payment_requested`, `shipped`. It lands
     in scadify's branch `feat/storefront-follow` (PR 1 of #5283).
 
@@ -154,14 +159,17 @@ Rules:
 - `contact_kind` filters the customer's contacts: only contacts of that kind are
   addressed (primary ones of that kind, else every one of that kind).
 - `fixed_args` may not name an argument that `args` maps, and its values are strings,
-  numbers or booleans. The binding route refuses a key whose name looks like a secret
-  (`password`, `token`, `key`, `secret`); secrets go in the plugin's header or OAuth.
+  numbers or booleans. The setting refuses a key whose name looks like a secret
+  (`pass`, `token`, `secret`, `key`, `auth`, `credential`); secrets go in the plugin's header or OAuth.
 
 ### 4.3 Validation (agent route)
 
-`PUT /api/v1/ai/orders/messaging-binding` on the agent (person-only, same origin as the
-plugin routes) checks the binding, then writes the setting through the CRUD route
-`PUT /api/v1/settings` (no new grant):
+`POST /api/v1/ai/orders/messaging-binding/check` on the agent (same origin as the plugin
+routes) checks a binding and writes nothing. The Settings page then saves it as the
+person, with the browser's own `PUT /api/v1/settings`, as every other setting is saved.
+The agent never writes the setting, so no service credential gets a settings write. A
+binding saved without the check is still safe: the send checks rules 1 to 4 again (below).
+The checks:
 
 1. The source exists and is enabled.
 2. The source is a remote MCP server: an `ai_plugins` row, or a package's **http** server.
@@ -171,8 +179,10 @@ plugin routes) checks the binding, then writes the setting through the CRUD rout
    and is not disabled in Settings → Tools & plugins.
 4. The tool's `inputSchema` has each mapped argument with a `string` type (or an array of
    strings for `to_shape: list`), and every required argument is mapped or in `fixed_args`.
-5. A "Send a test" button sends one message to an address the person types, through the
-   same path as §6, recorded as a test (no order).
+5. A "Send a test" button (`POST /api/v1/ai/orders/messaging-binding/test`, person-only)
+   sends one message to an address the person types, through the messaging client of
+   §6.1. It belongs to no order, so no `order_messages` row records it; the agent's span
+   for the call is its only trace.
 
 The binding is read again at every send. A plugin removed, disabled or changed since is a
 refusal at send time (`messaging_plugin_unavailable`), never a silent fallback.
@@ -210,8 +220,10 @@ owner approved two tools (§12).
 - It reads the order, the customer and the binding, and composes the message.
 - It refuses before anything parks when: there is no binding (`no_messaging_plugin`,
   with the composed text, so the person can still send it by hand); no contact of the
-  bound kind exists (`no_contact`); the order is a cart; or §8 skips it (`skipped`,
-  `storefront_mail`).
+  bound kind exists (`no_contact`); the order is a cart; the template was already sent
+  for the order's current status (`already_notified`); or §8 skips it (`skipped`,
+  `storefront_mail`). The last two come from the read-only route
+  `GET /api/v1/orders/{id}/messages/check?template=` (§7.1), which writes nothing.
 - Otherwise the approved input carries `to`, `subject`, `text`, `source` and `tool`, and
   the summary line is "Send '<subject>' to <addresses> through <source>".
 - The handler composes again. If the result differs from the approved input (the order,
@@ -250,12 +262,18 @@ plugin off, tool not listed), or `unknown` (the request was written and no answe
 A new built-in version of `order-fulfilment` takes a new opt-in input `send` (boolean,
 default false; the owner's call, §12). `notify` keeps its meaning: compose the `ready`
 message. Only with `notify` and `send` both true, the order `ready` and `send_ready` true
-does it call `order_notify_customer_send` with `template: "ready"`. Its run grant for
-that call is the rule
-`{"fn": "tool", "tool": "order_notify_customer_send", "orders": [<order>], "max_calls": 1}`.
-`move_triggers` (`builtin_flow.py`) moves a trigger only when its approved grant admits
-every new call, so today's triggers get `NEWER_NOTICE`. A moved trigger still sends
-nothing until a person sets `send` true. No send starts without a person's yes.
+does it call `order_notify_customer_send` with `template: "ready"`, from the script
+itself (not inside `agent(...)`). So the trigger's **standing grant** must admit it: the
+shop adds the rule
+`{"fn": "tool", "tool": "order_notify_customer_send", "orders": "any", "max_calls": 1}`
+and approves the grant again. The run grant seeded for one order's event narrows it to
+that order (`narrowed_to_order`). No code writes or approves that rule.
+`move_triggers` (`builtin_flow.py`) moves a trigger only when its approved standing grant
+admits every call the new script makes that its version did not, so a trigger whose
+grant lacks the rule gets `NEWER_NOTICE` and keeps its version. A moved trigger still
+sends nothing until a person sets `send` true. Without the rule, a run with `send` true
+parks the send for a `workflow_run_decisions` approval. No send starts without a
+person's yes.
 
 ## 7. The audit record, failure and retry
 
@@ -267,8 +285,8 @@ New table `order_messages` (backend migration, a new file
 | Column | Meaning |
 |---|---|
 | `id` | uuid |
-| `order_id` | the order |
-| `template` | `quoted`, `accepted`, `ready`, `shipped`, or `test` (order null) |
+| `order_id` | the order; never null (a test send is not recorded, §4.3) |
+| `template` | `quoted`, `accepted`, `ready`, `shipped` |
 | `source`, `tool` | the binding used |
 | `recipients` | jsonb `[{kind, value}]` |
 | `subject`, `text` | exactly what was sent |
@@ -278,27 +296,36 @@ New table `order_messages` (backend migration, a new file
 | `idempotency_key` | unique |
 | `episode` | the id of the order's newest status-change audit row at claim time |
 | `resend_of` | an earlier message this one sends again, or null |
-| `by` | from the author header (`orders/actor.py`), never a body |
-| `session_id`, `flow_run_id` | where the call came from, when known |
+| `by` | from the author header (`orders/actor.py`), never a body; its `session` and `run_id` say which session or flow run asked |
 | `created_at`, `finished_at` | times |
 
 Routes (`backend/scadbuddy/api/order_messages.py`, all under `/api/v1/orders/{id}/messages`):
 
-- `POST` (claim). Header `Idempotency-Key`. Under the order's row lock (`lock_order`):
-  1. A row with that key exists: answer it as it is (200). Nothing new is written.
+- `GET …/check?template=` (read-only, writes nothing): whether a send of the template
+  would be refused now: `already_notified` (with the message id) and, from PR 5,
+  `storefront_mail`. `prepareApproval` reads it, so a refused approval writes no row.
+- `POST` (claim). Header `Idempotency-Key`. Under the order's row lock (`lock_order`). A
+  cart is refused `order_not_submitted`.
+  1. A row with that key exists: answer it as it is (200). Nothing new is written. A key
+     of another order is 409 `idempotency_key_reused`.
   2. §8 says skip: write a `skipped` row and the audit row `message.skipped`; answer it.
      (PR 5. Until then this step is absent and nothing is skipped.)
-  3. A `sent` row of the same template and `episode` exists and the body has no
-     `resend_of`: refuse 409 `already_notified`, naming that row. This stops a flow
-     re-run or a second session from telling the customer twice for one status change.
-  4. Else write a `sending` row and the audit row `message.sending`; answer 201.
+  3. A row of the same template and `episode` that is `sent`, `sending` or `unknown`
+     exists and the body has no `resend_of`: refuse 409 `already_notified`, naming that
+     row. This stops a flow re-run or a second session from telling the customer twice
+     for one status change. A `failed` or `skipped` row does not block.
+  4. With `resend_of`: it must name a row of this order (else 422), and not one still
+     `sending` and fresh (409 `message_in_flight`).
+  5. Else write a `sending` row and the audit row `message.sending`; answer 201.
 - `POST …/{message_id}/outcome`: `sent`, `failed` or `unknown`, with `reason` and
-  `provider_message_id`. Only from `sending`. Writes the audit row `message.sent`,
-  `message.failed` or `message.unknown` in the same transaction.
-- `POST …/{message_id}/mark-sent`: a person says an `unknown` message did arrive.
-  Person-only (`PERSON_ENDPOINTS`). Audit `message.marked_sent`.
-- `GET`: the order's messages, newest first. `order_get` also returns the latest one per
-  template.
+  `provider_message_id`. Taken while the stored status is `sending` (stale or not) or
+  `unknown`, so a slow plugin's late `sent` is recorded. `sent`, `failed` and `skipped`
+  are final: 409 `message_final`.
+  Writes the audit row `message.sent`, `message.failed` or `message.unknown` in the same
+  transaction.
+- `POST …/{message_id}/mark-sent`: a person says an `unknown` message (or a stale
+  `sending` one) did arrive. Person-only (`PERSON_ENDPOINTS`). Audit `message.marked_sent`.
+- `GET`: the order's messages, newest first.
 
 The text is the customer's data. It is kept as long as the order exists and goes with
 the order (the owner's call, §12).
@@ -308,10 +335,10 @@ the order (the owner's call, §12).
 The handler's order of work:
 
 1. `POST …/messages` with `Idempotency-Key: idempotencyKey(ctx)`.
-2. If the answer is `sent`, `failed`, `unknown` or `skipped`: return it. Do not send.
-3. If the answer is `sending` and the row is new: call the plugin, then post the outcome.
-4. If the answer is `sending` and the row is old (a retry after a crash between the call
-   and the outcome):
+2. If the row is new (201): call the plugin, then post the outcome.
+3. If the row is old (200) and is `sent`, `failed` or `skipped`: return it. Do not send.
+4. If the row is old (200) and `sending` or `unknown`: a retry after a crash, or a lost
+   answer, between the call and the outcome.
    - With `args.idempotency_key` bound: call the plugin again with the same key (the
      plugin drops the copy), then post the outcome.
    - Without it: post `unknown` (`no_answer`) and send nothing. The answer tells the
@@ -325,9 +352,10 @@ Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a
 retry safe even if that changes.
 
-A `sending` row older than 15 minutes reads as `unknown` in every answer. There is no
-sweep: the next write that touches the row (its outcome, "Mark sent", or a resend that
-names it) records it, with its audit row. Nothing sends a message by itself.
+The stale rule: a `sending` row older than 15 minutes reads as `unknown` in every answer,
+and it is never resent by itself. There is no sweep: the row stays `sending` in storage
+until a write touches it (its outcome, or "Mark sent"), with its audit row. Only a
+person's "Send again" (a new row with `resend_of`) sends it once more. A test covers it.
 
 ## 8. The storefront overlap rule
 
@@ -339,7 +367,7 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 1. **Mail not set up.** An order on a shop with no storefront mail gets none. Skipping
    there tells the customer nothing. So the rule asks whether storefront mail *will send*
-   this notice: the seam is true only when storefront mail is configured.
+   this notice: the seam is true only when a mail host is set.
 2. **Who gets storefront mail.** Not "a storefront visitor": every order with a live
    order link, `back_office` orders included. A revoked link stops it. A rule keyed on the
    visitor would send twice to a `back_office` order with a link, and skip wrongly for a
@@ -354,21 +382,24 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 ### 8.2 The rule
 
-scadify's seam (PR 1 of #5283, branch `feat/storefront-follow`) is
-`storefront_mail_covers(conn, order_id, event) -> bool`: true when the order has a live
-order link and storefront mail is configured. It does not read `source` or the visitor.
-This design only consumes it (PR 5), in the CRUD service:
+scadify's seam (PR 1 of #5283, branch `feat/storefront-follow`,
+`orders/storefront/mail.py`, not yet on main) is
+`storefront_mail_covers(conn, order_id, event, *, host) -> bool`: true when the order has
+a live order link and a mail host is set. It does not read `source` or the visitor. This
+design only consumes it (PR 5), in the CRUD service, passing the settings snapshot's
+mail host:
 
 ```python
 STOREFRONT_EVENT = {"quoted": "price_ready", "shipped": "shipped"}
 
-def skipped_for_storefront(conn, order_id: str, template: str) -> bool:
+def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | None) -> bool:
     event = STOREFRONT_EVENT.get(template)
-    return event is not None and storefront_mail_covers(conn, order_id, event)
+    return event is not None and storefront_mail_covers(conn, order_id, event, host=host)
 ```
 
 - The claim route (§7.1 step 2) calls it under the order's row lock. `prepareApproval`
-  (§5.2) reads the same answer through a route; the agent never decides it.
+  (§5.2) reads the same answer through the read-only `GET …/messages/check`; the agent
+  never decides it.
 - PR 5 starts only when `storefront_mail_covers` is on main. Until then nothing is
   skipped; storefront mail does not send on main before that seam lands either.
 - `also_when_storefront_mails: true` sends anyway. The approval summary says "the
@@ -383,11 +414,15 @@ Backend (`backend/tests/`, Postgres):
 
 - Claim: same key twice gives one row; two keys in one episode give `already_notified`;
   `resend_of` passes; a new status change (new episode) passes.
-- Outcome moves only from `sending`; `mark-sent` only from `unknown` and only for a person.
+- Outcome is taken from `sending` or `unknown` and refused once final; `mark-sent` only
+  from `unknown` or a stale `sending`, and only for a person.
+- `GET …/check` answers `already_notified` and writes nothing.
 - Each write and its `order_events` row commit together; `by` comes from the header.
 - (PR 5) The skip: each template × `storefront_mail_covers` true or false, with a fake
   seam; only `quoted` and `shipped` can skip.
-- A `sending` row older than 15 minutes reads as `unknown`; "Mark sent" takes it.
+- The stale rule: a `sending` row older than 15 minutes reads as `unknown`, a new claim of
+  its key returns it without a new row, a plain claim of its template is
+  `already_notified`, and "Mark sent" takes it.
 - The setting's schema: secret-looking `fixed_args` keys refused.
 
 Agent (`agent/test/`, a fake http MCP server through the real forwarder):
@@ -420,7 +455,7 @@ messages list with "Mark sent" and "Send again"; the panel's approval shows the 
 
 1. **Backend record.** Migration `order_messages`, the routes of §7.1, the audit kinds,
    the setting `orders_customer_messaging`. No sweep and no storefront skip yet. Tests.
-2. **Agent send.** `orders/messaging.ts`, the binding route and validation (§4.3),
+2. **Agent send.** `orders/messaging.ts`, the binding check and test routes (§4.3),
    `order_notify_customer_send` with `prepareApproval` and `flowBinding`, the new answer
    fields of `order_notify_customer`, `ToolServices` wiring in sidecar and worker. Tests on
    every path.
@@ -456,7 +491,7 @@ The owner approved this design on 2026-11-09 with these calls:
    `order_notify_customer_send` is the `outward` send (§5.1).
 2. **Storefront mail** is the CRUD service's, sent after the causing transaction commits;
    it goes to every order with a live order link, `back_office` orders included; the seam
-   is scadify's `storefront_mail_covers(conn, order_id, event)` (§2, §8). The plugin skips
+   is scadify's `storefront_mail_covers(conn, order_id, event, *, host)` (§2, §8). The plugin skips
    `quoted` and `shipped` when the seam says the storefront mail sends them, whatever the
    plugin's channel; `also_when_storefront_mails` sends both on purpose.
 3. **The built-in flow** sends only with a new opt-in input `send` (default false). `notify`
