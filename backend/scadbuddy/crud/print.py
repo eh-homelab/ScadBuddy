@@ -284,17 +284,26 @@ class RemoteOutcomes:
         return [PrintRun.model_validate(run) for run in response.json()]
 
 
+#: How long the reprint's record waits for the API (#5833). The record is best effort
+#: and the item is queued already, so an API out of reach holds the reprint's reply
+#: this long, not the client's `UNAVAILABLE_BUDGET`.
+REPRINT_RECORD_BUDGET = 3.0
+
+
 class RemoteReprints:
     """`print_links.ReprintRecorder` over the API's CRUD route (#3741, #5295): the queue
     item ScadBuddy's reprint queued, recorded for the archive's subject. Sent again, the
-    first record stays (``ON CONFLICT (queue_item_id) DO NOTHING``)."""
+    first record stays (``ON CONFLICT (queue_item_id) DO NOTHING``). It waits at most
+    `REPRINT_RECORD_BUDGET` for the API (#5833)."""
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
 
     async def record_reprint(self, subject: PrintSubject, reprint: PrintReprint) -> None:
         body = {"subject": subject.key, "reprint": reprint.model_dump(mode="json")}
-        await self._client.request("POST", f"{BASE}/reprints", json=body)
+        await self._client.request(
+            "POST", f"{BASE}/reprints", json=body, budget=REPRINT_RECORD_BUDGET
+        )
 
 
 #: An event and the body that posts it, encoded once by `RemoteEvents.publish`.

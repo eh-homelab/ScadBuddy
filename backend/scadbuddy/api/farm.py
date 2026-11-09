@@ -39,14 +39,20 @@ DateFrom = Annotated[date | None, Query(description="First day, inclusive (creat
 DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_at)")]
 
 
+#: The queue item states that can carry the "Queued from ScadBuddy" mark (#3741, #5833):
+#: a job still to print or printing. A finished item is history and is not looked up.
+MARKED_STATUSES = frozenset({"pending", "printing", "paused"})
+
+
 class FarmQueueItem(QueueItem):
     """A queue item, and whether ScadBuddy queued it (#3741)."""
 
     #: The output or library file ScadBuddy queued this item for, found only by a record
     #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
-    #: the item. ``None`` for an item queued from Bambuddy (its reprint of an archive
-    #: ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never taken
-    #: from Bambuddy's answer.
+    #: the item. Set only on a pending, printing or paused item (`MARKED_STATUSES`).
+    #: ``None`` for a finished item, for an item queued from Bambuddy (its reprint of an
+    #: archive ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never
+    #: taken from Bambuddy's answer.
     scadbuddy: ScadBuddyJob | None = None
 
 
@@ -61,10 +67,11 @@ async def get_queue(
 ) -> list[FarmQueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
     is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
-    Each item ScadBuddy queued carries ``scadbuddy`` (#3741)."""
+    Each pending, printing or paused item ScadBuddy queued carries ``scadbuddy``
+    (#3741); only those items are looked up (#5833)."""
     async with client_for(store.load()) as client:
         items = await client.queue(printer_id=printer_id, status=status)
-    matches = await _jobs(links, items)
+    matches = await _jobs(links, [item for item in items if item.status in MARKED_STATUSES])
     return [
         FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
         for item in items
@@ -72,8 +79,10 @@ async def get_queue(
 
 
 async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
-    """The items ScadBuddy queued, in one read; none when its records cannot be read, so
-    a database blip costs the marks, never the queue."""
+    """Which of ``items`` ScadBuddy queued, in one read; none when its records cannot be
+    read, so a database blip costs the marks, never the queue."""
+    if not items:
+        return JobMatches()
     try:
         return await links.jobs(queue_items=[item.id for item in items])
     except DATABASE_ERRORS:

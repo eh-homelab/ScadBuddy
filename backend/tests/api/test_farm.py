@@ -4,6 +4,7 @@ spool inventory, read from Bambuddy and never written to it."""
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import httpx
 import psycopg
@@ -12,7 +13,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLink, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
@@ -30,7 +31,12 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
     linked, with no record of the item, carries none: Bambuddy's own reprint of that
     archive is such an item."""
     configure(client)
-    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=recording("queue.json")))
+    # Item 199 waits again here: only an item that can still print carries the mark.
+    queue = [
+        {**item, "status": "pending"} if item["id"] == 199 else item
+        for item in recording("queue.json")
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
     state = _state(client)
     output = PrintSubject.output("o" * 32)
 
@@ -83,6 +89,38 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "matched_by": "queue_item",
     }
     assert items[257]["scadbuddy"] is None
+    assert items[205]["scadbuddy"] is None
+
+
+@respx.mock
+def test_only_items_that_can_still_print_are_looked_up(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5833: an unfiltered read is mostly history. Only the pending, printing and paused
+    items can carry the mark, so only they are looked up, and a finished item ScadBuddy
+    sent carries none."""
+    configure(client)
+    queue = [
+        *recording("queue.json"),
+        {**recording("queue.json")[1], "id": 260, "status": "paused"},
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+    links = _state(client).print_links
+    asked: list[list[int]] = []
+    jobs = links.jobs
+
+    async def spy(*, queue_items: Any = (), lan_starts: Any = ()) -> JobMatches:
+        asked.append(sorted(queue_items))
+        return await jobs(queue_items=queue_items, lan_starts=lan_starts)
+
+    monkeypatch.setattr(links, "jobs", spy)
+    asyncio.run(links.record_sends(PrintSubject.output("o" * 32), [PrintSend(queue_item_id=205)]))
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    assert asked == [[257, 259, 260]]
+    items = {item["id"]: item for item in response.json()}
     assert items[205]["scadbuddy"] is None
 
 

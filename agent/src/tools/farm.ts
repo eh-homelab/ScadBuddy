@@ -21,9 +21,10 @@ export const farmTools: Tool[] = [
       "Bambuddy's print queue, in its order: each item's status, printer (or the printer model it waits for), " +
       'file, times, estimated duration and filament, and why it is waiting or failed. Finished items stay in the ' +
       'queue, so pass `status` (pending or printing for what is to come). `printer_id` -1 is items not assigned ' +
-      'to a printer. An item ScadBuddy queued (a print run or a reprint) carries `scadbuddy` (its output or ' +
-      'library file, template `slug`, `run_id` and linked `archive_id`), matched only by ScadBuddy\'s record of ' +
-      'that item; an item queued from Bambuddy, its reprint of a ScadBuddy print too, has none.' +
+      'to a printer. A pending, printing or paused item ScadBuddy queued (a print run or a reprint) carries ' +
+      '`scadbuddy` (its output or library file, template `slug`, `run_id` and linked `archive_id`), matched ' +
+      "only by ScadBuddy's record of that item; a finished item has none, and so has an item queued from " +
+      'Bambuddy, its reprint of a ScadBuddy print too.' +
       PAGED,
     input: z.object({
       printer_id: z.number().int().min(-1).optional(),

@@ -366,7 +366,8 @@ export type LanRunControl = Schemas['LanRunControl']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']
 /** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. Each item
- * carries `scadbuddy` when ScadBuddy queued it (#3741). */
+ * carries `scadbuddy` when ScadBuddy queued it and it is pending, printing or paused
+ * (#3741, #5833). */
 export type QueueItem = Schemas['FarmQueueItem']
 /** #3741 — a queue item or printer job ScadBuddy queued or started. */
 export type ScadBuddyJob = Schemas['ScadBuddyJob']
