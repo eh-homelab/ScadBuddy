@@ -18,6 +18,8 @@ import respx
 
 from scadbuddy.orders.models import Order
 from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.totals import totals_of
+from scadbuddy.payments import deposits
 from scadbuddy.payments.bank import BankLinks
 from scadbuddy.payments.deposits import mask, sync_deposits
 from scadbuddy.store.refs import BlobRefs
@@ -26,6 +28,7 @@ from tests.orders.test_lifecycle import BY, Shop
 from tests.payments.test_bank import (
     CHECKING,
     KEK,
+    OTHER_KEK,
     SANDBOX,
     linked,
     payload,
@@ -103,6 +106,13 @@ class Bank:
         cursor: str | None = row["sync_cursor"]
         return cursor
 
+    def loop_cursor(self) -> str | None:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT sync_loop_cursor FROM bank_links").fetchone()
+        assert row is not None
+        cursor: str | None = row["sync_loop_cursor"]
+        return cursor
+
     def owing(self, paid: int = 0) -> Order:
         """An accepted order of 1000 (USD) with ``paid`` already paid."""
         order, _ = self.shop.accepted()
@@ -168,6 +178,93 @@ async def test_deposits_are_kept_masked_and_withdrawals_and_other_accounts_are_n
 
 def test_mask_hides_long_digit_runs_only() -> None:
     assert mask("REF 1234 ACCT 000123456789 ORD-2026-12") == "REF 1234 ACCT ••• ORD-2026-12"
+
+
+@pytest.mark.parametrize(
+    ("text", "masked"),
+    [
+        ("IBAN DE89 3704 0044 0532 0130 00 THANKS", "IBAN DE••• THANKS"),
+        ("ACCT 1234-5678-9012", "ACCT •••"),
+        ("FROM 12 345", "FROM •••"),
+        ("ORD-2026-12 FROM 9876 5432", "ORD-2026-12 FROM •••"),
+        ("ROOM 12 FLOOR 3", "ROOM 12 FLOOR 3"),
+    ],
+    ids=["grouped IBAN", "hyphens", "five digits split", "order number kept", "short runs"],
+)
+def test_mask_counts_digits_across_single_spaces_and_hyphens(text: str, masked: str) -> None:
+    """A number printed in groups is still masked; an order number is not an account's."""
+    assert mask(text) == masked
+
+
+async def test_a_sync_stopped_mid_update_restarts_a_mutation_from_the_updates_first_cursor(
+    bank: Bank, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plaid: on a mutation, restart from the cursor of the update's first page, even when
+    the update spans two runs."""
+    monkeypatch.setattr(deposits, "MAX_PAGES", 1)
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page([transaction("t1", -1, "A")], cursor="c1", more=True)
+        )
+        await sync_deposits(bank.bank)
+    assert bank.cursor() == "c1"
+    with respx.mock as router:
+        route = router.post(SYNC).mock(
+            side_effect=[
+                httpx.Response(400, json=payload("error.sync_mutation.json")),
+                page([transaction("t1", -1, "A")], cursor="c1", more=True),
+            ]
+        )
+        await sync_deposits(bank.bank)
+        assert json.loads(route.calls[0].request.content)["cursor"] == "c1"
+        # The restart reads from the update's first cursor: here, the very start.
+        assert "cursor" not in json.loads(route.calls[1].request.content)
+    monkeypatch.setattr(deposits, "MAX_PAGES", 10)
+    with respx.mock as router:
+        route = router.post(SYNC).mock(
+            side_effect=[
+                page([transaction("t2", -2, "B")], cursor="c2"),
+                page([], cursor="c3"),
+            ]
+        )
+        await sync_deposits(bank.bank)
+        await sync_deposits(bank.bank)
+        # The update finished at c2: the next one starts there, and a mutation in it would
+        # restart from c2, not from the old update's start.
+        assert json.loads(route.calls[1].request.content)["cursor"] == "c2"
+    assert bank.loop_cursor() is None
+
+
+async def test_each_orders_balance_is_read_once_per_sync(
+    bank: Bank, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bank.owing()
+    bank.owing()
+    calls: list[str] = []
+    real = totals_of
+
+    def counted(store: Any, conn: Any, order_id: str) -> Any:
+        calls.append(order_id)
+        return real(store, conn, order_id)
+
+    monkeypatch.setattr(deposits, "totals_of", counted)
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page([transaction(f"t{n}", -(n + 1), "ACH") for n in range(5)])
+        )
+        await sync_deposits(bank.bank)
+    assert len(calls) == 2 and len(set(calls)) == 2
+
+
+@pytest.mark.parametrize("kek", [OTHER_KEK, None], ids=["another key file", "no key file"])
+async def test_keys_that_will_not_open_are_the_syncs_error(
+    bank: Bank, rows: OrderStore, kek: Any
+) -> None:
+    """The sweep does not fail on every run with nothing on the card."""
+    with respx.mock:  # nothing may reach Plaid
+        assert await sync_deposits(BankLinks(rows, kek)) == 0
+    status = bank.bank.status()
+    assert status.sync_error == ("credential_unreadable" if kek else "kek_missing")
 
 
 async def test_pending_and_other_account_deposits_are_skipped(bank: Bank) -> None:

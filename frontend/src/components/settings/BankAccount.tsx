@@ -84,7 +84,7 @@ export function BankAccount() {
     <section aria-label="Bank account" className="space-y-2 rounded-md border p-3">
       <h4 className="text-sm font-medium">Bank account (Plaid)</h4>
       <p className="text-[13px] text-muted-foreground">
-        Link the shop&apos;s checking or savings account. Each housekeeping sweep reads its new deposits and suggests the orders they may pay; nothing is recorded by itself.
+        Link the shop&apos;s checking or savings account. With the housekeeping sweeps on, each sweep reads its new deposits and suggests the orders they may pay; nothing is recorded by itself. With the sweeps off, deposits are not read.
       </p>
       <p className="text-[13px] text-muted-foreground">Stripe payouts go to the bank set in your Stripe dashboard.</p>
       {listed.error && !shown && (
@@ -114,7 +114,7 @@ export function BankAccount() {
               Deposits last read <When at={shown.synced_at} />
             </span>
           ) : (
-            <span>Deposits not read yet</span>
+            <span>Deposits not read yet: the housekeeping sweeps must be on.</span>
           )}
         </p>
       )}

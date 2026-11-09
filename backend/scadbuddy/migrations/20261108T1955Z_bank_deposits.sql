@@ -1,9 +1,12 @@
 -- The linked account's deposits and the orders each may pay (#4961). A suggestion is
 -- never a payment: the shop confirms it on the order. The sync's cursor and its last
--- outcome live on the link. A deposit's `description` is the bank's text with every run
--- of five or more digits masked, so no account number is kept.
+-- outcome live on the link; `sync_loop_cursor` is the first cursor of an update a run cut
+-- short ('' for the very start), where a mutation restarts. A deposit's `description` is
+-- the bank's text with every run of five or more digits masked, a run going on across
+-- single spaces or hyphens (payments/deposits.py `mask`).
 ALTER TABLE bank_links
   ADD COLUMN sync_cursor text,
+  ADD COLUMN sync_loop_cursor text,
   ADD COLUMN synced_at timestamptz,
   ADD COLUMN sync_error text;
 

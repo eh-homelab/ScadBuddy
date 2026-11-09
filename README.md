@@ -642,7 +642,8 @@ run reads the account's new posted deposits
 ([`/transactions/sync`](https://plaid.com/docs/api/products/transactions/#transactionssync))
 and suggests the orders each may pay: one whose number (`ORD-2026-12`) is in the deposit's
 text, or one whose balance equals the deposit. A suggestion records nothing. The bank's
-text is kept with every run of five or more digits masked. The page's Content-Security-Policy allows Link's one
+text is kept with every run of five or more digits masked, a run going on across single
+spaces or hyphens (so an IBAN printed in groups is masked); an order number is kept. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

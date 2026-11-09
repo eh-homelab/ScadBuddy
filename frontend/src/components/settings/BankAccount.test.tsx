@@ -79,7 +79,7 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     mockBankLink({ linked: true, syncError: 'ITEM_LOGIN_REQUIRED' })
     renderSettingsSection(<BankAccount />, { route })
     expect(await screen.findByRole('status')).toHaveTextContent('Plaid could not be read (ITEM_LOGIN_REQUIRED)')
-    expect(screen.getByText('Deposits not read yet')).toBeInTheDocument()
+    expect(screen.getByText(/Deposits not read yet/)).toHaveTextContent('the housekeeping sweeps must be on')
   })
 
   it('unlinks the account and keeps the keys', async () => {

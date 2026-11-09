@@ -440,7 +440,7 @@ class BankLinks:
                 "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
                 " item_id = NULL, account_id = NULL, account_name = NULL, account_type ="
                 " NULL, account_mask = NULL, linked_at = NULL, sync_cursor = NULL,"
-                " synced_at = NULL, sync_error = NULL WHERE id = %s",
+                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL WHERE id = %s",
                 (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id, row["id"]),
             )
             # The Item's deposits and their suggestions go with it.

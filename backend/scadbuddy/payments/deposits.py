@@ -6,9 +6,12 @@ the API. Plaid's facts this rests on (the sign of ``amount``, pending transactio
 restart on ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION``) are ``plaid.py``'s docstring.
 
 What is kept of a deposit: its Plaid id, amount, currency, date and the bank's text with
-every run of five or more digits masked (`mask`), so an account number in a memo is never
-stored or logged. Only posted deposits on the linked account are read: a pending one is
-removed by Plaid when it posts, and the posted one comes with a new id. A suggestion is:
+every run of five or more digits masked (`mask`), a run going on across single spaces or
+hyphens, so a number printed in groups (an IBAN) is masked too; an order number is kept.
+The mask cannot know every format a bank prints, so the text is kept short
+(``DESCRIPTION_CHARS``) and never logged. Only posted deposits on the linked account are
+read: a pending one is removed by Plaid when it posts, and the posted one comes with a new
+id. A suggestion is:
 
 - ``order_number``: the text names an order's number (``ORD-<yyyy>-<n>``), on an order
   neither cancelled nor closed;
@@ -30,14 +33,18 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.orders.totals import totals_of
 from scadbuddy.payments import plaid
-from scadbuddy.payments.bank import BankLinks, LinkedAccess
+from scadbuddy.payments.bank import AccessTokenMissingError, BankLinks, LinkedAccess
+from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
 from scadbuddy.payments.plaid import PlaidError
 
 logger = logging.getLogger(__name__)
 
 #: An order number in a deposit's text, any case, leading zeros allowed in the count.
 ORDER_NUMBER: Final = re.compile(r"\bORD-(\d{4})-0*(\d{1,9})\b", re.IGNORECASE)
-_LONG_DIGITS: Final = re.compile(r"\d{5,}")
+#: Digits, and digits joined by single spaces or hyphens: one run for `mask`.
+_DIGIT_RUN: Final = re.compile(r"\d(?:[ -]?\d)*")
+#: The fewest digits a run holds for `mask` to hide it.
+MASKED_DIGITS: Final = 5
 #: The longest text kept of a deposit.
 DESCRIPTION_CHARS: Final = 200
 #: Pages one sync reads before it stores its cursor and stops (500 transactions each).
@@ -48,9 +55,22 @@ MAX_RESTARTS: Final = 2
 ENDED: Final = ("cancelled", "closed")
 
 
+def _mask_runs(text: str) -> str:
+    return _DIGIT_RUN.sub(
+        lambda m: "•••" if sum(c.isdigit() for c in m.group()) >= MASKED_DIGITS else m.group(),
+        text,
+    )
+
+
 def mask(text: str) -> str:
-    """``text`` with every run of five or more digits replaced: no account number stays."""
-    return _LONG_DIGITS.sub("•••", text)
+    """``text`` with every run of ``MASKED_DIGITS`` or more digits replaced, a run going on
+    across single spaces or hyphens. Order numbers (``ORDER_NUMBER``) are kept as they are."""
+    kept, last = [], 0
+    for m in ORDER_NUMBER.finditer(text):
+        kept += [_mask_runs(text[last : m.start()]), m.group()]
+        last = m.end()
+    kept.append(_mask_runs(text[last:]))
+    return "".join(kept)
 
 
 @dataclass(frozen=True)
@@ -100,13 +120,21 @@ class _Read:
     changed: dict[str, dict[str, Any]]
     removed: set[str]
     cursor: str
+    #: Plaid still had more pages when ``MAX_PAGES`` stopped the loop.
+    more: bool = False
 
 
-async def _read(linked: plaid.PlaidKeys, access_token: str, start: str | None) -> _Read:
-    """Every page from ``start``, the loop started again on a mutation."""
-    for _ in range(MAX_RESTARTS + 1):
-        read = _Read(changed={}, removed=set(), cursor=start or "")
-        cursor = start
+async def _read(
+    linked: plaid.PlaidKeys, access_token: str, start: str | None, first: str | None
+) -> _Read:
+    """Every page from ``start``, at most ``MAX_PAGES``. On a mutation the loop starts
+    again from ``first``, the cursor of the update's first page: Plaid says to restart
+    from there, and an update that ``MAX_PAGES`` cut short began on an earlier run. A
+    transaction read twice is written once (by its id)."""
+    for attempt in range(MAX_RESTARTS + 1):
+        begin = start if attempt == 0 else first
+        read = _Read(changed={}, removed=set(), cursor=begin or "")
+        cursor = begin
         try:
             for _ in range(MAX_PAGES):
                 found = await plaid.transactions_sync(linked, access_token, cursor)
@@ -117,6 +145,7 @@ async def _read(linked: plaid.PlaidKeys, access_token: str, start: str | None) -
                     read.changed.pop(tx_id, None)
                     read.removed.add(tx_id)
                 cursor = read.cursor = found.next_cursor
+                read.more = found.has_more
                 if not found.has_more:
                     break
             return read
@@ -131,44 +160,71 @@ async def sync_deposits(bank: BankLinks) -> int:
     orders. The number of new suggestions. A Plaid failure keeps its code on the link
     and the cursor where it was. Every Postgres call runs in a thread: the sync also runs
     on the API's event loop."""
-    linked = await asyncio.to_thread(bank.access)
+    try:
+        linked = await asyncio.to_thread(bank.access)
+    except (CredentialUnreadableError, KekMissingError, AccessTokenMissingError) as error:
+        # Every run would fail the same way: the card shows why instead.
+        code = _UNREADABLE[type(error)]
+        logger.warning("the deposit sync could not open the link: %s", code)
+        await asyncio.to_thread(_failed, bank.store, None, code)
+        return 0
     if linked is None:
         return 0
-    start = await asyncio.to_thread(_cursor, bank.store)
+    start, first = await asyncio.to_thread(_cursor, bank.store)
     try:
-        read = await _read(linked.keys, linked.access_token, start)
+        read = await _read(linked.keys, linked.access_token, start, first)
     except PlaidError as error:
         logger.warning("the deposit sync could not read Plaid: %s", error.code)
         await asyncio.to_thread(_failed, bank.store, linked.item_id, error.code)
         return 0
-    return await asyncio.to_thread(_store, bank.store, linked, start, read)
+    return await asyncio.to_thread(_store, bank.store, linked, start, first, read)
 
 
-def _cursor(store: OrderStore) -> str | None:
+_UNREADABLE: Final[dict[type[Exception], str]] = {
+    CredentialUnreadableError: "credential_unreadable",
+    KekMissingError: "kek_missing",
+    AccessTokenMissingError: "access_token_missing",
+}
+
+
+def _cursor(store: OrderStore) -> tuple[str | None, str | None]:
+    """The stored cursor, and the first cursor of an update a run left unfinished (else
+    the stored cursor itself)."""
     with store.transaction() as conn:
-        row = conn.execute("SELECT sync_cursor FROM bank_links").fetchone()
-    return row["sync_cursor"] if row else None
+        row = conn.execute("SELECT sync_cursor, sync_loop_cursor FROM bank_links").fetchone()
+    if row is None:
+        return None, None
+    loop = row["sync_loop_cursor"]
+    # '' is "from the very start": the first update of a new link.
+    first = (loop or None) if loop is not None else row["sync_cursor"]
+    return row["sync_cursor"], first
 
 
-def _failed(store: OrderStore, item_id: str, code: str | None) -> None:
+def _failed(store: OrderStore, item_id: str | None, code: str | None) -> None:
+    """Keep the failure's code on the link: on ``item_id``'s, or on any linked row."""
     with store.transaction() as conn:
         conn.execute(
-            "UPDATE bank_links SET sync_error = %s WHERE item_id = %s",
-            (code or "unavailable", item_id),
+            "UPDATE bank_links SET sync_error = %s WHERE item_id IS NOT NULL"
+            + (" AND item_id = %s" if item_id is not None else ""),
+            (code or "unavailable", *([item_id] if item_id is not None else [])),
         )
 
 
-def _store(store: OrderStore, linked: LinkedAccess, start: str | None, read: _Read) -> int:
+def _store(
+    store: OrderStore, linked: LinkedAccess, start: str | None, first: str | None, read: _Read
+) -> int:
     with store.transaction() as conn:
         now = conn.execute("SELECT item_id, sync_cursor FROM bank_links FOR UPDATE").fetchone()
         if now is None or now["item_id"] != linked.item_id or now["sync_cursor"] != start:
             # Unlinked, or another sync stored its cursor first: that one's reads stand.
             return 0
         suggested = _apply(store, conn, linked.item_id, linked.account_id, read)
+        # An update cut short keeps its first cursor for a later run's restart.
+        loop = (first or "") if read.more else None
         conn.execute(
-            "UPDATE bank_links SET sync_cursor = %s, synced_at = clock_timestamp(),"
-            " sync_error = NULL WHERE item_id = %s",
-            (read.cursor or None, linked.item_id),
+            "UPDATE bank_links SET sync_cursor = %s, sync_loop_cursor = %s,"
+            " synced_at = clock_timestamp(), sync_error = NULL WHERE item_id = %s",
+            (read.cursor or None, loop, linked.item_id),
         )
     return suggested
 
@@ -176,6 +232,7 @@ def _store(store: OrderStore, linked: LinkedAccess, start: str | None, read: _Re
 def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _Read) -> int:
     gone = set(read.removed)
     suggested = 0
+    balances = _Balances(store, conn)
     for tx_id, tx in read.changed.items():
         deposit = deposit_of(tx, account_id)
         if deposit is None:
@@ -201,7 +258,7 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
             "DELETE FROM bank_deposit_matches WHERE transaction_id = %s",
             (deposit.transaction_id,),
         )
-        for order_id, reason in _matches(store, conn, deposit):
+        for order_id, reason in _matches(conn, balances, deposit):
             conn.execute(
                 "INSERT INTO bank_deposit_matches (transaction_id, order_id, reason)"
                 " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
@@ -213,7 +270,36 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
     return suggested
 
 
-def _matches(store: OrderStore, conn: Conn, deposit: Deposit) -> list[tuple[str, str]]:
+class _Balances:
+    """Each open order's balance, read once per sync: nothing the sync does changes one."""
+
+    def __init__(self, store: OrderStore, conn: Conn) -> None:
+        self._store = store
+        self._conn = conn
+        self._orders: list[tuple[str, str, date]] | None = None
+        self._balances: dict[str, int] = {}
+
+    def open_orders(self, currency: str, on: date) -> list[str]:
+        """Orders past ``draft``, not ended, in ``currency``, made on or before ``on``."""
+        if self._orders is None:
+            self._orders = [
+                (str(row["id"]), row["currency"], row["created_on"])
+                for row in self._conn.execute(
+                    "SELECT id, currency, created_at::date AS created_on FROM orders WHERE"
+                    " number IS NOT NULL AND status <> ALL(%s) ORDER BY created_at",
+                    ([*ENDED, "draft"],),
+                ).fetchall()
+            ]
+        return [o for o, cur, made in self._orders if cur == currency and made <= on]
+
+    def balance(self, order_id: str) -> int:
+        if order_id not in self._balances:
+            totals = totals_of(self._store, self._conn, order_id)
+            self._balances[order_id] = totals.balance_minor
+        return self._balances[order_id]
+
+
+def _matches(conn: Conn, balances: _Balances, deposit: Deposit) -> list[tuple[str, str]]:
     found: dict[str, str] = {}
     numbers = sorted(
         {f"ORD-{m.group(1)}-{int(m.group(2))}" for m in ORDER_NUMBER.finditer(deposit.text)}
@@ -224,14 +310,9 @@ def _matches(store: OrderStore, conn: Conn, deposit: Deposit) -> list[tuple[str,
             (numbers, list(ENDED)),
         ).fetchall():
             found[str(row["id"])] = "order_number"
-    for row in conn.execute(
-        "SELECT id FROM orders WHERE number IS NOT NULL AND status <> ALL(%s)"
-        " AND currency = %s AND created_at::date <= %s ORDER BY created_at",
-        ([*ENDED, "draft"], deposit.currency, deposit.posted_on),
-    ).fetchall():
-        order_id = str(row["id"])
+    for order_id in balances.open_orders(deposit.currency, deposit.posted_on):
         if order_id in found:
             continue
-        if totals_of(store, conn, order_id).balance_minor == deposit.amount_minor:
+        if balances.balance(order_id) == deposit.amount_minor:
             found[order_id] = "amount"
     return list(found.items())
