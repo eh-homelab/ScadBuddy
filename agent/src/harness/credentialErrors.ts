@@ -87,19 +87,22 @@ export function classifyFailure(evidence: FailureEvidence): FailureClass {
 export function describeApiFailure(
   evidence: FailureEvidence,
   judged: { probe?: ProbeVerdict['verdict'] | undefined } = {},
+  /** Which credential, for text the person sees (#3710, `credentialDisplayLabel`); omitted, none is named. */
+  credential?: string,
 ): string {
   const http = typeof evidence.status === 'number' ? `HTTP ${evidence.status}` : 'no response'
   const text = evidence.message?.trim()
   const detail = text ? `: ${text}` : ''
+  const the = credential ? `the Claude credential (${credential})` : 'the Claude credential'
   switch (classifyFailure(evidence)) {
     case 'permanent':
       // A refusal is the key's only once a probe confirms it (fallback.ts).
       if (judged.probe === 'answered') return `the model endpoint refused this request (${http}); the credential itself works${detail}`
-      if (judged.probe === 'rate_limited') return `the Claude credential is rate limited (${http}); try again later${detail}`
-      if (judged.probe === 'refused') return `the Claude credential was rejected (${http}); check it under Settings → AI${detail}`
+      if (judged.probe === 'rate_limited') return `${the} is rate limited (${http}); try again later${detail}`
+      if (judged.probe === 'refused') return `${the} was rejected (${http}); check it under Settings → AI${detail}`
       return `the model endpoint refused this request (${http}), and the credential could not be checked; try again, then check it under Settings → AI${detail}`
     case 'rate_limited':
-      return `the Claude credential is rate limited (${http}); try again later${detail}`
+      return `${the} is rate limited (${http}); try again later${detail}`
     case 'transient':
       return `the model endpoint failed (${http}); try again${detail}`
     default:

@@ -233,7 +233,14 @@ export const handlers = [
   http.put(`${base}/entries/:id/name`, async ({ params, request }) => {
     const current = find(params.id)
     if (!current) return detail(`no credential ${String(params.id)}`, 404)
-    const name = named(((await request.json()) as { name: string | null }).name)
+    // Strict, as agent `RenameBody` (a zod strictObject): `name` only, a string or null (#5772).
+    const body: unknown = await request.json()
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return detail('body: Expected object', 400)
+    const keys = Object.keys(body)
+    if (keys.some((k) => k !== 'name')) return detail(`body: Unrecognized key(s) in object: ${keys.filter((k) => k !== 'name').join(', ')}`, 400)
+    const raw = (body as { name?: unknown }).name
+    if (raw !== null && typeof raw !== 'string') return detail('name: Expected string, received ' + typeof raw, 400)
+    const name = named(raw)
     if (name instanceof Response) return name
     const renamed: AiCredentialEntry = { ...current, name: name.name }
     state.credentials = state.credentials.map((c) => (c.id === renamed.id ? renamed : c))
