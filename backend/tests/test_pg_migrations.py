@@ -522,7 +522,9 @@ def test_the_printed_revision_backfill_names_the_newest_revision_before_each_att
             " ('none', 'custom', 1, 1, 'succeeded', '{}', now(), 'production', NULL)"
         )
         assert migrate(conn)[0] == MIGRATIONS[backfill].id
-        rows = dict(conn.execute("SELECT id, revision_id FROM order_item_fulfilments").fetchall())
+        rows: dict[object, object] = dict(
+            conn.execute("SELECT id, revision_id FROM order_item_fulfilments").fetchall()
+        )
     assert rows == {"first": None, "one": "r1", "two": "r2", "test": "r1", "none": None}
 
 
