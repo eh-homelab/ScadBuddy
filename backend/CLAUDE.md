@@ -687,14 +687,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   design adds that neither the item nor the body covers is refused after the revision is
   written; the quote is of it (`revision_id` in the operation's request;
   409 `revision_superseded` once another is current, the record's locked check
-  included; a cart is refused `order_not_submitted` first). The lifecycle drops the quote holders §3.4 releases
+  included; a cart is refused `order_not_submitted` first). The page (#4673 PR 4): the
+  row's "Slice…" and the drawer's print setups (`QuoteEditor`, `printSetups.ts`,
+  `DesignInputs.tsx` for the inputs), each plate's image from the quote's sliced file
+  (`GET …/quotes/{quote}/plates/{plate}/thumbnail`, `quote.py` `plate_image`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
   The agent's `order_item_quote` takes `manual` or `slice`, beside `price_book_get`,
   `price_book_set` and `order_estimate`. Frontend: the Settings page's Orders section
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
-  `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
+  `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed

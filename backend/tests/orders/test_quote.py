@@ -441,6 +441,26 @@ def test_a_refused_check_leaves_the_item_unchanged(shop: Shop) -> None:
 # -- the run's writes, in order ----------------------------------------------------------------
 
 
+def test_a_body_only_check_prices_nothing_with_archived_pins_alone(shop: Shop) -> None:
+    """#5761 review: before a slice's new revision, the pins it carries price it only
+    while they stand; an archived pin is the run's to refuse, never a price."""
+    shop.lifecycle.update_item(
+        shop.order.id, shop.item.id, BY, filaments={0: shop.pla, 1: shop.petg}
+    )
+    shop.rows.archive_filament(shop.pla)
+    shop.rows.archive_filament(shop.petg)
+    with pytest.raises(ApiError) as refused:
+        quote_check(
+            shop.rows,
+            PricingPolicy(markup_percent="20"),
+            shop.order.id,
+            shop.item.id,
+            shop.request(),
+            body_only=True,
+        )
+    assert refused.value.type.endswith("/price_book")
+
+
 async def test_ensure_output_reuses_a_matching_output(shop: Shop) -> None:
     item = shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="out-9")
     meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)

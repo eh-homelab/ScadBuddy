@@ -474,6 +474,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
+  {
+    operation: 'GET /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail',
+    reason:
+      "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
+      "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
+  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',

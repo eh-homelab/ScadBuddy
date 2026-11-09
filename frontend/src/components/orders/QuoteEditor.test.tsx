@@ -16,7 +16,7 @@ const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEB
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
-// #4250 — "Quote from a slice…" opens the print dialog in its quote mode: the spools slice,
+// #4250 — "Slice…" opens the print dialog in its quote mode: the spools slice,
 // a price-book filament per slot prices, and Quote posts the item's slice quote.
 describe('QuoteEditor · a quote from a slice (#4250)', () => {
   beforeEach(() => resetMockState())
@@ -550,5 +550,102 @@ describe('QuoteEditor · times (#5554)', () => {
   it('marks no newest quote when there is only one', () => {
     editor([quote('q-only', '2026-11-06T14:00:00Z', false)])
     expect(screen.queryByTestId('quote-newest')).toBeNull()
+  })
+})
+
+// #4673 PR 4 (order operations spec §5.2) — Slice… on the item's design, its inputs
+// editable in place; and the item's print setups, grouped by revision.
+describe('QuoteEditor · print setups (#4673)', () => {
+  beforeEach(() => resetMockState())
+
+  it('sends the inputs edited in the dialog, and none while they are the item’s', async () => {
+    const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 })
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} startSlicing={1} />,
+    )
+    const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    const inputs = within(dialog).getByTestId('design-inputs')
+    await user.click(within(inputs).getByRole('button', { name: /^Inputs/ }))
+    const name = await within(inputs).findByRole('textbox', { name: /Name on the tag/ })
+    // Typed back to the item's own value, nothing is changed (#5797 review).
+    await user.clear(name)
+    await user.type(name, 'Reagan')
+    expect(within(inputs).getByRole('button', { name: /^Inputs/ })).toHaveTextContent(/^Inputs$/)
+    await user.clear(name)
+    await user.type(name, 'Ada')
+    expect(within(inputs).getByRole('button', { name: /changed: a new revision/ })).toBeInTheDocument()
+    const slots = await within(dialog).findAllByRole('combobox', { name: /^Filament for slot/ })
+    for (const slot of slots) await selectOption(user, slot, /^Bambu PLA/)
+    const quote = within(dialog).getByTestId('run-quote')
+    await waitFor(() => expect(quote).toBeEnabled())
+    await user.click(quote)
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1))
+    const body = start.mock.calls[0]![0]
+    expect(body.inputs).toEqual({ ...draft.reference!.inputs, params: { ...(draft.reference!.inputs as { params: object }).params, name: 'Ada' } })
+  })
+
+  it('groups the setups by revision, and holds Accept on an older one with the reason', async () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'quoted', { quantity: 1 })
+    const reference = draft.reference!
+    const revisions = [
+      { id: 'r1', item_id: ITEM_DRAFT, number: 1, reference: { ...reference, inputs: { params: { name: 'Reagan' }, v: 1 } }, colours: [], note: '', created_at: '2026-11-01T00:00:00Z', created_by: { kind: 'browser' } },
+      { id: 'r2', item_id: ITEM_DRAFT, number: 2, reference: { ...reference, inputs: { params: { name: 'Ada' }, v: 1 } }, colours: [], note: '', created_at: '2026-11-02T00:00:00Z', created_by: { kind: 'browser' } },
+    ] as unknown as NonNullable<Parameters<typeof QuoteEditor>[0]['item']>['revisions']
+    const sliced = (id: string, revision: string, at: string, accepted: boolean, tier: string): Quote =>
+      ({
+        id,
+        order_item_id: ITEM_DRAFT,
+        revision_id: revision,
+        created_at: at,
+        source: 'slice',
+        accepted,
+        sliced_sha256: 'b'.repeat(64),
+        sliced_blob_key: `quote-${'b'.repeat(64)}`,
+        plates: [{ index: 1, print_seconds: 3720, filaments: [{ slot: 0, used_g: '12.5' }] }],
+        lines: [],
+        unit_cost_minor: 500,
+        unit_price_minor: 900,
+        quantity: 1,
+        total_minor: 900,
+        created_by: { kind: 'browser' },
+        choices: { printer_id: 1, printer: null, path: null, choices: { tier, nozzles: [] }, prime_tower: null, supports: null, print_sequence: null },
+        filament_plan: null,
+      }) as unknown as Quote
+    const quotes = [sliced('qa', 'r1', '2026-11-01T01:00:00Z', false, 'standard'), sliced('qb', 'r2', '2026-11-02T01:00:00Z', false, 'draft')]
+    renderPage(
+      <QuoteEditor
+        orderId={ORDER_DRAFT}
+        itemId={ITEM_DRAFT}
+        currency="USD"
+        exponent={2}
+        quotes={quotes}
+        editable
+        onChanged={vi.fn()}
+        item={{ ...draft, revisions, current_revision_id: 'r2' }}
+        slice={{ start: vi.fn(), dismiss: vi.fn() }}
+      />,
+    )
+    expect(screen.getAllByTestId('setup-group').map((h) => h.textContent)).toEqual(['Revision 2 (current)', 'Revision 1'])
+    const old = screen.getByTestId('quote-qa')
+    expect(within(old).getByRole('button', { name: 'Accept' })).toBeDisabled()
+    expect(within(old).getByTestId('setup-old-revision')).toHaveTextContent('older revision')
+    const current = screen.getByTestId('quote-qb')
+    expect(within(current).getByRole('button', { name: 'Accept' })).toBeEnabled()
+    expect(within(current).getByTestId('setup-facts')).toHaveTextContent('1 plate · 1h 2m · 12.5 g')
+    expect(within(current).getByRole('img', { name: 'Plate 1' })).toHaveAttribute('src', expect.stringContaining(`/quotes/qb/plates/1/thumbnail`))
+  })
+
+  it('names what a setup changed from the accepted one', () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'approved', { quantity: 1 })
+    const base = { order_item_id: ITEM_DRAFT, revision_id: null, source: 'slice', plates: [], lines: [], unit_cost_minor: 1, unit_price_minor: 1, quantity: 1, total_minor: 1, created_by: { kind: 'browser' }, filament_plan: null }
+    const setup = (tier: string) => ({ printer_id: 1, printer: null, path: null, choices: { tier, nozzles: [] }, prime_tower: null, supports: null, print_sequence: null })
+    const quotes = [
+      { ...base, id: 'qa', created_at: '2026-11-01T00:00:00Z', accepted: true, choices: setup('standard') },
+      { ...base, id: 'qb', created_at: '2026-11-02T00:00:00Z', accepted: false, choices: setup('draft') },
+    ] as unknown as Quote[]
+    renderPage(<QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={quotes} editable={false} onChanged={vi.fn()} item={draft} />)
+    expect(within(screen.getByTestId('quote-qb')).getByTestId('setup-changes')).toHaveTextContent('Changed from the accepted: quality standard → draft')
+    expect(within(screen.getByTestId('quote-qa')).queryByTestId('setup-changes')).toBeNull()
   })
 })

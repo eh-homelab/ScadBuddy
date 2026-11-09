@@ -102,6 +102,7 @@ import { QueuedPanel } from './print/QueuedPanel'
 import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
+import { DesignInputs, type ItemDesign } from './orders/DesignInputs'
 import { QuoteFilaments } from './orders/QuoteFilaments'
 import { refusalText } from './orders/refusal'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
@@ -267,6 +268,12 @@ interface Props {
      * so a new quote keeps them. Left out, the model's remembered ones.
      */
     partSettings?: PartSettingsMap | null
+    /**
+     * #4673 PR 4 — the item's design, whose inputs the dialog edits in place: changed, the
+     * quote sends them, and the backend makes a revision of them first. Left out (a
+     * library file item), no inputs are shown.
+     */
+    design?: ItemDesign
     /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
     start: (body: SliceQuoteRequest) => Promise<void>
   }
@@ -934,6 +941,8 @@ export function PrintPicker({
   const [priced, setPriced] = useState<Record<string, string>>({})
   // #4625 §6.3 — each support slot's price-book filament, keyed as `priced` is.
   const [support, setSupport] = useState<Record<string, string>>({})
+  // #4673 PR 4 — the inputs edited in the quote dialog, null while they are the item's.
+  const [designInputs, setDesignInputs] = useState<Record<string, unknown> | null>(null)
   // The quote and item-print modes (`handing`): the one request the dialog hands the page.
   const [handingBusy, setHandingBusy] = useState(false)
   const [handingError, setHandingError] = useState<string | null>(null)
@@ -1500,6 +1509,11 @@ export function PrintPicker({
         support_filaments: Object.fromEntries(Object.entries(support).filter(([, filament]) => filament)),
         // #5627: what the quote slices with, so its print can send the same.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
+        // #4673: the whole print setup, which the quote records and its print sends.
+        ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...(supports === null ? {} : { supports }),
+        ...(primeTower === null ? {} : { prime_tower: primeTower }),
+        ...(designInputs === null ? {} : { inputs: designInputs }),
       })
       close()
     } catch (cause) {
@@ -1727,6 +1741,7 @@ export function PrintPicker({
       ) : (
         <>
           {batch?.strip((step) => batch.onJump(step, stepChoice()))}
+          {quote?.design && <DesignInputs design={quote.design} onChange={setDesignInputs} />}
           {loading && !choices && (
             <div className="mb-4 space-y-2" data-testid="print-loading">
               <p className="text-sm text-muted-foreground">Reading the printer and the inventory</p>

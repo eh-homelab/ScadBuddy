@@ -1011,3 +1011,31 @@ def test_a_slices_support_slot_on_its_new_designs_colour_slot_is_refused(
     ended = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
     assert ended["status"] == "failed", ended
     assert "support_filaments" in json.dumps(ended)
+    # Named as the new design's colour slot, with the way out.
+    assert "send the slice again without that support slot" in json.dumps(ended)
+
+
+def test_a_slice_quotes_plate_preview_is_its_sliced_files_image(bambuddy: TestClient) -> None:
+    """#4673 PR 4 (order operations spec §5.2): each plate of a slice quote shows the
+    image its sliced file holds; a plate it lacks, or a quote with no slice, has none."""
+    shop = Shop(bambuddy, by_hand=True)
+    png = b"\x89PNG\r\n\x1a\nplate one"
+    BambuddySlices(
+        {
+            1: sliced_3mf(
+                plates={1: (600, [1.0, 1.0])},
+                gcode={1: b"M620 S0A\nM620 S1A\n"},
+                images={1: png},
+            )
+        }
+    )
+    quote = _slice(shop)["result"]
+    url = f"{shop.path}/quotes/{quote['id']}/plates/1/thumbnail"
+    shown = bambuddy.get(url)
+    assert shown.status_code == 200, shown.text
+    assert shown.headers["content-type"] == "image/png"
+    assert shown.content == png
+    assert bambuddy.get(f"{shop.path}/quotes/{quote['id']}/plates/2/thumbnail").status_code == 404
+    assert bambuddy.get(f"{shop.path}/quotes/nobody/plates/1/thumbnail").status_code == 404
+    elsewhere = f"/api/v1/orders/{shop.order['id']}/items/nobody/quotes/{quote['id']}"
+    assert bambuddy.get(f"{elsewhere}/plates/1/thumbnail").status_code == 404

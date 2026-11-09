@@ -136,8 +136,9 @@ export function OrderPage() {
   }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
   // #4955 — the drawer section a row's ⋯ action opened an item at, scrolled to once. Kept
-  // with the item's id, so it never reaches another item's drawer.
-  const [section, setSection] = useState<{ item: string; at: ItemSection } | null>(null)
+  // with the item's id, so it never reaches another item's drawer. `n` counts the clicks, so
+  // a second Slice… of the open item opens its dialog again (#4673).
+  const [section, setSection] = useState<{ item: string; at: ItemSection; n: number } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
@@ -314,7 +315,7 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           onAdd={() => setAdding(true)}
           onSection={(item, at) => {
-            setSection({ item: item.id, at })
+            setSection((was) => ({ item: item.id, at, n: (was?.n ?? 0) + 1 }))
             setOpenItem(item.id)
           }}
           busy={busy}
@@ -559,6 +560,7 @@ export function OrderPage() {
           slices={slices}
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
+          sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -577,6 +579,7 @@ function ItemDrawer({
   slices,
   unfulfilAllowed,
   section = null,
+  sliceAsked = 0,
   onClose,
   onChanged,
 }: {
@@ -589,6 +592,8 @@ function ItemDrawer({
   unfulfilAllowed: boolean
   /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
   section?: ItemSection | null
+  /** #4673 — each row Slice… of this item, counted: a new count opens the slice dialog. */
+  sliceAsked?: number
   onClose: () => void
   onChanged: () => void
 }) {
@@ -619,7 +624,8 @@ function ItemDrawer({
   // after this component's own effects run), and scrolled to; another section's attaches in its
   // place, so a second ⋯ section for this item scrolls again.
   const [target, setTarget] = useState<HTMLDivElement | null>(null)
-  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  // Slice… (#4673) opens the quote's section with its dialog.
+  const sectionRef = (name: ItemSection) => (name === section || (name === 'quote' && section === 'slice') ? setTarget : undefined)
   useEffect(() => {
     target?.scrollIntoView?.({ block: 'start' })
   }, [target])
@@ -822,7 +828,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} />
       )}
       </div>
       )}

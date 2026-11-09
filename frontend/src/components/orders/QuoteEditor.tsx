@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NO_SLICE_SOURCE } from './itemActions'
 import { api } from '../../api/client'
-import type { MachineRateBreakdown, OrderItem, PartSettingsMap, Quote, SliceQuoteRequest } from '../../api/types'
+import type { MachineRateBreakdown, OrderItem, PartSettingsMap, Quote, Revision, SliceQuoteRequest } from '../../api/types'
+import { formatDuration } from '../../lib/format'
 import { formatMoney, toMajor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
 import { orderItemSource } from '../../lib/printSource'
@@ -19,6 +20,7 @@ import { refusalText } from './refusal'
 import type { SliceQuoteRun } from './useSliceQuotes'
 import { elapsed, useNow } from './useNow'
 import { When } from './When'
+import { OLD_REVISION_TEXT, oldRevision, setupChanges, setupGroups, setupPlates, setupStats, type SetupGroup } from './printSetups'
 
 /** How long the typed price must stay still before the warning asks the route about it. */
 export const CHECK_DEBOUNCE_MS = 300
@@ -74,6 +76,46 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
   )
 }
 
+/** A print setups group's name: its revision's number, and whether it is the current one. */
+function groupName(group: SetupGroup): string {
+  if (!group.revision) return 'No revision'
+  return `Revision ${group.revision.number}${group.current ? ' (current)' : ''}`
+}
+
+/**
+ * #4673 PR 4 — a print setup's facts: plates, print time and grams (a quote read off a
+ * slice or a past print), what it changed from the accepted one, and each plate's image
+ * from its sliced file (a plate whose file holds none shows nothing).
+ */
+function SetupFacts({ orderId, itemId, quote, changes }: { orderId: string; itemId: string; quote: Quote; changes: string[] }) {
+  const [missing, setMissing] = useState<ReadonlySet<number>>(new Set())
+  if (quote.source === 'manual') return null
+  const stats = setupStats(quote)
+  const plates = quote.sliced_blob_key ? setupPlates(quote).filter((plate) => !missing.has(plate)) : []
+  return (
+    <div className="ml-3 flex flex-col gap-1 text-xs text-muted-foreground" data-testid="setup-facts">
+      <span>
+        {stats.plates} {stats.plates === 1 ? 'plate' : 'plates'} · {formatDuration(stats.seconds)} · {Math.round(stats.grams * 10) / 10} g
+      </span>
+      {changes.length > 0 && <span data-testid="setup-changes">Changed from the accepted: {changes.join('; ')}</span>}
+      {plates.length > 0 && (
+        <span className="flex flex-wrap gap-1">
+          {plates.map((plate) => (
+            <img
+              key={plate}
+              src={api.quotePlateThumbnailUrl(orderId, itemId, quote.id, plate)}
+              alt={`Plate ${plate}`}
+              loading="lazy"
+              className="size-16 rounded border bg-muted object-contain"
+              onError={() => setMissing((was) => new Set(was).add(plate))}
+            />
+          ))}
+        </span>
+      )}
+    </div>
+  )
+}
+
 /**
  * A typed price for a line item (§3.4's `manual` quote, plan Ruling 1), a quote from a
  * slice of it (#4250: the print dialog in its quote mode, which slices every plate and
@@ -85,6 +127,12 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
  * Accept on the pending quote alone, with nothing to record (#5541: a custom item, whose
  * price is its own field, added after acceptance or by the agent with its price `quoted`).
  * An item taken from a past print (#4777) also quotes from that print (`ArchiveQuote`).
+ *
+ * #4673 PR 4 (order operations spec §5.2) — the quotes are the item's print setups, grouped
+ * by the revision each was made of: each with its plates, time, grams, plate previews and
+ * what it changed from the accepted one. Accept is off, with the reason, on a quote of a
+ * revision that is no longer the item's current one. Slice… opens the print dialog on the
+ * item's design, its inputs editable in place (`DesignInputs`).
  */
 export function QuoteEditor({
   orderId,
@@ -98,6 +146,7 @@ export function QuoteEditor({
   item,
   slice,
   parts = '',
+  startSlicing = 0,
 }: {
   orderId: string
   itemId: string
@@ -110,14 +159,21 @@ export function QuoteEditor({
   acceptPending?: boolean
   onChanged: () => void
   /** What a slice quote slices: the item's output or library file, and its colours' filaments. */
-  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> & Partial<Pick<OrderItem, 'library_file' | 'origin_archive_ids'>>
+  item?: Pick<OrderItem, 'output_id' | 'reference' | 'colours'> &
+    Partial<Pick<OrderItem, 'library_file' | 'origin_archive_ids' | 'current_revision_id'>> & { revisions?: Revision[] }
   /** The page's slice quote of this item (`useSliceQuotes`): its run, and how to start one. */
   slice?: { run?: SliceQuoteRun; start: (body: SliceQuoteRequest) => Promise<void>; dismiss: () => void }
   /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
    * them, so a change reads it again. */
   parts?: string
+  /** #4673 — the row's Slice… clicks, counted (0 for none): each new count opens the slice dialog. */
+  startSlicing?: number
 }) {
-  const [slicing, setSlicing] = useState(false)
+  const [slicing, setSlicing] = useState(startSlicing > 0)
+  // Slice… again on the row while the drawer is open: the dialog opens again.
+  useEffect(() => {
+    if (startSlicing > 0) setSlicing(true)
+  }, [startSlicing])
   const [fromPrint, setFromPrint] = useState(false)
   // What a slice quote slices: the item's output, or a library file item's file (#5544).
   const sliceSource = item ? orderItemSource(item) : null
@@ -140,6 +196,10 @@ export function QuoteEditor({
   // made again keeps them; with none, on the model's remembered ones.
   const lastSlice = quotes.filter((q) => q.source === 'slice').sort(byCreated).at(-1)
   const running = slice?.run && !slice.run.error ? slice.run : undefined
+  // #4673 PR 4 — the print setups, by revision; headed only when there is a revision to name.
+  const groups = setupGroups(quotes, item?.revisions ?? [], item?.current_revision_id)
+  const grouped = groups.some((group) => group.revision !== null)
+  const acceptedQuote = quotes.find((q) => q.accepted)
   const now = useNow(running !== undefined)
   const checked = useDebounced(current, CHECK_DEBOUNCE_MS)
   const history = useAsync(
@@ -183,9 +243,16 @@ export function QuoteEditor({
   return (
     <section className="flex flex-col gap-2" aria-label="Price">
       <h3 className="text-xs text-muted-foreground">Price</h3>
-      {quotes.length > 0 && (
+      {quotes.length > 0 &&
+        groups.map((group) => (
+          <div key={group.revision?.id ?? 'none'} role="group" aria-label={groupName(group)} className="flex flex-col gap-1">
+            {grouped && (
+              <h4 className="text-xs text-muted-foreground" data-testid="setup-group">
+                {groupName(group)}
+              </h4>
+            )}
         <ul className="flex flex-col gap-1 text-[13px]">
-          {quotes.map((quote) => (
+          {group.quotes.map((quote) => (
             <li key={quote.id} className="flex flex-col gap-0.5" data-testid={`quote-${quote.id}`}>
               <span className="flex flex-wrap items-center gap-2">
                 <span className="sb-num">{formatMoney(quote.unit_price_minor, currency, exponent)} × {quote.quantity} = {formatMoney(quote.total_minor, currency, exponent)}</span>
@@ -201,12 +268,25 @@ export function QuoteEditor({
                   <span className="text-xs text-primary">Accepted</span>
                 ) : (
                   (editable || (acceptPending && quote.id === pending?.id)) && (
-                    <Button size="xs" variant="outline" disabled={busy} onClick={() => void accept(quote.id)}>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={busy || oldRevision(quote, item?.current_revision_id)}
+                      title={oldRevision(quote, item?.current_revision_id) ? OLD_REVISION_TEXT : undefined}
+                      onClick={() => void accept(quote.id)}
+                    >
                       Accept
                     </Button>
                   )
                 )}
               </span>
+              {/* Beside every Accept it holds, so a touch screen shows the reason too. */}
+              {!quote.accepted && (editable || (acceptPending && quote.id === pending?.id)) && oldRevision(quote, item?.current_revision_id) && (
+                <span className="text-xs text-muted-foreground" data-testid="setup-old-revision">
+                  {OLD_REVISION_TEXT}
+                </span>
+              )}
+              <SetupFacts orderId={orderId} itemId={itemId} quote={quote} changes={setupChanges(quote, acceptedQuote, item?.revisions ?? [])} />
               {quote.source !== 'manual' && (
                 <ul className="ml-3 flex flex-col text-xs text-muted-foreground" aria-label="Quote lines">
                   {quote.lines.map((line, index) => (
@@ -223,7 +303,8 @@ export function QuoteEditor({
             </li>
           ))}
         </ul>
-      )}
+          </div>
+        ))}
       {slice && running && (
         <p role="status" className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-testid="quote-running">
           <Spinner />
@@ -272,7 +353,7 @@ export function QuoteEditor({
             onClick={() => setSlicing(true)}
             data-testid="quote-from-slice"
           >
-            Quote from a slice…
+            Slice…
           </Button>
           {(item.origin_archive_ids ?? []).length > 0 && (
             <Button type="button" size="sm" variant="outline" disabled={busy || fromPrint} onClick={() => setFromPrint(true)} data-testid="quote-from-print">
@@ -306,6 +387,7 @@ export function QuoteEditor({
             orderId,
             itemId,
             filaments: Object.fromEntries(item.colours.map((colour) => [String(colour.slot), colour.filament_id ?? null])),
+            ...(item.reference ? { design: { slug: item.reference.slug, commit: item.reference.commit, inputs: item.reference.inputs as Record<string, unknown> } } : {}),
             ...(lastSlice ? { partSettings: (lastSlice.part_settings ?? null) as PartSettingsMap | null } : {}),
             start: slice.start,
           }}
