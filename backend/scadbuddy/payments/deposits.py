@@ -7,7 +7,9 @@ restart on ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION``) are ``plaid.py``'s 
 
 What is kept of a deposit: its Plaid id, amount, currency, date and the bank's text with
 every run of five or more digits masked (`mask`), a run going on across single spaces or
-hyphens, so a number printed in groups (an IBAN) is masked too; an order number is kept.
+hyphens, so a number printed in groups (an IBAN) is masked too. An order number is masked
+too, and only the canonical number of an order that exists (`_existing`) is put back; digits
+run on after it stay masked.
 The mask cannot know every format a bank prints, so the text is kept short
 (``DESCRIPTION_CHARS``) and never logged. Only posted deposits on the linked account are
 read: a pending one is removed by Plaid when it posts, and the posted one comes with a new

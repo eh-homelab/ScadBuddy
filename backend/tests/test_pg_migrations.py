@@ -282,6 +282,40 @@ def _index(slug: str) -> int:
 
 
 @pytest.mark.requires_postgres
+def test_the_remask_migration_masks_text_stored_under_the_old_rule(pg_conninfo: str) -> None:
+    # #5852 review: before it, the mask kept any order-number match as written, so an
+    # account number written as one could be stored. Every order number and every run of
+    # four or more digits is masked; a real order's number goes too.
+    column = _index("bank_deposits_remask")
+    stored = [
+        "PAY ORD-2026-000123456789 THANKS",
+        "PAY ORD-2026-12 3456",
+        "pay ord-2026-12-34 and ORD-2026-7",
+        "ACCT 1234 REF 567",
+        "REF 123 ACCT \u2022\u2022\u2022",
+    ]
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:column])
+        for i, text in enumerate(stored):
+            conn.execute(
+                "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
+                " posted_on, description) VALUES (%s, 'item', 100, 'USD', '2026-11-01', %s)",
+                (f"t{i}", text),
+            )
+        assert migrate(conn)[0] == MIGRATIONS[column].id
+        rows = conn.execute(
+            "SELECT description FROM bank_deposits ORDER BY transaction_id"
+        ).fetchall()
+    assert [r[0] for r in rows] == [
+        "PAY ORD-\u2022\u2022\u2022 THANKS",
+        "PAY ORD-\u2022\u2022\u2022",
+        "pay ORD-\u2022\u2022\u2022 and ORD-\u2022\u2022\u2022",
+        "ACCT \u2022\u2022\u2022 REF 567",
+        "REF 123 ACCT \u2022\u2022\u2022",
+    ]
+
+
+@pytest.mark.requires_postgres
 def test_the_contract_migration_drops_only_what_the_previous_build_never_names(
     pg_conninfo: str,
 ) -> None:

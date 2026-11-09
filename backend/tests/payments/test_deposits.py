@@ -223,7 +223,7 @@ def test_mask_puts_back_only_the_canonical_number_of_an_order_that_exists(
     ids=["grouped IBAN", "hyphens", "five digits split", "unknown order number", "short runs"],
 )
 def test_mask_counts_digits_across_single_spaces_and_hyphens(text: str, masked: str) -> None:
-    """A number printed in groups is still masked; an order number is not an account's."""
+    """A number printed in groups is still masked, and so is an unknown order number."""
     assert mask(text) == masked
 
 
@@ -349,6 +349,9 @@ async def test_a_cancelled_order_is_not_suggested(bank: Bank) -> None:
         router.post(SYNC).mock(return_value=page([transaction("t1", -10, f"{order.number}")]))
         await sync_deposits(bank.bank)
     assert bank.matches() == set()
+    # Its number is still an order's, not an account's, so the mask puts it back.
+    [deposit] = bank.deposits()
+    assert deposit["description"] == order.number
 
 
 async def test_pages_run_until_has_more_is_false(bank: Bank) -> None:
