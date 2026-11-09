@@ -1,6 +1,8 @@
-"""Venmo through PayPal (#4960): a USD PayPal request from a shop with Venmo on gets a pay
-token, its link is the storefront's pay page, and ``venmo_checkout`` reads what that page
-needs by the token only while the request can still be paid."""
+"""Venmo through PayPal (#4960): once the storefront's pay page exists (`PAY_PAGE_READY`), a
+USD PayPal request from a shop with Venmo on gets a pay token, its link is that page, and
+``venmo_checkout`` reads what the page needs by the token only while the request can still
+be paid. Until then no link is rewritten and Venmo cannot be turned on; the tests of the
+rewrite turn the flag on (`page_ready`)."""
 
 from __future__ import annotations
 
@@ -15,12 +17,14 @@ import pytest
 from scadbuddy.orders.models import Order
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.payments import store as payments_store
+from scadbuddy.payments import venmo
 from scadbuddy.payments.models import HostedRequest, PaymentRequestView
 from scadbuddy.payments.paypal import PAYPAL
-from scadbuddy.payments.provider import Credential
+from scadbuddy.payments.provider import Credential, Verified
 from scadbuddy.payments.service import FieldError, Payments, ProviderConnect
 from scadbuddy.payments.venmo import (
     VenmoCheckout,
+    VenmoPageMissingError,
     pay_token,
     token_hash,
     venmo_checkout,
@@ -52,6 +56,12 @@ def connect_paypal(rows: OrderStore, settings: Mapping[str, str] = SETTINGS) -> 
             " dek_sealed, kek_id) VALUES ('paypal', 'PayPal', %s::jsonb, '\\x00', '\\x00', 'k')",
             (json.dumps(dict(settings)),),
         )
+
+
+@pytest.fixture
+def page_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The storefront's pay page exists (#5283 phase 4)."""
+    monkeypatch.setattr(venmo, "PAY_PAGE_READY", True)
 
 
 @pytest.fixture
@@ -209,6 +219,7 @@ def test_a_request_of_another_provider_reads_nothing(shop: PayShop) -> None:
     ],
 )
 def test_venmo_needs_paypal_usd_the_toggle_and_the_storefront(
+    page_ready: None,
     provider: str,
     settings: Mapping[str, str],
     currency: str,
@@ -218,7 +229,17 @@ def test_venmo_needs_paypal_usd_the_toggle_and_the_storefront(
     assert venmo_eligible(provider, settings, currency, storefront) is eligible
 
 
-def test_the_toggle_needs_the_storefront_url() -> None:
+def test_nothing_is_eligible_until_the_pay_page_exists() -> None:
+    assert not venmo_eligible("paypal", SETTINGS, "USD", STOREFRONT)
+
+
+def test_the_toggle_is_refused_until_the_pay_page_exists() -> None:
+    with pytest.raises(VenmoPageMissingError):
+        venmo_setting_error("paypal", SETTINGS, STOREFRONT)
+    assert venmo_setting_error("paypal", SETTINGS | {"venmo": "off"}, STOREFRONT) is None
+
+
+def test_the_toggle_needs_the_storefront_url(page_ready: None) -> None:
     assert venmo_setting_error("paypal", SETTINGS, None) is not None
     assert venmo_setting_error("paypal", SETTINGS, STOREFRONT) is None
     assert venmo_setting_error("paypal", SETTINGS | {"venmo": "off"}, None) is None
@@ -235,6 +256,11 @@ class _PayPal:
     id = "paypal"
     label = "PayPal"
     fields = PAYPAL.fields
+
+    reports_currency = False
+
+    async def verify(self, credential: Credential) -> Verified:
+        return Verified(account_label="PayPal (sandbox)")
 
     async def create_request(self, credential: Credential, request: Any, **_: Any) -> HostedRequest:
         return HostedRequest.model_validate(
@@ -265,7 +291,18 @@ def service(
     )
 
 
-async def test_an_eligible_request_links_to_the_storefront_pay_page(shop: PayShop) -> None:
+async def test_until_the_pay_page_exists_paypal_s_link_stays(shop: PayShop) -> None:
+    """#5769 review: no request links to a page nothing serves."""
+    order, _ = shop.accepted()
+    req = shop.lifecycle.open_payment_request(order.id, BY, provider="paypal")
+    linked = await service(shop).link(req.id)
+    assert linked.hosted_url == PAYER_ACTION
+    assert stored_hash(shop, req.id) is None
+
+
+async def test_an_eligible_request_links_to_the_storefront_pay_page(
+    shop: PayShop, page_ready: None
+) -> None:
     order, _ = shop.accepted()
     req = shop.lifecycle.open_payment_request(order.id, BY, provider="paypal")
     linked = await service(shop).link(req.id)
@@ -283,7 +320,7 @@ async def test_an_eligible_request_links_to_the_storefront_pay_page(shop: PaySho
     [(SETTINGS | {"venmo": "off"}, STOREFRONT), (SETTINGS, None)],
 )
 async def test_any_other_request_keeps_paypal_s_link(
-    shop: PayShop, settings: Mapping[str, str], storefront: str | None
+    shop: PayShop, page_ready: None, settings: Mapping[str, str], storefront: str | None
 ) -> None:
     order, _ = shop.accepted()
     req = shop.lifecycle.open_payment_request(order.id, BY, provider="paypal")
@@ -292,7 +329,29 @@ async def test_any_other_request_keeps_paypal_s_link(
     assert stored_hash(shop, req.id) is None
 
 
-async def test_connect_refuses_venmo_on_without_the_storefront_url(shop: PayShop) -> None:
+async def test_connect_refuses_venmo_on_until_the_pay_page_exists(shop: PayShop) -> None:
+    payments = service(shop)
+    body = ProviderConnect(settings=dict(SETTINGS), secrets={"client_secret": "s"})
+    with pytest.raises(VenmoPageMissingError):
+        await payments.connect("paypal", body, shop_currency="USD")
+
+
+async def test_connect_takes_venmo_off_when_it_is_left_out(shop: PayShop) -> None:
+    """#5769 review: a reconnect from before the field existed still saves."""
+    payments = service(shop)
+    saved: list[Mapping[str, Any]] = []
+    credentials = cast(Any, payments)._credentials
+    credentials.connect = lambda provider, **kw: saved.append(kw["settings"])
+    cast(Any, payments).statuses = lambda: [SimpleNamespace(id="paypal")]
+    left_out = {k: v for k, v in SETTINGS.items() if k != "venmo"}
+    body = ProviderConnect(settings=left_out, secrets={"client_secret": "s"})
+    await payments.connect("paypal", body, shop_currency="USD")
+    assert [s["venmo"] for s in saved] == ["off"]
+
+
+async def test_connect_refuses_venmo_on_without_the_storefront_url(
+    shop: PayShop, page_ready: None
+) -> None:
     payments = service(shop, storefront=None)
     body = ProviderConnect(settings=dict(SETTINGS), secrets={"client_secret": "s"})
     with pytest.raises(FieldError) as refused:

@@ -4,7 +4,7 @@ import { HttpResponse, http } from 'msw'
 import { api } from '../../../api/client'
 import { mockSettings, resetMockState } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
-import { choose, optionsOf } from '../../../test/select'
+import { choose, optionDisabled, optionsOf } from '../../../test/select'
 import { FAKE_PROVIDER, mockConnectProvider, mockPaymentEvent, setMockKek, setMockWebhookError } from '../../../mocks/features/payments'
 import { ORDER_ACCEPTED } from '../../../mocks/features/orders/state'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -154,6 +154,34 @@ describe('Settings → Payments (#4957)', () => {
     await choose(user, mode, 'live')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(sent).toEqual({ settings: { mode: 'live' }, secrets: {} }))
+  })
+
+  it('preselects a field\'s default and shows an unavailable choice disabled, with why (#4960)', async () => {
+    const withDefault = {
+      id: 'picky',
+      label: 'Picky',
+      fields: [{ name: 'venmo', label: 'Venmo (USD)', secret: false, choices: ['off', 'on'], default: 'off', unavailable: { on: 'Needs the pay page' } }],
+      connected: false,
+      account_label: null,
+      is_default: false,
+      connected_at: null,
+      last_webhook_at: null,
+    }
+    let sent: unknown = null
+    server.use(
+      http.get('/api/v1/payments/providers', () => HttpResponse.json([withDefault])),
+      http.put('/api/v1/payments/providers/picky', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ ...withDefault, connected: true, account_label: 'Picky' })
+      }),
+    )
+    const { user } = renderSettingsSection(<Payments />, { route })
+    const venmo = await screen.findByRole('combobox', { name: 'Venmo (USD)' })
+    expect(venmo).toHaveTextContent('off')
+    expect(await optionDisabled(user, venmo, /^on/)).toBe(true)
+    expect(screen.getByText('on: Needs the pay page')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(sent).toEqual({ settings: { venmo: 'off' }, secrets: {} }))
   })
 
   it('puts the key file back at resetMockState, so one test cannot leak it into the next', async () => {

@@ -615,17 +615,23 @@ Cash needs no provider: record it as a manual payment.
 
 Venmo is a funding source of PayPal, for US buyers paying in USD. Only PayPal's
 JavaScript SDK offers it, and PayPal's own approval link never does
-([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Set Venmo
-to `on` in PayPal's connect form. ScadBuddy refuses that while the API has no
-`SCADBUDDY_STOREFRONT_PUBLIC_URL` (the storefront edge's origin, the same variable the
-edge reads; set it on the API's Deployment too). Then each USD PayPal request links to
-the storefront's pay page, `/pay/<token>`, which offers PayPal and Venmo for the same
-PayPal order. The token is 32 random bytes. ScadBuddy keeps only its sha256 and drops it
-as soon as the request leaves open (approved, paid, cancelled, expired or failed), or is
-linked again without one; a spent token never opens the page again. Turning
-Venmo off ends every pay link at once. Any other request keeps PayPal's own link. A
-payment funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
-PayPal". A Venmo payment to the shop's own username has no merchant API, so record it
+([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Venmo
+needs a pay page on the storefront, `/pay/<token>`, that renders PayPal's buttons for the
+request's PayPal order. That page is the storefront's (#5283 phase 4) and is not built
+yet. Until it ships, PayPal's connect form shows Venmo `on` as unavailable, a connect
+with `on` is refused (409 `venmo_page_missing`), a connect that leaves Venmo out saves
+`off`, and every PayPal request keeps PayPal's own approval link. Once the page ships,
+the link rewrite and the toggle turn on: with Venmo `on` (which also needs
+`SCADBUDDY_STOREFRONT_PUBLIC_URL` on the API, the storefront edge's origin), each USD
+PayPal request will link to that page. Its token is 32 random bytes. ScadBuddy keeps
+only its sha256 and drops it as soon as the request leaves open (approved, paid,
+cancelled, expired or failed), or is linked again without one, so a spent token never
+opens the page again, and turning Venmo off ends every pay link at once. The edge reads
+the request through the API's `POST /api/v1/internal/crud/storefront/pay/checkout`
+(storefront service credential; a bare 404 for a token that reads nothing). A payment
+funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
+PayPal"; when PayPal does not answer the read of its funding source, the capture is
+recorded without a method. A Venmo payment to the shop's own username has no merchant API, so record it
 by hand: the payment form's method list has Cash, Check, Bank transfer, Venmo, Zelle and
 Other.
 

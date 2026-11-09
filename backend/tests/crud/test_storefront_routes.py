@@ -118,7 +118,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
-    assert r.json() == {"areas": []}
+    assert r.json() == {"areas": ["pay"]}
 
 
 def test_the_storefront_routes_are_not_in_the_schema() -> None:

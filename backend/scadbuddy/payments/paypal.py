@@ -94,6 +94,7 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
     Verified,
 )
+from scadbuddy.payments.venmo import PAY_PAGE_MISSING, PAY_PAGE_READY
 
 logger = logging.getLogger(__name__)
 
@@ -200,8 +201,16 @@ class PayPalProvider:
         ),
         ProviderField(name="client_id", label="Client ID", secret=False),
         ProviderField(name="webhook_id", label="Webhook ID", secret=False),
-        # #4960: Venmo on the storefront's pay page, for USD requests (`venmo.py`).
-        ProviderField(name="venmo", label="Venmo (USD)", secret=False, choices=["off", "on"]),
+        # #4960: Venmo on the storefront's pay page, for USD requests (`venmo.py`); off when
+        # left out, and refused on until that page exists.
+        ProviderField(
+            name="venmo",
+            label="Venmo (USD)",
+            secret=False,
+            choices=["off", "on"],
+            default="off",
+            unavailable=None if PAY_PAGE_READY else {"on": PAY_PAGE_MISSING},
+        ),
         ProviderField(name="client_secret", label="Secret", secret=True),
     )
 
@@ -584,8 +593,13 @@ class PayPalProvider:
 
     async def _funding(self, credential: Credential, order_id: str) -> ProviderEventMethod | None:
         """The method the order was paid with when it is one ScadBuddy names (#4960): the
-        capture does not say, the order's ``payment_source`` does."""
-        order = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        capture does not say, the order's ``payment_source`` does. None when the order
+        cannot be read: the capture is still recorded, without its method."""
+        try:
+            order = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        except ProviderUnavailableError:
+            # The capture is recorded without its method rather than held back.
+            return None
         source = order.get("payment_source")
         if not isinstance(source, dict):
             return None

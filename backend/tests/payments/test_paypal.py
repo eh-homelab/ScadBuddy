@@ -27,6 +27,7 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
 )
 from scadbuddy.payments.registry import providers
+from scadbuddy.payments.venmo import PAY_PAGE_MISSING
 
 PAYLOADS = Path(__file__).parent / "paypal_payloads"
 SANDBOX = API["sandbox"]
@@ -122,6 +123,14 @@ def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:
         ("venmo", False, ["off", "on"]),
         ("client_secret", True, None),
     ]
+
+
+def test_venmo_is_off_when_left_out_and_on_is_unavailable_until_the_pay_page() -> None:
+    """#4960: a reconnect from before the field existed still saves; the form shows
+    ``on`` as unavailable, with why."""
+    (venmo,) = [f for f in PAYPAL.fields if f.name == "venmo"]
+    assert venmo.default == "off"
+    assert venmo.unavailable == {"on": PAY_PAGE_MISSING}
 
 
 async def test_verify_reads_the_webhook_and_names_the_app_and_environment(
@@ -718,12 +727,13 @@ async def test_a_funding_source_scadbuddy_does_not_know_names_no_method(
     assert (event.kind, event.method) == ("paid", None)
 
 
-async def test_paypal_not_answering_for_the_funding_source_is_unavailable(
+async def test_paypal_not_answering_for_the_funding_source_records_no_method(
     paypal: PayPalProvider, pp: Any
 ) -> None:
+    """#5769 review: the capture is recorded without its method rather than held back."""
     pp["order"].respond(500, json={})
-    with pytest.raises(ProviderUnavailableError):
-        await parse(paypal, "payment.capture.completed.json")
+    event = await parse(paypal, "payment.capture.completed.json")
+    assert (event.kind, event.method, event.amount_minor) == ("paid", None, 700)
 
 
 async def test_a_fee_in_another_currency_is_not_recorded(paypal: PayPalProvider, pp: Any) -> None:

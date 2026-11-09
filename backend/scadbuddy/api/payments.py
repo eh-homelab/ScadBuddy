@@ -24,6 +24,7 @@ from scadbuddy.payments.service import (
     ProviderNotFoundError,
     ProviderStatus,
 )
+from scadbuddy.payments.venmo import VenmoPageMissingError
 
 PROBLEMS = "https://scadbuddy.dev/problems/payments/"
 
@@ -51,7 +52,9 @@ async def list_providers(payments: PaymentsDep) -> list[ProviderStatus]:
         "The provider checks the account first. 409 `kek_missing` without"
         " SCADBUDDY_SECRET_KEY_FILE; 409 `currency_mismatch` when the account takes"
         " payments in one currency and it is not `orders_currency`; 409"
-        " `currency_unknown` when such an account names no currency; 422 with the"
+        " `currency_unknown` when such an account names no currency; 409"
+        " `venmo_page_missing` for PayPal's `venmo` `on` until the storefront's pay page"
+        " exists; a field left out that has a `default` takes it; 422 with the"
         " provider's own text when it refuses."
     ),
 )
@@ -76,6 +79,10 @@ async def connect_provider(
     except CurrencyMismatchError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "currency_mismatch"
+        ) from None
+    except VenmoPageMissingError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "venmo_page_missing"
         ) from None
     except CurrencyUnknownError as error:
         raise ApiError(

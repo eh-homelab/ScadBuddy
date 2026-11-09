@@ -36,6 +36,12 @@ class ProviderField(BaseModel):
     label: str
     secret: bool
     choices: list[str] | None = None
+    #: The value a connect that leaves the field out takes, which the form preselects
+    #: (#4960: a reconnect made before the field existed still saves).
+    default: str | None = None
+    #: Choices the form shows but refuses, each with why (#4960: Venmo, until the
+    #: storefront's pay page ships).
+    unavailable: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _no_choices_for_a_secret(self) -> ProviderField:

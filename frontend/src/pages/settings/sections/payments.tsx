@@ -146,7 +146,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
   async function save() {
     const settings: Record<string, string> = {}
     const secrets: Record<string, string> = {}
-    for (const field of provider.fields) (field.secret ? secrets : settings)[field.name] = values[field.name] ?? ''
+    for (const field of provider.fields) (field.secret ? secrets : settings)[field.name] = values[field.name] ?? field.default ?? ''
     const saved = await run(() => api.connectPaymentProvider(provider.id, { settings, secrets }))
     // The secret leaves the page as soon as it is sent.
     if (saved) {
@@ -206,16 +206,17 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
           {provider.fields.map((field) => (
             <div key={field.name} className="flex flex-col gap-1">
               <Label htmlFor={`${provider.id}-${field.name}`}>{field.label}</Label>
-              {/* #4960 — a field with choices takes one of them. */}
+              {/* #4960 — a field with choices takes one of them, its default preselected; a
+                  choice the server refuses for now is shown disabled, with why. */}
               {field.choices ? (
-                <Select value={values[field.name] ?? ''} onValueChange={(v) => setValues({ ...values, [field.name]: v })}>
+                <Select value={values[field.name] ?? field.default ?? ''} onValueChange={(v) => setValues({ ...values, [field.name]: v })}>
                   <SelectTrigger id={`${provider.id}-${field.name}`} aria-label={field.label} className="w-56">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper">
                     {field.choices.map((choice) => (
-                      <SelectItem key={choice} value={choice}>
-                        {choice}
+                      <SelectItem key={choice} value={choice} disabled={field.unavailable?.[choice] !== undefined}>
+                        {field.unavailable?.[choice] !== undefined ? `${choice} (unavailable)` : choice}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -230,6 +231,11 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
                 onChange={(e) => setValues({ ...values, [field.name]: e.target.value })}
               />
               )}
+              {Object.entries(field.unavailable ?? {}).map(([choice, why]) => (
+                <p key={choice} className="max-w-56 text-xs text-muted-foreground">
+                  {choice}: {why}
+                </p>
+              ))}
             </div>
           ))}
           <Button type="submit" size="sm" disabled={busy} {...USER_ONLY}>

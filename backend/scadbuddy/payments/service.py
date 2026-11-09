@@ -246,7 +246,8 @@ class Payments:
             if storefront and venmo_eligible(
                 found.provider, credential.settings, found.currency, storefront
             ):
-                # #4960: the storefront's pay page offers Venmo for the same order.
+                # #4960: once the storefront's pay page exists (`PAY_PAGE_READY`), it
+                # offers Venmo for the same order.
                 token, token_digest = pay_token()
                 hosted = HostedRequest.model_validate(
                     {"provider_ref": hosted.provider_ref, "hosted_url": pay_link(storefront, token)}
@@ -586,6 +587,13 @@ class Payments:
         adapter = self._registry.get(provider)
         if adapter is None:
             raise ProviderNotFoundError(provider)
+        defaults = {
+            f.name: f.default
+            for f in adapter.fields
+            if f.default is not None and f.name not in body.settings
+        }
+        if defaults:
+            body = body.model_copy(update={"settings": {**body.settings, **defaults}})
         for part, given in (("settings", body.settings), ("secrets", body.secrets)):
             declared = {f.name for f in adapter.fields if f.secret == (part == "secrets")}
             if extra := sorted(set(given) - declared):

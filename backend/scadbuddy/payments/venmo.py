@@ -4,9 +4,19 @@ JavaScript SDK offers, with ``enable-funding=venmo``, for US buyers paying in US
 https://developer.paypal.com/v5/venmo/integrate.md). Orders v2's
 ``payment_source.venmo.experience_context`` takes no ``return_url``
 (https://developer.paypal.com/docs/api/orders/v2/), so PayPal's redirect link never shows
-Venmo. A Venmo-eligible request's link is therefore the storefront's own pay page,
-``<SCADBUDDY_STOREFRONT_PUBLIC_URL>/pay/<token>``, which renders PayPal's buttons for the
-request's existing PayPal order. The webhook captures it as any PayPal order.
+Venmo. The plan is a pay page on the storefront, ``<SCADBUDDY_STOREFRONT_PUBLIC_URL>/pay/<token>``,
+that renders PayPal's buttons for the request's PayPal order; its approval goes to the
+existing capture path. That page is the storefront's (#5283 phase 4) and does not exist
+yet. Until it ships (`PAY_PAGE_READY`), no request's link is rewritten, every request
+keeps PayPal's own approval link, and a connect with Venmo on is refused
+(`VenmoPageMissingError`, 409 ``venmo_page_missing``). The token, its hash, the checkout
+read and its CRUD route (`api/crud_storefront.py`) are in place for that page.
+
+Not yet measured: PayPal's docs do not say whether the JS SDK's buttons can fund, with
+Venmo, an order created with ``payment_source.paypal`` (as ``create_request`` creates
+it); the Venmo guides show only the SDK's script parameter and the buttons' render.
+Phase 4 measures it in the sandbox before `PAY_PAGE_READY` flips, and creates the order
+without ``payment_source`` for a pay-page request if it cannot.
 
 The token is 32 random bytes, URL-safe base64. Only its sha256 is stored
 (``payment_requests.pay_token_hash``), and it is dropped when the request is paid,
@@ -24,12 +34,22 @@ from pydantic import BaseModel
 
 from scadbuddy.orders.store import Conn
 
+#: Whether the storefront's ``/pay/<token>`` page exists (#5283 phase 4). Until it does, no
+#: request is Venmo-eligible and the toggle cannot be turned on.
+PAY_PAGE_READY: Final = False
+#: Why the toggle's ``on`` is refused while the page does not exist.
+PAY_PAGE_MISSING: Final = "Venmo needs the storefront's pay page, which is not built yet"
 #: The provider Venmo rides on, and its settings field that turns Venmo on.
 PROVIDER: Final = "paypal"
 SETTING: Final = "venmo"
 CURRENCY: Final = "USD"
 #: What ``secrets.token_urlsafe(32)`` gives: 43 characters of URL-safe base64.
 _TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+class VenmoPageMissingError(Exception):
+    """Venmo turned on before the storefront's pay page exists (#4960); 409
+    ``venmo_page_missing``."""
 
 
 class VenmoCheckout(BaseModel):
@@ -56,9 +76,11 @@ def pay_token() -> tuple[str, str]:
 def venmo_eligible(
     provider: str, settings: Mapping[str, str], currency: str, storefront_url: str | None
 ) -> bool:
-    """A PayPal request in USD, from a shop with Venmo on and a storefront to pay on."""
+    """A PayPal request in USD, from a shop with Venmo on and a storefront pay page to pay
+    on."""
     return (
-        provider == PROVIDER
+        PAY_PAGE_READY
+        and provider == PROVIDER
         and currency.upper() == CURRENCY
         and settings.get(SETTING) == "on"
         and bool(storefront_url)
@@ -68,11 +90,14 @@ def venmo_eligible(
 def venmo_setting_error(
     provider: str, settings: Mapping[str, str], storefront_url: str | None
 ) -> str | None:
-    """Why the connect form's Venmo toggle cannot be saved, or None."""
+    """Why the connect form's Venmo toggle cannot be saved, or None; raises
+    `VenmoPageMissingError` for ``on`` while the pay page does not exist."""
     if provider != PROVIDER or settings.get(SETTING, "off") == "off":
         return None
     if settings.get(SETTING) != "on":
         return "Venmo is on or off"
+    if not PAY_PAGE_READY:
+        raise VenmoPageMissingError(PAY_PAGE_MISSING)
     if not storefront_url:
         return "Venmo needs the storefront: set SCADBUDDY_STOREFRONT_PUBLIC_URL for the API"
     return None
