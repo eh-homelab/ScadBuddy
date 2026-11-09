@@ -603,7 +603,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a payment or a plain edit), `actor.py` (`created_by` and an audit row's `by` from the
   author header, never a body). The bus events are `OrderChanged` (`order.changed`) and
   `OrderItemChanged` (`order_item.changed`), ids and the new status only, on the realtime
-  topics `orders` and `order:<id>`. Every item's `inputs` join `referenced_asset_ids`, and
+  topics `orders` and `order:<id>`; a frame for a cart the draft sweep deleted also
+  carries `deleted: true` (and `cart`, a flag flow triggers read, marks a storefront cart). Every item's `inputs` join `referenced_asset_ids`, and
   `main.sweep_assets` skips the pass when they cannot be read. Routes `api/customers.py`,
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,

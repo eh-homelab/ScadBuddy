@@ -26,7 +26,7 @@ REQUEST_KINDS: Final = frozenset({"image", "video", "pdf"})
 #: The most characters of a request's text.
 MAX_REQUEST_TEXT: Final = 5000
 #: What `escape_filename` escapes, and `unescape_filename` decodes.
-_ESCAPED: Final = re.compile(r"%(22|5C|[01][0-9A-F]|7F)")
+_ESCAPED: Final = re.compile(r"%(22|5C|[01][0-9A-F]|7F)", re.IGNORECASE)
 
 
 def escape_filename(name: str) -> str:

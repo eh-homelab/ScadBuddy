@@ -787,6 +787,8 @@ class Lifecycle:
         with self.store.transaction() as conn:
             if not self.store.claim_idle_draft(conn, order_id, before=before):
                 return False
+            # `claim_idle_draft` holds the row lock already; this only reads the order
+            # (its status, for the event told after the commit).
             order = self._lock(conn, order_id)
             for attachment in self.store.attachments(order_id, conn=conn):
                 self.store.delete_attachment(conn, attachment.id)
