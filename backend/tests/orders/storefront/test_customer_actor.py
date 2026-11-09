@@ -10,8 +10,13 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.core.events import OrderChanged
-from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput, NewModelItem
+from scadbuddy.core.events import OrderChanged, OrderItemChanged
+from scadbuddy.orders.lifecycle import (
+    LifecycleError,
+    ManualQuoteInput,
+    NewCustomItem,
+    NewModelItem,
+)
 from scadbuddy.orders.models import Actor, Order, OrderItem, Revision
 from scadbuddy.orders.numbers import next_number
 from scadbuddy.orders.revisions import RevisionAnswerInput
@@ -20,7 +25,7 @@ from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.orders.test_lifecycle import BY, Shop, resolved, set_request_status
 from tests.orders.test_revisions import attach_render
 
 pytestmark = pytest.mark.requires_postgres
@@ -203,3 +208,154 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(shop: Shop) -> N
     quoted = shop.item(other)
     assert shop.quoted(other, quoted).status == "approved"
     assert shop.get(other).status == "quoted"
+
+
+# -- fix round 1 ---------------------------------------------------------------------------
+
+
+def test_a_refused_order_accept_keeps_the_customers_accept(
+    shop: Shop, pool: PgPool, customer: Actor
+) -> None:
+    """A pending payment (a capture can stay pending for days) refuses `accept_order`:
+    the customer's accept still commits, and an event says why the order waits."""
+    order = storefront_order(shop, pool, 1)
+    [item] = shop.rows.items(order.id)
+    req = shop.lifecycle.open_payment_request(order.id, BY, amount_minor=200, provider=None)
+    set_request_status(shop, req.id, "pending")
+    shop.lifecycle.answer_revision(order.id, item.id, revision(shop, item).id, ACCEPTED, customer)
+    assert revision(shop, item).answer == "accepted"
+    assert shop.get_item(item).status == "approved"
+    assert shop.get(order).status == "quoted"
+    last = shop.rows.events(order.id)[-1]
+    assert last.kind == "order.accept_skipped" and last.detail["slug"] == "payment_in_flight"
+    assert last.by.kind == "customer"
+
+
+def test_a_cancelled_item_is_left_out_of_the_last_accept(
+    shop: Shop, pool: PgPool, customer: Actor
+) -> None:
+    order = storefront_order(shop, pool, 2)
+    a, b = shop.rows.items(order.id)
+    shop.lifecycle.cancel_item(order.id, b.id, BY)
+    shop.lifecycle.answer_revision(order.id, a.id, revision(shop, a).id, ACCEPTED, customer)
+    assert shop.get(order).status == "accepted"
+
+
+def test_a_shop_cancel_never_accepts_the_order(shop: Shop, pool: PgPool, customer: Actor) -> None:
+    """Only the customer's own accept accepts a storefront order (§6.2)."""
+    order = storefront_order(shop, pool, 2)
+    a, b = shop.rows.items(order.id)
+    shop.lifecycle.answer_revision(order.id, a.id, revision(shop, a).id, ACCEPTED, customer)
+    shop.lifecycle.cancel_item(order.id, b.id, BY)
+    assert shop.get(order).status == "quoted"
+
+
+def test_accept_for_the_customer_refuses_a_wrong_revision(shop: Shop, pool: PgPool) -> None:
+    order = storefront_order(shop, pool, 2)
+    a, b = shop.rows.items(order.id)
+    other = revision(shop, b)
+    wrong = refused(
+        lambda: shop.lifecycle.accept_for_customer(order.id, a.id, "revision", other.id, "x", BY)
+    )
+    assert wrong.slug == "revision_not_found" and wrong.not_found
+    first = revision(shop, a)
+    shop.lifecycle.add_revision(order.id, a.id, BY, note="again")
+    older = refused(
+        lambda: shop.lifecycle.accept_for_customer(order.id, a.id, "revision", first.id, "x", BY)
+    )
+    assert older.slug == "revision_not_newest"
+    unsent = revision(shop, a)
+    never = refused(
+        lambda: shop.lifecycle.accept_for_customer(order.id, a.id, "revision", unsent.id, "x", BY)
+    )
+    assert never.slug == "revision_not_sent"
+
+
+def test_a_refused_accept_writes_nothing(shop: Shop, pool: PgPool) -> None:
+    order = storefront_order(shop, pool, 1)
+    [item] = shop.rows.items(order.id)
+    before, told = shop.rows.events(order.id), len(shop.events)
+    refused(
+        lambda: shop.lifecycle.answer_revision(
+            order.id, item.id, revision(shop, item).id, ACCEPTED, BY
+        )
+    )
+    [quote] = shop.rows.quotes(item.id)
+    refused(lambda: shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY))
+    assert shop.rows.events(order.id) == before and len(shop.events) == told
+    assert shop.get(order).status == order.status
+    assert shop.get_item(item).status == item.status
+    assert revision(shop, item).answer is None
+
+
+def test_the_accepted_item_is_told(shop: Shop, pool: PgPool, customer: Actor) -> None:
+    order = storefront_order(shop, pool, 1)
+    [item] = shop.rows.items(order.id)
+    shop.events.clear()
+    shop.lifecycle.answer_revision(order.id, item.id, revision(shop, item).id, ACCEPTED, customer)
+    told = [e for e in shop.events if isinstance(e, OrderItemChanged)]
+    assert [(e.item_id, e.status) for e in told] == [(item.id, "approved")]
+
+
+def test_a_customer_accepts_only_on_their_own_order(shop: Shop, pool: PgPool) -> None:
+    order = storefront_order(shop, pool, 1)
+    [item] = shop.rows.items(order.id)
+    stranger = customer_actor("someone-else", "visitor-row-2")
+    missing = refused(
+        lambda: shop.lifecycle.answer_revision(
+            order.id, item.id, revision(shop, item).id, ACCEPTED, stranger
+        )
+    )
+    assert missing.slug == "order_not_found" and missing.not_found
+    [quote] = shop.rows.quotes(item.id)
+    missing = refused(lambda: shop.lifecycle.accept_quote(order.id, item.id, quote.id, stranger))
+    assert missing.slug == "order_not_found" and missing.not_found
+
+
+def test_only_the_shops_staff_accept_for_the_customer(
+    shop: Shop, pool: PgPool, customer: Actor
+) -> None:
+    order = storefront_order(shop, pool, 1)
+    [item] = shop.rows.items(order.id)
+    rev = revision(shop, item)
+    for by in (AGENT, customer):
+        refusal = refused(
+            lambda by=by: shop.lifecycle.accept_for_customer(
+                order.id, item.id, "revision", rev.id, "by phone", by
+            )
+        )
+        assert refusal.slug == "customer_accepts" and not refusal.not_found
+    assert revision(shop, item).answer is None
+
+
+def _custom(**fields: Any) -> NewCustomItem:
+    return NewCustomItem(title="Gift wrap", quantity=1, unit_price_minor=1500, **fields)
+
+
+def test_a_storefront_custom_price_waits_for_the_customer(shop: Shop, pool: PgPool) -> None:
+    """§4.5: the shop's custom price on a storefront order is recorded, never accepted."""
+    order = storefront_order(shop, pool, 1)
+    [added] = shop.lifecycle.add_items(order.id, BY, [_custom()])
+    assert added.status == "quoted"
+    assert not any(q.accepted for q in shop.rows.quotes(added.id))
+    explicit = refused(lambda: shop.lifecycle.add_items(order.id, BY, [_custom(accept=True)]))
+    assert explicit.slug == "customer_accepts"
+    copy = shop.lifecycle.duplicate_item(order.id, added.id, BY)
+    assert copy.status == "quoted"
+    changed = shop.lifecycle.update_item(order.id, added.id, BY, unit_price_minor=2000)
+    assert changed.status == "quoted"
+    again = refused(
+        lambda: shop.lifecycle.update_item(
+            order.id, added.id, BY, unit_price_minor=2500, accept=True
+        )
+    )
+    assert again.slug == "customer_accepts"
+
+
+def test_a_back_office_custom_price_is_accepted_as_before(shop: Shop) -> None:
+    order = shop.order()
+    [added] = shop.lifecycle.add_items(order.id, BY, [_custom()])
+    assert added.status == "approved"
+    assert shop.lifecycle.duplicate_item(order.id, added.id, BY).status == "approved"
+    changed = shop.lifecycle.update_item(order.id, added.id, BY, unit_price_minor=2000)
+    assert changed.status == "approved"

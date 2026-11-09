@@ -69,7 +69,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/accept-for-customer',
     reason:
-      "A person's \"Accept for the customer\" on a storefront order (#5283, spec 2026-11-02 §6.1): the shop says why the customer did not accept themselves; an agent never accepts for the customer.",
+      "A person's \"Accept for the customer\" on a storefront order (#5283, spec 2026-11-02 §6.1): the shop's signed-in staff say why the customer did not accept themselves. The lifecycle refuses any actor but a browser (`customer_accepts`), so an agent never accepts for the customer.",
   },
   {
     operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",

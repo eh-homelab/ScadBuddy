@@ -123,3 +123,48 @@ def test_the_shop_accepts_for_the_customer_only_with_a_reason(
     [event] = [e for e in events if e["kind"] == "item.accepted_for_customer"]
     assert event["detail"]["reason"] == "By phone, 9 Nov"
     assert event["by"]["kind"] == "browser"
+
+
+def test_a_storefront_custom_price_waits_for_the_customer(
+    client: TestClient, pg_pool: PgPool
+) -> None:
+    """#5283, storefront spec §4.5: an unset `accept` leaves a storefront order's custom
+    price `quoted`; an explicit true is the customer's to give."""
+    order = storefront_order(Shop(OrderStore(pg_pool), BlobRefs(pg_pool)), pg_pool, 1)
+    items = f"/api/v1/orders/{order.id}/items"
+    custom = {"kind": "custom", "title": "Gift wrap", "quantity": 1, "unit_price_minor": 1500}
+    added = client.post(items, json=custom)
+    assert added.status_code == 201, added.text
+    assert added.json()["status"] == "quoted"
+    problem(client.post(items, json={**custom, "accept": True}), "customer_accepts")
+    url = f"{items}/{added.json()['id']}"
+    patched = client.patch(url, json={"unit_price_minor": 2000})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["status"] == "quoted"
+    problem(client.patch(url, json={"unit_price_minor": 2500, "accept": True}), "customer_accepts")
+    copy = client.post(f"{url}/duplicate", json={})
+    assert copy.status_code == 201, copy.text
+    assert copy.json()["status"] == "quoted"
+
+
+def test_a_back_office_custom_price_is_accepted_when_unset(client: TestClient) -> None:
+    order = create_order(client, create_customer(client)["id"])
+    items = f"/api/v1/orders/{order['id']}/items"
+    custom = {"kind": "custom", "title": "Gift wrap", "quantity": 1, "unit_price_minor": 1500}
+    added = client.post(items, json=custom).json()
+    assert added["status"] == "approved"
+    patched = client.patch(f"{items}/{added['id']}", json={"unit_price_minor": 2000})
+    assert patched.json()["status"] == "approved"
+    copy = client.post(f"{items}/{added['id']}/duplicate", json={})
+    assert copy.json()["status"] == "approved"
+
+
+def test_the_reason_is_trimmed_before_its_length_is_checked(
+    client: TestClient, pg_pool: PgPool
+) -> None:
+    order = storefront_order(Shop(OrderStore(pg_pool), BlobRefs(pg_pool)), pg_pool, 1)
+    item = client.get(f"/api/v1/orders/{order.id}").json()["items"][0]
+    rev = item["revisions"][-1]
+    padded = {"what": "revision", "target_id": rev["id"], "reason": "  " + "r" * 500 + "  "}
+    url = f"/api/v1/orders/{order.id}/items/{item['id']}/accept-for-customer"
+    assert client.post(url, json=padded).status_code == 200

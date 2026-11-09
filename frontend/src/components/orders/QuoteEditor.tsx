@@ -14,6 +14,7 @@ import { Spinner } from '@/components/ui/spinner'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { byCreated, parseUnitPrice, recordQuote, UNIT_PRICE_HINT } from './price'
+import { AcceptForCustomerButton } from './AcceptForCustomer'
 import { ArchiveQuote } from './ArchiveQuote'
 import { QuoteWarning } from './QuoteWarning'
 import { refusalText } from './refusal'
@@ -147,6 +148,7 @@ export function QuoteEditor({
   slice,
   parts = '',
   startSlicing = 0,
+  storefront = false,
 }: {
   orderId: string
   itemId: string
@@ -168,6 +170,9 @@ export function QuoteEditor({
   parts?: string
   /** #4673 — the row's Slice… clicks, counted (0 for none): each new count opens the slice dialog. */
   startSlicing?: number
+  /** #5283 — a storefront order: its customer accepts a price, so Accept is "Accept for the
+   * customer…" (with a reason) and a typed price is recorded only. */
+  storefront?: boolean
 }) {
   const [slicing, setSlicing] = useState(startSlicing > 0)
   // Slice… again on the row while the drawer is open: the dialog opens again.
@@ -267,7 +272,18 @@ export function QuoteEditor({
                 {quote.accepted ? (
                   <span className="text-xs text-primary">Accepted</span>
                 ) : (
-                  (editable || (acceptPending && quote.id === pending?.id)) && (
+                  (editable || (acceptPending && quote.id === pending?.id)) &&
+                  (storefront ? (
+                    <AcceptForCustomerButton
+                      orderId={orderId}
+                      itemId={itemId}
+                      what="quote"
+                      targetId={quote.id}
+                      disabled={busy || oldRevision(quote, item?.current_revision_id)}
+                      title={oldRevision(quote, item?.current_revision_id) ? OLD_REVISION_TEXT : undefined}
+                      onChanged={onChanged}
+                    />
+                  ) : (
                     <Button
                       size="xs"
                       variant="outline"
@@ -277,7 +293,7 @@ export function QuoteEditor({
                     >
                       Accept
                     </Button>
-                  )
+                  ))
                 )}
               </span>
               {/* Beside every Accept it holds, so a touch screen shows the reason too. */}
@@ -398,7 +414,7 @@ export function QuoteEditor({
           className="flex flex-wrap items-end gap-2"
           onSubmit={(event) => {
             event.preventDefault()
-            void record(true)
+            void record(!storefront)
           }}
         >
           <div className="flex flex-col gap-1">
@@ -409,12 +425,20 @@ export function QuoteEditor({
             <Label htmlFor={`price-label-${itemId}`}>Label</Label>
             <Input id={`price-label-${itemId}`} className="w-40" placeholder="Quoted by hand" value={label} onChange={(e) => setLabel(e.target.value)} />
           </div>
-          <Button type="submit" size="sm" disabled={busy}>
-            Record and accept
-          </Button>
-          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void record(false)}>
-            Record only
-          </Button>
+          {storefront ? (
+            <Button type="submit" size="sm" disabled={busy}>
+              Record
+            </Button>
+          ) : (
+            <>
+              <Button type="submit" size="sm" disabled={busy}>
+                Record and accept
+              </Button>
+              <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void record(false)}>
+                Record only
+              </Button>
+            </>
+          )}
         </form>
       )}
       {editable && current !== null && (

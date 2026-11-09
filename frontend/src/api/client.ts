@@ -269,6 +269,7 @@ import type {
   Quote,
   Revision,
   RevisionAnswerInput,
+  AcceptForCustomerInput,
   RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
@@ -2721,6 +2722,9 @@ export const api = {
   /** #4673 — the image a slice quote's sliced file holds for `plate` (404 when it holds none). */
   quotePlateThumbnailUrl: (orderId: string, itemId: string, quoteId: string, plate: number) =>
     `${API_BASE}/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/plates/${plate}/thumbnail`,
+  /** #5283 — the shop accepts a revision or a quote for a storefront order's customer, with a reason. */
+  acceptForCustomer: (orderId: string, itemId: string, body: AcceptForCustomerInput) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/accept-for-customer`, { method: 'POST', body: JSON.stringify(body) }),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

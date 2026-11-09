@@ -359,7 +359,9 @@ class NewCustomItem(NewItem):
     title: str
     unit_price_minor: int
     requires_printing: bool = False
-    accept: bool = True
+    #: Whether the price is accepted as it is saved; None is the order's default
+    #: (`Lifecycle.price_accepted`).
+    accept: bool | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -516,6 +518,13 @@ def check_visitors_cart(order: Order, by: Actor) -> None:
     them as the visitor."""
     if order.unsubmitted and by.kind != "visitor":
         raise LifecycleError("order_not_submitted", f"{order.label} is not yet submitted")
+
+
+def price_accepted(order: Order, accept: bool | None) -> bool:
+    """Whether a custom item's typed price is accepted as it is saved: ``accept`` as
+    given, and unset the order's default, true on a `back_office` order and false on a
+    `storefront` one, whose customer accepts it (#5283, storefront spec §4.5)."""
+    return order.source != "storefront" if accept is None else accept
 
 
 class Lifecycle:
@@ -2828,7 +2837,7 @@ class Lifecycle:
         notes: str = "",
         sku: str | None = None,
         requires_printing: bool = False,
-        accept: bool = True,
+        accept: bool | None = None,
         after_acceptance: bool = False,
     ) -> OrderItem:
         """A custom item (#4954): a title, a quantity and a typed price, with no template
@@ -2837,7 +2846,8 @@ class Lifecycle:
         (accepting a quote advances the order). Without (the agent's, whose `write` tier
         accepts nothing) the item is `quoted`, for `accept_quote` to pin. With
         ``after_acceptance`` (#5349) the price is never accepted as it is saved: the item
-        is `quoted`, and ``accept`` is refused (422)."""
+        is `quoted`, and ``accept`` is refused (422). Unset, ``accept`` is the order's
+        default (:func:`price_accepted`, #5283)."""
         entry = NewCustomItem(
             title=title,
             quantity=quantity,
@@ -2864,7 +2874,7 @@ class Lifecycle:
         order operations spec §3.1): a refusal of any adds none. ``after_acceptance`` as
         `add_item`'s, for every entry. ``cart_of`` and ``conn`` as `delete_item`'s."""
         for entry in entries:
-            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept:
+            if isinstance(entry, NewCustomItem) and after_acceptance and entry.accept is True:
                 raise LifecycleError(
                     "accept",
                     "accept: an item added after acceptance needs its quote accepted on its own",
@@ -2874,7 +2884,10 @@ class Lifecycle:
             order = self._lock(tx, order_id)
             self._visitors_cart(order, cart_of)
             self._takes_item(order, after_acceptance)
-            if any(isinstance(entry, NewCustomItem) and entry.accept for entry in entries):
+            if any(
+                isinstance(entry, NewCustomItem) and price_accepted(order, entry.accept)
+                for entry in entries
+            ):
                 self._not_on_hold(order)
             items = [self._insert_new(tx, order, by, entry, after_acceptance) for entry in entries]
             # Once for the whole add, not once per item.
@@ -2917,10 +2930,10 @@ class Lifecycle:
                     title=item.title,
                     unit_price_minor=priced.unit_price_minor if priced else 0,
                     requires_printing=item.requires_printing,
-                    accept=not after_acceptance,
+                    accept=False if after_acceptance else None,
                     **common,
                 )
-                if entry.accept:
+                if price_accepted(order, entry.accept):
                     self._not_on_hold(order)
             elif item.kind == "request":
                 entry = NewRequestItem(title=item.title, **common)
@@ -3069,12 +3082,21 @@ class Lifecycle:
         unit_price_minor: int,
         by: Actor,
         *,
-        accept: bool,
+        accept: bool | None,
     ) -> OrderItem:
         """A custom item's typed price as a `manual` quote at its quantity now, on the
         audit line: accepted and the item `approved`, or else the item `quoted`. Never
-        on a cart (#5282): a quote is never written there."""
+        on a cart (#5282): a quote is never written there. ``accept`` None is the
+        order's default (:func:`price_accepted`); on a storefront order only the
+        customer accepts it (`customer_accepts`, storefront spec §4.5)."""
         check_submitted(order)
+        if accept and order.source == "storefront" and by.kind != "customer":
+            raise LifecycleError(
+                "customer_accepts",
+                f"the customer accepts a price on storefront order {order.label};"
+                " the shop accepts only with Accept for the customer",
+            )
+        accept = price_accepted(order, accept)
         line = QuoteLine(
             kind="manual",
             label="Custom item",
@@ -3115,7 +3137,7 @@ class Lifecycle:
         unit_price_minor: int | None = None,
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | None = None,
-        accept: bool = True,
+        accept: bool | None = None,
         approval: Approval | None = None,
         expected_revision_id: str | None = None,
     ) -> OrderItem:
@@ -3151,6 +3173,8 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
+            explicit = accept is True
+            accept = price_accepted(order, accept)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
@@ -3288,7 +3312,9 @@ class Lifecycle:
             if fields:
                 item = self.store.update_item(conn, item.id, **fields)
             if price is not None:
-                item = self._custom_price(conn, order, item, price, by, accept=accept)
+                item = self._custom_price(
+                    conn, order, item, price, by, accept=True if explicit else accept
+                )
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
             self._retax(conn, order, by)
             order = self._rederive(conn, order, by)
@@ -3672,11 +3698,27 @@ class Lifecycle:
     # -- the storefront's accepts (storefront spec §6.1, §6.2) ----------------------------
 
     @staticmethod
-    def _accepts(order: Order, by: Actor, for_customer: str | None) -> None:
+    def _accepts(
+        order: Order, by: Actor, for_customer: str | None, *, accepting: bool = True
+    ) -> None:
         """On a storefront order a revision or a quote is accepted by the customer, or by
-        the shop "for the customer" with a reason (`customer_accepts`); "for the
-        customer" is for a storefront order only (`order_not_storefront`)."""
+        the shop's staff (a `browser` actor) "for the customer" with a reason
+        (`customer_accepts`); "for the customer" is for a storefront order only
+        (`order_not_storefront`). A customer acts on their own order only: another
+        order is `order_not_found`, so its existence never leaks. ``accepting`` false
+        (an answer that asks for changes) checks only the customer's order."""
+        if by.kind == "customer" and (
+            order.customer_id is None or by.principal != f"customer:{order.customer_id}"
+        ):
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        if not accepting:
+            return
         if for_customer is not None:
+            if by.kind != "browser":
+                raise LifecycleError(
+                    "customer_accepts",
+                    "only the shop's staff accept for the customer, from the order page",
+                )
             if order.source != "storefront":
                 raise LifecycleError(
                     "order_not_storefront",
@@ -3689,12 +3731,14 @@ class Lifecycle:
                 " the shop accepts only with Accept for the customer",
             )
 
-    def _customers_accept(self, order_id: str, by: Actor, for_customer: str | None) -> None:
+    def _customers_accept(
+        self, order_id: str, by: Actor, for_customer: str | None, *, accepting: bool = True
+    ) -> None:
         """:meth:`_accepts` before anything is written (``ensure_revision``'s repair among
         them); the caller checks again under the order's lock."""
         found = self.store.order(order_id)
         if found is not None:
-            self._accepts(found, by, for_customer)
+            self._accepts(found, by, for_customer, accepting=accepting)
 
     def _for_customer(
         self,
@@ -3722,13 +3766,24 @@ class Lifecycle:
     def _accepted_by_the_last(self, conn: Conn, order: Order, by: Actor) -> Order:
         """§6.2, decision 11: on a storefront order the accept that leaves every open item
         `approved` accepts the order, in its transaction and as ``by``; any other order
-        waits for the shop's `accept_order`."""
+        waits for the shop's `accept_order`. When `accept_order` refuses (a payment in
+        flight, a hold), the accept still commits: the order accept is skipped, in a
+        savepoint, and the audit row ``order.accept_skipped`` names the refusal."""
         if order.source != "storefront" or order.status not in OPEN_FOR_EDITS:
             return order
         items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
         if not items or any(i.status != "approved" for i in items):
             return order
-        return self._accept_order(conn, order, by)
+        try:
+            with self.store.transaction(conn):
+                return self._accept_order(conn, order, by)
+        except LifecycleError as refusal:
+            # The item's accept stands (a pending capture can last days); the shop
+            # accepts the order once what refused it is gone.
+            self._event(
+                conn, order, by, "order.accept_skipped", slug=refusal.slug, reason=str(refusal)
+            )
+            return order
 
     def accept_for_customer(
         self,
@@ -3889,14 +3944,12 @@ class Lifecycle:
         if body.answer == "changes_requested" and not body.note.strip():
             raise LifecycleError("note", "note: say what should change", unprocessable=True)
         accepting = body.answer == "accepted"
-        if accepting:
-            self._customers_accept(order_id, by, for_customer)
+        self._customers_accept(order_id, by, for_customer, accepting=accepting)
         self.ensure_revision(order_id, item_id, by)
         released: list[str] = []
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            if accepting:
-                self._accepts(order, by, for_customer)
+            self._accepts(order, by, for_customer, accepting=accepting)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:

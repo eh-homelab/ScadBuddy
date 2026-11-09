@@ -392,6 +392,13 @@ export function withFilaments(found: OrderItem, filaments: Record<string, string
   return { colours, changed: colours.some((c, i) => c.filament_id !== found.colours[i]?.filament_id) }
 }
 
+/** #5283 — `Lifecycle._accepts`: on a storefront order the shop's own accept is refused. */
+export function customerAccepts(order: Order) {
+  if (order.source === 'storefront') {
+    throw new Refused('customer_accepts', `the customer accepts on storefront order ${order.number}; the shop accepts only with Accept for the customer`)
+  }
+}
+
 /** The refusals of `acceptQuote`, for a caller that must know before it writes. */
 export function checkQuote(found: OrderItem, quote: Quote) {
   if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
@@ -663,11 +670,13 @@ function addItem(afterAcceptance: boolean): Parameters<typeof http.post>[1] {
       if (!body.title?.trim()) return fieldProblem(request, 'body', 'a custom item needs a title')
       const price = body.unit_price_minor
       // After acceptance an unset accept means false, and a true one is refused (#5349).
-      const accept = afterAcceptance ? body.accept === true : body.accept !== false
+      // Before, unset is true on a back-office order and false on a storefront one (#5283).
+      const accept = afterAcceptance ? body.accept === true : (body.accept ?? order.source !== 'storefront')
       if (afterAcceptance && accept) return fieldProblem(request, 'accept', 'accept: an item added after acceptance needs its quote accepted on its own')
       if (price == null || !Number.isInteger(price) || price < 0) return fieldProblem(request, 'body', 'a custom item needs a unit_price_minor')
       try {
         takesItem(order, afterAcceptance)
+        if (accept) customerAccepts(order)
         if (accept) notOnHold(order)
         const at = now()
         const created: OrderItem = {
@@ -801,7 +810,7 @@ const duplicateItem: Parameters<typeof http.post>[1] = async (info) => {
     if (original.kind === 'custom') {
       const quotes = quotesOf(original.id)
       const price = (quotes.find((q) => q.accepted) ?? [...quotes].sort(byCreated).at(-1))?.unit_price_minor ?? 0
-      add = { ...common, kind: 'custom', unit_price_minor: price, requires_printing: original.requires_printing, ...(afterAcceptance ? {} : { accept: true }) }
+      add = { ...common, kind: 'custom', unit_price_minor: price, requires_printing: original.requires_printing }
     } else if (original.kind === 'request') {
       add = { ...common, kind: 'request' }
     } else if (original.library_file) {
@@ -1355,7 +1364,8 @@ export const handlers = [
         if (body[name] != null && !custom) throw new FieldRefused(name, `${name}: only a custom item takes one`)
       }
       if (body.approval != null && found.kind === 'custom' && resolved === undefined) throw new FieldRefused('approval', 'approval: a custom item has no design')
-      const accept = body.accept !== false
+      const accept = body.accept ?? order.source !== 'storefront'
+      if (body.accept === true && body.unit_price_minor != null) customerAccepts(order)
       let price: number | null = null
       if (custom) {
         // The price it has: its accepted quote's, else its newest's.
@@ -1533,6 +1543,7 @@ export const handlers = [
       const order = lock(String(params.id))
       notEnded(order)
       const found = itemOf(order, String(params.item))
+      customerAccepts(order)
       openForRequote(order, found, "an item's price")
       notOnHold(order)
       const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === found.id)

@@ -427,6 +427,8 @@ export type RevisionAnswer = Revision['answer']
 export type Approval = OrderItem['approval']
 export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
 export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
+/** #5283 — the shop's "Accept for the customer" on a storefront order. */
+export type AcceptForCustomerInput = Schemas['AcceptForCustomerBody']
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']

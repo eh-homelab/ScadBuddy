@@ -28,7 +28,7 @@ from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -306,8 +306,10 @@ class ItemCreate(ReferenceBody):
     accept: bool | None = Field(
         default=None,
         description=(
-            "A custom item's only: whether its price is accepted as it is saved. Unset or"
-            " true leaves the item `approved`; false leaves it `quoted`. On"
+            "A custom item's only: whether its price is accepted as it is saved. True"
+            " leaves the item `approved`; false leaves it `quoted`. Unset is true on a"
+            " `back_office` order and false on a `storefront` one, where only the customer"
+            " accepts a price: true there is 409 `customer_accepts` (#5283). On"
             " `POST /orders/{id}/items/after-acceptance` unset means false, and true is"
             " 422: an item added after acceptance needs its quote accepted on its own."
         ),
@@ -441,9 +443,11 @@ class ItemPatch(BaseModel):
     #: A custom item's new price per unit (#4954), priced at once, as is its quantity.
     unit_price_minor: Money | None = Field(default=None, ge=0)
     requires_printing: bool | None = None
-    #: Whether a custom item's new price is accepted (true, the default) or left
-    #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
-    accept: bool = True
+    #: Whether a custom item's new price is accepted (true) or left `quoted` for an
+    #: `outward` accept (false, the agent's); nothing else reads it. Unset is true on a
+    #: `back_office` order and false on a `storefront` one, where true is 409
+    #: `customer_accepts` (#5283).
+    accept: bool | None = None
     #: Whether the item's design is approved before it is priced (`design_first`) or
     #: with its quote (`together`), in any open state.
     approval: Approval | None = None
@@ -482,6 +486,11 @@ class AcceptForCustomerBody(BaseModel):
     #: Why the shop accepts for the customer (e.g. "By phone, 9 Nov"), kept in the audit
     #: row `item.accepted_for_customer`.
     reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _trimmed(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class CancelBody(BaseModel):
@@ -1759,7 +1768,9 @@ async def _new_item(
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
         # After acceptance an unset accept means false: the price waits for its own accept.
-        accept = body.accept is True if after_acceptance else body.accept is not False
+        # Before, unset is the order's default (`price_accepted`): accepted on a
+        # back-office order, left for the customer on a storefront one (#5283).
+        accept = (body.accept is True) if after_acceptance else body.accept
         return NewCustomItem(
             title=body.title.strip(),
             quantity=body.quantity,
