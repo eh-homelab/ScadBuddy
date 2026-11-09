@@ -477,6 +477,8 @@ export type BankStatus = Schemas['BankStatus']
 export type BankKeys = Schemas['BankKeys']
 export type BankLinkCreate = Schemas['BankLinkCreate']
 export type BankUnlinked = Schemas['BankUnlinked']
+/** A deposit of the linked account suggested for an order; it records nothing by itself. */
+export type DepositSuggestion = Schemas['DepositSuggestion']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** #5281 — the shop's money rules (Settings → Orders): a rule of the deposit policy, and a

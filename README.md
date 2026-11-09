@@ -675,7 +675,13 @@ the keys again. Without `SCADBUDDY_SECRET_KEY_FILE`,
 run reads the account's new posted deposits
 ([`/transactions/sync`](https://plaid.com/docs/api/products/transactions/#transactionssync))
 and suggests the orders each may pay: one whose number (`ORD-2026-12`) is in the deposit's
-text, or one whose balance equals the deposit. A suggestion records nothing. The bank's
+text, or one whose balance equals the deposit. A suggestion records nothing: the order
+page lists it under "Suggested bank deposits", where "Record this deposit as payment"
+records it once as a `bank_transfer` payment whose reference is Plaid's transaction id,
+and "Not this order" hides it for good, after an unlink and a new link too. If the bank
+later changes or removes a deposit already recorded, the order page warns until the shop
+records the difference as a `bank_transfer` payment with the transaction id as reference
+(payments are never edited). A cancelled order takes no payment and shows no such warning. The bank's
 text is kept with every run of five or more digits masked, a run going on across single
 spaces or hyphens (so an IBAN printed in groups is masked); an order number is kept. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the

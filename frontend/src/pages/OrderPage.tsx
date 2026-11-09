@@ -12,6 +12,7 @@ import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
@@ -421,6 +422,7 @@ export function OrderPage() {
               )}
               <DepositControls order={order} totals={totals} requests={requests} onChanged={reload} />
               <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
+              <DepositSuggestions order={order} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
                   className="flex flex-wrap items-end gap-2"

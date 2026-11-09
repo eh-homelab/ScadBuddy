@@ -1238,4 +1238,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   hyphens; order numbers kept) and suggested in `bank_deposit_matches`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
-  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
+  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below.
+  The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
+  `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
+  lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
+  `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
+  method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
+  deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
+  currency; `deposit_changed` when a sync changed its amount meanwhile); the lock is taken in the payment's own transaction (`add_payment`'s
+  `on_insert`), so a confirmation holds one connection. "Not this order" (`…/{tx}/dismiss`)
+  writes a `bank_deposit_dismissals` row (transaction id and order), kept apart from the
+  Item's deposits, so a later sync, an unlink and a new link all keep it. Both are in
+  `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and its reference) is
+  never suggested again, after a new link too. A recorded deposit Plaid changed since is
+  listed with `reason` `changed`, and one Plaid removed (its row kept, `removed_at`) with
+  `removed`, each with `recorded_minor`, the sum of the order's `bank_transfer` payments
+  whose reference is the transaction id, while that sum is not the deposit's amount (0 when
+  removed), and only once the bank moved it (removed, or `changed_at`: set the first time a
+  sync reads a new amount for a recorded deposit and kept, so a change back after the
+  shop's correction warns again). Payments are never edited, so the page's warning asks the shop to
+  record the difference with that reference, which clears it. A cancelled order takes no
+  payment and shows no such warning; a removed row whose payment is gone is deleted by the
+  next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
+  deposit whose amount it changed or that it removed, so an open order page reloads.

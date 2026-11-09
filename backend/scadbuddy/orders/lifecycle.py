@@ -1008,6 +1008,7 @@ class Lifecycle:
         received_at: datetime | None = None,
         notes: str = "",
         payment_request_id: str | None = None,
+        on_insert: Callable[[Conn, Payment], None] | None = None,
     ) -> Payment:
         """Money the shop already received: a record, allowed on hold (Ruling 14). A
         payment that names an open request of this order closes it. Named or not, a
@@ -1039,6 +1040,9 @@ class Lifecycle:
                 notes=notes,
                 payment_request_id=payment_request_id,
             )
+            if on_insert is not None:
+                # The caller's own check, in this transaction: a refusal undoes the payment.
+                on_insert(conn, payment)
             if named is not None:
                 payments.set_request_status(conn, named.id, "paid", payment_id=payment.id)
             if payment.amount_minor > 0:

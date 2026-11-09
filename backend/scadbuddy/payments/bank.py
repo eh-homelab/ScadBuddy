@@ -426,10 +426,11 @@ class BankLinks:
                 raise BankNotLinkedError()
             logger.warning("unlinked the bank account here: its stored keys will not open")
             conn.execute("DELETE FROM bank_links WHERE id = %s", (row["id"],))
-            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (row["item_id"],))
+            _drop_deposits(conn, str(row["item_id"]))
 
     def _drop_link(self, item_id: str) -> None:
-        """Forget ``item_id``'s token, account, sync cursor and deposits; the keys stay."""
+        """Forget ``item_id``'s token, account, sync cursor and unrecorded deposits; the
+        keys stay."""
         with self._store.transaction() as conn:
             row = self._row(conn, lock=True)
             if row is None or row["item_id"] != item_id:
@@ -443,8 +444,13 @@ class BankLinks:
                 " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL WHERE id = %s",
                 (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id, row["id"]),
             )
-            # The Item's deposits and their suggestions go with it.
-            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (item_id,))
+            _drop_deposits(conn, item_id)
+
+
+def _drop_deposits(conn: Conn, item_id: str) -> None:
+    """The Item's deposits and their suggestions go with it, but a recorded one stays: its
+    order page still compares the payments with what the bank last said (#4961)."""
+    conn.execute("DELETE FROM bank_deposits WHERE item_id = %s AND payment_id IS NULL", (item_id,))
 
 
 async def _remove_quietly(keys: PlaidKeys, access_token: str) -> None:

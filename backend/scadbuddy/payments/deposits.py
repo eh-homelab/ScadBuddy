@@ -24,12 +24,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final
+from typing import Any, Final, Literal
 
+from pydantic import BaseModel
+
+from scadbuddy.core.events import EventBus, OrderBankDepositsChanged, emit
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.models import Money, Payment
 from scadbuddy.orders.store import Conn, OrderStore
 from scadbuddy.orders.totals import totals_of
 from scadbuddy.payments import plaid
@@ -155,11 +161,12 @@ async def _read(
     raise PlaidError("Plaid's transactions kept changing", plaid.SYNC_MUTATION)
 
 
-async def sync_deposits(bank: BankLinks) -> int:
+async def sync_deposits(bank: BankLinks, bus: EventBus | None = None) -> int:
     """Read the linked account's deposits since the stored cursor and suggest their
-    orders. The number of new suggestions. A Plaid failure keeps its code on the link
-    and the cursor where it was. Every Postgres call runs in a thread: the sync also runs
-    on the API's event loop."""
+    orders. The number of new suggestions; each order given one, and each order of a
+    recorded deposit Plaid changed or removed, hears ``order.bank_deposits`` on ``bus``. A
+    Plaid failure keeps its code on the link and the cursor where it was. Every Postgres
+    call runs in a thread: the sync also runs on the API's event loop."""
     try:
         linked = await asyncio.to_thread(bank.access)
     except (CredentialUnreadableError, KekMissingError, AccessTokenMissingError) as error:
@@ -177,7 +184,10 @@ async def sync_deposits(bank: BankLinks) -> int:
         logger.warning("the deposit sync could not read Plaid: %s", error.code)
         await asyncio.to_thread(_failed, bank.store, linked.item_id, error.code)
         return 0
-    return await asyncio.to_thread(_store, bank.store, linked, start, first, read)
+    suggested, told = await asyncio.to_thread(_store, bank.store, linked, start, first, read)
+    for order_id in sorted(told):
+        emit(bus, OrderBankDepositsChanged(order_id=order_id))
+    return len(suggested)
 
 
 _UNREADABLE: Final[dict[type[Exception], str]] = {
@@ -212,13 +222,14 @@ def _failed(store: OrderStore, item_id: str | None, code: str | None) -> None:
 
 def _store(
     store: OrderStore, linked: LinkedAccess, start: str | None, first: str | None, read: _Read
-) -> int:
+) -> tuple[list[str], set[str]]:
+    """``_apply``'s answer, or nothing when this run's reads do not stand."""
     with store.transaction() as conn:
         now = conn.execute("SELECT item_id, sync_cursor FROM bank_links FOR UPDATE").fetchone()
         if now is None or now["item_id"] != linked.item_id or now["sync_cursor"] != start:
             # Unlinked, or another sync stored its cursor first: that one's reads stand.
-            return 0
-        suggested = _apply(store, conn, linked.item_id, linked.account_id, read)
+            return [], set()
+        suggested, told = _apply(store, conn, linked.item_id, linked.account_id, read)
         # An update cut short keeps its first cursor for a later run's restart.
         loop = (first or "") if read.more else None
         conn.execute(
@@ -226,24 +237,43 @@ def _store(
             " synced_at = clock_timestamp(), sync_error = NULL WHERE item_id = %s",
             (read.cursor or None, loop, linked.item_id),
         )
-    return suggested
+    return suggested, told
 
 
-def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _Read) -> int:
+def _apply(
+    store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _Read
+) -> tuple[list[str], set[str]]:
+    """The order of each new suggestion, and every order whose deposits changed (those,
+    and the orders of recorded deposits Plaid changed or removed)."""
     gone = set(read.removed)
-    suggested = 0
+    suggested: list[str] = []
+    told: set[str] = set()
     balances = _Balances(store, conn)
     for tx_id, tx in read.changed.items():
         deposit = deposit_of(tx, account_id)
         if deposit is None:
             gone.add(tx_id)
             continue
+        before = conn.execute(
+            "SELECT amount_minor, payment_id FROM bank_deposits WHERE transaction_id = %s"
+            " FOR UPDATE",
+            (deposit.transaction_id,),
+        ).fetchone()
+        # The bank moved a recorded deposit: kept for good, so a change back after the
+        # shop's correction warns again.
+        moved = (
+            before is not None
+            and before["payment_id"] is not None
+            and before["amount_minor"] != deposit.amount_minor
+        )
         conn.execute(
             "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
             " posted_on, description) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT"
-            " (transaction_id) DO UPDATE SET amount_minor = EXCLUDED.amount_minor, currency ="
-            " EXCLUDED.currency, posted_on = EXCLUDED.posted_on, description ="
-            " EXCLUDED.description",
+            " (transaction_id) DO UPDATE SET item_id = EXCLUDED.item_id, amount_minor ="
+            " EXCLUDED.amount_minor, currency = EXCLUDED.currency, posted_on ="
+            " EXCLUDED.posted_on, description = EXCLUDED.description, removed_at = NULL,"
+            " changed_at = CASE WHEN %s THEN clock_timestamp() ELSE bank_deposits.changed_at"
+            " END",
             (
                 deposit.transaction_id,
                 item_id,
@@ -251,23 +281,65 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
                 deposit.currency,
                 deposit.posted_on,
                 mask(deposit.text)[:DESCRIPTION_CHARS],
+                moved,
             ),
         )
+        if moved:
+            told.update(_payment_orders(conn, [deposit.transaction_id]))
         # A changed deposit is matched again from nothing.
         conn.execute(
             "DELETE FROM bank_deposit_matches WHERE transaction_id = %s",
             (deposit.transaction_id,),
         )
-        for order_id, reason in _matches(conn, balances, deposit):
+        recorded = _recorded(conn, deposit.transaction_id)
+        if recorded is not None:
+            # Recorded already (before an unlink and a new link): never suggested again.
             conn.execute(
-                "INSERT INTO bank_deposit_matches (transaction_id, order_id, reason)"
-                " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                (deposit.transaction_id, order_id, reason),
+                "UPDATE bank_deposits SET payment_id = %s WHERE transaction_id = %s",
+                (recorded, deposit.transaction_id),
             )
-            suggested += 1
+            continue
+        for order_id, reason in _matches(conn, balances, deposit):
+            # A pair the shop dismissed is never suggested again, after a new link too.
+            added = conn.execute(
+                "INSERT INTO bank_deposit_matches (transaction_id, order_id, reason)"
+                " SELECT %s, %s, %s WHERE NOT EXISTS (SELECT 1 FROM bank_deposit_dismissals"
+                " WHERE transaction_id = %s AND order_id = %s) ON CONFLICT DO NOTHING",
+                (deposit.transaction_id, order_id, reason, deposit.transaction_id, order_id),
+            )
+            if added.rowcount:
+                suggested.append(order_id)
     if gone:
-        conn.execute("DELETE FROM bank_deposits WHERE transaction_id = ANY(%s)", (sorted(gone),))
-    return suggested
+        ids = sorted(gone)
+        # Locked first, so a confirmation in flight commits before both statements read
+        # ``payment_id``, and its deposit is marked rather than skipped.
+        conn.execute(
+            "SELECT 1 FROM bank_deposits WHERE transaction_id = ANY(%s) FOR UPDATE", (ids,)
+        )
+        # A recorded deposit stays, marked, so its order page warns; the rest go.
+        conn.execute(
+            "UPDATE bank_deposits SET removed_at = clock_timestamp()"
+            " WHERE transaction_id = ANY(%s) AND payment_id IS NOT NULL AND removed_at IS NULL",
+            (ids,),
+        )
+        told.update(_payment_orders(conn, ids))
+        conn.execute(
+            "DELETE FROM bank_deposits WHERE transaction_id = ANY(%s) AND payment_id IS NULL",
+            (ids,),
+        )
+    # A removed deposit is kept only for its payment's warning: once that payment is gone
+    # (``ON DELETE SET NULL``), nothing reads the row.
+    conn.execute("DELETE FROM bank_deposits WHERE removed_at IS NOT NULL AND payment_id IS NULL")
+    return suggested, told | set(suggested)
+
+
+def _payment_orders(conn: Conn, transaction_ids: list[str]) -> set[str]:
+    """The orders the payments recorded from these deposits are on."""
+    rows = conn.execute(
+        "SELECT DISTINCT order_id FROM order_payments WHERE method = %s AND reference = ANY(%s)",
+        (METHOD, transaction_ids),
+    ).fetchall()
+    return {str(row["order_id"]) for row in rows}
 
 
 class _Balances:
@@ -316,3 +388,152 @@ def _matches(conn: Conn, balances: _Balances, deposit: Deposit) -> list[tuple[st
         if balances.balance(order_id) == deposit.amount_minor:
             found[order_id] = "amount"
     return list(found.items())
+
+
+def _recorded(conn: Conn, transaction_id: str, *, but: str | None = None) -> str | None:
+    """The payment already recorded from this deposit, on any order (other than ``but``)."""
+    # The payment it was recorded as: the first positive one, never a later refund or
+    # adjustment with the same reference.
+    row = conn.execute(
+        "SELECT id FROM order_payments WHERE method = %s AND reference = %s"
+        " AND id IS DISTINCT FROM %s ORDER BY amount_minor <= 0, created_at, id LIMIT 1",
+        (METHOD, transaction_id, but),
+    ).fetchone()
+    return str(row["id"]) if row else None
+
+
+# -- the order page ----------------------------------------------------------------------
+
+#: The method a confirmed deposit is recorded with; its reference is the transaction id.
+METHOD: Final = "bank_transfer"
+#: ``changed``: a deposit recorded on this order whose amount Plaid changed since;
+#: ``removed``: one Plaid removed. Each is shown while the order's ``bank_transfer``
+#: payments with the transaction id as reference do not sum to the deposit (0 when
+#: removed): payments are never edited, so the shop records the difference.
+MatchReason = Literal["amount", "order_number", "changed", "removed"]
+
+
+class DepositSuggestion(BaseModel):
+    """A deposit the order may have been paid by, as the order page shows it."""
+
+    transaction_id: str
+    amount_minor: Money
+    currency: str
+    posted_on: date
+    #: The bank's text, masked (`mask`).
+    description: str
+    reason: MatchReason
+    #: For ``changed`` and ``removed``: the sum of the order's payments recorded from it.
+    recorded_minor: Money | None = None
+
+
+def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
+    """The order's suggested deposits not dismissed and not recorded, then the deposits
+    recorded on it that Plaid changed (``changed``) or removed (``removed``) since, while
+    their payments do not sum to the deposit and the order is not cancelled, newest
+    first."""
+    with store.transaction() as conn:
+        found = conn.execute(
+            "SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
+            " d.description, m.reason, NULL::bigint AS recorded_minor"
+            " FROM bank_deposit_matches m JOIN bank_deposits d USING (transaction_id)"
+            " WHERE m.order_id = %s AND d.payment_id IS NULL AND NOT EXISTS (SELECT 1 FROM"
+            " bank_deposit_dismissals x WHERE x.transaction_id = d.transaction_id AND"
+            " x.order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM order_payments p WHERE"
+            " p.method = %s AND p.reference = d.transaction_id)"
+            " UNION ALL SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
+            " d.description, CASE WHEN d.removed_at IS NULL THEN 'changed' ELSE 'removed'"
+            " END, t.total FROM bank_deposits d JOIN order_payments p ON p.id = d.payment_id"
+            # A cancelled order takes no payment, so it is never asked for one.
+            " JOIN orders o ON o.id = p.order_id AND o.status <> 'cancelled'"
+            " CROSS JOIN LATERAL (SELECT sum(q.amount_minor)::bigint AS total FROM"
+            " order_payments q WHERE q.order_id = p.order_id AND q.method = %s AND"
+            " q.reference = d.transaction_id) t WHERE p.order_id = %s"
+            # Only the bank's change warns, once it happened (``changed_at`` is kept).
+            " AND (d.removed_at IS NOT NULL OR d.changed_at IS NOT NULL) AND t.total <>"
+            " CASE WHEN d.removed_at IS NULL THEN d.amount_minor ELSE 0 END"
+            " ORDER BY posted_on DESC, transaction_id",
+            (order_id, METHOD, METHOD, order_id),
+        ).fetchall()
+    return [DepositSuggestion.model_validate(row) for row in found]
+
+
+def _not_suggested(order_id: str, transaction_id: str) -> LifecycleError:
+    return LifecycleError(
+        "deposit_not_suggested",
+        f"deposit {transaction_id} is not suggested for order {order_id}",
+        not_found=True,
+    )
+
+
+def record_deposit(
+    store: OrderStore,
+    order_id: str,
+    transaction_id: str,
+    add: Callable[..., Payment],
+) -> Payment:
+    """Record a suggested deposit as the order's payment, once. ``add`` is the order's
+    ``Lifecycle.add_payment``; the deposit's checks run again inside its transaction
+    (``on_insert``), under the order's lock and then the deposit's row lock, so two
+    confirmations record one payment and each holds one connection."""
+
+    def checked(conn: Conn, payment: Payment | None = None) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT d.amount_minor, d.currency, d.posted_on, d.description, d.payment_id,"
+            " o.currency AS order_currency FROM bank_deposits d JOIN bank_deposit_matches m"
+            " USING (transaction_id) JOIN orders o ON o.id = m.order_id"
+            " WHERE d.transaction_id = %s AND m.order_id = %s AND NOT EXISTS (SELECT 1 FROM"
+            " bank_deposit_dismissals x WHERE x.transaction_id = d.transaction_id AND"
+            " x.order_id = m.order_id)" + (" FOR UPDATE OF d" if payment is not None else ""),
+            (transaction_id, order_id),
+        ).fetchone()
+        if row is None:
+            raise _not_suggested(order_id, transaction_id)
+        if row["payment_id"] is not None or _recorded(
+            conn, transaction_id, but=payment.id if payment else None
+        ):
+            raise LifecycleError(
+                "deposit_recorded", f"deposit {transaction_id} is already recorded"
+            )
+        if row["currency"] != row["order_currency"]:
+            raise LifecycleError(
+                "deposit_currency",
+                f"the deposit is in {row['currency']}, the order in {row['order_currency']}",
+            )
+        if payment is not None and payment.amount_minor != row["amount_minor"]:
+            raise LifecycleError(
+                "deposit_changed", f"deposit {transaction_id} changed; reload the order"
+            )
+        return dict(row)
+
+    def claim(conn: Conn, payment: Payment) -> None:
+        checked(conn, payment)
+        conn.execute(
+            "UPDATE bank_deposits SET payment_id = %s WHERE transaction_id = %s",
+            (payment.id, transaction_id),
+        )
+
+    with store.transaction() as conn:
+        row = checked(conn)
+    return add(
+        amount_minor=row["amount_minor"],
+        method=METHOD,
+        reference=transaction_id,
+        # Plaid gives the date only; noon UTC keeps that date in most time zones.
+        received_at=datetime.combine(row["posted_on"], time(12), UTC),
+        notes=row["description"],
+        on_insert=claim,
+    )
+
+
+def dismiss_deposit(store: OrderStore, order_id: str, transaction_id: str) -> None:
+    """ "Not this order": the suggestion is not shown again, nor made again by a sync."""
+    with store.transaction() as conn:
+        done = conn.execute(
+            "INSERT INTO bank_deposit_dismissals (transaction_id, order_id)"
+            " SELECT transaction_id, order_id FROM bank_deposit_matches"
+            " WHERE transaction_id = %s AND order_id = %s ON CONFLICT DO NOTHING",
+            (transaction_id, order_id),
+        )
+        if done.rowcount == 0:
+            raise _not_suggested(order_id, transaction_id)
