@@ -170,14 +170,45 @@ async def test_deposits_are_kept_masked_and_withdrawals_and_other_accounts_are_n
     [deposit] = bank.deposits()
     assert deposit["transaction_id"] == "lPNjeW1nR6CDn5okmGQ6hEpMo4lLNoSrzqDje"
     assert (deposit["amount_minor"], deposit["currency"]) == (2500, "USD")
-    # The bank's text, with no run of five or more digits: no account number is kept.
-    assert deposit["description"] == "ZELLE PAYMENT FROM JANE DOE ACCT ••• ORD-2026-7"
+    # The bank's text, with no run of five or more digits: no account number is kept. No
+    # order ORD-2026-7 exists here, so its number is masked too.
+    assert deposit["description"] == "ZELLE PAYMENT FROM JANE DOE ACCT ••• ORD-•••"
     assert "123456789" not in repr(bank.deposits()) and "123456789" not in caplog.text
     assert bank.cursor() is not None and bank.cursor().startswith("tVUUL15l")  # type: ignore[union-attr]
 
 
 def test_mask_hides_long_digit_runs_only() -> None:
-    assert mask("REF 1234 ACCT 000123456789 ORD-2026-12") == "REF 1234 ACCT ••• ORD-2026-12"
+    text = "REF 1234 ACCT 000123456789 ORD-2026-12"
+    assert mask(text, {"ORD-2026-12"}) == "REF 1234 ACCT ••• ORD-2026-12"
+
+
+@pytest.mark.parametrize(
+    ("text", "known", "masked"),
+    [
+        ("PAY ORD-2026-000123456789", set(), "PAY ORD-•••"),
+        ("PAY ORD-2026-123456789", set(), "PAY ORD-•••"),
+        ("PAY ORD-2026-12", set(), "PAY ORD-•••"),
+        ("PAY ORD-2026-12 3456", {"ORD-2026-12"}, "PAY ORD-2026-12 •••"),
+        ("PAY ORD-2026-12-34", {"ORD-2026-12"}, "PAY ORD-2026-12-•••"),
+        ("pay ord-2026-00012", {"ORD-2026-12"}, "pay ORD-2026-12"),
+        ("PAY ORD-2026-000123456789", {"ORD-2026-123456789"}, "PAY ORD-2026-123456789"),
+    ],
+    ids=[
+        "leading zeros, no order",
+        "nine digits, no order",
+        "no such order",
+        "digits run on",
+        "digits run on after a hyphen",
+        "canonical token",
+        "an order that exists",
+    ],
+)
+def test_mask_puts_back_only_the_canonical_number_of_an_order_that_exists(
+    text: str, known: set[str], masked: str
+) -> None:
+    """Every digit run is masked first; only an existing order's ``ORD-yyyy-n`` comes back,
+    so an account number written as an order number never survives."""
+    assert mask(text, known) == masked
 
 
 @pytest.mark.parametrize(
@@ -186,13 +217,13 @@ def test_mask_hides_long_digit_runs_only() -> None:
         ("IBAN DE89 3704 0044 0532 0130 00 THANKS", "IBAN DE••• THANKS"),
         ("ACCT 1234-5678-9012", "ACCT •••"),
         ("FROM 12 345", "FROM •••"),
-        ("ORD-2026-12 FROM 9876 5432", "ORD-2026-12 FROM •••"),
+        ("ORD-2026-12 FROM 9876 5432", "ORD-••• FROM •••"),
         ("ROOM 12 FLOOR 3", "ROOM 12 FLOOR 3"),
     ],
-    ids=["grouped IBAN", "hyphens", "five digits split", "order number kept", "short runs"],
+    ids=["grouped IBAN", "hyphens", "five digits split", "unknown order number", "short runs"],
 )
 def test_mask_counts_digits_across_single_spaces_and_hyphens(text: str, masked: str) -> None:
-    """A number printed in groups is still masked; an order number is not an account's."""
+    """A number printed in groups is still masked, and so is an unknown order number."""
     assert mask(text) == masked
 
 
@@ -306,6 +337,9 @@ async def test_a_deposit_naming_an_order_number_is_suggested(bank: Bank) -> None
         )
         await sync_deposits(bank.bank)
     assert bank.matches() == {("t1", owing.id, "order_number")}
+    # The number of an order that exists is kept, written as ScadBuddy writes it.
+    [deposit] = bank.deposits()
+    assert deposit["description"] == f"ZELLE {owing.number} THANKS"
 
 
 async def test_a_cancelled_order_is_not_suggested(bank: Bank) -> None:
@@ -315,6 +349,9 @@ async def test_a_cancelled_order_is_not_suggested(bank: Bank) -> None:
         router.post(SYNC).mock(return_value=page([transaction("t1", -10, f"{order.number}")]))
         await sync_deposits(bank.bank)
     assert bank.matches() == set()
+    # Its number is still an order's, not an account's, so the mask puts it back.
+    [deposit] = bank.deposits()
+    assert deposit["description"] == order.number
 
 
 async def test_pages_run_until_has_more_is_false(bank: Bank) -> None:
