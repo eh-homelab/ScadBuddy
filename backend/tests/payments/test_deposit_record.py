@@ -371,3 +371,54 @@ async def test_a_removal_waits_for_a_confirmation_in_flight(bank: Bank) -> None:
             "SELECT removed_at FROM bank_deposits WHERE transaction_id = 't1'"
         ).fetchone()
     assert row is not None and row["removed_at"] is not None
+
+
+async def resynced(bank: Bank, amount: float, cursor: str, bus: Any = None) -> None:
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page(modified=[transaction("t1", amount, "ACH")], cursor=cursor)
+        )
+        await sync_deposits(bank.bank, bus)
+
+
+async def test_a_deposit_changed_and_changed_back_warns_again(bank: Bank) -> None:
+    """Once the bank moved a recorded deposit, the payments are checked against it for
+    good: a change back after the shop's correction warns again."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    await resynced(bank, -12, "c2")
+    adjust(bank, owing, 200, "t1")
+    assert suggestions(bank.rows, owing.id) == []
+    await resynced(bank, -10, "c3")
+    [back] = suggestions(bank.rows, owing.id)
+    assert (back.reason, back.amount_minor, back.recorded_minor) == ("changed", 1000, 1200)
+
+
+async def test_an_unlink_keeps_a_removed_deposit_s_warning(bank: Bank) -> None:
+    """Unlink drops the deposits nothing recorded; a recorded one keeps its warning."""
+    owing = bank.owing()
+    await removed_after_recording(bank, owing)
+    with respx.mock as router:
+        router.post(f"{SANDBOX}/item/remove").mock(
+            return_value=httpx.Response(200, json=payload("item.remove.json"))
+        )
+        await bank.bank.unlink()
+        plaid_answers(router)
+        await bank.bank.link("public-sandbox-2", [CHECKING])
+    [removed] = suggestions(bank.rows, owing.id)
+    assert removed.reason == "removed"
+
+
+async def test_a_sync_that_reads_a_recorded_deposit_unchanged_tells_no_page(bank: Bank) -> None:
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    heard: list[Any] = []
+
+    class Bus:
+        def publish(self, event: Any) -> None:
+            heard.append(event)
+
+    await resynced(bank, -10, "c2", Bus())
+    assert heard == []

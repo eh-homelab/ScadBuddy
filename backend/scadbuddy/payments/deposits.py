@@ -254,12 +254,26 @@ def _apply(
         if deposit is None:
             gone.add(tx_id)
             continue
+        before = conn.execute(
+            "SELECT amount_minor, payment_id FROM bank_deposits WHERE transaction_id = %s"
+            " FOR UPDATE",
+            (deposit.transaction_id,),
+        ).fetchone()
+        # The bank moved a recorded deposit: kept for good, so a change back after the
+        # shop's correction warns again.
+        moved = (
+            before is not None
+            and before["payment_id"] is not None
+            and before["amount_minor"] != deposit.amount_minor
+        )
         conn.execute(
             "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
             " posted_on, description) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT"
-            " (transaction_id) DO UPDATE SET amount_minor = EXCLUDED.amount_minor, currency ="
-            " EXCLUDED.currency, posted_on = EXCLUDED.posted_on, description ="
-            " EXCLUDED.description, removed_at = NULL",
+            " (transaction_id) DO UPDATE SET item_id = EXCLUDED.item_id, amount_minor ="
+            " EXCLUDED.amount_minor, currency = EXCLUDED.currency, posted_on ="
+            " EXCLUDED.posted_on, description = EXCLUDED.description, removed_at = NULL,"
+            " changed_at = CASE WHEN %s THEN clock_timestamp() ELSE bank_deposits.changed_at"
+            " END",
             (
                 deposit.transaction_id,
                 item_id,
@@ -267,8 +281,11 @@ def _apply(
                 deposit.currency,
                 deposit.posted_on,
                 mask(deposit.text)[:DESCRIPTION_CHARS],
+                moved,
             ),
         )
+        if moved:
+            told.update(_payment_orders(conn, [deposit.transaction_id]))
         # A changed deposit is matched again from nothing.
         conn.execute(
             "DELETE FROM bank_deposit_matches WHERE transaction_id = %s",
@@ -281,7 +298,6 @@ def _apply(
                 "UPDATE bank_deposits SET payment_id = %s WHERE transaction_id = %s",
                 (recorded, deposit.transaction_id),
             )
-            told.update(_payment_orders(conn, [deposit.transaction_id]))
             continue
         for order_id, reason in _matches(conn, balances, deposit):
             # A pair the shop dismissed is never suggested again, after a new link too.
@@ -433,8 +449,8 @@ def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
             " CROSS JOIN LATERAL (SELECT sum(q.amount_minor)::bigint AS total FROM"
             " order_payments q WHERE q.order_id = p.order_id AND q.method = %s AND"
             " q.reference = d.transaction_id) t WHERE p.order_id = %s"
-            # Only the bank's change warns: ``p`` is the payment the deposit was recorded as.
-            " AND (d.removed_at IS NOT NULL OR d.amount_minor <> p.amount_minor) AND t.total <>"
+            # Only the bank's change warns, once it happened (``changed_at`` is kept).
+            " AND (d.removed_at IS NOT NULL OR d.changed_at IS NOT NULL) AND t.total <>"
             " CASE WHEN d.removed_at IS NULL THEN d.amount_minor ELSE 0 END"
             " ORDER BY posted_on DESC, transaction_id",
             (order_id, METHOD, METHOD, order_id),
