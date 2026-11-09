@@ -24,6 +24,11 @@ build needs `protoc` on `PATH` (`apt-get install protobuf-compiler`). `Cargo.loc
 committed; CI runs clippy and the tests `--locked`, with the same Temporal CLI as the
 `agent` job in `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`.
 
+The Dockerfile's `slicer-build` stage builds the dependencies first with cargo-chef
+(pinned exactly, `cargo install cargo-chef --version`), then the workspace crates
+(#4059). A change to a crate's code reuses the dependency layer from the GHCR cache; a
+change to a `Cargo.toml` or `Cargo.lock` builds the dependencies again.
+
 
 ## Layout
 - `workers/rust/` — Rust Temporal workers and tools (spec 2026-10-16 §7):
