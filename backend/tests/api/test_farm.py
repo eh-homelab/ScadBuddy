@@ -115,7 +115,12 @@ def test_only_items_that_can_still_print_are_looked_up(
         return await jobs(queue_items=queue_items, lan_starts=lan_starts)
 
     monkeypatch.setattr(links, "jobs", spy)
-    asyncio.run(links.record_sends(PrintSubject.output("o" * 32), [PrintSend(queue_item_id=205)]))
+    asyncio.run(
+        links.record_sends(
+            PrintSubject.output("o" * 32),
+            [PrintSend(queue_item_id=205), PrintSend(queue_item_id=261)],
+        )
+    )
 
     response = client.get("/api/v1/farm/queue")
 
@@ -123,6 +128,7 @@ def test_only_items_that_can_still_print_are_looked_up(
     assert asked == [[257, 259, 260]]
     items = {item["id"]: item for item in response.json()}
     assert items[205]["scadbuddy"] is None
+    assert items[261]["scadbuddy"] is None
 
 
 @respx.mock
