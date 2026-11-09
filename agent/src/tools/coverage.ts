@@ -180,6 +180,19 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   ...(
     [
+      'GET /api/v1/payments/bank',
+      'PUT /api/v1/payments/bank/keys',
+      'DELETE /api/v1/payments/bank/keys',
+      'POST /api/v1/payments/bank/link-token',
+      'POST /api/v1/payments/bank/link',
+      'DELETE /api/v1/payments/bank/link',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Settings → Payments' bank account (#4961): a person links it in Plaid Link in their own browser; the Plaid keys and the link are never an agent's.",
+  })),
+  ...(
+    [
       'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/cancel',
       'POST /api/v1/orders/{order_id}/payment-requests/{request_id}/link',
     ] as const

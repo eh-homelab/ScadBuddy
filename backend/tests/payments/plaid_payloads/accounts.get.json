@@ -1,0 +1,60 @@
+{
+  "accounts": [
+    {
+      "account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp",
+      "balances": {
+        "available": 100,
+        "current": 110,
+        "iso_currency_code": "USD",
+        "limit": null,
+        "unofficial_currency_code": null
+      },
+      "mask": "0000",
+      "name": "Plaid Checking",
+      "official_name": "Plaid Gold Standard 0% Interest Checking",
+      "subtype": "checking",
+      "type": "depository"
+    },
+    {
+      "account_id": "dVzbVMLjrxTnLjX4G66XUp5GLklm4oiZy88yK",
+      "balances": {
+        "available": null,
+        "current": 210,
+        "iso_currency_code": "USD",
+        "limit": null,
+        "unofficial_currency_code": null
+      },
+      "mask": "1111",
+      "name": "Plaid Saving",
+      "official_name": "Plaid Silver Standard 0.1% Interest Saving",
+      "subtype": "savings",
+      "type": "depository"
+    },
+    {
+      "account_id": "Pp1Vpkl9w8sajvK6oEEKtr7vZxBnGpf7LxxLE",
+      "balances": {
+        "available": null,
+        "current": 410,
+        "iso_currency_code": "USD",
+        "limit": 2000,
+        "unofficial_currency_code": null
+      },
+      "mask": "3333",
+      "name": "Plaid Credit Card",
+      "official_name": "Plaid Diamond 12.5% APR Interest Credit Card",
+      "subtype": "credit card",
+      "type": "credit"
+    }
+  ],
+  "item": {
+    "available_products": ["balance", "identity", "investments"],
+    "billed_products": ["transactions"],
+    "consent_expiration_time": null,
+    "error": null,
+    "institution_id": "ins_109508",
+    "item_id": "M5eVJqLnv3tbzdngLDp9FL5OlDNxlNhlE55op",
+    "update_type": "background",
+    "webhook": ""
+  },
+  "request_id": "bkVE1BHWMAZ9Rnr"
+}
