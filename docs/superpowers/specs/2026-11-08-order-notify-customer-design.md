@@ -325,9 +325,9 @@ Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a
 retry safe even if that changes.
 
-A `sending` row older than 15 minutes reads as `unknown` in every answer, and the
-housekeeping sweep (`workflows/housekeeping.py` `SWEEPS`, behind its patch) writes it as
-`unknown` with an audit row. No message is ever sent by the sweep.
+A `sending` row older than 15 minutes reads as `unknown` in every answer. There is no
+sweep: the next write that touches the row (its outcome, "Mark sent", or a resend that
+names it) records it, with its audit row. Nothing sends a message by itself.
 
 ## 8. The storefront overlap rule
 
@@ -387,7 +387,7 @@ Backend (`backend/tests/`, Postgres):
 - Each write and its `order_events` row commit together; `by` comes from the header.
 - (PR 5) The skip: each template × `storefront_mail_covers` true or false, with a fake
   seam; only `quoted` and `shipped` can skip.
-- The stale-`sending` sweep writes `unknown` and sends nothing.
+- A `sending` row older than 15 minutes reads as `unknown`; "Mark sent" takes it.
 - The setting's schema: secret-looking `fixed_args` keys refused.
 
 Agent (`agent/test/`, a fake http MCP server through the real forwarder):
@@ -419,7 +419,7 @@ messages list with "Mark sent" and "Send again"; the panel's approval shows the 
 ## 10. PR breakdown
 
 1. **Backend record.** Migration `order_messages`, the routes of §7.1, the audit kinds,
-   the setting `orders_customer_messaging`, the stale sweep. No storefront skip yet. Tests.
+   the setting `orders_customer_messaging`. No sweep and no storefront skip yet. Tests.
 2. **Agent send.** `orders/messaging.ts`, the binding route and validation (§4.3),
    `order_notify_customer_send` with `prepareApproval` and `flowBinding`, the new answer
    fields of `order_notify_customer`, `ToolServices` wiring in sidecar and worker. Tests on
