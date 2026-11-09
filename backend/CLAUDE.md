@@ -680,7 +680,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that differs from the item's is made a revision first (`api/orders.py` `_slice_revision`,
   through `Lifecycle.add_revision`, after acceptance for an accepted item on a
   `TAKES_ITEMS` order) in `run_operation`'s `before_start`, after the quote's check of
-  the body alone (`quote_check` `body_only`, so a 422 writes nothing); the render's slots
+  the body alone (`quote_check` `body_only`: the filaments named and pinned, never the new
+  design's slots, so a 422 writes nothing); the render's slots
   take the item's earlier filaments (`carried_filaments`, unkeyed), and a slot the new
   design adds that neither the item nor the body covers is refused after the revision is
   written; the quote is of it (`revision_id` in the operation's request;

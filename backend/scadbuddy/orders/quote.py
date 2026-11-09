@@ -296,10 +296,10 @@ def quote_check(
     """Ruling 8's refusals, from the rows (with ``expected_revision_id``, the revision a
     slice's new inputs made, 409 ``revision_superseded`` once another is current, #4673):
     With ``body_only`` (a slice whose new design the route revises first, #5761
-    review) the item's state is the revise path's to refuse, and the rest is checked
-    against the item as it is before that revision: the cart, that it has a design
-    (``check_design``), the slots the body names against its current colour slots, the
-    filaments merged over them, the support slots and the price book.
+    review) the item's state is the revise path's to refuse, and so are the new design's
+    slots, known only once it renders (the run's): this checks the cart, that the item
+    has a design (``check_design``), the filaments the body names and those the item
+    has pinned, each in the book and not archived, and the price book.
     404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
@@ -337,14 +337,16 @@ def quote_check(
     if expected_revision_id is not None and item.current_revision_id != expected_revision_id:
         raise refused(_superseded(item_id))
     known = {slot.slot for slot in item.colours}
-    unknown = sorted(set(request.filaments) - known) if item.colours else []
+    # Before a new design's revision its slots are not known yet: only the filaments
+    # named are judged here, the slots by the run once it renders (#5761 review).
+    unknown = sorted(set(request.filaments) - known) if item.colours and not body_only else []
     if unknown:
         raise _unprocessable(
             "filaments", f"the item has no colour slot {', '.join(map(str, unknown))}"
         )
     slots = merged_slots(item, request.filaments)
     empty = sorted(slot for slot, filament_id in slots.items() if filament_id is None)
-    if empty:
+    if empty and not body_only:
         raise _unprocessable(
             "filaments", f"colour slot {empty[0]} has no filament to price it with"
         )

@@ -8,6 +8,11 @@ import { resetMockState } from '../../mocks/handlers'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
+import { HttpResponse, http } from 'msw'
+import { choicesView } from '../../mocks/choices'
+import * as fixtures from '../../mocks/fixtures'
+import { HOT_PRINTER, setHotPath } from '../../mocks/features/hotPath'
+import { server } from '../../mocks/server'
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
@@ -112,6 +117,50 @@ describe('PrintItem', () => {
       { slot_id: 1, spool_id: 21 },
       { slot_id: 2, spool_id: 27 },
     ])
+  })
+
+  // #5761 review — a quote on a LAN-only printer names it by its registry row alone; the
+  // dialog opens on that row and Print sends it.
+  it("opens on the quote's LAN-only printer", async () => {
+    setHotPath(true)
+    const lanOnly = { ...HOT_PRINTER, bambuddy_printer_id: null, bambuddy_active: false }
+    server.use(
+      http.get('/api/v1/printers', () => HttpResponse.json([lanOnly])),
+      // Opens on Bambuddy's printer; a read for the row is the row's, with no Bambuddy id.
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const row = new URL(request.url).searchParams.get('printer') === lanOnly.id
+        return HttpResponse.json({
+          ...choicesView,
+          ...(row
+            ? {
+                printer_id: null,
+                filaments: { ...fixtures.filamentOptions, printer_id: null },
+                model_choices: { printer_id: null, filament_plan: [] },
+              }
+            : {}),
+          lan_printers: [lanOnly.id],
+        })
+      }),
+    )
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: lanOnly.id, path: 'native', choices: quoted, prime_tower: null, supports: null, print_sequence: null },
+          filament_plan: null,
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Printer' })).toHaveTextContent(lanOnly.name))
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    expect(printed.mock.calls[0]![2]).toMatchObject({ printer: lanOnly.id })
   })
 
   // #5544 — a library file item prints its file: the dialog opens on the file, not an output.

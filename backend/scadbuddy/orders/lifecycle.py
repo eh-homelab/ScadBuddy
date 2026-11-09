@@ -2452,7 +2452,9 @@ class Lifecycle:
         revision's reference already has ``resolved``'s commit and inputs, read under
         the order's lock after the cart's refusal (:func:`check_submitted`), gets no
         revision: that revision is returned, and nothing is written (no audit row, no
-        event), so two sends that both read the old design make one."""
+        event), so two sends that both read the old design make one. Otherwise it
+        decides ``after_acceptance`` itself from the same locked rows (an accepted quote
+        on a `TAKES_ITEMS` order, not yet revised after acceptance), whatever is passed."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -2475,6 +2477,13 @@ class Lifecycle:
                     resolved.reference.inputs,
                 ):
                     return current
+                # Which path, decided from the rows under this lock, so two slices of
+                # different designs racing take the after-acceptance path once.
+                after_acceptance = (
+                    order.status in TAKES_ITEMS
+                    and any(quote.accepted for quote in self.store.quotes(item.id, conn=conn))
+                    and not item.revised_after_acceptance
+                )
             if item.status in SETTLED:
                 raise LifecycleError(
                     "item_not_open", f"item {item_id} is {item.status}", items=[item.id]

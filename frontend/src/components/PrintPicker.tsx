@@ -1346,14 +1346,24 @@ export function PrintPicker({
     if (!seeded || !seed || seeding.current === 'done' || !choices) return
     const wanted = seed.printer_id ?? null
     const known = wanted !== null && printers.some((entry) => entry.id === wanted)
+    // A seed naming only a registry row (an item print's quote on a LAN-only printer,
+    // #4673): that row, when the server says a run reaches it.
+    const row = wanted === null && seed.printer ? seed.printer : null
+    const lanRow = row !== null && lanChoosable.some((entry) => entry.id === row) ? row : null
+    // The rows first: before they load no row is choosable yet.
+    if (row !== null && registry.data === undefined && registry.error === undefined) return
     if (seeding.current === 'printer') {
       seeding.current = 'rest'
       if (known && wanted !== printerId) {
         askPrinter(wanted)
         return
       }
+      if (lanRow !== null && registryPrinter !== lanRow) {
+        askRegistry(lanRow)
+        return
+      }
     }
-    if ((known && printerId !== wanted) || !filaments || !planReady || (!project && ownProjects.loading)) return
+    if ((known && printerId !== wanted) || (lanRow !== null && registryPrinter !== lanRow) || !filaments || !planReady || (!project && ownProjects.loading)) return
     seeding.current = 'done'
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
     // An item print's quote with no plan seeds none (#4673): the picks stay.
@@ -1398,6 +1408,11 @@ export function PrintPicker({
     choices,
     printers,
     printerId,
+    lanChoosable,
+    registryPrinter,
+    askRegistry,
+    registry.data,
+    registry.error,
     filaments,
     planReady,
     project,

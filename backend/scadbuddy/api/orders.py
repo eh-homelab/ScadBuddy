@@ -87,7 +87,6 @@ from scadbuddy.orders.lifecycle import (
     stale_attempt,
 )
 from scadbuddy.orders.models import (
-    TAKES_ITEMS,
     Approval,
     Attachment,
     Charge,
@@ -2418,17 +2417,9 @@ async def _slice_revision(
     pinned = {str(slot.slot): slot.filament_id for slot in item.colours if slot.filament_id}
     if (resolved.reference.commit, resolved.reference.inputs) == (current.commit, current.inputs):
         return item.current_revision_id, pinned
-    quotes = await asyncio.to_thread(store.quotes, item.id)
-    after_acceptance = (
-        order.status in TAKES_ITEMS
-        and any(quote.accepted for quote in quotes)
-        and not item.revised_after_acceptance
-    )
     by = current_actor()
     revision = await _run_linked(
-        lambda: orders.lifecycle.add_revision(
-            order_id, item_id, by, resolved, after_acceptance=after_acceptance, reuse_current=True
-        ),
+        lambda: orders.lifecycle.add_revision(order_id, item_id, by, resolved, reuse_current=True),
         order_id,
         payments,
     )

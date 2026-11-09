@@ -28,6 +28,8 @@ function quotedSeed(quote: Quote | undefined): PrintRunRequest | null {
   if (!quote || !setup?.choices) return null
   return {
     printer_id: setup.printer_id ?? undefined,
+    // A LAN-only printer is named by its registry row alone (#5761 review).
+    ...(setup.printer ? { printer: setup.printer } : {}),
     // No plan seed for a quote with none: the dialog keeps its own spool picks.
     ...(quote.filament_plan ? { filament_plan: quote.filament_plan as PrintRunRequest['filament_plan'] } : {}),
     choices: setup.choices,
@@ -42,6 +44,7 @@ function quotedSeed(quote: Quote | undefined): PrintRunRequest | null {
 /** A slice quote's `choices` column (`orders/quote.py` `print_setup`). */
 type QuotedSetup = {
   printer_id?: number | null
+  printer?: string | null
   choices?: PrintRunRequest['choices'] | null
   prime_tower?: PrintRunRequest['prime_tower'] | null
   supports?: PrintRunRequest['supports'] | null
