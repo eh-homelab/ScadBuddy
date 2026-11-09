@@ -561,6 +561,8 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
           sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
+          // Once its dialog opened, a slice request is the quote's section only (#5797 review).
+          onSliceOpened={() => setSection((was) => (was?.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -580,6 +582,7 @@ function ItemDrawer({
   unfulfilAllowed,
   section = null,
   sliceAsked = 0,
+  onSliceOpened,
   onClose,
   onChanged,
 }: {
@@ -594,6 +597,7 @@ function ItemDrawer({
   section?: ItemSection | null
   /** #4673 — each row Slice… of this item, counted: a new count opens the slice dialog. */
   sliceAsked?: number
+  onSliceOpened?: () => void
   onClose: () => void
   onChanged: () => void
 }) {
@@ -828,7 +832,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} />
       )}
       </div>
       )}
