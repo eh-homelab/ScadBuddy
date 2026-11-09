@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router'
 import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
+import { NEW_TAB } from '../../lib/embed'
+import { scadbuddyJobPath } from './prints'
 import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
 /** An outside link of the queue's (opens Bambuddy beside the frame, #2351). */
@@ -97,7 +100,7 @@ export function PrintQueue() {
         <Card className="gap-0 py-0">
           <ol className="divide-y" aria-label="Waiting to print">
             {shown.map((item) => (
-              <QueueRow key={item.id} item={item} />
+              <QueueRow key={item.id} item={item} queueUrl={base ? `${base}/queue` : null} />
             ))}
           </ol>
         </Card>
@@ -112,7 +115,32 @@ export function PrintQueue() {
   )
 }
 
-function QueueRow({ item }: { item: QueueItem }) {
+/**
+ * #3743 — the item's name, as a link: ScadBuddy's own item to its ScadBuddy page
+ * ({@link scadbuddyJobPath}); any other to Bambuddy's queue page, which has no route for
+ * one item (`frontend/src/App.tsx` and `QueuePage.tsx` at maziggy/bambuddy@2ce0d93),
+ * in a new tab, which escapes the frame's sandbox.
+ */
+function ItemName({ item, name, queueUrl }: { item: QueueItem; name: string; queueUrl: string | null }) {
+  if (item.scadbuddy) {
+    return (
+      <Link to={scadbuddyJobPath(item.scadbuddy)} className={`min-w-0 truncate ${LINK}`}>
+        {name}
+      </Link>
+    )
+  }
+  if (queueUrl) {
+    return (
+      <a href={queueUrl} {...NEW_TAB} className={`min-w-0 truncate ${LINK}`}>
+        {name}
+        <span className="sr-only">, in Bambuddy's queue</span>
+      </a>
+    )
+  }
+  return <span className="min-w-0 truncate font-medium">{name}</span>
+}
+
+function QueueRow({ item, queueUrl }: { item: QueueItem; queueUrl: string | null }) {
   const name = item.archive_name ?? item.library_file_name ?? `Queue item ${item.id}`
   const where = item.printer_name ?? (item.target_model ? `Any ${item.target_model}` : 'No printer yet')
   const notes: string[] = []
@@ -123,7 +151,7 @@ function QueueRow({ item }: { item: QueueItem }) {
     <li className="px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="min-w-0 truncate font-medium">{name}</span>
+          <ItemName item={item} name={name} queueUrl={queueUrl} />
           {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
         </span>
         <span className="sb-num shrink-0 text-xs text-muted-foreground">

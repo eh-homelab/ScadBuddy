@@ -32,7 +32,7 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.core.problems import ApiError
 
 ARCHIVE_TTL = 30.0
-#: The key of a read that is of no one archive (the printers).
+#: The key of a read that is of no one archive (the printers, the version).
 _ALL = 0
 #: How long a timelapse's stills and probe are kept (#2360): Bambuddy extracts them with
 #: ffmpeg on every read, 20-26 s for one print, and a timelapse does not change once
@@ -41,6 +41,8 @@ TIMELAPSE_TTL = 6 * 3600.0
 #: How long a failed extraction of a timelapse's stills is kept (#2903): Bambuddy runs
 #: ffmpeg for each read, and one that always fails would otherwise run on every view.
 FAILED_FRAMES_TTL = 60.0
+#: How long Bambuddy's version is kept (#3743): it changes only on an upgrade.
+VERSION_TTL = 600.0
 #: Enough for every print of a busy homelab several times over.
 MAX_ENTRIES = 4096
 
@@ -125,6 +127,21 @@ class ArchiveCache:
         for row in held:
             self._put(self._key(client, "archive", row.id), row, self._ttl)
         return Primed(len(missing), len(held))
+
+    async def version(self, client: BambuddyClient) -> str | None:
+        """Bambuddy's version (`BambuddyClient.version`), which says whether it has a page
+        per archive (#3743). Kept `VERSION_TTL`, so the polled Now printing strip asks
+        once in that time. A failed read is kept as None for the same time: the strip
+        then links the archives page, which every Bambuddy has."""
+
+        async def load() -> str | None:
+            try:
+                return await client.version()
+            except (ApiError, ValueError) as error:
+                logger.info("Bambuddy's version unreadable", extra={"error": type(error).__name__})
+                return None
+
+        return await self._get(client, "version", _ALL, load, ttl=VERSION_TTL)
 
     async def printers(self, client: BambuddyClient) -> list[Printer]:
         """Bambuddy's printers: what the prints name a printer by (#2363)."""

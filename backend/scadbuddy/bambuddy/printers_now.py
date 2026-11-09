@@ -3,10 +3,12 @@
 ScadBuddy is an overlay on Bambuddy, so ``/prints`` shows every active printer's live
 state from ``GET /printers/{id}/status``, not only the archives ScadBuddy linked: a job
 started from Bambuddy, or one paused on an HMS error, is as visible as one ScadBuddy
-queued. A job whose archive ScadBuddy linked points at its print; any other at
-Bambuddy's archives. A job ScadBuddy queued or started carries ``scadbuddy`` (#3741,
-`with_scadbuddy_jobs`): the printing queue item ScadBuddy recorded, or a run's LAN start
-on that printer. A linked archive alone does not mark a job.
+queued. A job whose archive ScadBuddy linked points at its print; any other at its
+archive in Bambuddy: that archive's page, ``/archives/{id}``, on a Bambuddy that has one,
+else the archives page (#3743, `with_archive_pages`). A job ScadBuddy queued or
+started carries ``scadbuddy`` (#3741, `with_scadbuddy_jobs`): the printing queue item
+ScadBuddy recorded, or a run's LAN start on that printer. A linked archive alone does not
+mark a job.
 
 Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
 with a fresh report (`is_fresh`) shows that report, whether or not it is also in
@@ -20,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -40,10 +44,23 @@ from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
 
-#: Bambuddy's archives page, where a job ScadBuddy did not start is found. Bambuddy has
-#: no page per archive (``App.tsx`` at 14da007, as ``api/print_history.py`` records),
-#: so the card names the archive beside this link rather than in it.
+#: Bambuddy's archives page, where a job ScadBuddy did not link is found. A Bambuddy
+#: that has a page per archive gets the link to that page, ``/archives/{id}``
+#: (`with_archive_pages`, #3743); any other gets this one, with the archive's number
+#: beside it.
 ARCHIVES_PAGE = "/archives"
+#: The first Bambuddy version with ``archives/:id``. Measured on maziggy/bambuddy with
+#: `gh api` (2026-11-09), `APP_VERSION` in ``backend/app/core/config.py``, which
+#: ``GET /updates/version`` answers: f9080d1 (2026-10-02) set 1.2.6b1, ed72611
+#: (2026-10-21) 1.3.0b1, 2be2b26 (2026-10-28) 1.3.1b1; d43bf57 (2026-10-31) added
+#: the route (``frontend/src/App.tsx`` line 237 at 2ce0d93); 666f78f (2026-11-06), after
+#: it, set 1.3.0.
+FIRST_ARCHIVE_PAGE = Version("1.3.0")
+#: Versions reported both before and after the route came (1.3.1b1, from 2be2b26 until
+#: 666f78f): the archives page is the link that works on both.
+ARCHIVE_PAGE_UNKNOWN = frozenset({Version("1.3.1b1")})
+#: A daily build's tag (``v1.3.1b1-daily.20261108``) names the version it builds.
+_DAILY = re.compile(r"-daily\.\d+$")
 
 Activity = Literal["printing", "paused", "idle", "finished", "failed", "offline", "unknown"]
 
@@ -95,7 +112,9 @@ class PrinterNow(BaseModel):
     archive_id: int | None = None
     #: ScadBuddy linked ``archive_id``: its print is ``/prints/{archive_id}``.
     linked: bool = False
-    #: Where Bambuddy shows the archive, when ScadBuddy did not link it.
+    #: Where Bambuddy shows the archive, when ScadBuddy did not link it: its own page
+    #: (``/archives/{id}``) on a Bambuddy that has one (`has_archive_page`), else the
+    #: archives page.
     bambuddy_url: str | None = None
     #: The status read failed; the rest is unknown.
     error: str | None = None
@@ -234,6 +253,41 @@ def with_lan_runs(now: PrintersNow, runs: Mapping[str, LanRunControl]) -> Printe
         if control.awaiting_clear:
             update["awaiting_plate_clear"] = True
         return printer.model_copy(update=update)
+
+    return PrintersNow(printers=[card(printer) for printer in now.printers])
+
+
+def has_archive_page(version: str | None) -> bool:
+    """Whether a Bambuddy reporting ``version`` has a page per archive,
+    ``archives/:id`` (#3743). A version that does not parse, or none, has not: the
+    archives page works on every Bambuddy."""
+    if not version:
+        return False
+    try:
+        parsed = Version(_DAILY.sub("", version.strip()))
+    except InvalidVersion:
+        return False
+    return parsed >= FIRST_ARCHIVE_PAGE and parsed not in ARCHIVE_PAGE_UNKNOWN
+
+
+def needs_archive_pages(now: PrintersNow) -> bool:
+    """Whether any card links an archive in Bambuddy: only then is its version asked."""
+    return any(printer.bambuddy_url and printer.archive_id for printer in now.printers)
+
+
+def with_archive_pages(
+    now: PrintersNow, client: BambuddyClient, version: str | None
+) -> PrintersNow:
+    """``now`` with each Bambuddy archive link moved to that archive's own page, when
+    the Bambuddy reporting ``version`` has one (`has_archive_page`); else unchanged."""
+    if not has_archive_page(version):
+        return now
+
+    def card(printer: PrinterNow) -> PrinterNow:
+        if printer.bambuddy_url is None or printer.archive_id is None:
+            return printer
+        page = client.config.web_url(f"{ARCHIVES_PAGE}/{printer.archive_id}")
+        return printer.model_copy(update={"bambuddy_url": page})
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])
 

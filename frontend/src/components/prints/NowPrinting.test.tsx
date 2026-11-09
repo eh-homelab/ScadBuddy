@@ -42,16 +42,14 @@ describe('NowPrinting (#977)', () => {
     expect(errors).toHaveTextContent('Spaghetti detected: check the print. HMS 0C008042')
     expect(errors).toHaveTextContent('No description from Bambuddy HMS 0700220000020025')
     expect(errors).toHaveClass('text-warn')
-    // Started from Bambuddy: its archive there, not a ScadBuddy print.
-    // Bambuddy has no page per archive: the link names the page, and the archive sits beside it (#2930).
-    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
-      'href',
-      'http://bambuddy.local/archives',
-    )
-    expect(paused).toHaveTextContent("Bambuddy's archives · archive 90")
+    // Started from Bambuddy: the job links its archive there, not a ScadBuddy print (#3743).
+    const bambuddy = within(paused).getByRole('link', { name: 'Bracket, in Bambuddy' })
+    expect(bambuddy).toHaveAttribute('href', 'http://bambuddy.local/archives/90')
+    expect(bambuddy).toHaveAttribute('target', '_blank')
 
     const linked = screen.getByTestId('printer-now-2')
-    expect(within(linked).getByRole('link', { name: 'View this print' })).toHaveAttribute('href', '/prints/35')
+    // ScadBuddy's job, archived: its print in ScadBuddy.
+    expect(within(linked).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/prints/35')
     expect(linked).toHaveTextContent('54m left')
 
     const idle = screen.getByTestId('printer-now-3')
@@ -77,10 +75,48 @@ describe('NowPrinting (#977)', () => {
     renderPage(<NowPrinting />)
 
     const paused = await screen.findByTestId('printer-now-1')
-    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
+    expect(within(paused).getByRole('link', { name: 'Bracket, in Bambuddy' })).toHaveAttribute(
       'href',
-      'http://bambuddy.lan:8000/archives',
+      'http://bambuddy.lan:8000/archives/90',
     )
+  })
+
+  it('names the archive beside the link where Bambuddy has no page per archive (#3743)', async () => {
+    const [paused] = PRINTERS_NOW
+    // A Bambuddy before 1.3.0: the server links its archives page.
+    setPrintersNow([{ ...paused!, bambuddy_url: 'http://bambuddy.local/archives' }])
+    renderPage(<NowPrinting />)
+
+    const card = await screen.findByTestId('printer-now-1')
+    expect(within(card).getByRole('link', { name: "Bracket, archive 90 in Bambuddy's archives" })).toHaveAttribute(
+      'href',
+      'http://bambuddy.local/archives',
+    )
+    expect(card).toHaveTextContent('Bracket · archive 90')
+  })
+
+  it("links ScadBuddy's job to its subject's page until Bambuddy archives it (#3743)", async () => {
+    const [, ours] = PRINTERS_NOW
+    const job = ours!.scadbuddy!
+    setPrintersNow([
+      { ...ours!, archive_id: null, linked: false, scadbuddy: { ...job, archive_id: null } },
+      {
+        ...ours!,
+        id: '00000000-0000-4000-8000-000000000009',
+        printer_id: 9,
+        name: 'Library printer',
+        job_name: 'Bracket plate',
+        archive_id: null,
+        linked: false,
+        scadbuddy: { ...job, subject: 'library:1630', output_id: null, slug: null, library_file_id: 1630, archive_id: null },
+      },
+    ])
+    renderPage(<NowPrinting />)
+
+    const output = await screen.findByTestId('printer-now-2')
+    expect(within(output).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/edit/luna-0001')
+    const library = screen.getByTestId('printer-now-9')
+    expect(within(library).getByRole('link', { name: 'Bracket plate' })).toHaveAttribute('href', '/library?file=1630')
   })
 
   it('follows the printers as they change', async () => {
