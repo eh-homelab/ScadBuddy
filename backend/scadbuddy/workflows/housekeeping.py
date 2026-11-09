@@ -316,10 +316,12 @@ AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
 #: three provider calls (a token, the close, a read) of at most 20 s (`stripe.TIMEOUT`,
 #: `paypal.TIMEOUT`): 8 minutes, and a margin.
 PAYMENT_CLOSES_TIMEOUT = timedelta(minutes=10)
-#: Up to `payments.store.CAPTURE_SETTLE_BATCH` (8) requests, one after another, each up to
-#: three provider calls (a token, the read, a capture) of at most 20 s
-#: (`paypal.TIMEOUT`), and the closes a payment settles: 10 minutes, and a margin.
-PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=12)
+#: Up to `payments.store.CAPTURE_SETTLE_BATCH` (4) requests, one after another. Each is up
+#: to three provider calls (a token, the read, a capture) and, for a payment that settles
+#: the deposit and the balance, two page closes of three calls each (`_close_page`): 9
+#: calls of at most 20 s (`paypal.TIMEOUT`), 3 minutes a request, 12 minutes in all, and
+#: a margin.
+PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=15)
 #: Up to `payments.deposits.MAX_PAGES` (10) pages, read up to `MAX_RESTARTS` + 1 (3) times,
 #: each call at most 20 s (`plaid.TIMEOUT`): 10 minutes, then the matches, and a margin.
 BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)

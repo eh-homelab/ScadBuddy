@@ -602,9 +602,11 @@ class PayPalProvider:
     ) -> ProviderEvent | CaptureState:
         """#4959: read the order of an approval whose capture outcome was never told. A
         capture made is its ``paid``, ``pending`` or ``failed`` event, keyed by the
-        capture (a later webhook for it writes no second payment, the payment being
-        matched by the order). An ``APPROVED`` order with no capture is ``uncaptured``,
-        a voided or unknown order ``gone``; anything else, or a failed call, ``unknown``."""
+        capture and that kind, so a capture read ``pending`` and later read ``paid`` is
+        two events, not a replay (a later webhook for it writes no second payment, the
+        payment being matched by the order). An ``APPROVED`` order with no capture is
+        ``uncaptured``, a voided or unknown order ``gone``; anything else, or a failed
+        call, ``unknown``."""
         order_id = _path_id(provider_ref)
         try:
             order = await self._call(credential, "GET", f"/v2/checkout/orders/{order_id}")
@@ -632,7 +634,8 @@ class PayPalProvider:
                 kind = _READ_KINDS.get(capture.get("status"))
                 if kind is not None:
                     capture_id = _path_id(capture.get("id"))
-                    return _capture_event(f"capture:{capture_id}", kind, capture, order_id)
+                    event_id = f"capture:{capture_id}:{kind}"
+                    return _capture_event(event_id, kind, capture, order_id)
         except (KeyError, TypeError, AttributeError, ValueError, ValidationError, ProviderError):
             logger.warning("PayPal's order %s did not read as expected", order_id)
         return "unknown"

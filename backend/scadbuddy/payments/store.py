@@ -42,12 +42,28 @@ CLOSE_GIVE_UP_ATTEMPTS = 10
 #: well within this. Each read that finds the outcome still unknown doubles the wait, up
 #: to a day.
 CAPTURE_SETTLE_FIRST_MINUTES = 60
-#: The most pending captures one sweep reads.
-CAPTURE_SETTLE_BATCH = 8
-#: After this many reads that found the outcome unknown (about five days with the
-#: backoff: 1 + 2 + ... + 16 hours, then a day each), the request is marked `failed`, so
-#: it never blocks its order's cancel and the disconnect for good.
+#: The most pending captures one sweep reads; the housekeeping budget
+#: (`PAYMENT_CAPTURES_TIMEOUT`) counts the provider calls of this many.
+CAPTURE_SETTLE_BATCH = 4
+#: A read that found the capture pending at the provider sets the count to at least
+#: this, so the backoff (60 minutes doubled 5 times is past a day) is at its daily cap:
+#: the capture's own event settles it, and the sweep reads it once a day in case that
+#: event is lost too. A pending read does not add to the count.
+CAPTURE_DAILY_ATTEMPTS = 5
+#: After this many counted reads the request is marked `failed`, so it never blocks its
+#: order's cancel and the disconnect for good. A read is counted when it found the
+#: outcome unknown, when the lifecycle did not take its event, or when its settling
+#: raised (about five days with the backoff: 1 + 2 + ... + 16 hours, then a day each).
+#: After a pending read the count is at least `CAPTURE_DAILY_ATTEMPTS`, so four more
+#: counted reads, a day apart, give up.
 CAPTURE_GIVE_UP_ATTEMPTS = 9
+#: A capture still pending at the provider this many days after the approval marks the
+#: request `failed` (`capture_pending_unsettled`). PayPal says an eCheck usually clears
+#: in 4 to 7 business days and can take longer
+#: (https://www.paypal.com/us/cshelp/article/what-is-an-echeck-help285); 30 days is more
+#: than twice that with weekends and holidays, so a capture that is only slow is not
+#: failed while its money may still arrive.
+CAPTURE_PENDING_GIVE_UP_DAYS = 30
 
 
 def insert_request(
@@ -223,14 +239,20 @@ def capture_unsettled(conn: Conn, request_id: str) -> int:
     return 0 if row is None else int(row["capture_attempts"])
 
 
-def capture_settled(conn: Conn, request_id: str) -> None:
-    """The capture was made and is pending at the provider (#4959): its own event settles
-    it, as a bank debit's does, so the sweep stops reading it."""
-    conn.execute(
-        "UPDATE payment_requests SET capture_pending_at = NULL, capture_tried_at = NULL,"
-        " capture_attempts = 0 WHERE id = %s",
-        (request_id,),
-    )
+def capture_read_daily(conn: Conn, request_id: str) -> bool:
+    """The capture was made and is pending at the provider (#4959): its own event
+    settles it, as a bank debit's does, and the sweep reads it once a day in case that
+    event is lost (`CAPTURE_DAILY_ATTEMPTS`). The read is not counted toward
+    `CAPTURE_GIVE_UP_ATTEMPTS`: True once the approval is `CAPTURE_PENDING_GIVE_UP_DAYS`
+    old. A request no longer marked is left as it is (False)."""
+    row = conn.execute(
+        "UPDATE payment_requests SET capture_attempts = GREATEST(capture_attempts, %s),"
+        " capture_tried_at = clock_timestamp()"
+        " WHERE id = %s AND status = 'pending' AND capture_pending_at IS NOT NULL"
+        " RETURNING capture_pending_at <= clock_timestamp() - %s * interval '1 day' AS past",
+        (CAPTURE_DAILY_ATTEMPTS, request_id, CAPTURE_PENDING_GIVE_UP_DAYS),
+    ).fetchone()
+    return row is not None and bool(row["past"])
 
 
 def close_confirmed(conn: Conn, request_id: str, provider_ref: str) -> None:
