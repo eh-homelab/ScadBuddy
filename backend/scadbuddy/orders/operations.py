@@ -46,6 +46,7 @@ from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.library.outputs import OutputNotFoundError
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
@@ -102,6 +103,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ORDER_ITEM_QUOTE = "order_item_quote"
+#: Set, in a copy of the quote's request only, by the quote route's check of a slice's
+#: own body before it makes the slice's revision (#4673, #5761 review).
+BODY_ONLY = "body_only"
+#: The item's pinned filaments before a slice's revision (#4673, #5761 review), set by
+#: the quote route with that revision and not keyed: the render's slots take them.
+CARRIED = "carried_filaments"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
 ORDER_ATTEMPT_COPY = "order_attempt_copy"
@@ -486,9 +493,23 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         if rate is not None:
             policy = policy.model_copy(update={"machine_rate_per_hour": rate})
         slots = await asyncio.to_thread(
-            quote_check, orders.store, policy, request["order_id"], request["item_id"], body
+            lambda: quote_check(
+                orders.store,
+                policy,
+                request["order_id"],
+                request["item_id"],
+                body,
+                expected_revision_id=request.get("revision_id"),
+                # The quote route's check before a slice's revision (#5761 review).
+                body_only=bool(request.get(BODY_ONLY)),
+            )
         )
-        await asyncio.to_thread(support_check, orders.store, request["item_id"], body)
+        # Before a new design's revision, against the slots the body names; the run
+        # judges them again against the rendered slots (`quote_run`).
+        named = set(body.filaments) if request.get(BODY_ONLY) else None
+        await asyncio.to_thread(
+            lambda: support_check(orders.store, request["item_id"], body, colours=named)
+        )
         await library_file_stands(request["item_id"])
         if body.printer is not None:
             # A registry printer the run would refuse (a disagreeing pair, a virtual
@@ -532,6 +553,11 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 SliceQuoteRequest.model_validate(request["request"]),
                 Actor.model_validate(request["by"]),
                 quote_id=operation_quote_id(OPERATION_RUN.get()),
+                expected_revision_id=request.get("revision_id"),
+                carried_filaments={
+                    int(slot): filament_id
+                    for slot, filament_id in (request.get(CARRIED) or {}).items()
+                },
             )
         except QUOTE_RETRYABLE:
             raise
@@ -580,14 +606,15 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))
-        native = await native_run(body)
-        if body.path == "native" and "path" not in sent_keys(sent) and not native:
-            raise quoted_path_refusal(request["item_id"])
+        # Read once for the printer and the route (#5732 review).
+        settings = await asyncio.to_thread(core.settings_store.load)
         if body.printer is not None:
-            settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
                 body.printer, body.printer_id, settings, components.get(PRINTERS).store
             )
+        native = await native_run(body, settings)
+        if body.path == "native" and "path" not in sent_keys(sent) and not native:
+            raise quoted_path_refusal(request["item_id"])
         # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
         # so a refusal writes nothing, and recorded with it so a retry keys its run as
         # the first try did. On the native path the plan is the request's.
@@ -607,10 +634,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 checked["filament_plan"] = plan.model_dump(mode="json")
         return checked
 
-    async def native_run(body: PrintRunRequest) -> bool:
-        """Whether ``body``'s print takes the native path (no Bambuddy). A printer the
-        route refuses is not native here: the run refuses it itself, in its own words."""
-        settings = await asyncio.to_thread(core.settings_store.load)
+    async def native_run(body: PrintRunRequest, settings: StoredSettings) -> bool:
+        """Whether ``body``'s print takes the native path (no Bambuddy), on the stored
+        ``settings`` the check read. A printer the route refuses is not native here: the
+        run refuses it itself, in its own words."""
         if not native_backends(settings):
             return False
         printers = components.get(PRINTERS)
@@ -936,6 +963,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             queue="library",
             run_timeout=QUOTE_TIMEOUT,
             where="the item's quotes",
+            # #4673: the revision a slice's new design made is the route's, after the
+            # key is looked up; the body's `design` keys the request instead.
+            unkeyed=frozenset({"revision_id", CARRIED}),
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
             answers_running=True,

@@ -2611,6 +2611,7 @@ class Lifecycle:
         filaments: Mapping[int, str | None] | None = None,
         note: str = "",
         after_acceptance: bool = False,
+        reuse_current: bool = False,
     ) -> Revision:
         """A new design for the item while its order is open (§4.3). Without
         ``resolved`` it repeats the current revision's reference and colours: a revision
@@ -2625,7 +2626,15 @@ class Lifecycle:
         `item_locked` once shipped, `item_not_priced` for an item with no accepted quote
         (use the plain route), `print_in_flight` while a print of it runs,
         `item_partly_fulfilled` once an attempt of it is accepted (#5592). Its accepted
-        quote stays accepted until a quote of the new revision is (`_revise`)."""
+        quote stays accepted until a quote of the new revision is (`_revise`).
+
+        With ``reuse_current`` (#4673, a slice's new design) an item whose current
+        revision's reference already has ``resolved``'s commit and inputs, read under
+        the order's lock after the cart's refusal (:func:`check_submitted`), gets no
+        revision: that revision is returned, and nothing is written (no audit row, no
+        event), so two sends that both read the old design make one. Otherwise it
+        decides ``after_acceptance`` itself from the same locked rows (an accepted quote
+        on a `TAKES_ITEMS` order, not yet revised after acceptance), whatever is passed."""
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -2639,6 +2648,21 @@ class Lifecycle:
                     f"item {item_id} prints a library file: it has no design revisions;"
                     " add a new item to order something else",
                     items=[item.id],
+                )
+            if reuse_current and resolved is not None and item.current_revision_id is not None:
+                check_submitted(order)
+                current = self.store.revision(item.current_revision_id, conn=conn)
+                if current is not None and (current.reference.commit, current.reference.inputs) == (
+                    resolved.reference.commit,
+                    resolved.reference.inputs,
+                ):
+                    return current
+                # Which path, decided from the rows under this lock, so two slices of
+                # different designs racing take the after-acceptance path once.
+                after_acceptance = (
+                    order.status in TAKES_ITEMS
+                    and any(quote.accepted for quote in self.store.quotes(item.id, conn=conn))
+                    and not item.revised_after_acceptance
                 )
             if item.status in SETTLED:
                 raise LifecycleError(

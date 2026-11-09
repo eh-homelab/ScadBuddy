@@ -216,8 +216,37 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   request's, which must then send `choices` and `filament_plan` (422
   `print_setup_missing`). The built-in `order-fulfilment` flow sends `{}` for an item
   whose accepted quote records a setup. The agent's `order_item_print` takes every field
-  optional. The page's print dialog still sends its own choices, which must be the
-  quote's; PR 4's "Slice…" opens it from the quote.
+  optional. The page's print dialog opens on the accepted quote's setup (`PrintItem.tsx`
+  `quotedSeed`, `PrintPicker`'s `itemPrint.seed`, applied as a batch step's own seed),
+  so its Print sends what was quoted.
+- PR 3: a print setup with new inputs. The quote route's body is `ItemSliceQuoteRequest`
+  (`orders/quote.py`): `SliceQuoteRequest` with `inputs` and `commit`, each left out the
+  item's. When they differ from the item's reference, the route (`api/orders.py`
+  `_slice_revision`) resolves them as a revision's reference and makes the revision through
+  `Lifecycle.add_revision`, `after_acceptance` for an item with an accepted quote on a
+  `TAKES_ITEMS` order not yet revised after acceptance (decided under the order's lock),
+  so every refusal of that path applies unchanged. That step is `run_operation`'s `before_start`, so it runs only when
+  no record answers the key and its operation is not running (a replay makes no
+  revision), and it first runs the quote's own check on the body alone (`quote_check`
+  `body_only`: the cart, the filaments the body names, a support slot the body also names
+  as a colour, the price book and the machine rate; the new design's slots, which only
+  its render gives, are the run's to judge, as are the carried pins and the support
+  slots against those slots), so a refusal there writes nothing and leaves an accepted item's one revise after
+  acceptance unused. The same design makes no revision (`add_revision` `reuse_current`
+  compares it under the order's lock and writes nothing), so two first sends of one key
+  that race make one. The new revision has no colour slots until it renders, so the
+  route carries the item's pinned filaments with it (`carried_filaments`), and the
+  render's slots take them by slot number where the body names none (`quote.py`
+  `ensure_output`). A slot the new design adds that neither names is known only after
+  the render: the run refuses it (422 `filaments`) after the revision is written, and a
+  slice that names its filament quotes that revision. The design keys the operation's
+  request (`design`); the revision and the carried filaments do not (the kind's
+  `unkeyed`). `commit` is 7 to 40 hex characters. The operation's request carries the revision as `revision_id`, and the check
+  (`quote_check`), the run (`quote_run`) and the record (`record_slice_quote`, under the
+  order's lock) refuse 409 `revision_superseded` once another revision is current; the
+  order page says to slice again (`refusal.ts` `SUPERSEDED_TEXT`). A storefront cart is
+  refused `order_not_submitted` before anything of a revision is read. The agent's
+  `order_item_quote.slice` takes `inputs` and `commit`.
 
 ## 6. A derived machine rate (#4625)
 

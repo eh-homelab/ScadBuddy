@@ -398,9 +398,10 @@ class Payments:
           (the request still ``pending``: ``currency_mismatch``, ``ignored``,
           ``unmatched``) counts as one that could not tell; a ``pending`` one is left to
           the capture's own event, as a bank debit is, and read once a day in case that
-          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`), not counted; once the
-          approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old the request is marked
-          ``failed`` (``capture_pending_unsettled``);
+          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`), not counted; once its
+          ``capture_pending_at`` (the latest approval, or the backfill's run) is
+          `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old the request is marked ``failed``
+          (``capture_pending_unsettled``);
         - an order approved with no capture is captured again, keyed on the approval,
           once the order lock says the order still takes money (`Lifecycle.recapture_key`;
           an order that does not marks the request ``failed``); a refused or declined
@@ -485,9 +486,9 @@ class Payments:
         return await self._unsettled(provider, request)
 
     async def _pending_read(self, provider: str, request: PaymentRequestView) -> bool:
-        """The capture is pending at the provider: read once a day, not counted; once the
-        approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old, the request is
-        ``failed``."""
+        """The capture is pending at the provider: read once a day, not counted; once
+        ``capture_pending_at`` (the latest approval, or the backfill's run) is
+        `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old, the request is ``failed``."""
         if not await asyncio.to_thread(self._read_daily, request.id):
             return False
         logger.warning("payment request %s: its capture stayed pending; marked failed", request.id)
