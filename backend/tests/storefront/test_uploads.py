@@ -4,7 +4,8 @@ declared length and on what one process holds, which no test client can drive.""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -106,6 +107,72 @@ async def test_a_quiet_window_is_too_slow_at_its_end(monkeypatch: pytest.MonkeyP
     error = await refused(request(then_quiet), UploadGate())
     assert (error.status, slug(error)) == (408, "upload_too_slow")
     assert asyncio.get_running_loop().time() - started < 1.0
+
+
+def clocked(
+    monkeypatch: pytest.MonkeyPatch, *arrivals: tuple[float, bytes]
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """Each chunk read at its arrival time on `uploads`' clock, at once in real time; a
+    chunk that would come after the read's time limit times the read out instead."""
+    now = [0.0]
+    limit = [float("inf")]
+    monkeypatch.setattr(uploads, "_now", lambda: now[0])
+
+    @contextmanager
+    def fail_after(delay: float) -> Iterator[None]:
+        limit[0] = now[0] + delay
+        yield
+
+    monkeypatch.setattr(uploads, "_fail_after", fail_after)
+    sent = list(arrivals)
+
+    async def receive() -> dict[str, Any]:
+        at, body = sent.pop(0)
+        if at > limit[0]:
+            now[0] = limit[0]
+            raise TimeoutError
+        now[0] = at
+        return {"type": "http.request", "body": body, "more_body": bool(sent)}
+
+    return receive
+
+
+KIB64 = b"x" * (64 * 1024)
+
+
+async def test_a_steady_sender_just_over_the_floor_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The re-review's sender (about 1.5x the floor): windows [10, 20), [20, 30), [30, 40)
+    # each get one 64 KiB chunk, at 19, 25.67 and 32.3.
+    receive = clocked(
+        monkeypatch,
+        (0.0, HEAD + FILE),
+        (19.0, KIB64),
+        (25.67, KIB64),
+        (32.3, KIB64),
+        (39.0, KIB64),
+        (40.0, TAIL),
+    )
+    upload = await read_request(request(receive), UploadGate())
+    try:
+        assert len(await upload.files[0].read()) == 4 * len(KIB64)
+    finally:
+        await upload.close()
+
+
+async def test_a_one_byte_a_second_trickle_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    trickle = [(float(t), b"x") for t in range(1, 60)]
+    receive = clocked(monkeypatch, (0.0, HEAD + FILE), *trickle, (60.0, TAIL))
+    error = await refused(request(receive), UploadGate())
+    assert (error.status, slug(error)) == (408, "upload_too_slow")
+
+
+async def test_empty_windows_fail_at_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    # [10, 20) is full; [20, 30) gets nothing, though a chunk comes at 35.
+    receive = clocked(monkeypatch, (0.0, HEAD + FILE), (15.0, KIB64), (35.0, KIB64), (36.0, TAIL))
+    error = await refused(request(receive), UploadGate())
+    assert (error.status, slug(error)) == (408, "upload_too_slow")
 
 
 async def test_a_sender_over_the_floor_is_read(monkeypatch: pytest.MonkeyPatch) -> None:

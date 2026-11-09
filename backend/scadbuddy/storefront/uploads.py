@@ -62,6 +62,9 @@ MAX_GAP_SECONDS = 30.0
 RATE_GRACE_SECONDS = 10.0
 RATE_WINDOW_SECONDS = 10.0
 MIN_WINDOW_BYTES = 64 * 1024
+#: The clock `_capped` times a body by (a test sets its own).
+_now = time.monotonic
+_fail_after = anyio.fail_after
 #: What a visitor turned away as busy waits before it asks again.
 BUSY_RETRY: Final = 30
 #: The control characters a request's text may hold (after line ends are made ``\n``).
@@ -284,7 +287,7 @@ async def _capped(request: Request, slot: UploadSlot) -> AsyncGenerator[bytes]:
 
     Each wait ends at the first moment the body would be too slow, so a wait that times
     out is always a refusal: the stream is never read again after a cancelled read."""
-    start = time.monotonic()
+    start = _now()
     deadline = start + MAX_BODY_SECONDS
     # The window being counted: [window_end - RATE_WINDOW_SECONDS, window_end).
     window_end = start + RATE_GRACE_SECONDS + RATE_WINDOW_SECONDS
@@ -292,7 +295,7 @@ async def _capped(request: Request, slot: UploadSlot) -> AsyncGenerator[bytes]:
     chunks = request.stream().__aiter__()
     seen = 0
     while True:
-        now = time.monotonic()
+        now = _now()
         # The window that must next hold `MIN_WINDOW_BYTES`: this one, or (already full)
         # the next.
         floor = window_end if window_bytes < MIN_WINDOW_BYTES else window_end + RATE_WINDOW_SECONDS
@@ -300,22 +303,22 @@ async def _capped(request: Request, slot: UploadSlot) -> AsyncGenerator[bytes]:
         if wait <= 0:
             raise upload_too_slow()
         try:
-            with anyio.fail_after(wait):
+            with _fail_after(wait):
                 chunk = await chunks.__anext__()
         except StopAsyncIteration:
             return
         except TimeoutError:
             raise upload_too_slow() from None
-        now = time.monotonic()
-        # A chunk that comes as its window closes counts in it: the read could not be
-        # timed closer than that.
-        if now >= window_end - RATE_WINDOW_SECONDS:
-            window_bytes += len(chunk)
+        now = _now()
+        # Every window that closed before this chunk came is judged on its own bytes
+        # (the first empty one refuses), then the chunk counts in the window it came in.
         while now >= window_end:
             if window_bytes < MIN_WINDOW_BYTES:
                 raise upload_too_slow()
             window_end += RATE_WINDOW_SECONDS
             window_bytes = 0
+        if now >= window_end - RATE_WINDOW_SECONDS:
+            window_bytes += len(chunk)
         seen += len(chunk)
         if seen > MAX_REQUEST_BODY:
             raise file_too_large()
