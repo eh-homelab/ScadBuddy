@@ -249,6 +249,28 @@ def test_pending_reads_are_not_counted_toward_the_give_up(
     assert marks(client, req["id"])[1] == payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1
 
 
+def test_an_unknown_read_after_a_pending_read_counts_again(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """#5786 review: a pending read keeps the count; the next read that cannot tell adds
+    to it, so a request with one counted read left gives up on that read."""
+    order_id, req = stuck(client)
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_attempts = %s WHERE id = %s",
+            (payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1, req["id"]),
+        )
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
+    due(client, req["id"])
+    assert settle(client) == 0
+    assert marks(client, req["id"])[1] == payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1
+    FAKE.capture_reads[req["provider_ref"]] = "unknown"
+    due(client, req["id"])
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "failed"
+    assert audit(client, order_id, "payment_request.failed")[-1]["reason"] == "capture_unsettled"
+
+
 def test_a_capture_pending_past_its_bound_is_failed(
     client: TestClient, captures: list[tuple[str, str]]
 ) -> None:
