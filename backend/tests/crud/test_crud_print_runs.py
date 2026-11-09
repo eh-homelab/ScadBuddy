@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from temporalio.testing import ActivityEnvironment
 
@@ -21,6 +22,7 @@ from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import EVENT_KIND_REFUSED
+from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -31,10 +33,16 @@ from scadbuddy.core.events import PrinterEvent, PrintEvent, PrintRunEvent
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudUnavailableError
+from scadbuddy.crud.client import (
+    UNAVAILABLE_BUDGET,
+    CrudClient,
+    CrudRefusedError,
+    CrudUnavailableError,
+)
 from scadbuddy.crud.operations import OTHER_CALLERS_KIND, RemoteOperationStore
 from scadbuddy.crud.print import (
     BASE,
+    REPRINT_RECORD_BUDGET,
     RemoteEvents,
     RemoteOutcomes,
     RemotePrintRunStore,
@@ -48,7 +56,7 @@ from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import InsertInput
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
-from tests.crud.crud_support import served_print_crud, threaded_print_crud
+from tests.crud.crud_support import FakeClock, served_print_crud, threaded_print_crud
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -360,6 +368,69 @@ async def test_a_reprint_sent_twice_is_one_row(crud: CrudClient, store: Settings
     job = (await links.jobs(queue_items=[61])).queue_items[61]
     assert (job.subject, job.archive_id, job.run_id) == (SUBJECT.key, 40, None)
     assert await links.sends_for(SUBJECT) == []
+
+
+class _Token:
+    def token(self) -> str:
+        return "t"
+
+    def invalidate(self, token: str) -> None: ...
+
+
+async def test_an_api_out_of_reach_holds_a_reprints_reply_only_briefly() -> None:
+    """#5833: the reprint's record is best effort, and its item is queued already, so an
+    API that refuses the connection holds the reprint's reply for about
+    `REPRINT_RECORD_BUDGET` seconds of retries, not the client's `UNAVAILABLE_BUDGET`."""
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    clock = FakeClock()
+    client = CrudClient(
+        "http://api",
+        "print",
+        ServiceAuth(_Token()),
+        transport=httpx.MockTransport(unreachable),
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    with pytest.raises(CrudUnavailableError):
+        await RemoteReprints(client).record_reprint(
+            SUBJECT, PrintReprint(queue_item_id=62, archive_id=40)
+        )
+
+    assert REPRINT_RECORD_BUDGET < UNAVAILABLE_BUDGET
+    assert clock.now <= REPRINT_RECORD_BUDGET + 1.0
+
+
+async def test_an_api_that_never_answers_holds_a_reprints_reply_only_briefly() -> None:
+    """#5833 review: an API that takes the connection and never answers. Each attempt
+    waits its own timeout, which is `REPRINT_RECORD_BUDGET` too, not the client's 10 s,
+    so the reply waits at most about one budget for the retries plus one attempt."""
+    clock = FakeClock()
+    timeouts: list[float] = []
+
+    def hangs(request: httpx.Request) -> httpx.Response:
+        read = request.extensions["timeout"]["read"]
+        timeouts.append(read)
+        clock.now += read
+        raise httpx.ReadTimeout("no answer", request=request)
+
+    client = CrudClient(
+        "http://api",
+        "print",
+        ServiceAuth(_Token()),
+        transport=httpx.MockTransport(hangs),
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    with pytest.raises(CrudUnavailableError):
+        await RemoteReprints(client).record_reprint(
+            SUBJECT, PrintReprint(queue_item_id=63, archive_id=40)
+        )
+
+    assert timeouts and set(timeouts) == {REPRINT_RECORD_BUDGET}
+    assert clock.now <= 2 * REPRINT_RECORD_BUDGET + 1.0
 
 
 async def test_an_api_out_of_reach_reads_as_no_run() -> None:

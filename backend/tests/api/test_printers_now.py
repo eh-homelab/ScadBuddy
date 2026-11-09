@@ -823,3 +823,31 @@ def test_a_bambuddy_card_uses_a_lan_start_only_when_its_queue_names_nothing(
         "own3",
         "lan_start",
     )
+
+
+@respx.mock
+def test_two_printing_items_on_one_printer_take_none(client: TestClient) -> None:
+    """#5833: a card takes an item only when exactly one printing item names its printer.
+    With two, the queue still decides the card (no LAN start matches it), it takes
+    neither item, and it gets no badge, even when ScadBuddy sent one of them."""
+    configure_bambuddy(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(2)]))
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(
+            200, json=status(2, subtask_name="scadbuddy-twice-p1", current_archive_id=90)
+        )
+    )
+    respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(
+            200, json=[printing_item(301, 2, 90), printing_item(302, 2, 90)]
+        )
+    )
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    output = PrintSubject.output("o" * 32)
+    asyncio.run(state.print_links.record_sends(output, [PrintSend(queue_item_id=301)]))
+    (first,) = client.get(NOW).json()["printers"]
+    _lan_run(client, first["id"], "scadbuddy-twice-p1", run_id="twice")
+
+    (card,) = client.get(NOW).json()["printers"]
+
+    assert card["scadbuddy"] is None
