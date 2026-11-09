@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextvars
 from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -75,6 +76,14 @@ from scadbuddy.orders.numbers import next_number
 
 Conn = Connection[DictRow]
 Pool = ConnectionPool[Conn]
+
+#: Whether the transaction running in this context queued storefront mail (#5283,
+#: `orders/storefront/mail.py` `queue_mail`), so its commit kicks the sender. It stays set
+#: until the lifecycle's after-commit tell reads it (`Lifecycle._told`), however many
+#: order locks the transaction takes; a top-level transaction that rolls back clears it.
+MAIL_QUEUED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "storefront_mail_queued", default=False
+)
 
 
 @dataclass
@@ -415,8 +424,13 @@ class OrderStore:
             with conn.transaction():
                 yield conn
             return
-        with self._pool.connection() as own, own.transaction():
-            yield own
+        try:
+            with self._pool.connection() as own, own.transaction():
+                yield own
+        except BaseException:
+            # The mail it queued is gone with it: nothing to kick.
+            MAIL_QUEUED.set(False)
+            raise
 
     @contextmanager
     def _write(self, conn: Conn | None) -> Iterator[Conn]:

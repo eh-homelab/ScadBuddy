@@ -1,10 +1,10 @@
 """The storefront's mail templates (#5283, spec 2026-11-02 §5.7): a subject and a short
 plain-text body per event. Customer text (an item's title, a carrier) goes in as it was
 typed and is never HTML: the message is ``text/plain``. A subject is one line, whatever
-its values hold. The only link is the order link, ``{public_url}/o#{token}``, built from
-the env-only ``storefront_public_url``; the other order mails send none, because only a
-token's sha256 is kept, so they point the customer at the link mail they already have.
-A sign-in code mail carries the code and no link."""
+its values hold. Every order mail carries the order link, ``{public_url}/o#{token}``
+(ruling R1), which the sender builds from the env-only ``storefront_public_url`` and the
+link's sealed token; a sign-in code mail carries the code and no link.
+"""
 
 from __future__ import annotations
 
@@ -24,9 +24,6 @@ MailEvent = Literal[
 ORDER_EVENTS: frozenset[MailEvent] = frozenset(
     {"revision_ready", "price_ready", "payment_requested", "shipped"}
 )
-
-#: How a mail without a link tells the customer where to look.
-_FOLLOW = "Open your order with the link in the mail we sent you when you placed it."
 
 
 @dataclass(frozen=True)
@@ -54,9 +51,9 @@ def _amount(context: Mapping[str, Any]) -> str:
     return f"{Decimal(minor).scaleb(-exponent):.{exponent}f} {currency}"
 
 
-def render(event: MailEvent, context: Mapping[str, Any], public_url: str | None) -> Rendered:
-    """The mail for ``event`` with ``context``. Only the order link needs ``public_url``;
-    the sender holds an order link back until it is set."""
+def render(event: MailEvent, context: Mapping[str, Any], link: str | None) -> Rendered:
+    """The mail for ``event`` with ``context``. ``link`` is the order link, which every
+    order mail needs (ValueError without one); a sign-in code takes none."""
     order = _text(context, "order")
     if event == "sign_in_code":
         code = _text(context, "code")
@@ -65,34 +62,33 @@ def render(event: MailEvent, context: Mapping[str, Any], public_url: str | None)
             f"Your sign-in code is {code}.\n\n"
             "It works for 10 minutes. If you did not ask for it, you can ignore this mail.\n",
         )
+    if not link:
+        raise ValueError(f"the {event} mail needs the order link")
+    follow = f"Follow your order here:\n{link}\n"
     if event == "order_link":
-        if public_url is None:
-            raise ValueError("the order link needs SCADBUDDY_STOREFRONT_PUBLIC_URL")
-        link = f"{public_url.rstrip('/')}/o#{_text(context, 'token')}"
         return Rendered(
             _line(f"Your order {order}"),
-            f"Thank you for your order {order}.\n\n"
-            f"Follow it here:\n{link}\n\n"
+            f"Thank you for your order {order}.\n\n{follow}\n"
             "Keep this link to yourself: anyone with it can see and answer for your order.\n",
         )
     if event == "revision_ready":
         item = _text(context, "item", "your item")
         return Rendered(
             _line(f"A design is ready for order {order}"),
-            f"A design of {item} is ready for you to look at, on order {order}.\n\n{_FOLLOW}\n",
+            f"A design of {item} is ready for you to look at, on order {order}.\n\n{follow}",
         )
     if event == "price_ready":
         item = _text(context, "item", "your item")
         return Rendered(
             _line(f"Your price is ready for order {order}"),
-            f"The price of {item} is ready for you to accept, on order {order}.\n\n{_FOLLOW}\n",
+            f"The price of {item} is ready for you to accept, on order {order}.\n\n{follow}",
         )
     if event == "payment_requested":
         amount = _amount(context)
         due = f" of {amount}" if amount else ""
         return Rendered(
             _line(f"Payment requested for order {order}"),
-            f"We asked for a payment{due} for order {order}.\n\n{_FOLLOW}\n",
+            f"We asked for a payment{due} for order {order}.\n\n{follow}",
         )
     carrier = _text(context, "carrier")
     tracking = _text(context, "tracking")
@@ -101,4 +97,4 @@ def render(event: MailEvent, context: Mapping[str, Any], public_url: str | None)
         lines.append(f"Carrier: {carrier}")
     if tracking:
         lines.append(f"Tracking: {tracking}")
-    return Rendered(_line(f"Order {order} has shipped"), "\n".join(lines) + f"\n\n{_FOLLOW}\n")
+    return Rendered(_line(f"Order {order} has shipped"), "\n".join(lines) + f"\n\n{follow}")

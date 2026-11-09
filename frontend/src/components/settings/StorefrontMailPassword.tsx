@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAsync } from '../../lib/useAsync'
+import { When } from '../orders/When'
 
 const KEK_MISSING = 'https://scadbuddy.dev/problems/storefront/kek_missing'
 
@@ -19,23 +20,25 @@ function failure(error: unknown): string {
 
 /**
  * #5283 — the storefront's SMTP password, sealed under the API's key file as a payment
- * provider's secret is. It is typed here and never read back: the page shows only
- * whether one is set.
+ * provider's secret is, and bound to the host, port and user set when it was saved. It
+ * is typed here and never read back: the page shows only whether one is set, and for
+ * which connection. Below it, the mail server's last failure, which no mail was charged for.
  */
 export function StorefrontMailPassword() {
-  const listed = useAsync(() => api.storefrontMailPassword(), [])
-  const [set, setSet] = useState<boolean | null>(null)
+  const [version, setVersion] = useState(0)
+  const listed = useAsync(() => api.storefrontMail(), [version])
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const shown = set ?? listed.data?.set ?? null
+  const status = listed.data
+  const shown = status ? status.password_set : null
 
   async function run(action: () => Promise<{ set: boolean }>) {
     setBusy(true)
     setError(null)
     try {
-      const next = await action()
-      setSet(next.set)
+      await action()
+      setVersion((v) => v + 1)
       // The password leaves the page as soon as it is sent.
       setPassword('')
     } catch (err) {
@@ -56,13 +59,13 @@ export function StorefrontMailPassword() {
       <Label htmlFor="storefront-mail-password">SMTP password</Label>
       <p className="text-xs text-muted-foreground">
         Stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again.{' '}
-        {shown === null ? null : shown ? <span>Password set</span> : <span>No password set</span>}
+        {shown === null ? null : shown ? <span>Password set for {status?.password_for}</span> : <span>No password set</span>}
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <Input
           id="storefront-mail-password"
           type="password"
-          autoComplete="off"
+          autoComplete="new-password"
           className="w-56"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -83,6 +86,18 @@ export function StorefrontMailPassword() {
           </Button>
         )}
       </div>
+      {status?.server_error && (
+        <p role="status" className="text-[13px] text-warn">
+          The mail server failed: {status.server_error}
+          {status.server_error_at && (
+            <>
+              {' '}
+              (<When at={status.server_error_at} />)
+            </>
+          )}
+          . Queued mail waits and is tried again.
+        </p>
+      )}
       {error && (
         <p role="alert" className="text-[13px] text-warn">
           {error}

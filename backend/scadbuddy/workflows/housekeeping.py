@@ -348,8 +348,9 @@ BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
 #: deletes, then two deletes.
 STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
-#: Up to 50 rows (`send_queued`'s limit), each one SMTP session of at most 20 s per step
-#: (`mail.SMTP_TIMEOUT`); a server that does not answer stops the batch at its first row.
+#: One pass of up to 50 rows (`send_queued`), which stops claiming at `mail.PASS_BUDGET`
+#: (8 min); a row in flight then has at most a few 20 s steps (`mail.SMTP_TIMEOUT`) left.
+#: A server that does not answer stops the pass at its first row.
 STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

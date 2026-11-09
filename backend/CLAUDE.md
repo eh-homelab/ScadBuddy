@@ -795,23 +795,33 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
   The storefront's mail (#5283, spec 2026-11-02 §5.7, migration
-  `20261109T0751Z_storefront_mail.sql`): `orders/storefront/mail.py` and
-  `mail_templates.py` (plain text; the order link `{storefront_public_url}/o#{token}` is the
-  only link). A change writes a `storefront_mail` row in its own transaction
-  (`queue_mail`), so a rollback leaves none; `Lifecycle._told` then kicks
-  `StorefrontMail.send_queued` on the API's loop (`kick`, bound in the orders component's
-  run), which claims rows `FOR UPDATE SKIP LOCKED` and sends each with `smtplib` (STARTTLS
-  per `storefront_mail_starttls`, 20 s timeout), at most `MAX_ATTEMPTS` (8) times; a token
-  or code in a row's context is dropped once it is sent or given up. The
+  `20261109T0751Z_storefront_mail.sql`): `orders/storefront/mail.py`, `mail_templates.py`
+  (plain text), `links.py` (an order's links: `create_order_link` keeps the token's sha256
+  and the token sealed under the KEK, AAD `storefront_order_links:<id>`;
+  `revoke_order_links` drops the sealed token) and `addresses.py` (`check_address`: exactly
+  one addr-spec, else `EmailInvalidError`, slug `email_invalid`). A change writes a
+  `storefront_mail` row in its own transaction (`queue_mail`), so a rollback leaves none;
+  `OrderStore.MAIL_QUEUED` stays set until `Lifecycle._told` kicks
+  `StorefrontMail.send_queued` on the API's loop (a top-level rollback clears it). A pass
+  (one at a time per process, at most `PASS_BUDGET`) leases one row at a time
+  (`lease_until`, `FOR UPDATE SKIP LOCKED`, committed), sends with no connection held, and
+  stamps the result. A server or setup failure (connect, TLS, login, sender, timeout, a
+  password bound to another connection) charges no row: the process backs off (1 min,
+  doubling to 1 h) and keeps the error in `storefront_mail_server` (`GET
+  /storefront/mail`). A recipient refusal charges the row (`next_attempt_at` 1, 2, 4 ...
+  min, at most 1 h; given up after 8); a template error or a revoked link (`link_revoked`)
+  fails it at once. Every order mail names its link (`link_id`, never the token) and
+  carries `{storefront_public_url}/o#{token}`. The
   `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
   is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
   price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
-  (`shipped`) queue only when `storefront_mail_covers` (a live `storefront_order_links`
-  row and a `storefront_mail_host`); their mail goes to the link's `sent_to` and carries
-  no link, since only a token's sha256 is kept. The SMTP settings are env-seeded
-  `storefront_mail_*` (Settings → Storefront mail); the password is sealed under the KEK in
-  `storefront_mail_secret` (`GET`/`PUT`/`DELETE /storefront/mail/password`, a person's
-  writes only).
+  (`shipped`) queue only when `storefront_mail_covers` (a live link and a
+  `storefront_mail_host`), to the link's `sent_to`. The SMTP settings are env-seeded
+  `storefront_mail_*` (Settings → Storefront mail), a person's to change
+  (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). A login goes only over TLS
+  (STARTTLS, or `storefront_mail_tls` `implicit`, `SMTP_SSL`). The password is sealed in
+  `storefront_mail_secret`, bound to the host, port and user it was saved for (columns and
+  AAD); `PUT`/`DELETE /storefront/mail/password` are a person's only.
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

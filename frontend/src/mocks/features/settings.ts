@@ -197,6 +197,9 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'storefront_mail_sender' && typeof value === 'string' && !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(value.trim())) {
       return refused(name, `Value error, ${envName(name)} is an address, such as shop@example.com`)
     }
+    if (name === 'storefront_mail_tls' && value !== 'starttls' && value !== 'implicit') {
+      return refused(name, "Input should be 'starttls' or 'implicit'")
+    }
     if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
       return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
     }

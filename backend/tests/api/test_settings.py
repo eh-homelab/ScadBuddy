@@ -856,6 +856,7 @@ def test_the_storefront_mail_settings_have_their_defaults(client: TestClient) ->
         "storefront_mail_user": None,
         "storefront_mail_sender": None,
         "storefront_mail_starttls": True,
+        "storefront_mail_tls": "starttls",
     }
     assert all(body["applies"][name] == "live" for name in MAIL_FIELDS)
     # Env-only: a stored value could point customers' links anywhere.
@@ -868,6 +869,7 @@ MAIL_FIELDS = (
     "storefront_mail_user",
     "storefront_mail_sender",
     "storefront_mail_starttls",
+    "storefront_mail_tls",
 )
 
 

@@ -92,6 +92,7 @@ from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
+    MAIL_QUEUED,
     UNSET,
     Conn,
     OrderNotFoundError,
@@ -103,13 +104,8 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.storefront.mail import (
-    QUEUED,
-    MailEvent,
-    mail_recipient,
-    queue_mail,
-    storefront_mail_covers,
-)
+from scadbuddy.orders.storefront.links import live_link
+from scadbuddy.orders.storefront.mail import MailEvent, queue_mail
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
@@ -604,8 +600,8 @@ class Lifecycle:
             logger.exception("could not release an ended item's quotes; the reaper drops them")
 
     def _told(self, change: _Change) -> None:
-        if QUEUED.get(False):
-            QUEUED.set(False)
+        if MAIL_QUEUED.get():
+            MAIL_QUEUED.set(False)
             self.on_mail()
         if change.ended:
             self._release_ended(change.released)
@@ -635,8 +631,6 @@ class Lifecycle:
         self._told(_Change(order, [(item, None) for item in items]))
 
     def _lock(self, conn: Conn, order_id: str) -> Order:
-        # A transition starts here: mail a rolled-back one queued is not this one's.
-        QUEUED.set(False)
         try:
             return self.store.lock_order(conn, order_id)
         except OrderNotFoundError:
@@ -683,13 +677,20 @@ class Lifecycle:
     def _mail(self, conn: Conn, order: Order, event: MailEvent, **context: Any) -> None:
         """Queue ``event``'s mail to the customer in the transition's transaction, only
         when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a mail
-        host, #5283); otherwise nothing, and it stays #5660's plugin's job. Sent after the
+        host, #5283); otherwise nothing, and it stays #5660's plugin's job. The mail goes
+        to the link's address and names the link, whose token it carries. Sent after the
         commit (``on_mail``)."""
         # The link first: an order no customer follows reads no settings.
-        to = mail_recipient(conn, order.id)
-        if to is None or not storefront_mail_covers(conn, order.id, event, host=self.mail_host()):
+        link = live_link(conn, order.id)
+        if link is None or not self.mail_host():
             return
-        queue_mail(conn, event, to, {"order": order.label, **context}, order.id)
+        queue_mail(
+            conn,
+            event,
+            link.sent_to,
+            {"order": order.label, "link_id": link.id, **context},
+            order.id,
+        )
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)

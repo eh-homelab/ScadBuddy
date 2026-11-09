@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.options import (
 )
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
+from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
@@ -133,13 +134,15 @@ class SettingsView(BaseModel):
     storefront_render_concurrency: int = 2
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
-    #: The storefront's mail (#5283): SMTP host, port, user, From and STARTTLS. The
+    #: The storefront's mail (#5283): SMTP host, port, user, From, STARTTLS and the TLS
+    #: mode. The
     #: password is sealed apart (`GET /storefront/mail/password` says whether it is set).
     storefront_mail_host: str | None = None
     storefront_mail_port: int = 587
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
     storefront_mail_starttls: bool = True
+    storefront_mail_tls: Literal["starttls", "implicit"] = "starttls"
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
@@ -522,6 +525,7 @@ async def put_settings(
     ``default_printer`` for one with none, never both: a ``default_printer`` naming a
     printer that has one is saved as its ``printer_id``, and a ``printer_id`` clears
     ``default_printer``. 422 for a ``default_printer`` the registry does not hold."""
+    _mail_connection_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
@@ -542,6 +546,34 @@ async def put_settings(
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()
     return _view(snapshot, state)
+
+
+#: The storefront mail's connection (#5283, ruling R2): where the sealed SMTP password is
+#: sent. A person's to change, as the password is (`api/storefront.py`): an agent or a
+#: service that could move it could have the password sent to a server of its own.
+MAIL_CONNECTION = frozenset(
+    {
+        "storefront_mail_host",
+        "storefront_mail_port",
+        "storefront_mail_user",
+        "storefront_mail_sender",
+        "storefront_mail_starttls",
+        "storefront_mail_tls",
+    }
+)
+PERSON_ONLY = "https://scadbuddy.dev/problems/storefront/person_only"
+
+
+def _mail_connection_by_a_person(patch: SettingsPatch) -> None:
+    """403 ``person_only`` for a change (or reset) of the mail connection by anyone but a
+    person's own session (`core.authorship.by_a_person`)."""
+    touched = (patch.model_fields_set | set(patch.reset)) & MAIL_CONNECTION
+    if touched and not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person changes the storefront mail's connection: " + ", ".join(sorted(touched)),
+            type_=PERSON_ONLY,
+        )
 
 
 def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:

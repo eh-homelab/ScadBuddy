@@ -766,6 +766,7 @@ class SettingsPatch(BaseModel):
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
     storefront_mail_starttls: bool | None = None
+    storefront_mail_tls: Literal["starttls", "implicit"] | None = None
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None

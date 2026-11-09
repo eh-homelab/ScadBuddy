@@ -260,6 +260,7 @@ import type {
   BankLinkCreate,
   BankStatus,
   MailPasswordStatus,
+  MailStatusView,
   BankUnlinked,
   PolicyUpdate,
   PriceBook,
@@ -2457,7 +2458,9 @@ export const api = {
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
-  /** #5283 — whether the storefront's SMTP password is set; the password is never read back. */
+  /** #5283 — whether the storefront's SMTP password is set (and for which connection), and
+   * the mail server's last failure; the password is never read back. */
+  storefrontMail: () => request<MailStatusView>('/storefront/mail'),
   storefrontMailPassword: () => request<MailPasswordStatus>('/storefront/mail/password'),
   setStorefrontMailPassword: (password: string) =>
     request<MailPasswordStatus>('/storefront/mail/password', { method: 'PUT', body: JSON.stringify({ password }) }),

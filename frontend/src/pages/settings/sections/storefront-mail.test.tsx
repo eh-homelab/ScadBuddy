@@ -1,12 +1,17 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
-import { setMockMailKek } from '../../../mocks/features/storefrontMail'
-import { resetMockState } from '../../../mocks/handlers'
+import { setMockMailKek, setMockMailServerError } from '../../../mocks/features/storefrontMail'
+import { mockSettings, resetMockState, setMockSettings } from '../../../mocks/handlers'
 import { enter, region, renderSettingsSection } from '../testing'
 import { Component as StorefrontMail } from './storefront-mail'
 
 const route = '/settings/system'
+
+/** The host and user the password is bound to (ruling R2). */
+function connected() {
+  setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_user: 'shop' })
+}
 
 describe('Settings → Storefront mail (#5283)', () => {
   beforeEach(() => resetMockState())
@@ -26,13 +31,16 @@ describe('Settings → Storefront mail (#5283)', () => {
   })
 
   it('sets the password and never shows it again', async () => {
+    connected()
     const { user } = renderSettingsSection(<StorefrontMail />, { route })
     expect(await screen.findByText('No password set')).toBeInTheDocument()
     const field = screen.getByLabelText('SMTP password')
     expect(field).toHaveAttribute('type', 'password')
+    // Never the browser's saved login (review M5).
+    expect(field).toHaveAttribute('autocomplete', 'new-password')
     await enter(user, field, 'hunter2')
     await user.click(screen.getByRole('button', { name: 'Save password' }))
-    expect(await screen.findByText('Password set')).toBeInTheDocument()
+    expect(await screen.findByText('Password set for shop@smtp.example.com:587')).toBeInTheDocument()
     expect(screen.queryByDisplayValue('hunter2')).not.toBeInTheDocument()
     expect(JSON.stringify(await api.storefrontMailPassword())).not.toContain('hunter2')
     await user.click(screen.getByRole('button', { name: 'Forget password' }))
@@ -40,11 +48,30 @@ describe('Settings → Storefront mail (#5283)', () => {
   })
 
   it('says the key file is missing on kek_missing', async () => {
+    connected()
     setMockMailKek(false)
     const { user } = renderSettingsSection(<StorefrontMail />, { route })
     await enter(user, await screen.findByLabelText('SMTP password'), 'pw')
     await user.click(screen.getByRole('button', { name: 'Save password' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/key file/)
     expect(screen.getByText('No password set')).toBeInTheDocument()
+  })
+
+  it('asks for the host and user before the password', async () => {
+    const { user } = renderSettingsSection(<StorefrontMail />, { route })
+    await enter(user, await screen.findByLabelText('SMTP password'), 'pw')
+    await user.click(screen.getByRole('button', { name: 'Save password' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/host and user/)
+  })
+
+  it('shows the last failure of the mail server', async () => {
+    setMockMailServerError('SMTPAuthenticationError: (535, bad login)')
+    renderSettingsSection(<StorefrontMail />, { route })
+    expect(await screen.findByRole('status')).toHaveTextContent(/SMTPAuthenticationError/)
+  })
+
+  it('offers STARTTLS or implicit TLS', async () => {
+    renderSettingsSection(<StorefrontMail />, { route })
+    expect(await screen.findByLabelText('TLS')).toBeInTheDocument()
   })
 })

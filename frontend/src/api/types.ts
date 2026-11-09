@@ -473,6 +473,7 @@ export type ProviderConnect = Schemas['ProviderConnect']
 /** #4961 — the shop's bank account linked through Plaid, beside the providers. */
 export type BankStatus = Schemas['BankStatus']
 export type MailPasswordStatus = Schemas['MailPasswordStatus']
+export type MailStatusView = Schemas['MailStatusView']
 export type BankKeys = Schemas['BankKeys']
 export type BankLinkCreate = Schemas['BankLinkCreate']
 export type BankUnlinked = Schemas['BankUnlinked']

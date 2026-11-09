@@ -185,13 +185,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   ...(
     [
+      'GET /api/v1/storefront/mail',
       'GET /api/v1/storefront/mail/password',
       'PUT /api/v1/storefront/mail/password',
       'DELETE /api/v1/storefront/mail/password',
     ] as const
   ).map((operation) => ({
     operation,
-    reason: "Settings → Storefront mail (#5283): a person sets the shop's SMTP password; it is sealed and never an agent's.",
+    reason: "Settings → Storefront mail (#5283): a person sets the shop's SMTP password and reads the server's state; the password is sealed and never an agent's.",
   })),
   ...(
     [

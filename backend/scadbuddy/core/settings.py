@@ -226,15 +226,19 @@ class Settings(BaseSettings):
     storefront_requests_enabled: bool = False
     # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
     # (`orders/storefront/mail.py`): the SMTP host (unset sends nothing), its port, the
-    # login user, the From address, and whether to STARTTLS. The password is not a
-    # setting: it is sealed under the KEK in `storefront_mail_secret`. The links in a mail
-    # come from `storefront_public_url`, which stays env-only.
-    # SCADBUDDY_STOREFRONT_MAIL_HOST, _PORT, _USER, _SENDER and _STARTTLS.
+    # login user, the From address, whether to STARTTLS, and how TLS starts (`starttls`
+    # on the port, or `implicit`: TLS from the first byte, usually port 465). A login is
+    # only ever sent over TLS. The password is not a setting: it is sealed under the KEK
+    # in `storefront_mail_secret`, bound to the host, port and user. These are a person's
+    # to change (`api/settings.py` `MAIL_CONNECTION`). The links in a mail come from
+    # `storefront_public_url`, which stays env-only.
+    # SCADBUDDY_STOREFRONT_MAIL_HOST, _PORT, _USER, _SENDER, _STARTTLS and _TLS.
     storefront_mail_host: str | None = None
     storefront_mail_port: int = Field(default=587, ge=1, le=65535)
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
     storefront_mail_starttls: bool = True
+    storefront_mail_tls: Literal["starttls", "implicit"] = "starttls"
     # #4953: whether a fulfilled line item may be unfulfilled (#4952). Off, the shop
     # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
     # for a person and the agent alike. A change writes nothing to existing orders.
@@ -1028,6 +1032,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_mail_user": "live",
         "storefront_mail_sender": "live",
         "storefront_mail_starttls": "live",
+        "storefront_mail_tls": "live",
         # Read by each time entry and each costs read (#5326).
         "pricing_labour_rate_per_hour": "live",
         "pricing_usd_rate": "live",
