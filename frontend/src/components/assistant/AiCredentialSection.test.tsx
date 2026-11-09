@@ -146,6 +146,26 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     )
   })
 
+  it('leaves the name out when the list’s time is another instant in an offset form (#5781)', async () => {
+    server.use(
+      http.get(entries, () =>
+        HttpResponse.json({
+          credentials: [
+            credentialEntry({ id: 'n1', name: 'Work', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-01T12:30:00Z' }),
+          ],
+          usable_now: false,
+          recovers_at: '2099-01-01T12:30:00.000+01:00',
+          can_save: true,
+          cannot_save_reason: null,
+        }),
+      ),
+    )
+    renderPage(<AiCredentialSection />)
+    const notice = await screen.findByTestId('ai-credentials-none-usable')
+    expect(notice).toHaveTextContent(/The first rate-limited one is usable again at/)
+    expect(notice).not.toHaveTextContent('Work')
+  })
+
   it('names a credential in its test result by its name (#3710)', async () => {
     setCredentials([credentialEntry({ id: 'n1', name: 'Personal Max', last4: 'Q7xA' })])
     const { user } = renderPage(<AiCredentialSection />)
