@@ -44,7 +44,10 @@ def _suggestions(orders: OrdersComponent, order_id: str) -> list[DepositSuggesti
     description=(
         "Deposits of the Plaid-linked account whose amount equals the order's balance or"
         " whose text names its number; none dismissed or recorded. A suggestion records"
-        " nothing."
+        " nothing. Then the deposits recorded on the order that the bank changed or removed"
+        " since (`reason` `changed` or `removed`, with `recorded_minor`), while the order's"
+        " `bank_transfer` payments with that reference do not add up to the deposit (0 when"
+        " removed) and the order is not cancelled."
     ),
 )
 async def list_order_bank_deposits(order_id: str, orders: OrdersDep) -> list[DepositSuggestion]:

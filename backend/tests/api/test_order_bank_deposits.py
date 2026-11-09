@@ -120,3 +120,12 @@ def test_an_agent_reads_suggestions_and_records_none(settings: Settings) -> None
             assert answer.status_code == 403, answer.text
             assert answer.json()["reason"] == "not_a_person"
         assert client.get(deposits, headers=agent).status_code == 404
+
+
+def test_the_list_s_description_names_the_bank_s_changes() -> None:
+    """The spec tells an API caller every row it can get, the recorded ones included."""
+    from scadbuddy.api.order_bank_deposits import router
+
+    [listed] = [r for r in router.routes if getattr(r, "methods", None) == {"GET"}]
+    text = getattr(listed, "description", "")
+    assert "`changed`" in text and "`removed`" in text and "cancelled" in text

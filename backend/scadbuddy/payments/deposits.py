@@ -295,6 +295,11 @@ def _apply(
                 suggested.append(order_id)
     if gone:
         ids = sorted(gone)
+        # Locked first, so a confirmation in flight commits before both statements read
+        # ``payment_id``, and its deposit is marked rather than skipped.
+        conn.execute(
+            "SELECT 1 FROM bank_deposits WHERE transaction_id = ANY(%s) FOR UPDATE", (ids,)
+        )
         # A recorded deposit stays, marked, so its order page warns; the rest go.
         conn.execute(
             "UPDATE bank_deposits SET removed_at = clock_timestamp()"
@@ -371,9 +376,11 @@ def _matches(conn: Conn, balances: _Balances, deposit: Deposit) -> list[tuple[st
 
 def _recorded(conn: Conn, transaction_id: str, *, but: str | None = None) -> str | None:
     """The payment already recorded from this deposit, on any order (other than ``but``)."""
+    # The payment it was recorded as: the first positive one, never a later refund or
+    # adjustment with the same reference.
     row = conn.execute(
         "SELECT id FROM order_payments WHERE method = %s AND reference = %s"
-        " AND id IS DISTINCT FROM %s LIMIT 1",
+        " AND id IS DISTINCT FROM %s ORDER BY amount_minor <= 0, created_at, id LIMIT 1",
         (METHOD, transaction_id, but),
     ).fetchone()
     return str(row["id"]) if row else None

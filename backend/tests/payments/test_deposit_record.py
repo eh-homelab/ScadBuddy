@@ -4,6 +4,7 @@ transaction id as ``reference``; "Not this order" dismisses the suggestion."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import threading
 from typing import Any
@@ -315,3 +316,58 @@ async def test_a_removed_deposit_whose_payment_is_gone_is_pruned(bank: Bank) -> 
         router.post(SYNC).mock(return_value=page(cursor="c3"))
         await sync_deposits(bank.bank)
     assert bank.deposits() == []
+
+
+async def test_a_new_link_keeps_the_payment_the_deposit_was_recorded_as(bank: Bank) -> None:
+    """After a new link the deposit is tied to its own payment, not to a refund with the
+    same reference, so an unchanged deposit shows no warning."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    adjust(bank, owing, -1000, "t1")
+    with bank.pool.connection() as conn:
+        # The recorded payment's row rewritten: an unordered read now finds the refund first.
+        conn.execute("UPDATE order_payments SET notes = notes || '' WHERE amount_minor > 0")
+    with respx.mock as router:
+        router.post(f"{SANDBOX}/item/remove").mock(
+            return_value=httpx.Response(200, json=payload("item.remove.json"))
+        )
+        await bank.bank.unlink()
+        plaid_answers(router)
+        await bank.bank.link("public-sandbox-2", [CHECKING])
+    await synced(bank, transaction("t1", -10, "ACH"))
+    with bank.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT p.amount_minor FROM bank_deposits d JOIN order_payments p"
+            " ON p.id = d.payment_id WHERE d.transaction_id = 't1'"
+        ).fetchone()
+    assert row is not None and row["amount_minor"] == 1000
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_a_removal_waits_for_a_confirmation_in_flight(bank: Bank) -> None:
+    """A sync that removes a deposit while a confirmation holds its row sees the payment
+    once the confirmation commits, and marks the row instead of skipping it."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    payment = bank.shop.lifecycle.add_payment(
+        owing.id, BY, amount_minor=1000, method="bank_transfer", reference="t1"
+    )
+    with bank.pool.connection() as conn:
+        # The confirmation's transaction (the pool's connections autocommit).
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE bank_deposits SET payment_id = %s WHERE transaction_id = 't1'",
+            (payment.id,),
+        )
+        with respx.mock as router:
+            router.post(SYNC).mock(return_value=page(removed=["t1"], cursor="c2"))
+            syncing = asyncio.create_task(sync_deposits(bank.bank))
+            await asyncio.sleep(1.5)
+            conn.execute("COMMIT")
+            await syncing
+    with bank.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT removed_at FROM bank_deposits WHERE transaction_id = 't1'"
+        ).fetchone()
+    assert row is not None and row["removed_at"] is not None
