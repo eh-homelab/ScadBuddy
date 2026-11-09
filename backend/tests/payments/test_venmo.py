@@ -145,17 +145,29 @@ def test_an_unknown_token_reads_nothing(shop: PayShop, token: str) -> None:
     assert checkout(shop, token) is None
 
 
-@pytest.mark.parametrize("status", ["pending", "paid", "cancelled", "expired", "failed"])
-def test_a_request_that_leaves_open_reads_nothing_and_drops_its_token(
-    shop: PayShop, status: Any
-) -> None:
-    """A token is spent once its request leaves ``open``: the storefront's ``/pay/{token}``
-    answers 404 for it, whatever the request does next."""
+@pytest.mark.parametrize("status", ["paid", "cancelled", "expired"])
+def test_a_request_that_ends_reads_nothing_and_drops_its_token(shop: PayShop, status: Any) -> None:
+    """A token is spent once its request ends: the storefront's ``/pay/{token}`` answers
+    404 for it, whatever the request does next."""
     _, req, token = tokened(shop)
     with shop.rows.transaction() as conn:
         payments_store.set_request_status(conn, req.id, status)
     assert checkout(shop, token) is None
     assert stored_hash(shop, req.id) is None
+
+
+def test_a_pending_request_reads_nothing_and_a_failed_one_reads_again(shop: PayShop) -> None:
+    """#5769 review: an approval moves the request to ``pending`` (the capture is in
+    flight, so the page offers nothing), and a capture PayPal refused puts it back to
+    ``failed``, which the customer can approve again (#4959): its pay link works again."""
+    _, req, token = tokened(shop)
+    with shop.rows.transaction() as conn:
+        payments_store.set_request_status(conn, req.id, "pending")
+    assert checkout(shop, token) is None
+    assert stored_hash(shop, req.id) == token_hash(token)
+    with shop.rows.transaction() as conn:
+        payments_store.set_request_status(conn, req.id, "failed")
+    assert checkout(shop, token) is not None
 
 
 def test_a_cancel_through_the_lifecycle_drops_the_token(shop: PayShop) -> None:

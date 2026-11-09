@@ -138,13 +138,16 @@ def set_request_status(
     provider's (by hand, or a payment on another request that cleared the balance), is
     marked. Its own provider's payment clears the mark: the page was paid. A new mark, or
     a cleared one, starts the close over: no tries and no give-up (#5728 review). A
-    request that leaves ``open`` (for any other status) drops its pay token (#4960) in the
-    same write: a spent token never reads again."""
+    request that ends (paid, cancelled or expired) drops its pay token (#4960) in the
+    same write: a spent token never reads again. A ``pending`` or ``failed`` one keeps it:
+    a capture PayPal refused leaves the request ``failed``, and its page can be approved
+    again (#4959), so its link must still work (#5769 review)."""
     row = conn.execute(
         "UPDATE payment_requests r SET status = %(status)s,"
         " paid_at = CASE WHEN %(status)s = 'paid' THEN clock_timestamp() END,"
         " payment_id = COALESCE(%(payment)s, r.payment_id),"
-        " pay_token_hash = CASE WHEN %(status)s = 'open' THEN r.pay_token_hash END,"
+        " pay_token_hash = CASE WHEN %(status)s IN ('open', 'pending', 'failed')"
+        "  THEN r.pay_token_hash END,"
         " close_pending_at = CASE WHEN m.mark THEN clock_timestamp()"
         "  WHEN %(status)s = 'paid' THEN NULL ELSE r.close_pending_at END,"
         " close_abandoned_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"

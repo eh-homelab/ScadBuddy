@@ -1066,7 +1066,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
   it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
   show `on` disabled, with why). Only the token's sha256 is kept, in
-  `payment_requests.pay_token_hash`, dropped when the request closes or is linked again
+  `payment_requests.pay_token_hash`, read while the request is open or failed (not
+  pending), dropped when it is paid, cancelled or expired, or linked again
   without one; `venmo_checkout` is what the edge's CRUD route reads,
   `POST /api/v1/internal/crud/storefront/pay/checkout` (`api/crud_storefront.py`, area
   `pay`, the token in the body, a bare 404 for None); a Venmo-funded capture is

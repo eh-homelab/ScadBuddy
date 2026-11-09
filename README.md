@@ -633,10 +633,13 @@ with `on` is refused (409 `venmo_page_missing`), a connect that leaves Venmo out
 the link rewrite and the toggle turn on: with Venmo `on` (which also needs
 `SCADBUDDY_STOREFRONT_PUBLIC_URL` on the API, the storefront edge's origin), each USD
 PayPal request will link to that page. Its token is 32 random bytes. ScadBuddy keeps
-only its sha256 and drops it as soon as the request leaves open (pending, which a
-PayPal approval moves it to, paid, cancelled, expired or failed), or is linked again
-without one, so a spent token never opens the page again, and turning Venmo off ends
-every pay link at once. Nothing links those requests again with PayPal's own approval
+only its sha256 and drops it as soon as the request is paid, cancelled or expired, or
+is linked again without one, so a spent token never opens the page again, and turning
+Venmo off ends every pay link at once. The page offers nothing while a capture is
+pending (a PayPal approval moves the request there), and works again if the capture
+fails, since a failed request can be approved again. While Venmo is on, a PayPal
+payment is recorded with its funding source; one approved by Venmo and captured after
+the shop turned Venmo off is recorded as PayPal's. Nothing links those requests again with PayPal's own approval
 link, so after turning Venmo off, cancel each open PayPal request whose link was a pay
 page and ask for the payment again. The new request gets PayPal's own link. The edge reads
 the request through the API's `POST /api/v1/internal/crud/storefront/pay/checkout`

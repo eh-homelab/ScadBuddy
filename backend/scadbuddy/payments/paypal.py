@@ -574,8 +574,7 @@ class PayPalProvider:
             found = _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
             # The funding source is read only while Venmo is on (#5769 review): a shop
             # that never turns it on makes no extra call per capture.
-            venmo_on = credential.settings.get(VENMO_SETTING) == "on"
-            if found.kind == "paid" and found.provider_ref is not None and venmo_on:
+            if found.kind == "paid" and found.provider_ref is not None and _venmo_on(credential):
                 found = found.model_copy(
                     update={"method": await self._funding(credential, found.provider_ref)}
                 )
@@ -679,8 +678,9 @@ class PayPalProvider:
                     capture_id = _path_id(capture.get("id"))
                     event_id = f"capture:{capture_id}:{kind}"
                     found = _capture_event(event_id, kind, capture, order_id)
-                    if kind == "paid":
-                        # The order read names the funding source (#4960), as `_funding`.
+                    if kind == "paid" and _venmo_on(credential):
+                        # The order read names the funding source (#4960), by the
+                        # webhook's rule (`_venmo_on`), so both paths agree.
                         found = found.model_copy(update={"method": _method_of(order)})
                     return found
         except (KeyError, TypeError, AttributeError, ValueError, ValidationError, ProviderError):
@@ -777,6 +777,15 @@ def _money(money: Mapping[str, Any]) -> tuple[int, str]:
 
 def _order_of(capture: Mapping[str, Any]) -> str:
     return _path_id(capture["supplementary_data"]["related_ids"]["order_id"])
+
+
+def _venmo_on(credential: Credential) -> bool:
+    """Whether a paid capture names its funding source (#4960): only while the shop's
+    Venmo toggle is on, so a shop that never turns it on makes no extra call per capture
+    (#5769 review). The webhook and the sweep's read use this one rule. A shop that turns
+    Venmo off between a Venmo approval and its capture records that payment as PayPal's:
+    the method is a label, and the money and the fee are the same."""
+    return credential.settings.get(VENMO_SETTING) == "on"
 
 
 def _method_of(order: Mapping[str, Any]) -> ProviderEventMethod | None:

@@ -46,7 +46,9 @@ class ProviderField(BaseModel):
 
     @model_validator(mode="after")
     def _no_choices_for_a_secret(self) -> ProviderField:
-        assert not (self.secret and self.choices), "a secret field has no choices"
+        if self.secret and self.choices:
+            # A ValueError, not an assert, so it holds under ``python -O`` (#5769 review).
+            raise ValueError("a secret field has no choices")
         # A default or an unavailable choice outside the choices would save a value the
         # form cannot show (#5769 review).
         has_default = self.choices is not None and self.default is not None
