@@ -274,8 +274,9 @@ def test_an_unknown_read_after_a_pending_read_counts_again(
 def test_a_capture_pending_past_its_bound_is_failed(
     client: TestClient, captures: list[tuple[str, str]]
 ) -> None:
-    """The request never blocks its order's cancel for good: once the approval is
-    `CAPTURE_PENDING_GIVE_UP_DAYS` old, a pending read marks it failed."""
+    """The request never blocks its order's cancel for good: once ``capture_pending_at``
+    (here the approval) is `CAPTURE_PENDING_GIVE_UP_DAYS` old, a pending read marks it
+    failed."""
     order_id, req = stuck(client)
     FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
     days = payments_store.CAPTURE_PENDING_GIVE_UP_DAYS
