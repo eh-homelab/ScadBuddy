@@ -7,12 +7,13 @@ Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.farm import (
     ArchiveOutcome,
@@ -22,6 +23,10 @@ from scadbuddy.bambuddy.farm import (
     spool_summary,
 )
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
+from scadbuddy.core.problems import DATABASE_ERRORS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/farm", tags=["farm"])
 
@@ -34,18 +39,46 @@ DateFrom = Annotated[date | None, Query(description="First day, inclusive (creat
 DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_at)")]
 
 
-@router.get("/queue", response_model=list[QueueItem], summary="Bambuddy's print queue")
+class FarmQueueItem(QueueItem):
+    """A queue item, and whether ScadBuddy queued it (#3741)."""
+
+    #: The output or library file ScadBuddy queued this item for, found only by a record
+    #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
+    #: the item. ``None`` for an item queued from Bambuddy (its reprint of an archive
+    #: ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never taken
+    #: from Bambuddy's answer.
+    scadbuddy: ScadBuddyJob | None = None
+
+
+@router.get("/queue", response_model=list[FarmQueueItem], summary="Bambuddy's print queue")
 async def get_queue(
     store: SettingsStoreDep,
+    links: PrintLinksDep,
     printer_id: Annotated[
         int | None, Query(description="One printer's items; -1 for items not assigned to one")
     ] = None,
     status: Annotated[QueueStatus | None, Query(description="Only items in this state")] = None,
-) -> list[QueueItem]:
+) -> list[FarmQueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
-    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come."""
+    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
+    Each item ScadBuddy queued carries ``scadbuddy`` (#3741)."""
     async with client_for(store.load()) as client:
-        return await client.queue(printer_id=printer_id, status=status)
+        items = await client.queue(printer_id=printer_id, status=status)
+    matches = await _jobs(links, items)
+    return [
+        FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
+        for item in items
+    ]
+
+
+async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
+    """The items ScadBuddy queued, in one read; none when its records cannot be read, so
+    a database blip costs the marks, never the queue."""
+    try:
+        return await links.jobs(queue_items=[item.id for item in items])
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the queue shows no ScadBuddy marks")
+        return JobMatches()
 
 
 @router.get("/stats", response_model=ArchiveStats, summary="The farm's print statistics")

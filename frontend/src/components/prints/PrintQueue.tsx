@@ -4,6 +4,7 @@ import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
+import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
 /** An outside link of the queue's (opens Bambuddy beside the frame, #2351). */
 const LINK = 'font-medium text-primary underline-offset-4 hover:underline'
@@ -121,7 +122,10 @@ function QueueRow({ item }: { item: QueueItem }) {
   return (
     <li className="px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <span className="min-w-0 truncate font-medium">{name}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate font-medium">{name}</span>
+          {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
+        </span>
         <span className="sb-num shrink-0 text-xs text-muted-foreground">
           {where}
           {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}

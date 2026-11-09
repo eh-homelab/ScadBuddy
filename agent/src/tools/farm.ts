@@ -21,7 +21,9 @@ export const farmTools: Tool[] = [
       "Bambuddy's print queue, in its order: each item's status, printer (or the printer model it waits for), " +
       'file, times, estimated duration and filament, and why it is waiting or failed. Finished items stay in the ' +
       'queue, so pass `status` (pending or printing for what is to come). `printer_id` -1 is items not assigned ' +
-      'to a printer.' +
+      'to a printer. An item ScadBuddy queued (a print run or a reprint) carries `scadbuddy` (its output or ' +
+      'library file, template `slug`, `run_id` and linked `archive_id`), matched only by ScadBuddy\'s record of ' +
+      'that item; an item queued from Bambuddy, its reprint of a ScadBuddy print too, has none.' +
       PAGED,
     input: z.object({
       printer_id: z.number().int().min(-1).optional(),
@@ -50,7 +52,13 @@ export const farmTools: Tool[] = [
       'the Bambuddy printer id every print tool takes (as get_print_targets lists them), `id`, its registry id, ' +
       'which the registry tools and print_output (`printer`) take, and `path`, the link that answered (native ' +
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
-      'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`).',
+      'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`). ' +
+      'A printing or paused job ScadBuddy queued or started carries `scadbuddy` (its output or library file, ' +
+      'template `slug`, `run_id` and linked `archive_id`). On a printer linked to Bambuddy, when its queue has a ' +
+      "printing item on the printer, only ScadBuddy's record of that item matches, so a job queued from Bambuddy " +
+      '(its reprint of a ScadBuddy print too) has none; when its queue cannot be read, nothing matches. Otherwise ' +
+      "a run's LAN start on that printer under the job's name matches until the run records that start ended; a " +
+      'job started on the printer itself has none unless it has such a name.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

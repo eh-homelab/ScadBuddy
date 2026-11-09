@@ -60,6 +60,16 @@ describe('NowPrinting (#977)', () => {
     expect(within(idle).queryByRole('link')).toBeNull()
   })
 
+  it('marks the jobs ScadBuddy queued or started, and no other (#3741)', async () => {
+    renderPage(<NowPrinting />)
+
+    const linked = await screen.findByTestId('printer-now-2')
+    expect(within(linked).getByText('Queued from ScadBuddy')).toBeInTheDocument()
+    // Started from Bambuddy, and an idle printer: no mark.
+    expect(within(screen.getByTestId('printer-now-1')).queryByText('Queued from ScadBuddy')).toBeNull()
+    expect(within(screen.getByTestId('printer-now-3')).queryByText('Queued from ScadBuddy')).toBeNull()
+  })
+
   it('opens Bambuddy on the hostname framing ScadBuddy', async () => {
     setBambuddyLinks({ bambuddy_url: null, bambuddy_web_urls: 'http://bambuddy.local, http://bambuddy.lan:8000' })
     frame.embedded = true
