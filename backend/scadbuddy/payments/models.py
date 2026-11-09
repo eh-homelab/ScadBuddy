@@ -32,6 +32,11 @@ ProviderEventKind = Literal[
 #: ``capture_request``'s answer: the money is captured (or was already), or the provider
 #: declined the customer's method, so the request reads ``failed``.
 CaptureOutcome = Literal["captured", "declined"]
+#: ``read_capture``'s answers that are not an event (#4959): ``uncaptured``, the order is
+#: approved and holds no capture, so a capture may be made again; ``unknown``, the
+#: outcome cannot be told yet; ``gone``, the order can no longer be captured and holds
+#: no capture (voided, or no longer known to the provider).
+CaptureState = Literal["uncaptured", "unknown", "gone"]
 EventOutcome = Literal["recorded", "replayed", "unmatched", "ignored", "currency_mismatch"]
 
 HttpsUrl = Annotated[HttpUrl, UrlConstraints(allowed_schemes=["https"])]

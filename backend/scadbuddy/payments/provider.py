@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from scadbuddy.payments.models import (
     CaptureOutcome,
+    CaptureState,
     HostedRequest,
     PaymentRequestView,
     ProviderEvent,
@@ -119,4 +120,14 @@ class CapturingProvider(PaymentProvider, Protocol):
         ``pending`` and the event's row is kept, so the provider's retry of the event reads
         ``replayed`` and captures again under the same key);
         ``ProviderError`` for a refusal a retry would meet again."""
+        ...
+
+    async def read_capture(
+        self, credential: Credential, provider_ref: str
+    ) -> ProviderEvent | CaptureState:
+        """#4959, the housekeeping sweep: what became of the capture of an approved
+        payment whose capture outcome was never told. A capture made: its ``paid`` event
+        (keyed by the capture, so a later webhook writes no second payment) or its
+        ``failed`` one. Otherwise a `CaptureState`. Never raises for a failed call: one
+        that cannot be told is ``unknown``."""
         ...

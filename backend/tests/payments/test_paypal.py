@@ -817,3 +817,77 @@ async def test_an_event_scadbuddy_does_not_read_is_other(paypal: PayPalProvider,
         found = payload("payment.capture.completed.json") | {"event_type": name}
         event = await paypal.parse_webhook(CRED, HEADERS, json.dumps(found).encode())
         assert event.kind == "other"
+
+
+# -- the sweep's read of a capture never told (#4959) ----------------------------------------
+
+
+def captured_order(status: str, *, fee: str | None = None) -> dict[str, Any]:
+    order: dict[str, Any] = payload("api.order.captured.json")
+    capture = order["purchase_units"][0]["payments"]["captures"][0]
+    capture["status"] = status
+    if fee is not None:
+        capture["seller_receivable_breakdown"] = {
+            "paypal_fee": {"currency_code": "USD", "value": fee}
+        }
+    return order
+
+
+@pytest.mark.parametrize("status", ["COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED"])
+async def test_a_capture_made_reads_as_paid_keyed_by_the_capture(
+    paypal: PayPalProvider, pp: Any, status: str
+) -> None:
+    pp.routes["order"].respond(json=captured_order(status, fee="0.50"))
+    read = await paypal.read_capture(CRED, ORDER)
+    assert read == ProviderEvent(
+        event_id=f"capture:{CAPTURE}",
+        kind="paid",
+        provider_ref=ORDER,
+        amount_minor=700,
+        currency="USD",
+        fee_minor=50,
+    )
+
+
+@pytest.mark.parametrize("status", ["DECLINED", "FAILED"])
+async def test_a_capture_that_failed_reads_as_failed(
+    paypal: PayPalProvider, pp: Any, status: str
+) -> None:
+    pp.routes["order"].respond(json=captured_order(status))
+    read = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(read, ProviderEvent)
+    assert (read.kind, read.event_id, read.provider_ref) == ("failed", f"capture:{CAPTURE}", ORDER)
+
+
+async def test_a_pending_capture_reads_as_pending(paypal: PayPalProvider, pp: Any) -> None:
+    pp.routes["order"].respond(json=captured_order("PENDING"))
+    read = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(read, ProviderEvent)
+    assert read.kind == "pending"
+
+
+async def test_an_approved_order_with_no_capture_reads_uncaptured(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    assert await paypal.read_capture(CRED, ORDER) == "uncaptured"
+
+
+async def test_a_voided_or_unknown_order_reads_gone(paypal: PayPalProvider, pp: Any) -> None:
+    voided = payload("api.order.approved.json") | {"status": "VOIDED"}
+    pp.routes["order"].respond(json=voided)
+    assert await paypal.read_capture(CRED, ORDER) == "gone"
+    pp.routes["order"].respond(404, json=payload("api.error.order_not_found.json"))
+    assert await paypal.read_capture(CRED, ORDER) == "gone"
+
+
+@pytest.mark.parametrize("answer", [500, 401, "no answer", "PAYER_ACTION_REQUIRED"])
+async def test_anything_else_reads_unknown(
+    paypal: PayPalProvider, pp: Any, answer: int | str
+) -> None:
+    if answer == "no answer":
+        pp.routes["order"].side_effect = httpx.ConnectTimeout("no answer")
+    elif isinstance(answer, int):
+        pp.routes["order"].respond(answer, json={"name": "INTERNAL_SERVER_ERROR"})
+    else:
+        pp.routes["order"].respond(json=payload("api.order.approved.json") | {"status": answer})
+    assert await paypal.read_capture(CRED, ORDER) == "unknown"

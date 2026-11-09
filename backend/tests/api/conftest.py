@@ -220,12 +220,14 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
     sweeps off too, at a time the test does not choose. It claims a due page as the
     test's own `Payments.retry_closes` does, so the test's next call finds the page not
     due, or closed already. Every api test gets this: none relies on the app's own
-    close sweep, and a test that drives `retry_closes` itself must not race it."""
+    close sweep, and a test that drives `retry_closes` itself must not race it. The
+    pending captures' sweep (#4959) is off for the same reason."""
 
     async def off(state: AppState) -> None:
         return None
 
     monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
+    monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
 
 
 @pytest.fixture(autouse=True)
