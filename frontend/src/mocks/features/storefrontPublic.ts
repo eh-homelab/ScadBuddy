@@ -208,6 +208,8 @@ export const handlers = [
     save()
     return HttpResponse.json(current)
   }),
+  // The bot check is off in the mocks (#5283): no site key, no widget.
+  http.get(`${base}/turnstile`, () => HttpResponse.json({ site_key: null })),
   http.post(`${base}/draft/requests`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing

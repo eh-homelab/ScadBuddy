@@ -222,6 +222,13 @@ class Settings(BaseSettings):
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
+    # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on sign-up,
+    # submit and design requests, on while the site key is set. The secret is sealed at
+    # rest like the other secrets, and saving one needs SCADBUDDY_SECRET_KEY_FILE; only
+    # this process reads it (`orders/storefront/turnstile.py`), never the edge or a page.
+    # SCADBUDDY_STOREFRONT_TURNSTILE_SITE_KEY and _SECRET.
+    storefront_turnstile_site_key: str | None = Field(default=None, max_length=200)
+    storefront_turnstile_secret: str | None = Field(default=None, repr=False, max_length=200)
     # #4953: whether a fulfilled line item may be unfulfilled (#4952). Off, the shop
     # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
     # for a person and the agent alike. A change writes nothing to existing orders.
@@ -900,6 +907,7 @@ SECRET_FIELDS: Final = frozenset(
         "google_fonts_api_key",
         "store_s3_secret_access_key",
         "git_remote_token",
+        "storefront_turnstile_secret",
     }
 )
 
@@ -985,6 +993,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_render_concurrency": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
+        "storefront_turnstile_site_key": "live",
+        "storefront_turnstile_secret": "live",
         # Read by each time entry and each costs read (#5326).
         "pricing_labour_rate_per_hour": "live",
         "pricing_usd_rate": "live",

@@ -15,7 +15,7 @@ It never imports database code: the edge's process holds none (`test_edge.py`).
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
@@ -43,6 +43,26 @@ STOREFRONT_CSP: Final = (
     "worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; "
     "frame-ancestors 'none'"
 )
+#: Cloudflare Turnstile's origin (#5283). Its CSP page asks for it in ``script-src`` and
+#: ``frame-src``, and for ``connect-src 'self'`` only in pre-clearance mode, which the
+#: storefront does not use
+#: (https://developers.cloudflare.com/turnstile/reference/content-security-policy/, read
+#: 2026-11-09). The page is one app and a CSP binds at a full load, so every page names it
+#: while the bot check is on (a site key is set), and none does while it is off.
+TURNSTILE_ORIGIN: Final = "https://challenges.cloudflare.com"
+TURNSTILE_CSP: Final = STOREFRONT_CSP.replace(
+    "script-src 'self';", f"script-src 'self' {TURNSTILE_ORIGIN}; frame-src {TURNSTILE_ORIGIN};"
+)
+
+
+def storefront_csp(turnstile: bool) -> str:
+    """The page's policy: `TURNSTILE_CSP` while the bot check is on, else the first-party
+    `STOREFRONT_CSP`."""
+    return TURNSTILE_CSP if turnstile else STOREFRONT_CSP
+
+
+async def _turnstile_off() -> bool:
+    return False
 
 
 def _closure(manifest: dict[str, Any], key: str) -> set[str]:
@@ -78,7 +98,10 @@ class StorefrontStatic:
     """An ASGI app for the bundle in ``dist``; mounted at ``/``, after every route.
     Raises FileNotFoundError when ``dist`` has no ``storefront.html`` or manifest."""
 
-    def __init__(self, dist: Path) -> None:
+    def __init__(
+        self, dist: Path, *, turnstile: Callable[[], Awaitable[bool]] = _turnstile_off
+    ) -> None:
+        self._turnstile = turnstile
         self.page = dist / ENTRY
         if not self.page.is_file():
             raise FileNotFoundError(self.page)
@@ -92,9 +115,13 @@ class StorefrontStatic:
                 await send({"type": "websocket.close"})
             return
         response = self._response(scope)
+        if response is None:
+            response = self._page(await self._turnstile())
         await response(scope, receive, send)
 
-    def _response(self, scope: Scope) -> Response:
+    def _response(self, scope: Scope) -> Response | None:
+        """The answer, or None for the page itself (`_page`), whose CSP waits on
+        whether the bot check is on."""
         path: str = scope["path"]
         root: str = scope.get("root_path", "")
         if root and path.startswith(root):
@@ -107,7 +134,7 @@ class StorefrontStatic:
         if scope["method"] not in ("GET", "HEAD"):
             return PlainTextResponse("Method Not Allowed", 405, headers={"Allow": "GET, HEAD"})
         if not parts:
-            return self._page()
+            return None
         if parts[0] == ASSETS_DIR:
             if len(parts) == 2 and parts[1] in self.allowed:
                 response = FileResponse(self.assets / parts[1])
@@ -117,10 +144,10 @@ class StorefrontStatic:
         # A client route never has a file extension, a dot file, or `..`.
         if any(part.startswith(".") or "." in part for part in parts):
             return _not_found()
-        return self._page()
+        return None
 
-    def _page(self) -> Response:
+    def _page(self, turnstile: bool) -> Response:
         response = FileResponse(self.page, media_type="text/html")
         response.headers["Cache-Control"] = REVALIDATE
-        response.headers["Content-Security-Policy"] = STOREFRONT_CSP
+        response.headers["Content-Security-Policy"] = storefront_csp(turnstile)
         return response

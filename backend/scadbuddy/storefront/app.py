@@ -51,6 +51,7 @@ from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
 from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
 from scadbuddy.storefront.static import StorefrontStatic
+from scadbuddy.storefront.turnstile import SiteKey
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
 
@@ -121,6 +122,8 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     # Design requests: their own allowance per client, and "Ask for a design" as read last.
     app.state.upload_allowance = UploadAllowance()
     app.state.requests_enabled = RequestsEnabled()
+    # The bot check's site key (#5283), for the page's config and its CSP.
+    app.state.turnstile_site_key = SiteKey()
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)
@@ -150,7 +153,11 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     # Last, so every route wins the match: the page and its own chunks (`static.py`).
     frontend = settings.resolve_frontend_dir()
     if frontend is not None:
-        app.mount("/", StorefrontStatic(frontend), name="storefront-page")
+
+        async def turnstile_on() -> bool:
+            return await app.state.turnstile_site_key.get(client) is not None
+
+        app.mount("/", StorefrontStatic(frontend, turnstile=turnstile_on), name="storefront-page")
     else:
         logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()

@@ -30,6 +30,7 @@ from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
@@ -70,6 +71,14 @@ def _client(request: Request) -> str:
 Crud = Annotated[StorefrontCrud, Depends(_crud)]
 Visitor = Annotated[str, Depends(_visitor)]
 Client = Annotated[str, Depends(_client)]
+
+
+@visitor_router.get("/turnstile")
+async def turnstile(request: Request, crud: Crud) -> Any:
+    """The bot check's public site key for the page's widget, or null while the check is
+    off (`turnstile.py`): the CRUD side's ``GET …/turnstile``, as last read."""
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    return {"site_key": await site_key.get(crud)}
 
 
 @visitor_router.get("/listings")
@@ -206,7 +215,8 @@ def _request_key(request: Request, visitor_id: str) -> str:
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
-    428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
+    428 ``idempotency_key_required``, 403 ``bot_check_failed`` or 503
+    ``bot_check_unavailable`` (`turnstile.py`), 429 ``request_limited`` (`UploadAllowance`: the
     client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
     (`uploads.py` `UploadGate`). The body is then read whole with every cap
     (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
@@ -224,6 +234,7 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
         )
     key = _request_key(request, visitor_id)
+    await require_turnstile(request, "request")
     allowance: UploadAllowance = state.upload_allowance
     held = allowance.start(client)
     if isinstance(held, int):

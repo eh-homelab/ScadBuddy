@@ -18,11 +18,13 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: early by #4625 so a merge never runs on the worker's role. The print ``reprints`` area
 #: is ``…/print/reprints``, the queue item a reprint queued (#3741). The storefront ``pay`` area
 #: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay/{token}`` page reads.
+#: The storefront ``turnstile`` area is ``…/storefront/turnstile`` and
+#: ``…/turnstile/verify``, the bot check (#5283).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
     "print": ["settings", "runs", "operations", "events", "printer-ensure", "reprints"],
-    "storefront": ["listings", "renders", "drafts", "requests", "pay"],
+    "storefront": ["listings", "renders", "drafts", "requests", "pay", "turnstile"],
     "agent": ["order-costs"],
 }
 

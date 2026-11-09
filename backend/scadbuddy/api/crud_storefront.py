@@ -6,7 +6,8 @@ The edge sends the visitor id it verified in the cookie (`VISITOR_HEADER`) and t
 browser's address (`CLIENT_HEADER`). This side cannot check the cookie's mac: it takes
 the id only as a 256-bit secret to look a visitor up by, and the address only to key the
 per-client render limit (plan "Trust model"). `visitor_id` and `store_client` are the
-dependencies that read them, and every route takes both but ``pay/checkout``: only a
+dependencies that read them, and every route takes both but ``pay/checkout`` and
+``GET …/turnstile``: only a
 ``storefront`` credential reaches these routes (`crud_router`), so no other caller can
 send either header here.
 
@@ -53,6 +54,7 @@ import ipaddress
 import json
 import re
 from typing import Annotated, Any, Final
+from urllib.parse import urlsplit
 
 from fastapi import Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -84,6 +86,12 @@ from scadbuddy.orders.storefront.renders import (
     start_render,
     store_render,
 )
+from scadbuddy.orders.storefront.turnstile import (
+    MAX_TOKEN_CHARS,
+    TurnstileConfig,
+    Verdict,
+    verify,
+)
 from scadbuddy.orders.storefront.wire import (
     AddListingItem,
     DraftView,
@@ -99,6 +107,7 @@ from scadbuddy.storefront.wire import (
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
     VISITOR_ID_PROBLEM,
+    TurnstileAction,
 )
 
 router = crud_router("storefront")
@@ -392,3 +401,49 @@ async def pay_checkout(body: PayCheckoutRead, orders: OrdersDep) -> VenmoCheckou
     if found is None:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     return found
+
+
+class TurnstileSiteKey(BaseModel):
+    """The bot check's public site key; ``null`` while the check is off."""
+
+    site_key: str | None
+
+
+class TurnstileCheck(BaseModel):
+    """The browser's token, as the edge read it, and the form it was made for."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str | None = Field(default=None, max_length=MAX_TOKEN_CHARS)
+    action: TurnstileAction
+
+
+class TurnstileVerdict(BaseModel):
+    verdict: Verdict
+
+
+def _turnstile_config(state: StateDep) -> TurnstileConfig:
+    runtime = state.settings_store.snapshot().runtime
+    public = state.settings.storefront_public_url
+    return TurnstileConfig(
+        site_key=runtime.storefront_turnstile_site_key or None,
+        secret=runtime.storefront_turnstile_secret or None,
+        hostname=urlsplit(public).hostname if public else None,
+    )
+
+
+@router.get("/turnstile", name="crud_storefront_turnstile")
+async def turnstile(state: StateDep) -> TurnstileSiteKey:
+    """The bot check's site key (``storefront_turnstile_site_key``), or ``null``."""
+    config = await asyncio.to_thread(_turnstile_config, state)
+    return TurnstileSiteKey(site_key=config.site_key)
+
+
+@router.post("/turnstile/verify", name="crud_storefront_turnstile_verify")
+async def turnstile_verify(
+    body: TurnstileCheck, state: StateDep, _visitor: Visitor, client: StoreClient
+) -> TurnstileVerdict:
+    """The verdict on the browser's token (`orders/storefront/turnstile.py` `verify`)."""
+    config = await asyncio.to_thread(_turnstile_config, state)
+    verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
+    return TurnstileVerdict(verdict=verdict)

@@ -4,7 +4,7 @@ database code: the edge imports it, and the edge never imports `scadbuddy.orders
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, Literal
 
 #: A listing id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``listing_not_found`` before a lookup.
@@ -36,6 +36,14 @@ STOREFRONT_PROBLEMS: Final = "https://scadbuddy.dev/problems/storefront/"
 VISITOR_ID_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}visitor_id"
 STORE_CLIENT_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}store_client"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
+#: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
+#: made for one form does not pass another's check.
+TurnstileAction = Literal["submit", "request", "sign_up"]
+#: The header the page sends the widget's token in.
+TURNSTILE_HEADER: Final = "X-Turnstile-Token"
+#: Cloudflare's bound on a token's length
+#: (https://developers.cloudflare.com/turnstile/get-started/server-side-validation/).
+MAX_TURNSTILE_TOKEN_CHARS: Final = 2048
 
 
 def public_problem(problem_type: object) -> bool:

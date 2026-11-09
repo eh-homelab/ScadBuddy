@@ -1043,6 +1043,8 @@ export const settingsDefaults = {
   storefront_render_concurrency: 2,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  // #5283 — the bot check: off with no site key; the secret is reported only as a flag.
+  storefront_turnstile_site_key: null,
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
   // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,
@@ -1079,6 +1081,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   git_remote_token: 'live',
+  storefront_turnstile_secret: 'live',
   // #4249 — copied by each order at create; neither live nor a restart.
   orders_currency: 'next order',
   render_concurrency: 'restart',
@@ -1131,6 +1134,7 @@ export const settings: Settings = {
   has_google_fonts_api_key: false,
   has_store_s3_secret_access_key: false,
   has_git_remote_token: false,
+  has_storefront_turnstile_secret: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',

@@ -521,6 +521,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
   `SCADBUDDY_TRUSTED_PROXIES` set). The bridge itself is `library/lsp.py`.
+- The storefront's bot check (#5283, storefront spec §5.8): Cloudflare Turnstile, on while
+  `storefront_turnstile_site_key` is set. Only the CRUD service holds the secret
+  (`storefront_turnstile_secret`, a `SECRET_FIELDS` member; a save needs the KEK, as
+  `git_remote_token`'s does), and only it calls Siteverify (`orders/storefront/turnstile.py`
+  `verify`; the Cloudflare facts are its docstring). The edge's `storefront/turnstile.py`
+  `require_turnstile(request, action)` forwards the page's `X-Turnstile-Token` to `POST
+  …/crud/storefront/turnstile/verify` (area `turnstile`) and refuses 403
+  `bot_check_failed` or 503 `bot_check_unavailable`. It fails closed: a site key with no
+  secret this process can open is `unavailable`, never a pass. A form route awaits it
+  before it reads its body: design requests (`request`), submit (`submit`) and sign-up
+  (`sign_up`). The edge's page CSP (`storefront/static.py`) names
+  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
