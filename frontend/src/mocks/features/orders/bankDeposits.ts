@@ -53,6 +53,8 @@ export const handlers = [
     const shown = suggested.flatMap((s) => {
       if (s.order_id !== params.id || s.dismissed) return []
       if (s.reason !== 'changed' && s.reason !== 'removed') return recorded(s.transaction_id) ? [] : [s]
+      // A cancelled order takes no payment, so it is never asked for one.
+      if (state.orders.find((o) => o.id === s.order_id)?.status === 'cancelled') return []
       const total = state.payments
         .filter((p) => p.order_id === s.order_id && p.method === 'bank_transfer' && p.reference === s.transaction_id)
         .reduce((sum, p) => sum + p.amount_minor, 0)

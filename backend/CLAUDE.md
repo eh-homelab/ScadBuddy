@@ -1232,7 +1232,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   listed with `reason` `changed`, and one Plaid removed (its row kept, `removed_at`) with
   `removed`, each with `recorded_minor`, the sum of the order's `bank_transfer` payments
   whose reference is the transaction id, while that sum is not the deposit's amount (0 when
-  removed). Payments are never edited, so the page's warning asks the shop to record the
-  difference with that reference, which clears it. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  removed), and only once the bank moved it (removed, or an amount other than the payment
+  it was recorded as). Payments are never edited, so the page's warning asks the shop to
+  record the difference with that reference, which clears it. A cancelled order takes no
+  payment and shows no such warning; a removed row whose payment is gone is deleted by the
+  next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
   topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
   deposit it changed or removed, so an open order page reloads.

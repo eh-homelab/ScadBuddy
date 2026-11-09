@@ -279,3 +279,39 @@ async def test_a_sync_tells_the_page_of_a_recorded_deposit_it_changed(bank: Bank
         )
         assert await sync_deposits(bank.bank, Bus()) == 0  # type: ignore[arg-type]
     assert [e.order_id for e in heard] == [owing.id]
+
+
+async def removed_after_recording(bank: Bank, order: Order) -> None:
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, order, "t1")
+    with respx.mock as router:
+        router.post(SYNC).mock(return_value=page(removed=["t1"], cursor="c2"))
+        await sync_deposits(bank.bank)
+
+
+async def test_a_cancelled_order_shows_no_bank_warning(bank: Bank) -> None:
+    """A cancelled order takes no payment, so a warning asking for one is never shown."""
+    owing = bank.owing()
+    await removed_after_recording(bank, owing)
+    bank.shop.lifecycle.cancel_order(owing.id, BY)
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_a_refund_with_the_deposit_s_reference_is_no_bank_change(bank: Bank) -> None:
+    """The warning is about the bank's change: an unchanged deposit never shows it."""
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    adjust(bank, owing, -1000, "t1")
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_a_removed_deposit_whose_payment_is_gone_is_pruned(bank: Bank) -> None:
+    owing = bank.owing()
+    await removed_after_recording(bank, owing)
+    with bank.pool.connection() as conn:
+        conn.execute("DELETE FROM order_payments WHERE reference = 't1'")
+    with respx.mock as router:
+        router.post(SYNC).mock(return_value=page(cursor="c3"))
+        await sync_deposits(bank.bank)
+    assert bank.deposits() == []

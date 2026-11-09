@@ -306,6 +306,9 @@ def _apply(
             "DELETE FROM bank_deposits WHERE transaction_id = ANY(%s) AND payment_id IS NULL",
             (ids,),
         )
+    # A removed deposit is kept only for its payment's warning: once that payment is gone
+    # (``ON DELETE SET NULL``), nothing reads the row.
+    conn.execute("DELETE FROM bank_deposits WHERE removed_at IS NOT NULL AND payment_id IS NULL")
     return suggested, told | set(suggested)
 
 
@@ -404,7 +407,8 @@ class DepositSuggestion(BaseModel):
 def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
     """The order's suggested deposits not dismissed and not recorded, then the deposits
     recorded on it that Plaid changed (``changed``) or removed (``removed``) since, while
-    their payments do not sum to the deposit, newest first."""
+    their payments do not sum to the deposit and the order is not cancelled, newest
+    first."""
     with store.transaction() as conn:
         found = conn.execute(
             "SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
@@ -417,9 +421,13 @@ def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
             " UNION ALL SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
             " d.description, CASE WHEN d.removed_at IS NULL THEN 'changed' ELSE 'removed'"
             " END, t.total FROM bank_deposits d JOIN order_payments p ON p.id = d.payment_id"
+            # A cancelled order takes no payment, so it is never asked for one.
+            " JOIN orders o ON o.id = p.order_id AND o.status <> 'cancelled'"
             " CROSS JOIN LATERAL (SELECT sum(q.amount_minor)::bigint AS total FROM"
             " order_payments q WHERE q.order_id = p.order_id AND q.method = %s AND"
-            " q.reference = d.transaction_id) t WHERE p.order_id = %s AND t.total <>"
+            " q.reference = d.transaction_id) t WHERE p.order_id = %s"
+            # Only the bank's change warns: ``p`` is the payment the deposit was recorded as.
+            " AND (d.removed_at IS NOT NULL OR d.amount_minor <> p.amount_minor) AND t.total <>"
             " CASE WHEN d.removed_at IS NULL THEN d.amount_minor ELSE 0 END"
             " ORDER BY posted_on DESC, transaction_id",
             (order_id, METHOD, METHOD, order_id),

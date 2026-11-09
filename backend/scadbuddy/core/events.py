@@ -246,8 +246,9 @@ class OrderChanged(BaseEvent):
 
 
 class OrderBankDepositsChanged(BaseEvent):
-    """The deposit sync (#4961) suggested a deposit for the order: re-read ``GET
-    /orders/{order_id}/bank-deposits``. Published on ``order:<order id>``."""
+    """The deposit sync (#4961) suggested a deposit for the order, or changed or removed a
+    deposit recorded on it: re-read ``GET /orders/{order_id}/bank-deposits``. Published on
+    ``order:<order id>``."""
 
     kind: Literal["order.bank_deposits"] = "order.bank_deposits"
     order_id: str
