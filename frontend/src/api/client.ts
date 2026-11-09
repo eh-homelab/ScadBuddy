@@ -256,6 +256,10 @@ import type {
   PaymentCreate,
   PaymentRequestCreate,
   PaymentRequestView,
+  BankKeys,
+  BankLinkCreate,
+  BankStatus,
+  BankUnlinked,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2445,6 +2449,12 @@ export const api = {
     request<ProviderStatus>(`/payments/providers/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
   disconnectPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}`, { method: 'DELETE' }),
   setDefaultPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}/default`, { method: 'POST' }),
+  bankLink: () => request<BankStatus>('/payments/bank'),
+  saveBankKeys: (body: BankKeys) => request<BankStatus>('/payments/bank/keys', { method: 'PUT', body: JSON.stringify(body) }),
+  forgetBankKeys: () => request<void>('/payments/bank/keys', { method: 'DELETE' }),
+  bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
+  linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
+  unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

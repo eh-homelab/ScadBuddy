@@ -13,8 +13,8 @@ import { bambuddyFrame } from './bambuddyFrame'
  */
 test.describe('tracing', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
-  // The page CSP's `connect-src 'self'` stops a cross-origin fetch before it is sent,
-  // so the test lifts it to see what the instrumentation would have put on one.
+  // The page CSP's `connect-src` (this origin and Plaid's two API hosts, #4961) stops a
+  // cross-origin fetch to any other host before it is sent, so the test lifts it to see what the instrumentation would have put on one.
   test.use({ bypassCSP: true })
 
   /** A `fetch` outside any action, not a poll, is a parentless CLIENT span: propagated, sampled (spec §6, #2187). */

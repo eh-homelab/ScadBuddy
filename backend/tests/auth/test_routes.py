@@ -293,4 +293,10 @@ def test_only_the_webhook_is_public_among_payments_routes() -> None:
         "scadbuddy.api.payments.connect_provider",
         "scadbuddy.api.payments.disconnect_provider",
         "scadbuddy.api.payments.default_provider",
+        # #4961: the bank account's keys and link; reading it is any api caller's.
+        "scadbuddy.api.bank_link.put_bank_keys",
+        "scadbuddy.api.bank_link.delete_bank_keys",
+        "scadbuddy.api.bank_link.create_bank_link_token",
+        "scadbuddy.api.bank_link.create_bank_link",
+        "scadbuddy.api.bank_link.delete_bank_link",
     }

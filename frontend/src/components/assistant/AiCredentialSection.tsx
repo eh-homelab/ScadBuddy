@@ -111,7 +111,12 @@ function noneUsable(credentials: readonly AiCredentialEntry[], canSave: boolean)
 
 /** ", “Work”," for the named credential that recovers at `at` (#3710); empty when it has no name. */
 function recovering(credentials: readonly AiCredentialEntry[], at: string): string {
-  const name = credentials.find((c) => c.status === 'cooling_down' && c.cooldown_until === at)?.name
+  // Compared as instants, not strings (#5779): the agent writes both with toISOString today,
+  // but a change of format there must not drop the name.
+  const instant = Date.parse(at)
+  const name = credentials.find(
+    (c) => c.status === 'cooling_down' && c.cooldown_until !== null && Date.parse(c.cooldown_until) === instant,
+  )?.name
   return name ? `, “${name}”,` : ''
 }
 

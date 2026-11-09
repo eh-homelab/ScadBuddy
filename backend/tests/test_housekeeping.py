@@ -451,9 +451,9 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    # 82 minutes since #5700's payment closes (10 minutes), #4959's pending captures
-    # (12 minutes) and #5282's idle storefront carts (5 minutes) joined the prune Schedule.
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=82)
+    # 85 minutes since #5700's payment closes (10 minutes), #4959's pending captures
+    # (15 minutes) and #5282's idle storefront carts (5 minutes) joined the prune Schedule.
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=85)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

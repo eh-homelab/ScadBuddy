@@ -556,9 +556,11 @@ PayPal's verify-webhook-signature call before ScadBuddy reads it
 When neither comes (PayPal retries an event for 3 days), the housekeeping sweep reads the
 PayPal order, from an hour after the approval, then with a backoff: a capture it finds is
 recorded as its event would be, an order still approved with no capture is captured again
-while the order takes money (else the request is failed), and a voided order, or one
-never told after about five days of reads, leaves the request failed. So a pending
-request never blocks its order's cancel for good.
+while the order takes money (else the request is failed), a capture still pending at
+PayPal is read once a day in case its completion event is lost too, and a voided order,
+or one never told after about five days of reads (the daily reads of a pending capture
+count too), leaves the request failed. So a pending request never blocks its order's
+cancel for good.
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. A refund that is
 still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal
@@ -616,6 +618,30 @@ when Square says it completed; one that is then rejected or fails gets a payment
 cancels it. A cancelled request's payment link is deleted, which cancels its Square
 order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
 Cash needs no provider: record it as a manual payment.
+
+#### Bank account through Plaid (#4961)
+
+Plaid is not a payment provider: it takes no payment. It links the shop's checking or
+savings account; reading its deposits and matching them to orders is a later step of
+#4961, which is why Link asks for the Transactions product
+([Transactions](https://plaid.com/docs/transactions/)). In the Plaid Dashboard, get the
+client ID and the Sandbox or Production secret
+([quickstart](https://plaid.com/docs/quickstart/)). In Settings → Payments, under
+"Bank account (Plaid)", save them with their environment; Plaid checks them before they
+are kept, sealed under the key file. Then "Link a bank account" opens Plaid Link, where
+the shop picks one checking or savings account
+([Link](https://plaid.com/docs/link/web/)). ScadBuddy keeps the access token sealed, and
+the account's name, type and mask (its last 2-4 characters) only, never an account or
+routing number. "Unlink" removes the Item at Plaid
+([`/item/remove`](https://plaid.com/docs/api/items/#itemremove)) and drops the token; the
+keys stay until "Forget keys". When Plaid refuses the stored keys (a secret rotated in the
+Dashboard), "Unlink" drops the link here only, keeps the keys, and says to remove the Item
+in the Plaid Dashboard. When the keys are sealed under another key file, "Unlink" cannot
+reseal them, so it forgets the keys too: remove the Item in the Plaid Dashboard, then save
+the keys again. Without `SCADBUDDY_SECRET_KEY_FILE`,
+"Unlink" is refused and the link stays, since the file may be mounted again. The page's Content-Security-Policy allows Link's one
+script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
+bank Stripe pays out to: set it in the Stripe Dashboard.
 
 ### Authentication on the deployment (#4975)
 
