@@ -23,6 +23,7 @@ from scadbuddy.orders.machine_rate import (
     MachineRates,
     MachineRateStore,
     MaintenanceCost,
+    Stored,
     WearPart,
 )
 from scadbuddy.printers.models import PrinterCreate, PrinterRow
@@ -484,6 +485,33 @@ async def test_the_views_inputs_are_from_the_same_read_as_its_breakdown(
     assert view.inputs.maintenance[0].interval_hours == "50"
     assert view.bambuddy_tasks == ["Lubricate rods"]
     assert live.asked == [7]  # one read serves the breakdown and the names
+
+
+async def test_a_profile_deleted_during_the_view_takes_bambuddys_names_from_the_one_read(
+    store: MachineRateStore,
+    printers: PrinterStore,
+    settings_store: SettingsStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = linked_printer(printers)
+    store.replace(printer.id, INPUTS)
+    real = store.stored
+
+    def stored_then_deleted(key: str) -> Stored:
+        # The breakdown's read sees the profile; a delete lands before the view's own.
+        seen = real(key)
+        store.delete(key)
+        return seen
+
+    monkeypatch.setattr(store, "stored", stored_then_deleted)
+    live = FakeBambuddy(
+        [MaintenanceTask(task="Lubricate rods", interval_hours=50, interval_type="hours")]
+    )
+    view = await rates(store, printers, settings_store, live).view(printer.id)
+    assert view is not None and view.inputs is None
+    assert view.breakdown.intervals == "bambuddy"
+    assert view.bambuddy_tasks == ["Lubricate rods"]
+    assert live.asked == [7]
 
 
 async def test_the_view_of_a_linked_printer_with_no_profile_names_bambuddys_tasks(
