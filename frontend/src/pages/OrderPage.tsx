@@ -563,8 +563,9 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
           sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
-          // Once its dialog opened, a slice request is the quote's section only (#5797 review).
-          onSliceOpened={() => setSection((was) => (was?.at === 'slice' ? { ...was, at: 'quote' } : was))}
+          // Once its dialog opened, a slice request is the quote's section only (#5797 review); only
+          // this item's, so a late call never rewrites another item's request (#5832).
+          onSliceOpened={() => setSection((was) => (was?.item === current.id && was.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
