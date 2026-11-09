@@ -52,6 +52,14 @@ describe('PrintQueue (#2351)', () => {
     )
   })
 
+  it('marks the items ScadBuddy queued, and no other (#3741)', async () => {
+    renderPage(<PrintQueue />)
+
+    const keychain = await screen.findByTestId('queue-item-259')
+    expect(within(keychain).getByText('Queued from ScadBuddy')).toBeInTheDocument()
+    expect(within(screen.getByTestId('queue-item-260')).queryByText('Queued from ScadBuddy')).toBeNull()
+  })
+
   it('says when nothing is waiting', async () => {
     setPrintQueue(PRINT_QUEUE.filter((item) => item.status !== 'pending'))
     renderPage(<PrintQueue />)

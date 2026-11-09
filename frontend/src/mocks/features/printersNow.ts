@@ -4,7 +4,7 @@ import { printersState } from './printers'
 
 /**
  * #977 — what each printer is doing now: the H2C paused on the 2026-10-01 spaghetti
- * detection, a print ScadBuddy linked, and an idle printer.
+ * detection, a print ScadBuddy queued and linked (#3741), and an idle printer.
  */
 export const PRINTERS_NOW: PrinterNow[] = [
   {
@@ -47,6 +47,16 @@ export const PRINTERS_NOW: PrinterNow[] = [
     linked: true,
     bambuddy_url: null,
     error: null,
+    // #3741 — ScadBuddy queued it: the archive is linked to the keychain output.
+    scadbuddy: {
+      subject: 'output:luna-0001',
+      output_id: 'luna-0001',
+      library_file_id: null,
+      slug: 'keychain',
+      run_id: 'run-luna',
+      archive_id: 35,
+      matched_by: 'archive',
+    },
   },
   {
     id: '00000000-0000-4000-8000-000000000003',

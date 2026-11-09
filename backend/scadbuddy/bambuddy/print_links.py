@@ -32,12 +32,16 @@ hash whose file the start uploaded (`print_history._run_by_file`): on the print'
 read, or as the prints list links the print (`print_history._link_lan_prints`, #5724),
 which looks only for the starts no row here names. A LAN start has no queue item, so no
 send names it.
+
+`PrintLinkStore.jobs` reads these records, with ``print_runs``' LAN starts, to mark the
+queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`).
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -95,6 +99,111 @@ class LanArchiveLink(BaseModel):
     run_id: str
     subtask_name: str
     plate_id: int | None = None
+
+
+#: How a job was found to be ScadBuddy's (#3741): the queue item a run's send recorded,
+#: an archive ScadBuddy linked, or the ``subtask_name`` a run's LAN start recorded on that
+#: printer.
+JobMatchedBy = Literal["queue_item", "archive", "lan_start"]
+
+
+class ScadBuddyJob(BaseModel):
+    """A queue item or printer job that ScadBuddy queued or started (#3741): what the
+    Prints page's "Queued from ScadBuddy" badge marks. It is found only by ScadBuddy's
+    own records (`PrintLinkStore.jobs`), never by a name or a time, so a job started
+    from Bambuddy or on the printer has none."""
+
+    #: The print subject's key: ``output:<id>`` or ``library:<file id>``.
+    subject: str
+    output_id: str | None = None
+    library_file_id: int | None = None
+    #: The output's template, when ScadBuddy knows it; ``None`` for a library file.
+    slug: str | None = None
+    #: The print run that queued or started it, when one is recorded.
+    run_id: str | None = None
+    #: The archive ScadBuddy linked to it (its print is ``/prints/{archive_id}``).
+    archive_id: int | None = None
+    matched_by: JobMatchedBy
+
+
+@dataclass(frozen=True)
+class JobMatches:
+    """`PrintLinkStore.jobs`'s answer: each key that matched, and the job it is."""
+
+    queue_items: dict[int, ScadBuddyJob] = field(default_factory=dict)
+    archives: dict[int, ScadBuddyJob] = field(default_factory=dict)
+    #: By ``(registry printer id, subtask_name)``.
+    lan_starts: dict[tuple[str, str], ScadBuddyJob] = field(default_factory=dict)
+
+
+def _output_id_of(column: str) -> str:
+    """SQL for the output id a subject column names, or NULL for a library file's."""
+    return f"CASE WHEN {column} LIKE 'output:%%' THEN substr({column}, 8) END"
+
+
+def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -> ScadBuddyJob:
+    return ScadBuddyJob(
+        subject=subject.key,
+        output_id=subject.output_id,
+        library_file_id=subject.file_id,
+        slug=row["slug"] if subject.output_id is not None else None,
+        run_id=row["run_id"],
+        archive_id=row["archive_id"],
+        matched_by=matched_by,
+    )
+
+
+#: The queue items a send recorded, then those only a link names (a send from before
+#: ``print_sends``, #1750), each with its archive when one is linked.
+_QUEUE_JOBS = (
+    "SELECT s.queue_item_id, s.subject, s.run_id,"
+    " COALESCE(o.slug, r.slug) AS slug,"
+    " (SELECT l.archive_id FROM print_links l WHERE l.queue_item_id = s.queue_item_id"
+    "  AND l.subject = s.subject ORDER BY l.first_seen LIMIT 1) AS archive_id"
+    " FROM print_sends s"
+    " LEFT JOIN print_runs r ON r.id = s.run_id"
+    f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('s.subject')}"
+    " WHERE s.queue_item_id = ANY(%(ids)s)"
+    " UNION ALL"
+    " SELECT * FROM (SELECT DISTINCT ON (l.queue_item_id) l.queue_item_id, l.subject,"
+    " NULL::text AS run_id, o.slug, l.archive_id"
+    " FROM print_links l"
+    f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('l.subject')}"
+    " WHERE l.queue_item_id = ANY(%(ids)s) AND NOT EXISTS"
+    "  (SELECT 1 FROM print_sends s WHERE s.queue_item_id = l.queue_item_id)"
+    " ORDER BY l.queue_item_id, (l.subject LIKE 'library:%%'), l.first_seen, l.subject)"
+    " AS legacy"
+)
+
+#: Each archive's owner (`_OWNER_ORDER`), with the run that queued its item or made its
+#: LAN start.
+_ARCHIVE_JOBS = (
+    "SELECT DISTINCT ON (l.archive_id) l.archive_id, l.subject,"
+    " COALESCE(s.run_id, a.run_id) AS run_id, COALESCE(o.slug, r.slug) AS slug"
+    " FROM print_links l"
+    " LEFT JOIN print_sends s ON s.queue_item_id = l.queue_item_id"
+    " LEFT JOIN lan_print_archives a ON a.archive_id = l.archive_id"
+    " LEFT JOIN print_runs r ON r.id = COALESCE(s.run_id, a.run_id)"
+    f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('l.subject')}"
+    " WHERE l.archive_id = ANY(%(ids)s)"
+    " ORDER BY l.archive_id, (l.subject LIKE 'library:%%'), l.first_seen, l.subject,"
+    " l.queue_item_id"
+)
+
+#: The runs on these printers whose result records a LAN start under one of these
+#: names, with the archive that start became when one is recorded.
+_LAN_JOBS = (
+    "SELECT r.id AS run_id, r.output_id AS run_subject, r.printer::text AS printer,"
+    " e.name, COALESCE(o.slug, r.slug) AS slug, a.archive_id"
+    " FROM print_runs r CROSS JOIN LATERAL (SELECT x->>'subtask_name' AS name"
+    "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
+    "   THEN r.result->'lan' END) AS x) AS e"
+    " LEFT JOIN lan_print_archives a ON a.run_id = r.id AND a.subtask_name = e.name"
+    " LEFT JOIN output_index o ON o.output_id ="
+    "  CASE WHEN r.output_id LIKE 'library:%%' THEN NULL ELSE r.output_id END"
+    " WHERE r.printer = ANY(%(printers)s::uuid[]) AND e.name = ANY(%(names)s)"
+    " ORDER BY r.created_at"
+)
 
 
 class PendingLibraryPrint(BaseModel):
@@ -243,6 +352,23 @@ class PrintLinkStore:
     async def record_lan_start(self, link: LanArchiveLink) -> None:
         """Record the LAN start an archive became. The first record is kept."""
         await asyncio.to_thread(self._record_lan_start, link)
+
+    async def jobs(
+        self,
+        *,
+        queue_items: Sequence[int] = (),
+        archives: Sequence[int] = (),
+        lan_starts: Sequence[tuple[str, str]] = (),
+    ) -> JobMatches:
+        """Which of these jobs ScadBuddy queued or started (#3741), in at most three
+        queries on one connection, one per kind of key given: ``queue_items`` by the
+        sends a run recorded (or a link that names the item), ``archives`` by their
+        linked owner, ``lan_starts`` (registry printer id, ``subtask_name``) by a run on
+        that printer whose result records that start. A LAN start name two runs share
+        matches neither: no match is ever a guess."""
+        return await asyncio.to_thread(
+            self._jobs, sorted(set(queue_items)), sorted(set(archives)), sorted(set(lan_starts))
+        )
 
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
@@ -395,6 +521,46 @@ class PrintLinkStore:
                 " VALUES (%s, %s, %s, %s) ON CONFLICT (archive_id) DO NOTHING",
                 (link.archive_id, link.run_id, link.subtask_name, link.plate_id),
             )
+
+    def _jobs(
+        self, queue_items: list[int], archives: list[int], lan_starts: list[tuple[str, str]]
+    ) -> JobMatches:
+        matches = JobMatches()
+        if not (queue_items or archives or lan_starts):
+            return matches
+        with self._pool.connection() as conn:
+            if queue_items:
+                for row in conn.execute(_QUEUE_JOBS, {"ids": queue_items}).fetchall():
+                    # A send first: the legacy branch reads only items no send names.
+                    matches.queue_items.setdefault(
+                        row["queue_item_id"],
+                        _job(dict(row), PrintSubject.parse(row["subject"]), "queue_item"),
+                    )
+            if archives:
+                for row in conn.execute(_ARCHIVE_JOBS, {"ids": archives}).fetchall():
+                    matches.archives[row["archive_id"]] = _job(
+                        dict(row), PrintSubject.parse(row["subject"]), "archive"
+                    )
+            if lan_starts:
+                wanted = set(lan_starts)
+                found: dict[tuple[str, str], list[ScadBuddyJob]] = {}
+                rows = conn.execute(
+                    _LAN_JOBS,
+                    {
+                        "printers": sorted({printer for printer, _ in wanted}),
+                        "names": sorted({name for _, name in wanted}),
+                    },
+                ).fetchall()
+                for row in rows:
+                    key = (row["printer"], row["name"])
+                    if key not in wanted:
+                        continue
+                    subject = PrintSubject.from_run_subject(row["run_subject"])
+                    found.setdefault(key, []).append(_job(dict(row), subject, "lan_start"))
+                for key, jobs in found.items():
+                    if len({job.run_id for job in jobs}) == 1:
+                        matches.lan_starts[key] = jobs[0]
+        return matches
 
     def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
         with self._pool.connection() as conn:

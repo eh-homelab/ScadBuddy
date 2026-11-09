@@ -90,6 +90,7 @@ from scadbuddy.bambuddy.preview import (
     read_preview,
     read_toolpath,
 )
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PROCESS_VALUES_QUERY,
     PrintCheck,
@@ -104,7 +105,13 @@ from scadbuddy.bambuddy.print_run import (
     lan_printers,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
-from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now, with_lan_runs
+from scadbuddy.bambuddy.printers_now import (
+    PrintersNow,
+    job_keys,
+    printers_now,
+    with_lan_runs,
+    with_scadbuddy_jobs,
+)
 from scadbuddy.bambuddy.progress import (
     LanRunControl,
     PrintProgress,
@@ -698,8 +705,10 @@ async def post_tray_spool(
         "time left and its HMS errors, whoever started the job, from Bambuddy's status or "
         "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
-        "names Bambuddy's archives page. A printer whose status cannot be read is a "
-        "card with `error`, never a failed page."
+        "names Bambuddy's archives page. A printing or paused job ScadBuddy queued or "
+        "started carries `scadbuddy` (#3741): the output or library file, matched by the "
+        "archive ScadBuddy linked or a run's LAN start on that printer, never by a guess. "
+        "A printer whose status cannot be read is a card with `error`, never a failed page."
     ),
 )
 async def get_printers_now(
@@ -723,7 +732,20 @@ async def get_printers_now(
             cards = await printers_now(
                 client, links, printers.store, printers.reports, now=now, native=native
             )
+    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards))
     return with_lan_runs(cards, await _lan_controls(runs, cards))
+
+
+async def _scadbuddy_jobs(links: PrintLinkStore, cards: PrintersNow) -> JobMatches:
+    """Which working cards' jobs ScadBuddy queued or started (#3741), in one read; none
+    when its records cannot be read, so a database blip costs the badges, never the
+    strip."""
+    archives, starts = job_keys(cards)
+    try:
+        return await links.jobs(archives=archives, lan_starts=starts)
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the strip shows no ScadBuddy marks")
+        return JobMatches()
 
 
 async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:

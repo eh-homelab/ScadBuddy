@@ -17,9 +17,11 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
@@ -547,3 +549,130 @@ def test_a_native_printer_never_asks_bambuddy_for_its_status(client: TestClient)
     assert not native_status.called
     assert bambuddy_status.called
     assert [card.path for card in cards.values() if card.id != pid] == ["bambuddy"]
+
+
+# --- #3741: the jobs ScadBuddy queued or started -------------------------------------
+
+
+@respx.mock
+def test_a_job_whose_archive_scadbuddy_linked_is_marked(client: TestClient) -> None:
+    """#3741: a Bambuddy card's ``current_archive_id`` that ScadBuddy linked names the
+    subject that printed it; an archive it did not link names none."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(
+            200, json=status(2, state="PAUSE", subtask_name="Bracket", current_archive_id=90)
+        )
+    )
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    asyncio.run(
+        state.print_links.record(
+            PrintSubject.output("o" * 32),
+            PrintLink(archive_id=13, matched_by="queue_item", queue_item_id=257),
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card for card in response.json()["printers"]}
+    assert cards[1]["scadbuddy"] == {
+        "subject": "output:" + "o" * 32,
+        "output_id": "o" * 32,
+        "library_file_id": None,
+        "slug": None,
+        "run_id": None,
+        "archive_id": 13,
+        "matched_by": "archive",
+    }
+    assert cards[2]["scadbuddy"] is None
+
+
+def _lan_run(client: TestClient, printer: str, subtask: str, *, run_id: str) -> None:
+    """A native run on ``printer`` that started ``subtask`` over the LAN."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    store = state.print_runs.store
+    started = LanStarted(subtask_name=subtask, started_at=datetime.now(UTC), plate_id=1)
+
+    async def seed() -> None:
+        await store.insert_accepted(
+            run_id,
+            subject=PrintSubject.output("o" * 32),
+            key=run_id,
+            slug="keychain",
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w",
+            retention=None,
+            printer=printer,
+        )
+        await store.succeed(
+            run_id,
+            "keychain",
+            PrintRunResult(library_file_id=41, copies=1, path="native", lan=[started]),
+        )
+
+    asyncio.run(seed())
+
+
+def test_a_job_a_run_started_over_the_lan_is_marked(client: TestClient) -> None:
+    """#3741: a native card whose ``subtask_name`` is a LAN start a run on that printer
+    recorded names the run; the same name on another printer, or a job started on the
+    printer itself, names none."""
+    garage = _lan_printer(client)
+    shed = _lan_printer(client, serial="01P00A000000002", name="Shed")
+    loft = _lan_printer(client, serial="01P00A000000003", name="Loft")
+    reports = _registry(client).reports
+    now = datetime.now(UTC)
+    reports.put(garage, {"gcode_state": "RUNNING", "subtask_name": "scadbuddy-run3741-p1"}, now)
+    # The garage run's name on another printer: not that run's start.
+    reports.put(shed, {"gcode_state": "PAUSE", "subtask_name": "scadbuddy-run3741-p1"}, now)
+    reports.put(loft, {"gcode_state": "RUNNING", "subtask_name": "Bracket"}, now)
+    _lan_run(client, garage, "scadbuddy-run3741-p1", run_id="run3741")
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["id"]: card for card in response.json()["printers"]}
+    assert cards[garage]["scadbuddy"] == {
+        "subject": "output:" + "o" * 32,
+        "output_id": "o" * 32,
+        "library_file_id": None,
+        "slug": "keychain",
+        "run_id": "run3741",
+        "archive_id": None,
+        "matched_by": "lan_start",
+    }
+    assert cards[shed]["scadbuddy"] is None
+    assert cards[loft]["scadbuddy"] is None
+
+
+def test_a_lan_start_two_runs_share_is_not_marked(client: TestClient) -> None:
+    """#3741: never a guess. A name two runs on the printer recorded names neither."""
+    garage = _lan_printer(client)
+    _registry(client).reports.put(
+        garage, {"gcode_state": "RUNNING", "subtask_name": "scadbuddy-twin-p1"}, datetime.now(UTC)
+    )
+    _lan_run(client, garage, "scadbuddy-twin-p1", run_id="twin-a")
+    _lan_run(client, garage, "scadbuddy-twin-p1", run_id="twin-b")
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert card["scadbuddy"] is None
+
+
+def test_an_idle_printer_is_not_marked(client: TestClient) -> None:
+    """#3741: only a printing or paused job is marked, even when the report still names
+    the run's last start."""
+    garage = _lan_printer(client)
+    _registry(client).reports.put(
+        garage, {"gcode_state": "FINISH", "subtask_name": "scadbuddy-done-p1"}, datetime.now(UTC)
+    )
+    _lan_run(client, garage, "scadbuddy-done-p1", run_id="done")
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert card["scadbuddy"] is None

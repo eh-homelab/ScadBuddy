@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils'
 import { mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
+import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
 /** How often the printers are read while the page is visible: the fallback when no
  * `printers` signal comes (realtime down, or a printer only Bambuddy knows). */
@@ -232,6 +233,7 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
       {working && (
         <>
           {printer.job_name && <p className="mt-1 truncate">{printer.job_name}</p>}
+          {printer.scadbuddy && <QueuedFromScadBuddy job={printer.scadbuddy} className="mt-1 self-start" />}
           {progress !== null && (
             <div
               role="progressbar"

@@ -3,13 +3,97 @@ spool inventory, read from Bambuddy and never written to it."""
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
+from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
+
+
+def _state(client: TestClient) -> AppState:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state
+
+
+@respx.mock
+def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
+    """#3741: an item a ScadBuddy run queued (its send) and an item whose archive
+    ScadBuddy linked carry ``scadbuddy``; every other item carries none."""
+    configure(client)
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=recording("queue.json")))
+    state = _state(client)
+    output = PrintSubject.output("o" * 32)
+
+    async def seed() -> None:
+        await state.print_runs.store.insert_accepted(
+            "run-3741",
+            subject=output,
+            key="run-3741",
+            slug="keychain",
+            workflow_id="print-run-3741",
+            workflow_run_id="w",
+            retention=None,
+        )
+        await state.print_links.record_sends(
+            output, [PrintSend(queue_item_id=259, plate_id=1, run_id="run-3741")]
+        )
+        # Item 257 printed archive 144, which ScadBuddy linked by the sliced file's hash.
+        await state.print_links.record(
+            PrintSubject.library(1615), PrintLink(archive_id=144, matched_by="content_hash")
+        )
+
+    asyncio.run(seed())
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()}
+    assert items[259]["scadbuddy"] == {
+        "subject": "output:" + "o" * 32,
+        "output_id": "o" * 32,
+        "library_file_id": None,
+        "slug": "keychain",
+        "run_id": "run-3741",
+        "archive_id": None,
+        "matched_by": "queue_item",
+    }
+    assert items[257]["scadbuddy"] == {
+        "subject": "library:1615",
+        "output_id": None,
+        "library_file_id": 1615,
+        "slug": None,
+        "run_id": None,
+        "archive_id": 144,
+        "matched_by": "archive",
+    }
+    assert items[199]["scadbuddy"] is None and items[205]["scadbuddy"] is None
+
+
+@respx.mock
+def test_the_queue_has_no_marks_when_the_records_are_unreadable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3741: a database blip costs the marks, never the queue."""
+    configure(client)
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=recording("queue.json")))
+
+    async def broken(**_: object) -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(_state(client).print_links, "jobs", broken)
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    assert all(item["scadbuddy"] is None for item in response.json())
 
 
 @respx.mock
