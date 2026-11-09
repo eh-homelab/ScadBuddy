@@ -905,6 +905,22 @@ def test_requests_off_are_refused_before_the_body_is_read(
     assert crud_mock["requests_enabled"].call_count == 3
 
 
+def test_a_refused_key_is_not_asked_about_again_within_30_seconds(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5829: a key the CRUD side said holds no committed request is refused
+    on a repeat without a second CRUD call (a refused request never commits)."""
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    sent = {"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())}
+    for _ in range(3):
+        assert _ask(edge, headers=sent).status_code == 404
+    keyed = [
+        c for c in crud_mock["requests_enabled"].calls if "idempotency-key" in c.request.headers
+    ]
+    assert len(keyed) == 1
+
+
 def test_a_committed_request_is_sent_again_after_requests_went_off(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

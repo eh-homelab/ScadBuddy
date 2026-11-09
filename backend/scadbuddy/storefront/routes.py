@@ -160,13 +160,36 @@ UPLOAD_LOST: Final = (
 )
 
 
+#: How long a refused (visitor, key) is remembered, and how many are kept.
+REFUSED_TTL: Final = 30.0
+REFUSED_MAX: Final = 10_000
+
+
 class RequestsEnabled:
     """The CRUD side's ``storefront_requests_enabled``, read at most once per
-    `ENABLED_TTL` per replica."""
+    `ENABLED_TTL` per replica. Also a short negative cache of the keys it said hold no
+    committed request while requests are off (`REFUSED_TTL`, `REFUSED_MAX`, the oldest
+    evicted): safe, since a refused request never commits."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._read: tuple[float, bool] | None = None
+        self._refused: dict[tuple[str, str], float] = {}
+
+    def is_refused(self, visitor_id: str, key: str) -> bool:
+        at = self._refused.get((visitor_id, key))
+        if at is None:
+            return False
+        if self._clock() - at >= REFUSED_TTL:
+            del self._refused[(visitor_id, key)]
+            return False
+        return True
+
+    def refuse(self, visitor_id: str, key: str) -> None:
+        self._refused.pop((visitor_id, key), None)
+        self._refused[(visitor_id, key)] = self._clock()
+        while len(self._refused) > REFUSED_MAX:
+            del self._refused[next(iter(self._refused))]
 
     async def get(self, crud: StorefrontCrud, *, visitor_id: str, client: str) -> bool:
         now = self._clock()
@@ -203,15 +226,20 @@ async def _refuse_unless_sent(
     request: Request, crud: StorefrontCrud, visitor_id: str, client: str
 ) -> None:
     """404 ``requests_disabled`` unless the request's key holds a request the CRUD side
-    committed (asked uncached: only while requests are off). A request with no key, or
-    a bad one, is refused as off."""
+    committed (asked while requests are off; a refusal is remembered for `REFUSED_TTL`).
+    A request with no key, or a bad one, is refused as off."""
     try:
         key = _request_key(request, visitor_id)
     except ApiError:
         key = None
-    if key is None or not await crud.requests_enabled(
-        visitor_id=visitor_id, client=client, key=key
-    ):
+    cache: RequestsEnabled = request.app.state.requests_enabled
+    if key is None or cache.is_refused(visitor_id, key):
+        refused = True
+    else:
+        refused = not await crud.requests_enabled(visitor_id=visitor_id, client=client, key=key)
+        if refused:
+            cache.refuse(visitor_id, key)
+    if refused:
         raise ApiError(
             404,
             "This shop does not take design requests.",
