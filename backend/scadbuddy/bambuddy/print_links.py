@@ -11,8 +11,11 @@ Each row of ``print_sends`` and ``print_links`` is keyed by the print's subject
 share both tables (#1750).
 
 - ``print_sends``: each queue item a run queued, written by its source's ``record()``
-  as each plate is queued (`print_source.record_sends`), and each item ScadBuddy's
-  reprint of an archive queued, with no run (`operations.py` ``reprint_run``, #3741).
+  as each plate is queued (`print_source.record_sends`).
+- ``print_reprints``: each queue item ScadBuddy's reprint of an archive queued
+  (`operations.py` ``reprint_run``, #3741), with the archive it reprints. It is not a
+  send: no run queued it, and that archive is linked already, so the library linking
+  pass, a subject's last run and an order's archives never read it. Only `jobs` does.
 - ``print_links``: each archive a subject's print produced. Two ways a link is found
   (``matched_by``): ``queue_item``, the queue item ScadBuddy created reports
   ``archive_id``; ``content_hash``, once the item is gone, an archive whose
@@ -102,27 +105,37 @@ class LanArchiveLink(BaseModel):
     plate_id: int | None = None
 
 
-class SendRecorder(Protocol):
-    """Where a queue item ScadBuddy queued is recorded as a send: `PrintLinkStore` in the
-    API, `crud.print.RemoteSends` in the print worker, which reaches no SQL for it
-    (#3741, #5295)."""
+class PrintReprint(BaseModel):
+    """A queue item ScadBuddy's reprint of an archive queued (#3741)."""
 
-    async def record_sends(self, subject: PrintSubject, sends: Sequence[PrintSend]) -> None: ...
+    queue_item_id: int
+    #: The archive it reprints, which is linked to the subject.
+    archive_id: int
+
+
+class ReprintRecorder(Protocol):
+    """Where the queue item ScadBuddy's reprint queued is recorded: `PrintLinkStore` in
+    the API, `crud.print.RemoteReprints` in the print worker, which reaches no SQL for
+    it (#3741, #5295)."""
+
+    async def record_reprint(self, subject: PrintSubject, reprint: PrintReprint) -> None: ...
 
 
 #: How a job was found to be ScadBuddy's (#3741): a record of its queue item (the send a
-#: run or a reprint recorded, or a link that names the item), or the ``subtask_name`` a
-#: run's LAN start recorded on that printer.
+#: run recorded, the reprint ScadBuddy recorded, or a link that names the item), or the
+#: ``subtask_name`` a run's LAN start recorded on that printer.
 JobMatchedBy = Literal["queue_item", "lan_start"]
 
 
 class ScadBuddyJob(BaseModel):
     """A queue item or printer job that ScadBuddy queued or started (#3741): what the
     Prints page's "Queued from ScadBuddy" badge marks. It is found only by a record of
-    that job itself (`PrintLinkStore.jobs`): its queue item's send or link, or a run's
-    LAN start on that printer. An archive ScadBuddy linked is not enough, since
-    Bambuddy's own reprint of it prints the same archive. So a job queued from Bambuddy
-    or started on the printer has none."""
+    that job itself (`PrintLinkStore.jobs`): its queue item's send, reprint or link, or,
+    for a printer job with no Bambuddy queue item, a run's LAN start on that printer. An
+    archive ScadBuddy linked is not enough, since Bambuddy's own reprint of it prints the
+    same archive. So a job queued from Bambuddy has none. A job started on the printer
+    itself has none, unless it has the name of a run's LAN start on that printer whose
+    end the run has not recorded."""
 
     #: The print subject's key: ``output:<id>`` or ``library:<file id>``.
     subject: str
@@ -166,8 +179,10 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
     )
 
 
-#: The queue items a send recorded, then those only a link names by the item (a send
-#: from before ``print_sends``, #1750), each with the archive linked by that item.
+#: The queue items a send recorded, each with the archive linked by that item; those a
+#: reprint recorded, each with the archive it reprints; then those only a link names by
+#: the item (a send from before ``print_sends``, #1750). Bambuddy gives each queue item
+#: its own id, so no item is in two of them.
 _QUEUE_JOBS = (
     "SELECT s.queue_item_id, s.subject, s.run_id,"
     " COALESCE(o.slug, r.slug) AS slug,"
@@ -177,6 +192,11 @@ _QUEUE_JOBS = (
     " LEFT JOIN print_runs r ON r.id = s.run_id"
     f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('s.subject')}"
     " WHERE s.queue_item_id = ANY(%(ids)s)"
+    " UNION ALL"
+    " SELECT p.queue_item_id, p.subject, NULL::text AS run_id, o.slug, p.archive_id"
+    " FROM print_reprints p"
+    f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('p.subject')}"
+    " WHERE p.queue_item_id = ANY(%(ids)s)"
     " UNION ALL"
     " SELECT * FROM (SELECT DISTINCT ON (l.queue_item_id) l.queue_item_id, l.subject,"
     " NULL::text AS run_id, o.slug, l.archive_id"
@@ -201,7 +221,6 @@ _LAN_JOBS = (
     " LEFT JOIN output_index o ON o.output_id ="
     "  CASE WHEN r.output_id LIKE 'library:%%' THEN NULL ELSE r.output_id END"
     " WHERE r.printer = ANY(%(printers)s::uuid[]) AND e.name = ANY(%(names)s)"
-    " ORDER BY r.created_at"
 )
 
 
@@ -325,6 +344,11 @@ class PrintLinkStore:
         twice changes nothing: the first record is kept."""
         await asyncio.to_thread(self._record_sends, subject, list(sends))
 
+    async def record_reprint(self, subject: PrintSubject, reprint: PrintReprint) -> None:
+        """Record the queue item ScadBuddy's reprint of an archive of ``subject`` queued
+        (#3741). Recording it twice changes nothing: the first record is kept."""
+        await asyncio.to_thread(self._record_reprint, subject, reprint)
+
     async def sends_for(self, subject: PrintSubject) -> list[PrintSend]:
         """The subject's sends, in the order they were recorded."""
         return await asyncio.to_thread(self._sends_for, subject)
@@ -360,7 +384,7 @@ class PrintLinkStore:
     ) -> JobMatches:
         """Which of these jobs ScadBuddy queued or started (#3741), in at most two
         queries on one connection, one per kind of key given: ``queue_items`` by the
-        send recorded for the item (or a link that names the item), ``lan_starts``
+        send or reprint recorded for the item (or a link that names the item), ``lan_starts``
         (registry printer id, ``subtask_name``) by a run on that printer whose result
         records that start and not its end. A LAN start name two runs share matches
         neither: no match is ever a guess."""
@@ -448,6 +472,7 @@ class PrintLinkStore:
                 "DELETE FROM print_links WHERE subject = ANY(%s) RETURNING archive_id", (keys,)
             ).fetchall()
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
+            conn.execute("DELETE FROM print_reprints WHERE subject = ANY(%s)", (keys,))
             if unlinked:
                 conn.execute(
                     "DELETE FROM print_attachments AS a WHERE a.archive_id = ANY(%s) AND NOT"
@@ -481,6 +506,14 @@ class PrintLinkStore:
                     )
                     for send in sends
                 ],
+            )
+
+    def _record_reprint(self, subject: PrintSubject, reprint: PrintReprint) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO print_reprints (queue_item_id, subject, archive_id)"
+                " VALUES (%s, %s, %s) ON CONFLICT (queue_item_id) DO NOTHING",
+                (reprint.queue_item_id, subject.key, reprint.archive_id),
             )
 
     def _sends_for(self, subject: PrintSubject, run_id: str | None = None) -> list[PrintSend]:

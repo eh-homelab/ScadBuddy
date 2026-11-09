@@ -54,9 +54,10 @@ export const farmTools: Tool[] = [
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
       'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`). ' +
       'A printing or paused job ScadBuddy queued or started carries `scadbuddy` (its output or library file, ' +
-      'template `slug`, `run_id` and linked `archive_id`), matched by the queue item Bambuddy says the printer ' +
-      "prints when ScadBuddy recorded that item, or by a run's LAN start on that printer; a job queued from " +
-      'Bambuddy (its reprint of a ScadBuddy print too) or started on the printer has none.',
+      'template `slug`, `run_id` and linked `archive_id`). When Bambuddy says the printer prints a queue item, ' +
+      "only ScadBuddy's record of that item matches, so a job queued from Bambuddy (its reprint of a ScadBuddy " +
+      "print too) has none. When it prints none, a run's LAN start on that printer under the job's name matches " +
+      'until the run records that start ended; a job started on the printer itself has none unless it has such a name.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

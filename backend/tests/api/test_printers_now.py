@@ -748,3 +748,28 @@ def test_an_idle_printer_is_not_marked(client: TestClient) -> None:
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
 
     assert card["scadbuddy"] is None
+
+
+@respx.mock
+def test_a_bambuddy_item_decides_alone_never_the_lan_start(client: TestClient) -> None:
+    """#3741 review: a card whose printing Bambuddy item ScadBuddy has no record of is not
+    marked, even when a run's LAN start on that printer recorded the same job name and
+    no end (a run's last start never records one). A LAN start has no queue item, so
+    Bambuddy's item is a job of its own: its reprint of that print, for one."""
+    configure_bambuddy(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(2)]))
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(
+            200, json=status(2, subtask_name="scadbuddy-again-p1", current_archive_id=90)
+        )
+    )
+    respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(200, json=[printing_item(301, 2, 90)])
+    )
+    (first,) = client.get("/api/v1/print/printers/now").json()["printers"]
+    assert first["job_name"] == "scadbuddy-again-p1"
+    _lan_run(client, first["id"], "scadbuddy-again-p1", run_id="again")
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert card["scadbuddy"] is None

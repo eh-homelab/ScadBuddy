@@ -9,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -20,9 +21,11 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy import output_reader
+from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.workflows.problems import OPERATION_UNEXPECTED_DETAIL
 from tests.api.test_print_actions import TIMELAPSE, mock_enqueue
-from tests.api.test_print_history import link, mock_archive
+from tests.api.test_print_history import link, mock_archive, state
 from tests.api.test_project_file import project_folder_routes, uploads
 from tests.api.test_send import API, configure, make_output, plate_routes, upload_route
 from tests.api.test_sidebar import PUBLIC
@@ -49,7 +52,7 @@ def test_reprint_with_a_key_twice_queues_once(client: TestClient, model: str) ->
 
 @respx.mock
 def test_scadbuddys_own_reprint_keeps_its_mark_in_the_queue(client: TestClient, model: str) -> None:
-    """#3741: ScadBuddy's reprint records its queue item as a send of the archive's
+    """#3741: ScadBuddy's reprint records its queue item as a reprint of the archive's
     subject, so the queue marks it. Bambuddy's own reprint of the same archive has no
     such record (`test_farm.py`), so only this one is marked."""
     configure(client)
@@ -75,6 +78,40 @@ def test_scadbuddys_own_reprint_keeps_its_mark_in_the_queue(client: TestClient, 
         "queue_item",
     )
     assert items[52]["scadbuddy"] is None
+    # The reprint is not a send: the output's sends, which its runs and its last print
+    # read, are as they were (#3741 review).
+    links = state(client).print_links
+    assert asyncio.run(links.sends_for(PrintSubject.output(output_id))) == []
+
+
+@respx.mock
+def test_a_library_files_reprint_is_never_a_pending_send(client: TestClient) -> None:
+    """#3741 review: the reprint of a library file's archive is marked in the queue, but
+    it is not a send of the file. A send waits in `pending_library` until its item names
+    an archive it can link. This item names an archive that is linked already, so it
+    would wait for 180 days and take one of the linking pass's slots. It is not the
+    file's last run either."""
+    configure(client)
+    library = PrintSubject.library(89)
+    links = state(client).print_links
+    asyncio.run(
+        links.record(library, PrintLink(archive_id=36, matched_by="queue_item", queue_item_id=50))
+    )
+    mock_archive(36, printer_id=3, plate_id=1)
+    mock_enqueue(53)
+    queued = {**recording("queue.json")[1], "id": 53, "archive_id": 36, "status": "pending"}
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=[queued]))
+
+    reprinted = client.post(
+        "/api/v1/prints/36/reprint", headers={"Idempotency-Key": uuid.uuid4().hex}
+    )
+    assert reprinted.status_code == 201, reprinted.text
+
+    [item] = client.get("/api/v1/farm/queue").json()
+    assert item["scadbuddy"] is not None
+    assert (item["scadbuddy"]["library_file_id"], item["scadbuddy"]["archive_id"]) == (89, 36)
+    assert asyncio.run(links.pending_library(50, max_age=timedelta(days=180))) == []
+    assert asyncio.run(links.last_run(library)) == []
 
 
 @respx.mock

@@ -22,9 +22,9 @@ the API's `PrintRunStore`, so its ``print.run`` event and activity row commit wi
 record is natural on its run (``ON CONFLICT (run_id) DO NOTHING``), and its
 ``print.outcome`` commits with it.
 
-The queue item ScadBuddy's reprint queues is recorded as a send of the archive's subject
-(`POST /sends`, #3741), so the Prints page marks it. Natural: a send recorded again keeps
-the first record.
+The queue item ScadBuddy's reprint queues is recorded as a reprint of the archive's
+subject (`POST /reprints`, #3741), so the Prints page marks it. It is not a send. Natural:
+a reprint recorded again keeps the first record.
 
 A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
 or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
@@ -61,7 +61,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
-from scadbuddy.bambuddy.print_links import PrintSend
+from scadbuddy.bambuddy.print_links import PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
@@ -310,22 +310,22 @@ async def older_open(subject: str, runs: PrintRunsDep) -> list[PrintRun]:
     return await _outcomes(runs).older_open(subject)
 
 
-class SendsWrite(BaseModel):
-    """`PrintLinkStore.record_sends`'s arguments (#3741)."""
+class ReprintWrite(BaseModel):
+    """`PrintLinkStore.record_reprint`'s arguments (#3741)."""
 
     subject: str
-    sends: list[PrintSend]
+    reprint: PrintReprint
 
 
-@router.post("/sends", name="crud_print_record_sends", status_code=status.HTTP_204_NO_CONTENT)
-async def record_sends(body: SendsWrite, links: PrintLinksDep) -> None:
-    """The queue items ScadBuddy's reprint queued (#3741), so the Prints page marks them.
-    Natural: a send recorded again keeps the first record."""
+@router.post("/reprints", name="crud_print_record_reprint", status_code=status.HTTP_204_NO_CONTENT)
+async def record_reprint(body: ReprintWrite, links: PrintLinksDep) -> None:
+    """The queue item ScadBuddy's reprint of an archive queued (#3741), so the Prints
+    page marks it. Natural: a reprint recorded again keeps the first record."""
     try:
         subject = PrintSubject.parse(body.subject)
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
-    await links.record_sends(subject, body.sends)
+    await links.record_reprint(subject, body.reprint)
 
 
 class EnsureBambuddy(BaseModel):

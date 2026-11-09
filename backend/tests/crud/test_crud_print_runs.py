@@ -13,7 +13,6 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import ANY
 
 import pytest
 from temporalio.testing import ActivityEnvironment
@@ -23,7 +22,7 @@ from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import EVENT_KIND_REFUSED
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
-from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRunError, PrintRunStore, read_latest
@@ -39,7 +38,7 @@ from scadbuddy.crud.print import (
     RemoteEvents,
     RemoteOutcomes,
     RemotePrintRunStore,
-    RemoteSends,
+    RemoteReprints,
 )
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
@@ -351,16 +350,16 @@ async def test_the_insert_prunes_past_the_apis_own_retention(
     assert await runs.get("r1") is None and await runs.get("r2") is not None
 
 
-async def test_a_send_sent_twice_is_one_row(crud: CrudClient, store: SettingsStore) -> None:
+async def test_a_reprint_sent_twice_is_one_row(crud: CrudClient, store: SettingsStore) -> None:
     """#3741: the queue item a reprint queued, recorded through the API (#5295): sent
-    again, the first record stays."""
-    remote = RemoteSends(crud)
-    first = PrintSend(queue_item_id=61, plate_id=2, printer_id=3)
-    await remote.record_sends(SUBJECT, [first])
-    await remote.record_sends(SUBJECT, [first.model_copy(update={"plate_id": 9})])
-    assert await PrintLinkStore(store.pool).sends_for(SUBJECT) == [
-        first.model_copy(update={"first_seen": ANY})
-    ]
+    again, the first record stays. It is not a send of the subject."""
+    remote = RemoteReprints(crud)
+    await remote.record_reprint(SUBJECT, PrintReprint(queue_item_id=61, archive_id=40))
+    await remote.record_reprint(SUBJECT, PrintReprint(queue_item_id=61, archive_id=41))
+    links = PrintLinkStore(store.pool)
+    job = (await links.jobs(queue_items=[61])).queue_items[61]
+    assert (job.subject, job.archive_id, job.run_id) == (SUBJECT.key, 40, None)
+    assert await links.sends_for(SUBJECT) == []
 
 
 async def test_an_api_out_of_reach_reads_as_no_run() -> None:

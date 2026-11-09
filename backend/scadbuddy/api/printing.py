@@ -707,10 +707,11 @@ async def post_tray_spool(
         "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
         "names Bambuddy's archives page. A printing or paused job ScadBuddy queued or "
-        "started carries `scadbuddy` (#3741): the output or library file, matched by the "
-        "queue item Bambuddy says the printer prints when ScadBuddy recorded that item, or "
-        "by a run's LAN start on that printer. A linked archive alone is not a match, as "
-        "Bambuddy's reprint of it prints the same archive. "
+        "started carries `scadbuddy` (#3741): the output or library file. When Bambuddy "
+        "says the printer prints a queue item, only ScadBuddy's record of that item "
+        "matches. When it prints none, a run's LAN start on that printer under the job's "
+        "name matches, until the run records that start's end. A linked archive alone is "
+        "not a match, as Bambuddy's reprint of it prints the same archive. "
         "A printer whose status cannot be read is a card with `error`, never a failed page."
     ),
 )

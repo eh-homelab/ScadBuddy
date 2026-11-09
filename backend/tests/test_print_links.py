@@ -8,7 +8,13 @@ from datetime import timedelta
 import psycopg
 import pytest
 
-from scadbuddy.bambuddy.print_links import LanArchiveLink, PrintLink, PrintLinkStore, PrintSend
+from scadbuddy.bambuddy.print_links import (
+    LanArchiveLink,
+    PrintLink,
+    PrintLinkStore,
+    PrintReprint,
+    PrintSend,
+)
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.render.projection import JobProjection
@@ -245,6 +251,29 @@ async def test_sends_are_recorded_per_subject_once_per_queue_item(links: PrintLi
     ]
     assert all(s.first_seen is not None for s in sent)
     assert [s.queue_item_id for s in await links.sends_for(LIBRARY)] == [60]
+
+
+async def test_a_reprint_marks_its_item_and_is_no_send(links: PrintLinkStore) -> None:
+    """#3741 review: ScadBuddy's reprint of an archive marks its queue item, with the
+    archive it reprints. It is not a send: not pending for the library linking pass, not
+    a subject's run, and it goes with its subject."""
+    await links.record_sends(LIBRARY, [PrintSend(queue_item_id=51, plate_id=1, printer_id=2)])
+    await links.link_library(51, 40, "cube.3mf")
+    await links.record_reprint(LIBRARY, PrintReprint(queue_item_id=70, archive_id=40))
+    await links.record_reprint(OUT, PrintReprint(queue_item_id=71, archive_id=18))
+
+    assert await links.pending_library(10, max_age=timedelta(days=180)) == []
+    assert [s.queue_item_id for s in await links.last_run(LIBRARY)] == [51]
+    assert await links.sends_for(OUT) == []
+    matches = await links.jobs(queue_items=[70, 71])
+    assert (matches.queue_items[70].library_file_id, matches.queue_items[70].archive_id) == (
+        89,
+        40,
+    )
+    assert (matches.queue_items[71].output_id, matches.queue_items[71].run_id) == (OUTPUT, None)
+
+    await links.delete_outputs([OUTPUT])
+    assert 71 not in (await links.jobs(queue_items=[71])).queue_items
 
 
 async def test_a_library_send_is_pending_until_its_archive_is_linked(
