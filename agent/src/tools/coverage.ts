@@ -67,6 +67,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
   },
   {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/accept-for-customer',
+    reason:
+      "A person's \"Accept for the customer\" on a storefront order (#5283, spec 2026-11-02 §6.1): the shop says why the customer did not accept themselves; an agent never accepts for the customer.",
+  },
+  {
     operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",
     reason: "A person's choice in the Revisions panel (#5280, spec 2026-11-02 §4.6); add_model_media adds the agent's own photos.",
   },

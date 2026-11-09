@@ -310,6 +310,21 @@ describe('OrderPage payment requests (#4957)', () => {
     expect(screen.queryByRole('combobox', { name: 'For request' })).not.toBeInTheDocument()
   })
 
+  it('names the customer in the history, not the browser (#5283)', async () => {
+    state.events.push({
+      id: state.events.length + 1,
+      order_id: ORDER_ACCEPTED,
+      at: new Date().toISOString(),
+      by: { kind: 'customer', principal: `customer:${CUSTOMER_BOB}`, session: 'v-1' },
+      kind: 'revision.answered',
+      detail: {},
+    })
+    render(ORDER_ACCEPTED)
+    const history = await screen.findByRole('region', { name: 'Audit line' })
+    const answered = (await within(history).findByText('revision.answered')).closest('li')!
+    expect(answered).toHaveTextContent('· customer')
+  })
+
   it('names a provider in the history, not the browser', async () => {
     mockConnectProvider()
     const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })

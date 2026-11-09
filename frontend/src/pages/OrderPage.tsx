@@ -532,7 +532,7 @@ export function OrderPage() {
               {[...events.data].reverse().map((e) => (
                 <li key={e.id}>
                   <span className="text-foreground">{e.kind}</span>
-                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : 'browser'}
+                  {typeof e.detail.to === 'string' ? ` → ${e.detail.to}` : ''} · {timeAgo(e.at)} · {e.by.kind === 'agent' ? (e.by.principal ?? 'agent') : e.by.kind === 'provider' ? `${providerLabel((e.by.principal ?? '').replace(/^payment:/, ''))} (provider)` : e.by.kind === 'customer' ? 'customer' : e.by.kind === 'visitor' ? 'storefront visitor' : 'browser'}
                   {/* #4252 (§7.4): what a flow did, under which run. */}
                   {e.by.run_id && (
                     <>

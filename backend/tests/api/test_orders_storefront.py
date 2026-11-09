@@ -8,12 +8,16 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import NewModelItem
+from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
+from scadbuddy.store.refs import BlobRefs
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
+from tests.api.test_orders_lifecycle import problem
 from tests.api.test_settings_runtime import _state
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import resolved
+from tests.orders.storefront.test_customer_actor import storefront_order
+from tests.orders.test_lifecycle import Shop, resolved
 
 
 @pytest.fixture
@@ -86,3 +90,36 @@ def test_a_slice_with_new_inputs_is_refused_on_a_cart(
     assert "revision" not in refused.text
     after = client.get(f"/api/v1/orders/{draft_with_item}").json()["items"][0]
     assert after["current_revision_id"] == item["current_revision_id"]
+
+
+def test_the_shop_accepts_for_the_customer_only_with_a_reason(
+    client: TestClient, pg_pool: PgPool
+) -> None:
+    """#5283, storefront spec §6.1: on a storefront order the shop's own accept is
+    refused; "Accept for the customer" takes a reason and keeps it in the audit line."""
+    order = storefront_order(Shop(OrderStore(pg_pool), BlobRefs(pg_pool)), pg_pool, 1)
+    item = client.get(f"/api/v1/orders/{order.id}").json()["items"][0]
+    rev = item["revisions"][-1]
+    url = f"/api/v1/orders/{order.id}/items/{item['id']}"
+    problem(
+        client.post(f"{url}/revisions/{rev['id']}/answer", json={"answer": "accepted"}),
+        "customer_accepts",
+    )
+    [quote] = client.get(f"/api/v1/orders/{order.id}").json()["items"][0]["quotes"]
+    problem(client.post(f"{url}/quotes/{quote['id']}/accept"), "customer_accepts")
+    blank = {"what": "revision", "target_id": rev["id"], "reason": ""}
+    assert client.post(f"{url}/accept-for-customer", json=blank).status_code == 422
+    spaces = client.post(f"{url}/accept-for-customer", json={**blank, "reason": "  "})
+    assert spaces.status_code == 422, spaces.text
+    accepted = client.post(
+        f"{url}/accept-for-customer",
+        json={"what": "revision", "target_id": rev["id"], "reason": "By phone, 9 Nov"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["status"] == "approved"
+    detail = client.get(f"/api/v1/orders/{order.id}").json()
+    assert detail["order"]["status"] == "accepted"
+    events = client.get(f"/api/v1/orders/{order.id}/events").json()
+    [event] = [e for e in events if e["kind"] == "item.accepted_for_customer"]
+    assert event["detail"]["reason"] == "By phone, 9 Nov"
+    assert event["by"]["kind"] == "browser"

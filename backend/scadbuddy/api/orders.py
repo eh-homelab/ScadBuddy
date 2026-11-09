@@ -24,7 +24,7 @@ import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -467,6 +467,21 @@ class PaymentCreate(BaseModel):
     notes: str = ""
     #: The open payment request this payment settles (#4957): it closes as `paid`.
     payment_request_id: str | None = None
+
+
+class AcceptForCustomerBody(BaseModel):
+    """The shop's "Accept for the customer" on a storefront order (#5283, storefront spec
+    §6.1): what it accepts, and why the customer did not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: `revision`: the item's newest sent revision, accepted; `quote`: one of its quotes.
+    what: Literal["revision", "quote"]
+    #: The revision's id or the quote's id.
+    target_id: str = Field(min_length=1, max_length=100)
+    #: Why the shop accepts for the customer (e.g. "By phone, 9 Nov"), kept in the audit
+    #: row `item.accepted_for_customer`.
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class CancelBody(BaseModel):
@@ -2161,7 +2176,10 @@ async def send_revision(
         "revision; on a `together` item an acceptance also accepts the quote that names "
         "it. 404 `revision_not_found`; 409 `revision_not_newest`, `revision_not_sent`, "
         "`revision_answered`, `revision_not_quoted`, `item_not_open` and "
-        "`order_closed`/`order_cancelled`/`order_on_hold`."
+        "`order_closed`/`order_cancelled`/`order_on_hold`. On a `storefront` order an "
+        "`accepted` is the customer's: the shop's is 409 `customer_accepts` (use "
+        "`POST …/accept-for-customer`); the customer's accept that leaves every open "
+        "item `approved` accepts the order."
     ),
 )
 async def answer_revision(
@@ -2176,6 +2194,39 @@ async def answer_revision(
     by = current_actor()
     return await _run_linked(
         lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by),
+        order_id,
+        service,
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/accept-for-customer",
+    response_model=OrderItem,
+    summary="Accept a revision or a quote for a storefront customer",
+    description=(
+        "Storefront spec §6.1: on a `storefront` order only the customer accepts a revision "
+        "or a quote, and the shop's own accept is 409 `customer_accepts`. This accepts "
+        "`target_id` (the newest sent revision, or a quote of the item) for the customer, "
+        "as their accept would, and keeps `reason` in the audit row "
+        "`item.accepted_for_customer`. The accept that leaves every open item `approved` "
+        "accepts the order. 422 for a blank `reason`; 404 `revision_not_found`, "
+        "`quote_not_found`; 409 `order_not_storefront` (a back-office order: accept it "
+        "directly), and the refusals of the revision answer and the quote accept."
+    ),
+)
+async def accept_for_customer(
+    order_id: str,
+    item_id: str,
+    body: AcceptForCustomerBody,
+    orders: OrdersDep,
+    service: PaymentsDep,
+) -> OrderItem:
+    check_path(order_id, item_id, body.target_id)
+    by = current_actor()
+    return await _run_linked(
+        lambda: orders.lifecycle.accept_for_customer(
+            order_id, item_id, body.what, body.target_id, body.reason, by
+        ),
         order_id,
         service,
     )
@@ -2393,6 +2444,10 @@ async def _slice_revision(
     "/{order_id}/items/{item_id}/quotes/{quote_id}/accept",
     response_model=OrderItem,
     summary="Accept a quote",
+    description=(
+        "On a `storefront` order only the customer accepts a quote: the shop's accept is "
+        "409 `customer_accepts` (use `POST …/accept-for-customer`)."
+    ),
 )
 async def accept_quote(
     order_id: str, item_id: str, quote_id: str, orders: OrdersDep, service: PaymentsDep

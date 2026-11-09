@@ -30,7 +30,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -2084,44 +2084,46 @@ class Lifecycle:
         """§3.5: every item not cancelled has an accepted quote; the addresses are
         copied (Ruling 11); `accepted_at` is stamped."""
         with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            check_submitted(order)
-            if order.status not in OPEN_FOR_EDITS:
-                raise LifecycleError(
-                    "order_not_acceptable", f"order {order.label} is {order.status}"
-                )
-            self._not_on_hold(order)
-            self._no_payment_in_flight(conn, order)
-            items = self.store.items(order.id, conn=conn)
-            open_items = [item for item in items if item.status != "cancelled"]
-            if not open_items:
-                raise LifecycleError("no_open_items", f"order {order.label} has no open items")
-            unquoted = [item.id for item in open_items if item.status != "approved"]
-            if unquoted:
-                raise LifecycleError(
-                    "items_not_quoted",
-                    f"{len(unquoted)} item(s) of order {order.label} have no accepted quote",
-                    items=unquoted,
-                )
-            snapshots: dict[str, AddressSnapshot | None] = {}
-            for name in ("shipping_address_id", "billing_address_id"):
-                address_id = getattr(order, name)
-                found = self.store.address(address_id, conn=conn) if address_id else None
-                snapshots[name.removesuffix("_id")] = (
-                    AddressSnapshot.model_validate(found[1].model_dump(exclude={"position"}))
-                    if found
-                    else None
-                )
-            self.store.update_order_fields(
-                conn,
-                order.id,
-                shipping_address=snapshots["shipping_address"],
-                billing_address=snapshots["billing_address"],
-            )
-            accepted = self.store.set_order_status(conn, order.id, "accepted")
-            self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
-            self._open_balance(conn, order, by)
+            accepted = self._accept_order(conn, self._lock(conn, order_id), by)
         self._told(_Change(accepted))
+        return accepted
+
+    def _accept_order(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """`accept_order` in the caller's transaction, under its lock of ``order``."""
+        check_submitted(order)
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError("order_not_acceptable", f"order {order.label} is {order.status}")
+        self._not_on_hold(order)
+        self._no_payment_in_flight(conn, order)
+        items = self.store.items(order.id, conn=conn)
+        open_items = [item for item in items if item.status != "cancelled"]
+        if not open_items:
+            raise LifecycleError("no_open_items", f"order {order.label} has no open items")
+        unquoted = [item.id for item in open_items if item.status != "approved"]
+        if unquoted:
+            raise LifecycleError(
+                "items_not_quoted",
+                f"{len(unquoted)} item(s) of order {order.label} have no accepted quote",
+                items=unquoted,
+            )
+        snapshots: dict[str, AddressSnapshot | None] = {}
+        for name in ("shipping_address_id", "billing_address_id"):
+            address_id = getattr(order, name)
+            found = self.store.address(address_id, conn=conn) if address_id else None
+            snapshots[name.removesuffix("_id")] = (
+                AddressSnapshot.model_validate(found[1].model_dump(exclude={"position"}))
+                if found
+                else None
+            )
+        self.store.update_order_fields(
+            conn,
+            order.id,
+            shipping_address=snapshots["shipping_address"],
+            billing_address=snapshots["billing_address"],
+        )
+        accepted = self.store.set_order_status(conn, order.id, "accepted")
+        self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
+        self._open_balance(conn, order, by)
         return accepted
 
     def _no_payment_in_flight(self, conn: Conn, order: Order, *, kind: str | None = None) -> None:
@@ -3635,12 +3637,23 @@ class Lifecycle:
         item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
         `design_first` item the quote's revision must be accepted first
         (`revision_not_accepted`); a custom item has neither. Never on a cart (#5282,
-        ``order_not_submitted``)."""
+        ``order_not_submitted``). On a storefront order only the customer accepts
+        (`customer_accepts`, storefront spec §6.1), and the accept that leaves every open
+        item `approved` accepts the order (§6.2)."""
+        return self._accept_quote_of(order_id, item_id, quote_id, by, for_customer=None)
+
+    def _accept_quote_of(
+        self, order_id: str, item_id: str, quote_id: str, by: Actor, *, for_customer: str | None
+    ) -> OrderItem:
+        """`accept_quote`, or with ``for_customer`` (a reason) the shop's accept of it for
+        a storefront customer (`accept_for_customer`)."""
         self._not_a_cart(order_id)
+        self._customers_accept(order_id, by, for_customer)
         self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
+            self._accepts(order, by, for_customer)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             self._open_for_requote(conn, order, item, "an item's price")
@@ -3651,7 +3664,99 @@ class Lifecycle:
                     "quote_not_found", f"no quote {quote_id} of item {item_id}", not_found=True
                 )
             order, item, released = self._accept_quote(conn, order, item, quote, by)
+            self._for_customer(conn, order, by, item, "quote", quote.id, for_customer)
+            order = self._accepted_by_the_last(conn, order, by)
         self._told(_Change(order, [(item, None)], released))
+        return item
+
+    # -- the storefront's accepts (storefront spec §6.1, §6.2) ----------------------------
+
+    @staticmethod
+    def _accepts(order: Order, by: Actor, for_customer: str | None) -> None:
+        """On a storefront order a revision or a quote is accepted by the customer, or by
+        the shop "for the customer" with a reason (`customer_accepts`); "for the
+        customer" is for a storefront order only (`order_not_storefront`)."""
+        if for_customer is not None:
+            if order.source != "storefront":
+                raise LifecycleError(
+                    "order_not_storefront",
+                    f"{order.label} is not a storefront order: accept it as the shop",
+                )
+        elif order.source == "storefront" and by.kind != "customer":
+            raise LifecycleError(
+                "customer_accepts",
+                f"the customer accepts on storefront order {order.label};"
+                " the shop accepts only with Accept for the customer",
+            )
+
+    def _customers_accept(self, order_id: str, by: Actor, for_customer: str | None) -> None:
+        """:meth:`_accepts` before anything is written (``ensure_revision``'s repair among
+        them); the caller checks again under the order's lock."""
+        found = self.store.order(order_id)
+        if found is not None:
+            self._accepts(found, by, for_customer)
+
+    def _for_customer(
+        self,
+        conn: Conn,
+        order: Order,
+        by: Actor,
+        item: OrderItem,
+        what: str,
+        target_id: str,
+        reason: str | None,
+    ) -> None:
+        """The audit row of the shop's accept for the customer, with its reason."""
+        if reason is not None:
+            self._event(
+                conn,
+                order,
+                by,
+                "item.accepted_for_customer",
+                item_id=item.id,
+                what=what,
+                target_id=target_id,
+                reason=reason,
+            )
+
+    def _accepted_by_the_last(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """§6.2, decision 11: on a storefront order the accept that leaves every open item
+        `approved` accepts the order, in its transaction and as ``by``; any other order
+        waits for the shop's `accept_order`."""
+        if order.source != "storefront" or order.status not in OPEN_FOR_EDITS:
+            return order
+        items = [i for i in self.store.items(order.id, conn=conn) if i.status != "cancelled"]
+        if not items or any(i.status != "approved" for i in items):
+            return order
+        return self._accept_order(conn, order, by)
+
+    def accept_for_customer(
+        self,
+        order_id: str,
+        item_id: str,
+        what: Literal["revision", "quote"],
+        target_id: str,
+        reason: str,
+        by: Actor,
+    ) -> OrderItem:
+        """The shop's "Accept for the customer" on a storefront order (storefront spec
+        §6.1): the newest sent revision ``target_id`` (an `accepted` answer) or the quote
+        ``target_id``, as the customer's own accept would, for ``reason`` (trimmed, 1 to
+        500 characters), which the audit row ``item.accepted_for_customer`` keeps. A
+        `back_office` order is `order_not_storefront`: the shop accepts it as itself."""
+        reason = reason.strip()
+        if not 1 <= len(reason) <= 500:
+            raise LifecycleError("reason", "a reason is 1 to 500 characters", unprocessable=True)
+        if what == "quote":
+            return self._accept_quote_of(order_id, item_id, target_id, by, for_customer=reason)
+        _, item = self._answer_revision(
+            order_id,
+            item_id,
+            target_id,
+            RevisionAnswerInput(answer="accepted"),
+            by,
+            for_customer=reason,
+        )
         return item
 
     def _accept_quote(
@@ -3760,13 +3865,38 @@ class Lifecycle:
         by: Actor,
     ) -> Revision:
         """The customer's answer to the newest sent revision. On a `together` item an
-        `accepted` also accepts the newest quote that names it, in the same transaction."""
+        `accepted` also accepts the newest quote that names it, in the same transaction.
+        On a storefront order only the customer accepts (`customer_accepts`, storefront
+        spec §6.1; the shop may record their `changes_requested`), and the accept that
+        leaves every open item `approved` accepts the order (§6.2)."""
+        revision, _ = self._answer_revision(
+            order_id, item_id, revision_id, body, by, for_customer=None
+        )
+        return revision
+
+    def _answer_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        revision_id: str,
+        body: RevisionAnswerInput,
+        by: Actor,
+        *,
+        for_customer: str | None,
+    ) -> tuple[Revision, OrderItem]:
+        """`answer_revision`, or with ``for_customer`` (a reason) the shop's accept of it
+        for a storefront customer (`accept_for_customer`)."""
         if body.answer == "changes_requested" and not body.note.strip():
             raise LifecycleError("note", "note: say what should change", unprocessable=True)
+        accepting = body.answer == "accepted"
+        if accepting:
+            self._customers_accept(order_id, by, for_customer)
         self.ensure_revision(order_id, item_id, by)
         released: list[str] = []
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
+            if accepting:
+                self._accepts(order, by, for_customer)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
@@ -3810,8 +3940,11 @@ class Lifecycle:
             )
             if quote is not None:
                 order, item, released = self._accept_quote(conn, order, item, quote, by)
+            self._for_customer(conn, order, by, item, "revision", revision.id, for_customer)
+            if quote is not None:
+                order = self._accepted_by_the_last(conn, order, by)
         self._told(_Change(order, [(item, None)], released))
-        return revision
+        return revision, item
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------
 
