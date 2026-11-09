@@ -33,7 +33,7 @@ import hashlib
 import logging
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -298,8 +298,9 @@ def quote_check(
     With ``body_only`` (a slice whose new design the route revises first, #5761
     review) the item's state is the revise path's to refuse, and so are the new design's
     slots, known only once it renders (the run's): this checks the cart, that the item
-    has a design (``check_design``), the filaments the body names and those the item
-    has pinned, each in the book and not archived, and the price book.
+    has a design (``check_design``), the filaments the body names, each in the book and
+    not archived, and the price book. The item's pinned filaments go with the revision,
+    so the run judges those it still uses.
     404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
@@ -350,7 +351,12 @@ def quote_check(
         raise _unprocessable(
             "filaments", f"colour slot {empty[0]} has no filament to price it with"
         )
-    named = check_filaments(store, {slot: f for slot, f in slots.items() if f is not None})
+    judged = dict(request.filaments) if body_only else slots
+    named = check_filaments(store, {slot: f for slot, f in judged.items() if f is not None})
+    if body_only:
+        # The pins the revision carries price it too, when they still stand.
+        pinned = (store.filament(f) for slot, f in slots.items() if f and slot not in judged)
+        named = [*named, *(record for record in pinned if record is not None)]
     if prices_nothing(policy, named):
         raise _unprocessable(
             "price_book",
@@ -370,14 +376,22 @@ def _superseded(item_id: str) -> LifecycleError:
     )
 
 
-def support_check(store: OrderStore, item_id: str, request: SliceQuoteRequest) -> None:
+def support_check(
+    store: OrderStore,
+    item_id: str,
+    request: SliceQuoteRequest,
+    *,
+    colours: Collection[int] | None = None,
+) -> None:
     """422 ``support_filaments`` for a support slot that is a colour slot of the item (its
     filament is the slot's own), or below 0, or a support filament unknown or archived
-    (§6.3). Blocking; writes nothing."""
+    (§6.3). Blocking; writes nothing. ``colours`` stands in for the item's slots: before a
+    slice's new design renders, the slots its body names (#5761 review)."""
     item = store.item(item_id)
     if item is None:
         return
-    colours = {slot.slot for slot in item.colours}
+    if colours is None:
+        colours = {slot.slot for slot in item.colours}
     for slot, filament_id in sorted(request.support_filaments.items()):
         if slot < 0 or slot in colours:
             raise _unprocessable(
@@ -981,6 +995,10 @@ async def quote_run(
         saved_as=operation_output_id(quote_id),
         carried=carried_filaments,
     )
+    if expected_revision_id is not None:
+        # A slice's new design has its colour slots only now: its support slots are
+        # judged against them here (#5761 review).
+        await asyncio.to_thread(support_check, store, item_id, request)
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every

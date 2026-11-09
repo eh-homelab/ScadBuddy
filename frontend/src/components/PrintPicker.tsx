@@ -1347,7 +1347,9 @@ export function PrintPicker({
     const wanted = seed.printer_id ?? null
     const known = wanted !== null && printers.some((entry) => entry.id === wanted)
     // A seed naming only a registry row (an item print's quote on a LAN-only printer,
-    // #4673): that row, when the server says a run reaches it.
+    // #4673): that row, when the server says a run reaches it. The wait below holds only
+    // while it is choosable: a read that stops listing it makes `lanRow` null, and the
+    // rest of the seed applies on the printer in view (#5761 review).
     const row = wanted === null && seed.printer ? seed.printer : null
     const lanRow = row !== null && lanChoosable.some((entry) => entry.id === row) ? row : null
     // The rows first: before they load no row is choosable yet.

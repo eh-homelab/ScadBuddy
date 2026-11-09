@@ -504,9 +504,12 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 body_only=bool(request.get(BODY_ONLY)),
             )
         )
-        if not request.get(BODY_ONLY):
-            # Against the item's colour slots, which a new design's render sets.
-            await asyncio.to_thread(support_check, orders.store, request["item_id"], body)
+        # Before a new design's revision, against the slots the body names; the run
+        # judges them again against the rendered slots (`quote_run`).
+        named = set(body.filaments) if request.get(BODY_ONLY) else None
+        await asyncio.to_thread(
+            lambda: support_check(orders.store, request["item_id"], body, colours=named)
+        )
         await library_file_stands(request["item_id"])
         if body.printer is not None:
             # A registry printer the run would refuse (a disagreeing pair, a virtual

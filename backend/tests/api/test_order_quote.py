@@ -984,3 +984,25 @@ def test_two_racing_slices_of_different_designs_revise_after_acceptance_once(
     assert [r["number"] for r in item["revisions"]] == [1, 2, 3]
     assert quote["revision_id"] == item["current_revision_id"]
     assert paths == ["after acceptance"]
+
+
+def test_a_slices_support_slot_on_its_new_designs_colour_slot_is_refused(
+    bambuddy: TestClient,
+) -> None:
+    """#5761 review: a support slot is judged against the new design's colour slots: one
+    the body also names as a colour is refused before the revision, and one the render
+    gives is refused by the run, never priced with the colour's filament silently."""
+    shop = Shop(bambuddy, by_hand=True)
+    BambuddySlices({1: sliced_plate(1, 600, [1.0, 1.0])})
+    _slice(shop)
+
+    both = shop.post(inputs=WIDER, support_filaments={"0": shop.petg})
+    assert both.status_code == 422, both.text
+    assert "support_filaments" in both.text
+    assert [r["number"] for r in shop.get_item()["revisions"]] == [1]
+
+    started = shop.post(inputs=WIDER, filaments={}, support_filaments={"1": shop.pla})
+    assert started.status_code == 202, started.text
+    ended = follow_operation(bambuddy, started.json(), timeout=120, poll=0.2)
+    assert ended["status"] == "failed", ended
+    assert "support_filaments" in json.dumps(ended)

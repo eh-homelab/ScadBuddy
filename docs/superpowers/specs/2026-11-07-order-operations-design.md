@@ -228,9 +228,10 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   so every refusal of that path applies unchanged. That step is `run_operation`'s `before_start`, so it runs only when
   no record answers the key and its operation is not running (a replay makes no
   revision), and it first runs the quote's own check on the body alone (`quote_check`
-  `body_only`: the cart, the filaments the body names and the item has pinned, the price
-  book and the machine rate; the new design's slots, which only its render gives, are the
-  run's to judge), so a refusal there writes nothing and leaves an accepted item's one revise after
+  `body_only`: the cart, the filaments the body names, a support slot the body also names
+  as a colour, the price book and the machine rate; the new design's slots, which only
+  its render gives, are the run's to judge, as are the carried pins and the support
+  slots against those slots), so a refusal there writes nothing and leaves an accepted item's one revise after
   acceptance unused. The same design makes no revision (`add_revision` `reuse_current`
   compares it under the order's lock and writes nothing), so two first sends of one key
   that race make one. The new revision has no colour slots until it renders, so the
