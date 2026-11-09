@@ -4,9 +4,10 @@ ScadBuddy is an overlay on Bambuddy, so ``/prints`` shows every active printer's
 state from ``GET /printers/{id}/status``, not only the archives ScadBuddy linked: a job
 started from Bambuddy, or one paused on an HMS error, is as visible as one ScadBuddy
 queued. A job whose archive ScadBuddy linked points at its print; any other at
-Bambuddy's archives. A job ScadBuddy queued or started carries ``scadbuddy`` (#3741,
-`with_scadbuddy_jobs`): the printing queue item ScadBuddy recorded, or a run's LAN start
-on that printer. A linked archive alone does not mark a job.
+Bambuddy's page for its archive, ``/archives/{id}`` (#3743). A job ScadBuddy queued or
+started carries ``scadbuddy`` (#3741, `with_scadbuddy_jobs`): the printing queue item
+ScadBuddy recorded, or a run's LAN start on that printer. A linked archive alone does not
+mark a job.
 
 Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
 with a fresh report (`is_fresh`) shows that report, whether or not it is also in
@@ -40,9 +41,10 @@ from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
 
-#: Bambuddy's archives page, where a job ScadBuddy did not start is found. Bambuddy has
-#: no page per archive (``App.tsx`` at 14da007, as ``api/print_history.py`` records),
-#: so the card names the archive beside this link rather than in it.
+#: Bambuddy's archives page. A card links a job ScadBuddy did not link to its archive
+#: there, ``/archives/{id}`` (#3743): Bambuddy opens one archive over the list on that
+#: route since v1.3.0 (``frontend/src/App.tsx`` line 237 at maziggy/bambuddy@2ce0d93,
+#: route added in d43bf57). Bambuddy before v1.3.0 has no such route.
 ARCHIVES_PAGE = "/archives"
 
 Activity = Literal["printing", "paused", "idle", "finished", "failed", "offline", "unknown"]
@@ -95,7 +97,7 @@ class PrinterNow(BaseModel):
     archive_id: int | None = None
     #: ScadBuddy linked ``archive_id``: its print is ``/prints/{archive_id}``.
     linked: bool = False
-    #: Where Bambuddy shows the archive, when ScadBuddy did not link it.
+    #: Bambuddy's page for the archive (``/archives/{id}``), when ScadBuddy did not link it.
     bambuddy_url: str | None = None
     #: The status read failed; the rest is unknown.
     error: str | None = None
@@ -316,7 +318,7 @@ async def printer_now(
             "archive_id": archive_id,
             "linked": linked,
             "bambuddy_url": (
-                client.config.web_url(ARCHIVES_PAGE)
+                client.config.web_url(f"{ARCHIVES_PAGE}/{archive_id}")
                 if archive_id is not None and not linked
                 else None
             ),

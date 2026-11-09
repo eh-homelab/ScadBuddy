@@ -1,9 +1,23 @@
-import type { PrintDetail, PrintSummary } from '../../api/types'
+import type { PrintDetail, PrintSummary, ScadBuddyJob } from '../../api/types'
+import { editPath } from '../../lib/deeplink'
 import type { Slide } from '../media/slides'
 
 /** The print detail page (#311). */
 export function printPath(archiveId: number): string {
   return `/prints/${archiveId}`
+}
+
+/**
+ * #3743 — the ScadBuddy page of a job ScadBuddy queued or started: its print once
+ * Bambuddy archived it, else its subject's page (the output's, or the library file's
+ * in the Library). A queue item page of its own is #3744.
+ */
+export function scadbuddyJobPath(job: ScadBuddyJob): string {
+  if (job.archive_id != null) return printPath(job.archive_id)
+  if (job.output_id != null) return editPath(job.output_id)
+  if (job.library_file_id != null) return `/library?file=${job.library_file_id}`
+  // A subject names an output or a library file; this is for a key of neither.
+  return '/prints'
 }
 
 /** #1755 — the history of one Bambuddy library file's prints. */

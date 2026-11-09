@@ -126,7 +126,8 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
     paused = cards[2]
     assert paused["activity"] == "paused"
     assert (paused["archive_id"], paused["linked"]) == (90, False)
-    assert paused["bambuddy_url"].endswith("/archives")
+    # #3743: Bambuddy's own page for the archive (`archives/:id`, maziggy/bambuddy v1.3.0).
+    assert paused["bambuddy_url"].endswith("/archives/90")
     assert [(hms["code"], hms["description"]) for hms in paused["hms"]] == [
         ("0C008042", "Spaghetti detected"),
         ("0700220000020025", None),

@@ -5,7 +5,8 @@ import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { useSubscription } from '../../lib/realtime'
-import { CameraIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
+import { NEW_TAB } from '../../lib/embed'
+import { CameraIcon, ExternalLinkIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -22,6 +23,7 @@ import { cn } from '@/lib/utils'
 import { mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
+import { printPath, scadbuddyJobPath } from './prints'
 import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
 /** How often the printers are read while the page is visible: the fallback when no
@@ -232,7 +234,7 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
       {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
       {working && (
         <>
-          {printer.job_name && <p className="mt-1 truncate">{printer.job_name}</p>}
+          <JobLink printer={printer} />
           {printer.scadbuddy && <QueuedFromScadBuddy job={printer.scadbuddy} className="mt-1 self-start" />}
           {progress !== null && (
             <div
@@ -274,28 +276,48 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
           ))}
         </ul>
       )}
-      {printer.archive_id != null &&
-        (printer.linked ? (
-          <Button asChild variant="link" size="xs" className="mt-1 h-auto self-start px-0">
-            <Link to={`/prints/${printer.archive_id}`}>View this print</Link>
-          </Button>
-        ) : printer.bambuddy_url ? (
-          // Bambuddy has no page per archive, so the link names the page it opens and the
-          // archive to look for there sits beside it (#2930).
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            <a
-              href={bambuddyLink(printer.bambuddy_url)}
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Bambuddy's archives
-            </a>{' '}
-            · archive {printer.archive_id}
-          </p>
-        ) : null)}
     </>
   )
+}
+
+const JOB_LINK = 'font-medium text-primary underline-offset-4 hover:underline'
+
+/**
+ * #3743 — the job's name, as a link to where the job is: ScadBuddy's print of an
+ * archive ScadBuddy linked; for ScadBuddy's own job (`scadbuddy`), its ScadBuddy page
+ * ({@link scadbuddyJobPath}); for any other, its archive in Bambuddy (`/archives/{id}`,
+ * on the hostname framing ScadBuddy, in a new tab, which escapes the frame's sandbox).
+ * A job with none of these is its name only.
+ */
+function JobLink({ printer }: { printer: PrinterNow }) {
+  const name = printer.job_name ?? (printer.archive_id != null ? `Archive ${printer.archive_id}` : null)
+  const inside =
+    printer.linked && printer.archive_id != null
+      ? printPath(printer.archive_id)
+      : printer.scadbuddy
+        ? scadbuddyJobPath(printer.scadbuddy)
+        : null
+  if (inside) {
+    return (
+      <p className="mt-1 truncate">
+        <Link to={inside} className={JOB_LINK}>
+          {name ?? 'This print'}
+        </Link>
+      </p>
+    )
+  }
+  if (printer.bambuddy_url) {
+    return (
+      <p className="mt-1 truncate">
+        <a href={bambuddyLink(printer.bambuddy_url)} {...NEW_TAB} className={JOB_LINK}>
+          {name ?? 'This print'}
+          <span className="sr-only">, in Bambuddy</span>
+          <ExternalLinkIcon aria-hidden="true" className="ml-1 inline size-3 align-baseline" />
+        </a>
+      </p>
+    )
+  }
+  return name ? <p className="mt-1 truncate">{name}</p> : null
 }
 
 /**

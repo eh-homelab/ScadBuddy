@@ -26,7 +26,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     awaiting_plate_clear: false,
     archive_id: 90,
     linked: false,
-    bambuddy_url: 'http://bambuddy.local/archives',
+    bambuddy_url: 'http://bambuddy.local/archives/90',
     error: null,
   },
   {
