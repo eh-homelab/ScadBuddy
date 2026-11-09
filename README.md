@@ -556,9 +556,11 @@ PayPal's verify-webhook-signature call before ScadBuddy reads it
 When neither comes (PayPal retries an event for 3 days), the housekeeping sweep reads the
 PayPal order, from an hour after the approval, then with a backoff: a capture it finds is
 recorded as its event would be, an order still approved with no capture is captured again
-while the order takes money (else the request is failed), and a voided order, or one
-never told after about five days of reads, leaves the request failed. So a pending
-request never blocks its order's cancel for good.
+while the order takes money (else the request is failed), a capture still pending at
+PayPal is read once a day in case its completion event is lost too, and a voided order,
+or one never told after about five days of reads (the daily reads of a pending capture
+count too), leaves the request failed. So a pending request never blocks its order's
+cancel for good.
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. A refund that is
 still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal

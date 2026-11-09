@@ -1037,9 +1037,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pending`) whose wait is over (`captures_due`: `CAPTURE_SETTLE_FIRST_MINUTES` after the
   approval or the last read, doubled per unknown read, at most a day; claimed `FOR UPDATE
   SKIP LOCKED`), read with no lock held (`CapturingProvider.read_capture`). A capture
-  found is recorded through `record_provider_event` (keyed `capture:<id>`; a later webhook
-  writes no second payment, matched by the order) and its closes run; a pending one stops
-  the reads; an `APPROVED` order with no capture is captured again under the approval's
+  found is recorded through `record_provider_event` (keyed `capture:<id>:<kind>`, so a pending read and a later paid one are two events; a later webhook
+  writes no second payment, matched by the order) and its closes run, and one that leaves
+  the request `pending` (`currency_mismatch`, `ignored`, `unmatched`) counts as an
+  unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), each read
+  counted toward the give-up; a request whose settling raises is logged and counted, and
+  the batch (`CAPTURE_SETTLE_BATCH`, 4) goes on; an `APPROVED` order with no capture is captured again under the approval's
   key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
   (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
   `CAPTURE_GIVE_UP_ATTEMPTS` unknown reads (`capture_unsettled`) mark it `failed`. The capture's events record the money. Each
