@@ -7,7 +7,10 @@ import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { refusalText } from './refusal'
 
-const WHY: Record<Exclude<DepositSuggestion['reason'], 'changed'>, string> = {
+type Warned = 'changed' | 'removed'
+const warned = (d: DepositSuggestion) => d.reason === 'changed' || d.reason === 'removed'
+
+const WHY: Record<Exclude<DepositSuggestion['reason'], Warned>, string> = {
   amount: 'matches the balance',
   order_number: 'names this order',
 }
@@ -16,16 +19,17 @@ const WHY: Record<Exclude<DepositSuggestion['reason'], 'changed'>, string> = {
  * #4961 — deposits of the Plaid-linked account that may have paid this order. A suggestion
  * records nothing: "Record this deposit as payment" records it once, as a `bank_transfer`
  * payment whose reference is the transaction id; "Not this order" hides it. A recorded deposit
- * whose amount Plaid changed since is shown as a warning, with no action: the shop corrects the
- * payment by hand. The list reloads when a sync suggests a deposit (`order.bank_deposits`).
+ * that Plaid changed or removed since is a warning with no action while the order's payments with
+ * that reference do not add up to it: payments are never edited, so the shop records the
+ * difference with the same reference. The list reloads on `order.bank_deposits`.
  */
 export function DepositSuggestions({ order, onChanged }: { order: Order; onChanged: () => void }) {
   const listed = useAsync(() => api.orderBankDeposits(order.id), [order.id], [`order:${order.id}`])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const all = listed.data ?? []
-  const deposits = all.filter((d) => d.reason !== 'changed')
-  const changed = all.filter((d) => d.reason === 'changed')
+  const deposits = all.filter((d) => !warned(d))
+  const changed = all.filter(warned)
   const money = (minor: number, currency: string) => formatMoney(minor, currency, order.minor_exponent)
   if (all.length === 0 && !error) return null
 
@@ -48,8 +52,13 @@ export function DepositSuggestions({ order, onChanged }: { order: Order; onChang
       <h3 className="text-[13px] font-medium">Suggested bank deposits</h3>
       {changed.map((d) => (
         <p key={d.transaction_id} role="status" className="text-[13px] text-warn">
-          The bank changed a deposit recorded as a payment: it now reads {money(d.amount_minor, d.currency)}, recorded as{' '}
-          {d.recorded_minor == null ? 'unknown' : money(d.recorded_minor, d.currency)} ({d.posted_on} · {d.description}). Correct the payment by hand.
+          {d.reason === 'removed' ? (
+            <>The bank removed a deposit recorded as a payment ({money(d.amount_minor, d.currency)}).</>
+          ) : (
+            <>The bank changed a deposit recorded as a payment: it now reads {money(d.amount_minor, d.currency)}.</>
+          )}{' '}
+          Recorded: {d.recorded_minor == null ? 'unknown' : money(d.recorded_minor, d.currency)} ({d.posted_on} · {d.description}). Record the
+          difference as a bank transfer payment with reference {d.transaction_id}.
         </p>
       ))}
       {deposits.length > 0 && (
@@ -60,7 +69,7 @@ export function DepositSuggestions({ order, onChanged }: { order: Order; onChang
               <span className="sb-num font-medium">{money(d.amount_minor, d.currency)}</span>
               <span className="text-muted-foreground">
                 {' · '}
-                {d.posted_on} · {d.description} · {d.reason !== 'changed' && WHY[d.reason]}
+                {d.posted_on} · {d.description} · {!warned(d) && WHY[d.reason as keyof typeof WHY]}
               </span>
             </span>
             <span className="flex gap-2">

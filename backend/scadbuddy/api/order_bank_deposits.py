@@ -64,7 +64,7 @@ async def list_order_bank_deposits(order_id: str, orders: OrdersDep) -> list[Dep
         "Records the deposit's amount once, method `bank_transfer`, reference the Plaid"
         " transaction id. 404 `deposit_not_suggested`; 409 `deposit_recorded` when it is"
         " recorded on any order; 409 `deposit_currency` when its currency is not the"
-        " order's."
+        " order's; 409 `deposit_changed` when a sync changed its amount meanwhile (reload)."
     ),
 )
 async def record_order_bank_deposit(

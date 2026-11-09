@@ -163,10 +163,10 @@ async def _read(
 
 async def sync_deposits(bank: BankLinks, bus: EventBus | None = None) -> int:
     """Read the linked account's deposits since the stored cursor and suggest their
-    orders. The number of new suggestions; each order given one hears
-    ``order.bank_deposits`` on ``bus``. A Plaid failure keeps its code on the link and the
-    cursor where it was. Every Postgres call runs in a thread: the sync also runs on the
-    API's event loop."""
+    orders. The number of new suggestions; each order given one, and each order of a
+    recorded deposit Plaid changed or removed, hears ``order.bank_deposits`` on ``bus``. A
+    Plaid failure keeps its code on the link and the cursor where it was. Every Postgres
+    call runs in a thread: the sync also runs on the API's event loop."""
     try:
         linked = await asyncio.to_thread(bank.access)
     except (CredentialUnreadableError, KekMissingError, AccessTokenMissingError) as error:
@@ -184,8 +184,8 @@ async def sync_deposits(bank: BankLinks, bus: EventBus | None = None) -> int:
         logger.warning("the deposit sync could not read Plaid: %s", error.code)
         await asyncio.to_thread(_failed, bank.store, linked.item_id, error.code)
         return 0
-    suggested = await asyncio.to_thread(_store, bank.store, linked, start, first, read)
-    for order_id in sorted(set(suggested)):
+    suggested, told = await asyncio.to_thread(_store, bank.store, linked, start, first, read)
+    for order_id in sorted(told):
         emit(bus, OrderBankDepositsChanged(order_id=order_id))
     return len(suggested)
 
@@ -222,14 +222,14 @@ def _failed(store: OrderStore, item_id: str | None, code: str | None) -> None:
 
 def _store(
     store: OrderStore, linked: LinkedAccess, start: str | None, first: str | None, read: _Read
-) -> list[str]:
-    """The order of each new suggestion."""
+) -> tuple[list[str], set[str]]:
+    """``_apply``'s answer, or nothing when this run's reads do not stand."""
     with store.transaction() as conn:
         now = conn.execute("SELECT item_id, sync_cursor FROM bank_links FOR UPDATE").fetchone()
         if now is None or now["item_id"] != linked.item_id or now["sync_cursor"] != start:
             # Unlinked, or another sync stored its cursor first: that one's reads stand.
-            return []
-        suggested = _apply(store, conn, linked.item_id, linked.account_id, read)
+            return [], set()
+        suggested, told = _apply(store, conn, linked.item_id, linked.account_id, read)
         # An update cut short keeps its first cursor for a later run's restart.
         loop = (first or "") if read.more else None
         conn.execute(
@@ -237,12 +237,17 @@ def _store(
             " synced_at = clock_timestamp(), sync_error = NULL WHERE item_id = %s",
             (read.cursor or None, loop, linked.item_id),
         )
-    return suggested
+    return suggested, told
 
 
-def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _Read) -> list[str]:
+def _apply(
+    store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _Read
+) -> tuple[list[str], set[str]]:
+    """The order of each new suggestion, and every order whose deposits changed (those,
+    and the orders of recorded deposits Plaid changed or removed)."""
     gone = set(read.removed)
     suggested: list[str] = []
+    told: set[str] = set()
     balances = _Balances(store, conn)
     for tx_id, tx in read.changed.items():
         deposit = deposit_of(tx, account_id)
@@ -254,7 +259,7 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
             " posted_on, description) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT"
             " (transaction_id) DO UPDATE SET amount_minor = EXCLUDED.amount_minor, currency ="
             " EXCLUDED.currency, posted_on = EXCLUDED.posted_on, description ="
-            " EXCLUDED.description",
+            " EXCLUDED.description, removed_at = NULL",
             (
                 deposit.transaction_id,
                 item_id,
@@ -276,6 +281,7 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
                 "UPDATE bank_deposits SET payment_id = %s WHERE transaction_id = %s",
                 (recorded, deposit.transaction_id),
             )
+            told.update(_payment_orders(conn, [deposit.transaction_id]))
             continue
         for order_id, reason in _matches(conn, balances, deposit):
             # A pair the shop dismissed is never suggested again, after a new link too.
@@ -288,8 +294,28 @@ def _apply(store: OrderStore, conn: Conn, item_id: str, account_id: str, read: _
             if added.rowcount:
                 suggested.append(order_id)
     if gone:
-        conn.execute("DELETE FROM bank_deposits WHERE transaction_id = ANY(%s)", (sorted(gone),))
-    return suggested
+        ids = sorted(gone)
+        # A recorded deposit stays, marked, so its order page warns; the rest go.
+        conn.execute(
+            "UPDATE bank_deposits SET removed_at = clock_timestamp()"
+            " WHERE transaction_id = ANY(%s) AND payment_id IS NOT NULL AND removed_at IS NULL",
+            (ids,),
+        )
+        told.update(_payment_orders(conn, ids))
+        conn.execute(
+            "DELETE FROM bank_deposits WHERE transaction_id = ANY(%s) AND payment_id IS NULL",
+            (ids,),
+        )
+    return suggested, told | set(suggested)
+
+
+def _payment_orders(conn: Conn, transaction_ids: list[str]) -> set[str]:
+    """The orders the payments recorded from these deposits are on."""
+    rows = conn.execute(
+        "SELECT DISTINCT order_id FROM order_payments WHERE method = %s AND reference = ANY(%s)",
+        (METHOD, transaction_ids),
+    ).fetchall()
+    return {str(row["order_id"]) for row in rows}
 
 
 class _Balances:
@@ -354,8 +380,11 @@ def _recorded(conn: Conn, transaction_id: str, *, but: str | None = None) -> str
 
 #: The method a confirmed deposit is recorded with; its reference is the transaction id.
 METHOD: Final = "bank_transfer"
-#: ``changed``: a deposit recorded on this order whose amount Plaid changed since.
-MatchReason = Literal["amount", "order_number", "changed"]
+#: ``changed``: a deposit recorded on this order whose amount Plaid changed since;
+#: ``removed``: one Plaid removed. Each is shown while the order's ``bank_transfer``
+#: payments with the transaction id as reference do not sum to the deposit (0 when
+#: removed): payments are never edited, so the shop records the difference.
+MatchReason = Literal["amount", "order_number", "changed", "removed"]
 
 
 class DepositSuggestion(BaseModel):
@@ -368,13 +397,14 @@ class DepositSuggestion(BaseModel):
     #: The bank's text, masked (`mask`).
     description: str
     reason: MatchReason
-    #: For ``changed``: the amount the payment was recorded with.
+    #: For ``changed`` and ``removed``: the sum of the order's payments recorded from it.
     recorded_minor: Money | None = None
 
 
 def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
     """The order's suggested deposits not dismissed and not recorded, then the deposits
-    recorded on it whose amount Plaid has changed since (``changed``), newest first."""
+    recorded on it that Plaid changed (``changed``) or removed (``removed``) since, while
+    their payments do not sum to the deposit, newest first."""
     with store.transaction() as conn:
         found = conn.execute(
             "SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
@@ -385,11 +415,14 @@ def suggestions(store: OrderStore, order_id: str) -> list[DepositSuggestion]:
             " x.order_id = m.order_id) AND NOT EXISTS (SELECT 1 FROM order_payments p WHERE"
             " p.method = %s AND p.reference = d.transaction_id)"
             " UNION ALL SELECT d.transaction_id, d.amount_minor, d.currency, d.posted_on,"
-            " d.description, 'changed', p.amount_minor FROM bank_deposits d JOIN"
-            " order_payments p ON p.id = d.payment_id WHERE p.order_id = %s AND"
-            " p.amount_minor <> d.amount_minor"
+            " d.description, CASE WHEN d.removed_at IS NULL THEN 'changed' ELSE 'removed'"
+            " END, t.total FROM bank_deposits d JOIN order_payments p ON p.id = d.payment_id"
+            " CROSS JOIN LATERAL (SELECT sum(q.amount_minor)::bigint AS total FROM"
+            " order_payments q WHERE q.order_id = p.order_id AND q.method = %s AND"
+            " q.reference = d.transaction_id) t WHERE p.order_id = %s AND t.total <>"
+            " CASE WHEN d.removed_at IS NULL THEN d.amount_minor ELSE 0 END"
             " ORDER BY posted_on DESC, transaction_id",
-            (order_id, METHOD, order_id),
+            (order_id, METHOD, METHOD, order_id),
         ).fetchall()
     return [DepositSuggestion.model_validate(row) for row in found]
 

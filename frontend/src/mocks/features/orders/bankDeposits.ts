@@ -48,8 +48,17 @@ export const handlers = [
     } catch (error) {
       return refused(request, error)
     }
-    // A 'changed' row is a recorded deposit whose amount the bank changed since; it stays shown.
-    const shown = suggested.filter((s) => s.order_id === params.id && !s.dismissed && (s.reason === 'changed' || !recorded(s.transaction_id)))
+    // A 'changed' or 'removed' row is a recorded deposit the bank changed since; it is shown
+    // while the order's payments with its reference do not sum to it (0 when removed).
+    const shown = suggested.flatMap((s) => {
+      if (s.order_id !== params.id || s.dismissed) return []
+      if (s.reason !== 'changed' && s.reason !== 'removed') return recorded(s.transaction_id) ? [] : [s]
+      const total = state.payments
+        .filter((p) => p.order_id === s.order_id && p.method === 'bank_transfer' && p.reference === s.transaction_id)
+        .reduce((sum, p) => sum + p.amount_minor, 0)
+      const owed = s.reason === 'removed' ? 0 : s.amount_minor
+      return total === owed ? [] : [{ ...s, recorded_minor: total }]
+    })
     return HttpResponse.json(shown.map(({ order_id: _order, dismissed: _dismissed, ...deposit }) => deposit))
   }),
   http.post('/api/v1/orders/:id/bank-deposits/:tx/record', ({ request, params }) => {

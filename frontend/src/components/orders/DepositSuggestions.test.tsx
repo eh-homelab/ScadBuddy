@@ -74,12 +74,26 @@ describe('DepositSuggestions (#4961)', () => {
     })
   })
 
-  it('warns, with no action, when the bank changed a recorded deposit', async () => {
-    mockDepositSuggestion(ORDER_ACCEPTED, { reason: 'changed', amount_minor: 1200, recorded_minor: 1000 })
-    renderPage(<Host id={ORDER_ACCEPTED} />)
+  it('warns, with no action, when the bank changed a recorded deposit, until the payment adds up', async () => {
+    const deposit = mockDepositSuggestion(ORDER_ACCEPTED, { reason: 'changed', amount_minor: 1200 })
+    await api.addPayment(ORDER_ACCEPTED, { amount_minor: 1000, method: 'bank_transfer', reference: deposit.transaction_id })
+    const { unmount } = renderPage(<Host id={ORDER_ACCEPTED} />)
     const warning = await screen.findByRole('status')
-    expect(warning).toHaveTextContent('now reads $12.00, recorded as $10.00')
+    expect(warning).toHaveTextContent('it now reads $12.00. Recorded: $10.00')
+    expect(warning).toHaveTextContent(`reference ${deposit.transaction_id}`)
     expect(screen.queryByRole('button', { name: 'Record this deposit as payment' })).not.toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Suggested bank deposits' })).not.toBeInTheDocument()
+    unmount()
+    await api.addPayment(ORDER_ACCEPTED, { amount_minor: 200, method: 'bank_transfer', reference: deposit.transaction_id })
+    renderPage(<Host id={ORDER_ACCEPTED} />)
+    expect(await screen.findByTestId('paid')).toHaveTextContent('1200')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('warns when the bank removed a recorded deposit', async () => {
+    const deposit = mockDepositSuggestion(ORDER_ACCEPTED, { reason: 'removed', amount_minor: 1000 })
+    await api.addPayment(ORDER_ACCEPTED, { amount_minor: 1000, method: 'bank_transfer', reference: deposit.transaction_id })
+    renderPage(<Host id={ORDER_ACCEPTED} />)
+    expect(await screen.findByRole('status')).toHaveTextContent('The bank removed a deposit recorded as a payment ($10.00)')
   })
 })

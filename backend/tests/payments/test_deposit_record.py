@@ -226,3 +226,56 @@ async def test_a_sync_tells_each_suggested_order_s_page(bank: Bank) -> None:
         router.post(SYNC).mock(return_value=page([transaction("t1", -10, "ACH")]))
         await sync_deposits(bank.bank, Bus())  # type: ignore[arg-type]
     assert [(e.kind, e.order_id) for e in heard] == [("order.bank_deposits", owing.id)]
+
+
+def adjust(bank: Bank, order: Order, amount_minor: int, tx_id: str) -> None:
+    """The shop's correction: payments are never edited, so it records the difference."""
+    bank.shop.lifecycle.add_payment(
+        order.id, BY, amount_minor=amount_minor, method="bank_transfer", reference=tx_id
+    )
+
+
+async def test_the_changed_warning_clears_once_the_payment_is_corrected(bank: Bank) -> None:
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page(modified=[transaction("t1", -12, "ACH")], cursor="c2")
+        )
+        await sync_deposits(bank.bank)
+    adjust(bank, owing, 200, "t1")
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_a_recorded_deposit_plaid_removes_is_shown_until_it_is_reversed(
+    bank: Bank,
+) -> None:
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    with respx.mock as router:
+        router.post(SYNC).mock(return_value=page(removed=["t1"], cursor="c2"))
+        await sync_deposits(bank.bank)
+    [removed] = suggestions(bank.rows, owing.id)
+    assert (removed.reason, removed.recorded_minor) == ("removed", 1000)
+    adjust(bank, owing, -1000, "t1")
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_a_sync_tells_the_page_of_a_recorded_deposit_it_changed(bank: Bank) -> None:
+    owing = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    heard: list[Any] = []
+
+    class Bus:
+        def publish(self, event: Any) -> None:
+            heard.append(event)
+
+    with respx.mock as router:
+        router.post(SYNC).mock(
+            return_value=page(modified=[transaction("t1", -12, "ACH")], cursor="c2")
+        )
+        assert await sync_deposits(bank.bank, Bus()) == 0  # type: ignore[arg-type]
+    assert [e.order_id for e in heard] == [owing.id]
