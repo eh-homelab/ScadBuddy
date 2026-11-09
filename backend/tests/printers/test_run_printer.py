@@ -997,6 +997,7 @@ async def test_the_dialogs_background_slice_takes_the_asked_path(
         outputs=unused,
         uploads=unused,
         links=unused,
+        sends=unused,
         archive_cache=unused,
         printers=unused,
         reports=unused,

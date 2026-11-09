@@ -5,7 +5,8 @@ state from ``GET /printers/{id}/status``, not only the archives ScadBuddy linked
 started from Bambuddy, or one paused on an HMS error, is as visible as one ScadBuddy
 queued. A job whose archive ScadBuddy linked points at its print; any other at
 Bambuddy's archives. A job ScadBuddy queued or started carries ``scadbuddy`` (#3741,
-`with_scadbuddy_jobs`): its linked archive, or a run's LAN start on that printer.
+`with_scadbuddy_jobs`): the printing queue item ScadBuddy recorded, or a run's LAN start
+on that printer. A linked archive alone does not mark a job.
 
 Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
 with a fresh report (`is_fresh`) shows that report, whether or not it is also in
@@ -26,7 +27,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus
+from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus, QueueItem
 from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
 from scadbuddy.bambuddy.progress import LanRunControl
 from scadbuddy.core.problems import ApiError
@@ -102,10 +103,12 @@ class PrinterNow(BaseModel):
     #: clear. ``None`` when no run waits on it.
     lan_run: LanRunControl | None = None
     #: The output or library file ScadBuddy queued or started this job for (#3741),
-    #: matched only while it prints or is paused: by ``archive_id`` when ScadBuddy linked
-    #: that archive, else by the LAN start a run on this printer recorded under
-    #: ``job_name``. ``None`` for a job started from Bambuddy or on the printer, or when
-    #: ScadBuddy's records cannot be read.
+    #: matched only while it prints or is paused: by the queue item Bambuddy says this
+    #: printer prints, when ScadBuddy recorded that item, else by the LAN start a run on
+    #: this printer recorded under ``job_name`` and has not seen end. A linked
+    #: ``archive_id`` alone is not a match: Bambuddy's reprint of it prints the same
+    #: archive. ``None`` for a job queued from Bambuddy or started on the printer, or when
+    #: Bambuddy's queue or ScadBuddy's records cannot be read.
     scadbuddy: ScadBuddyJob | None = None
 
 
@@ -117,23 +120,60 @@ def _working(printer: PrinterNow) -> bool:
     return printer.activity in ("printing", "paused")
 
 
-def job_keys(now: PrintersNow) -> tuple[list[int], list[tuple[str, str]]]:
-    """What `PrintLinkStore.jobs` is asked for the working cards (#3741): each one's
-    archive, and its registry id with its job name (a LAN start's ``subtask_name``)."""
+async def printing_items(client: BambuddyClient, now: PrintersNow) -> dict[str, int]:
+    """The queue item each working Bambuddy-linked card prints (#3741), by registry id,
+    from one read of Bambuddy's ``printing`` items. A card gets one only when exactly
+    one such item names its printer, and, when both are known, the item's archive is
+    the card's. Bambuddy not asked when no card needs it; its queue unreadable costs only
+    the marks."""
+    working = [p for p in now.printers if _working(p) and p.printer_id is not None]
+    if not working:
+        return {}
+    try:
+        items = await client.queue(status="printing")
+    except (ApiError, ValidationError, ValueError):
+        logger.info("Bambuddy's printing queue unreadable; the strip shows no queue marks")
+        return {}
+    on: dict[int, list[QueueItem]] = {}
+    for item in items:
+        if item.printer_id is not None:
+            on.setdefault(item.printer_id, []).append(item)
+    found: dict[str, int] = {}
+    for printer in working:
+        mine = on.get(printer.printer_id or 0, [])
+        if len(mine) != 1:
+            continue
+        (item,) = mine
+        if (
+            None not in (item.archive_id, printer.archive_id)
+            and item.archive_id != printer.archive_id
+        ):
+            continue
+        found[printer.id] = item.id
+    return found
+
+
+def job_keys(now: PrintersNow, items: Mapping[str, int]) -> tuple[list[int], list[tuple[str, str]]]:
+    """What `PrintLinkStore.jobs` is asked for the working cards (#3741): the queue item
+    each one prints (`printing_items`), and its registry id with its job name (a LAN
+    start's ``subtask_name``)."""
     working = [printer for printer in now.printers if _working(printer)]
-    archives = [p.archive_id for p in working if p.archive_id is not None]
+    queue_items = [items[p.id] for p in working if p.id in items]
     starts = [(p.id, p.job_name) for p in working if p.job_name is not None]
-    return archives, starts
+    return queue_items, starts
 
 
-def with_scadbuddy_jobs(now: PrintersNow, matches: JobMatches) -> PrintersNow:
-    """``now`` with each working card's ScadBuddy job (#3741): its archive's link first,
-    then a run's LAN start of its job name on this printer."""
+def with_scadbuddy_jobs(
+    now: PrintersNow, matches: JobMatches, items: Mapping[str, int]
+) -> PrintersNow:
+    """``now`` with each working card's ScadBuddy job (#3741): its printing queue item's
+    record first, then a run's LAN start of its job name on this printer."""
 
     def card(printer: PrinterNow) -> PrinterNow:
         if not _working(printer):
             return printer
-        job = matches.archives.get(printer.archive_id) if printer.archive_id is not None else None
+        item = items.get(printer.id)
+        job = matches.queue_items.get(item) if item is not None else None
         if job is None and printer.job_name is not None:
             job = matches.lan_starts.get((printer.id, printer.job_name))
         return printer if job is None else printer.model_copy(update={"scadbuddy": job})

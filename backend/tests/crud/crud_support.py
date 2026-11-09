@@ -49,6 +49,7 @@ from scadbuddy.auth.service_credentials import (
     ServiceCredentialStore,
 )
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.events import EventBus
@@ -434,10 +435,12 @@ def print_crud_app(
     operations: OperationStore | None = None,
     kinds: Mapping[str, OperationKind] | None = None,
     printers: PrinterStore | None = None,
+    links: PrintLinkStore | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
-    through ``operations`` of ``kinds``, and printer rows through ``printers``."""
+    through ``operations`` of ``kinds``, printer rows through ``printers``, and queue
+    item sends through ``links``."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -448,6 +451,7 @@ def print_crud_app(
         settings=SimpleNamespace(auth_mode="enforce"),
         settings_store=store,
         print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
+        print_links=links,
         events=events,
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
@@ -515,7 +519,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
     """A print worker's client of an API that lists its areas and answers ``current``
     (the defaults) as the settings. Its other routes are missing (a 404)."""
     body = (current or PrintSettings()).model_dump(mode="json")
-    areas = ["settings", "runs", "operations", "events", "printer-ensure"]
+    areas = ["settings", "runs", "operations", "events", "printer-ensure", "sends"]
 
     def answer(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/print/areas"):

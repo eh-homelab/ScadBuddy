@@ -42,9 +42,10 @@ DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_
 class FarmQueueItem(QueueItem):
     """A queue item, and whether ScadBuddy queued it (#3741)."""
 
-    #: The output or library file a ScadBuddy run queued this item for, found by the
-    #: run's recorded send or by the archive ScadBuddy linked to it; ``None`` for an item
-    #: queued from Bambuddy, or when ScadBuddy's records cannot be read. Never taken
+    #: The output or library file ScadBuddy queued this item for, found only by a record
+    #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
+    #: the item. ``None`` for an item queued from Bambuddy (its reprint of an archive
+    #: ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never taken
     #: from Bambuddy's answer.
     scadbuddy: ScadBuddyJob | None = None
 
@@ -64,24 +65,17 @@ async def get_queue(
     async with client_for(store.load()) as client:
         items = await client.queue(printer_id=printer_id, status=status)
     matches = await _jobs(links, items)
-
-    def marked(item: QueueItem) -> FarmQueueItem:
-        job = matches.queue_items.get(item.id)
-        if job is None and item.archive_id is not None:
-            job = matches.archives.get(item.archive_id)
-        return FarmQueueItem(**item.model_dump(), scadbuddy=job)
-
-    return [marked(item) for item in items]
+    return [
+        FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
+        for item in items
+    ]
 
 
 async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
     """The items ScadBuddy queued, in one read; none when its records cannot be read, so
     a database blip costs the marks, never the queue."""
     try:
-        return await links.jobs(
-            queue_items=[item.id for item in items],
-            archives=[item.archive_id for item in items if item.archive_id is not None],
-        )
+        return await links.jobs(queue_items=[item.id for item in items])
     except DATABASE_ERRORS:
         logger.warning("print links unreadable; the queue shows no ScadBuddy marks")
         return JobMatches()

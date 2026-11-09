@@ -25,8 +25,10 @@ def _state(client: TestClient) -> AppState:
 
 @respx.mock
 def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
-    """#3741: an item a ScadBuddy run queued (its send) and an item whose archive
-    ScadBuddy linked carry ``scadbuddy``; every other item carries none."""
+    """#3741: an item a ScadBuddy run queued (its send), or an item a link names by its
+    queue item id, carries ``scadbuddy``. An item queued from an archive ScadBuddy
+    linked, with no record of the item, carries none: Bambuddy's own reprint of that
+    archive is such an item."""
     configure(client)
     respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=recording("queue.json")))
     state = _state(client)
@@ -45,9 +47,15 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         await state.print_links.record_sends(
             output, [PrintSend(queue_item_id=259, plate_id=1, run_id="run-3741")]
         )
-        # Item 257 printed archive 144, which ScadBuddy linked by the sliced file's hash.
+        # Item 257 is queued from archive 144, which ScadBuddy linked by the sliced
+        # file's hash; nothing records item 257 itself.
         await state.print_links.record(
             PrintSubject.library(1615), PrintLink(archive_id=144, matched_by="content_hash")
+        )
+        # Item 199's archive was linked by the item, before sends were recorded.
+        await state.print_links.record(
+            PrintSubject.library(1630),
+            PrintLink(archive_id=130, matched_by="queue_item", queue_item_id=199),
         )
 
     asyncio.run(seed())
@@ -65,16 +73,17 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "archive_id": None,
         "matched_by": "queue_item",
     }
-    assert items[257]["scadbuddy"] == {
-        "subject": "library:1615",
+    assert items[199]["scadbuddy"] == {
+        "subject": "library:1630",
         "output_id": None,
-        "library_file_id": 1615,
+        "library_file_id": 1630,
         "slug": None,
         "run_id": None,
-        "archive_id": 144,
-        "matched_by": "archive",
+        "archive_id": 130,
+        "matched_by": "queue_item",
     }
-    assert items[199]["scadbuddy"] is None and items[205]["scadbuddy"] is None
+    assert items[257]["scadbuddy"] is None
+    assert items[205]["scadbuddy"] is None
 
 
 @respx.mock

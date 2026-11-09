@@ -16,20 +16,30 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import PrinterStatus
-from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from tests.api.test_send import API, configure
+from tests.api.test_send import API
+from tests.api.test_send import configure as configure_bambuddy
 from tests.bambuddy.conftest import recording
 from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000001"
+
+
+def configure(client: TestClient) -> None:
+    """Bambuddy configured, with nothing on its queue printing: the strip reads that
+    queue once for its marks (#3741). Only inside ``respx.mock``."""
+    configure_bambuddy(client)
+    respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
 
 
 def printer(printer_id: int, *, active: bool = True) -> dict[str, Any]:
@@ -554,31 +564,59 @@ def test_a_native_printer_never_asks_bambuddy_for_its_status(client: TestClient)
 # --- #3741: the jobs ScadBuddy queued or started -------------------------------------
 
 
+def printing_item(item_id: int, printer_id: int, archive_id: int) -> dict[str, Any]:
+    """A queue item Bambuddy says is printing on ``printer_id``."""
+    return {
+        **recording("queue.json")[0],
+        "id": item_id,
+        "printer_id": printer_id,
+        "archive_id": archive_id,
+        "status": "printing",
+    }
+
+
 @respx.mock
-def test_a_job_whose_archive_scadbuddy_linked_is_marked(client: TestClient) -> None:
-    """#3741: a Bambuddy card's ``current_archive_id`` that ScadBuddy linked names the
-    subject that printed it; an archive it did not link names none."""
-    configure(client)
+def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> None:
+    """#3741: a Bambuddy card is marked by the queue item Bambuddy says it prints, when a
+    ScadBuddy run sent that item. A linked archive alone marks nothing: Bambuddy's
+    reprint of it prints the same archive (printer 2, its item not ScadBuddy's), and a
+    job with no printing item may be one too (printer 3)."""
+    configure_bambuddy(client)
     respx.get(f"{API}/printers/").mock(
-        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+        return_value=httpx.Response(200, json=[printer(1), printer(2), printer(3)])
     )
-    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, current_archive_id=13))
+    )
     respx.get(f"{API}/printers/2/status").mock(
         return_value=httpx.Response(
             200, json=status(2, state="PAUSE", subtask_name="Bracket", current_archive_id=90)
         )
     )
-    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    asyncio.run(
-        state.print_links.record(
-            PrintSubject.output("o" * 32),
-            PrintLink(archive_id=13, matched_by="queue_item", queue_item_id=257),
+    respx.get(f"{API}/printers/3/status").mock(
+        return_value=httpx.Response(200, json=status(3, current_archive_id=91))
+    )
+    printing = respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
+        return_value=httpx.Response(
+            200, json=[printing_item(300, 1, 13), printing_item(301, 2, 90)]
         )
     )
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    output = PrintSubject.output("o" * 32)
+
+    async def seed() -> None:
+        await state.print_links.record_sends(output, [PrintSend(queue_item_id=300, plate_id=1)])
+        for archive_id in (13, 90, 91):
+            await state.print_links.record(
+                output, PrintLink(archive_id=archive_id, matched_by="content_hash")
+            )
+
+    asyncio.run(seed())
 
     response = client.get("/api/v1/print/printers/now")
 
     assert response.status_code == 200, response.text
+    assert printing.call_count == 1  # one read for every card
     cards = {card["printer_id"]: card for card in response.json()["printers"]}
     assert cards[1]["scadbuddy"] == {
         "subject": "output:" + "o" * 32,
@@ -586,17 +624,37 @@ def test_a_job_whose_archive_scadbuddy_linked_is_marked(client: TestClient) -> N
         "library_file_id": None,
         "slug": None,
         "run_id": None,
-        "archive_id": 13,
-        "matched_by": "archive",
+        "archive_id": None,
+        "matched_by": "queue_item",
     }
     assert cards[2]["scadbuddy"] is None
+    assert cards[3]["scadbuddy"] is None
 
 
-def _lan_run(client: TestClient, printer: str, subtask: str, *, run_id: str) -> None:
+@respx.mock
+def test_an_unreadable_queue_costs_only_the_marks(client: TestClient) -> None:
+    """#3741: Bambuddy's queue not answering leaves the cards, unmarked."""
+    configure_bambuddy(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(500, json={"detail": "boom"}))
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    (card,) = response.json()["printers"]
+    assert (card["activity"], card["scadbuddy"]) == ("printing", None)
+
+
+def _lan_run(
+    client: TestClient, printer: str, subtask: str, *, run_id: str, ended: Any = None
+) -> None:
     """A native run on ``printer`` that started ``subtask`` over the LAN."""
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     store = state.print_runs.store
-    started = LanStarted(subtask_name=subtask, started_at=datetime.now(UTC), plate_id=1)
+    started = LanStarted(
+        subtask_name=subtask, started_at=datetime.now(UTC), plate_id=1, ended=ended
+    )
 
     async def seed() -> None:
         await store.insert_accepted(
@@ -658,6 +716,20 @@ def test_a_lan_start_two_runs_share_is_not_marked(client: TestClient) -> None:
     )
     _lan_run(client, garage, "scadbuddy-twin-p1", run_id="twin-a")
     _lan_run(client, garage, "scadbuddy-twin-p1", run_id="twin-b")
+
+    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+
+    assert card["scadbuddy"] is None
+
+
+def test_a_lan_start_its_run_saw_end_is_not_marked(client: TestClient) -> None:
+    """#3741: a start the run recorded as ended is not the job running now, even under
+    the same name."""
+    garage = _lan_printer(client)
+    _registry(client).reports.put(
+        garage, {"gcode_state": "RUNNING", "subtask_name": "scadbuddy-old-p1"}, datetime.now(UTC)
+    )
+    _lan_run(client, garage, "scadbuddy-old-p1", run_id="old", ended="done")
 
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
 

@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.models import QueueItemCreate
 from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import start_preview
-from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend, SendRecorder
 from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     resolve_project,
@@ -51,6 +51,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.virtual_printers import virtual_printer_kinds
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -84,6 +85,7 @@ def bambuddy_kinds(core: Core, components: Components) -> list[OperationKind]:
         outputs=LocalOutputs(core.outputs, core.catalogue),
         uploads=core.uploads,
         links=core.print_links,
+        sends=core.print_links,
         archive_cache=components.get(ARCHIVE_CACHE),
         library=components.get(PRINT_LIBRARY).serving_native,
         native_slices=components.get(SLICING).store,
@@ -99,6 +101,7 @@ def bambuddy_kinds_over(
     outputs: OutputReader,
     uploads: BambuddyUploadStore,
     links: PrintLinkStore,
+    sends: SendRecorder,
     archive_cache: ArchiveCache,
     printers: PrinterStore | None,
     reports: PrinterReportStore | None,
@@ -110,7 +113,9 @@ def bambuddy_kinds_over(
     reads its outputs (#1060) and native library files (#3827) through the API.
     ``printers`` and ``reports`` are the registry the background slice decides its run's
     path from (plan 2026-10-18 D2); required, so neither process can leave a native
-    printer's slice on Bambuddy's path by omission."""
+    printer's slice on Bambuddy's path by omission. ``sends`` records the queue item a
+    reprint queued (#3741): the API's own store, or the print worker's CRUD route, so
+    the worker writes no SQL for it (#5295); required for the same reason."""
     cache = archive_cache
 
     async def no_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -260,7 +265,28 @@ def bambuddy_kinds_over(
             "options_scope": options_scope(subject, slug),
             # What an image from before #1754 reads, should it run this check's run.
             "slug": slug,
+            # Whose send the queued item is (#3741).
+            "subject": subject.key,
         }
+
+    async def _record_reprint(checked: dict[str, Any], queue_item_id: int) -> None:
+        """Record the reprint's queue item as a send of the archive's subject (#3741), so
+        the Prints page marks it as ScadBuddy's, as it marks a run's items. No run queued
+        it. Best effort, as `print_source.record_sends`: the item is queued, and failing
+        the reprint over its record would tell the user it was not. A check from before
+        #3741 names no subject, and its item is not recorded."""
+        subject = checked.get("subject")
+        if subject is None:
+            return
+        send = PrintSend(
+            queue_item_id=queue_item_id,
+            plate_id=checked["plate_id"],
+            printer_id=checked["printer_id"],
+        )
+        try:
+            await sends.record_sends(PrintSubject.parse(subject), [send])
+        except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
+            logger.warning("could not record the reprint's send: %s", type(exc).__name__)
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
@@ -286,6 +312,7 @@ def bambuddy_kinds_over(
             )
             # The archive gains a run once the item prints; read it afresh then.
             cache.forget(client, archive_id)
+            await _record_reprint(checked, item.id)
             return {
                 "queue_item_id": item.id,
                 "printer_id": checked["printer_id"],

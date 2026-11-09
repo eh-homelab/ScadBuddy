@@ -47,7 +47,8 @@ export const PRINTERS_NOW: PrinterNow[] = [
     linked: true,
     bambuddy_url: null,
     error: null,
-    // #3741 — ScadBuddy queued it: the archive is linked to the keychain output.
+    // #3741 — ScadBuddy queued it: a run of the keychain output sent the queue item
+    // this printer prints.
     scadbuddy: {
       subject: 'output:luna-0001',
       output_id: 'luna-0001',
@@ -55,7 +56,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
       slug: 'keychain',
       run_id: 'run-luna',
       archive_id: 35,
-      matched_by: 'archive',
+      matched_by: 'queue_item',
     },
   },
   {

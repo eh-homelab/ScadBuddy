@@ -11,7 +11,8 @@ Each row of ``print_sends`` and ``print_links`` is keyed by the print's subject
 share both tables (#1750).
 
 - ``print_sends``: each queue item a run queued, written by its source's ``record()``
-  as each plate is queued (`print_source.record_sends`).
+  as each plate is queued (`print_source.record_sends`), and each item ScadBuddy's
+  reprint of an archive queued, with no run (`operations.py` ``reprint_run``, #3741).
 - ``print_links``: each archive a subject's print produced. Two ways a link is found
   (``matched_by``): ``queue_item``, the queue item ScadBuddy created reports
   ``archive_id``; ``content_hash``, once the item is gone, an archive whose
@@ -43,7 +44,7 @@ import asyncio
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -101,17 +102,27 @@ class LanArchiveLink(BaseModel):
     plate_id: int | None = None
 
 
-#: How a job was found to be ScadBuddy's (#3741): the queue item a run's send recorded,
-#: an archive ScadBuddy linked, or the ``subtask_name`` a run's LAN start recorded on that
-#: printer.
-JobMatchedBy = Literal["queue_item", "archive", "lan_start"]
+class SendRecorder(Protocol):
+    """Where a queue item ScadBuddy queued is recorded as a send: `PrintLinkStore` in the
+    API, `crud.print.RemoteSends` in the print worker, which reaches no SQL for it
+    (#3741, #5295)."""
+
+    async def record_sends(self, subject: PrintSubject, sends: Sequence[PrintSend]) -> None: ...
+
+
+#: How a job was found to be ScadBuddy's (#3741): a record of its queue item (the send a
+#: run or a reprint recorded, or a link that names the item), or the ``subtask_name`` a
+#: run's LAN start recorded on that printer.
+JobMatchedBy = Literal["queue_item", "lan_start"]
 
 
 class ScadBuddyJob(BaseModel):
     """A queue item or printer job that ScadBuddy queued or started (#3741): what the
-    Prints page's "Queued from ScadBuddy" badge marks. It is found only by ScadBuddy's
-    own records (`PrintLinkStore.jobs`), never by a name or a time, so a job started
-    from Bambuddy or on the printer has none."""
+    Prints page's "Queued from ScadBuddy" badge marks. It is found only by a record of
+    that job itself (`PrintLinkStore.jobs`): its queue item's send or link, or a run's
+    LAN start on that printer. An archive ScadBuddy linked is not enough, since
+    Bambuddy's own reprint of it prints the same archive. So a job queued from Bambuddy
+    or started on the printer has none."""
 
     #: The print subject's key: ``output:<id>`` or ``library:<file id>``.
     subject: str
@@ -119,9 +130,12 @@ class ScadBuddyJob(BaseModel):
     library_file_id: int | None = None
     #: The output's template, when ScadBuddy knows it; ``None`` for a library file.
     slug: str | None = None
-    #: The print run that queued or started it, when one is recorded.
+    #: The print run that queued or started it. ``None`` for ScadBuddy's reprint of an
+    #: archive (an operation, not a run), and for an item only a link names (a send from
+    #: before ``print_sends`` recorded runs, #1751).
     run_id: str | None = None
-    #: The archive ScadBuddy linked to it (its print is ``/prints/{archive_id}``).
+    #: The archive ScadBuddy linked to this item or start (its print is
+    #: ``/prints/{archive_id}``); ``None`` until one is linked.
     archive_id: int | None = None
     matched_by: JobMatchedBy
 
@@ -131,7 +145,6 @@ class JobMatches:
     """`PrintLinkStore.jobs`'s answer: each key that matched, and the job it is."""
 
     queue_items: dict[int, ScadBuddyJob] = field(default_factory=dict)
-    archives: dict[int, ScadBuddyJob] = field(default_factory=dict)
     #: By ``(registry printer id, subtask_name)``.
     lan_starts: dict[tuple[str, str], ScadBuddyJob] = field(default_factory=dict)
 
@@ -153,8 +166,8 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
     )
 
 
-#: The queue items a send recorded, then those only a link names (a send from before
-#: ``print_sends``, #1750), each with its archive when one is linked.
+#: The queue items a send recorded, then those only a link names by the item (a send
+#: from before ``print_sends``, #1750), each with the archive linked by that item.
 _QUEUE_JOBS = (
     "SELECT s.queue_item_id, s.subject, s.run_id,"
     " COALESCE(o.slug, r.slug) AS slug,"
@@ -175,29 +188,15 @@ _QUEUE_JOBS = (
     " AS legacy"
 )
 
-#: Each archive's owner (`_OWNER_ORDER`), with the run that queued its item or made its
-#: LAN start.
-_ARCHIVE_JOBS = (
-    "SELECT DISTINCT ON (l.archive_id) l.archive_id, l.subject,"
-    " COALESCE(s.run_id, a.run_id) AS run_id, COALESCE(o.slug, r.slug) AS slug"
-    " FROM print_links l"
-    " LEFT JOIN print_sends s ON s.queue_item_id = l.queue_item_id"
-    " LEFT JOIN lan_print_archives a ON a.archive_id = l.archive_id"
-    " LEFT JOIN print_runs r ON r.id = COALESCE(s.run_id, a.run_id)"
-    f" LEFT JOIN output_index o ON o.output_id = {_output_id_of('l.subject')}"
-    " WHERE l.archive_id = ANY(%(ids)s)"
-    " ORDER BY l.archive_id, (l.subject LIKE 'library:%%'), l.first_seen, l.subject,"
-    " l.queue_item_id"
-)
-
 #: The runs on these printers whose result records a LAN start under one of these
-#: names, with the archive that start became when one is recorded.
+#: names that the run has not seen end (`LanStarted.ended`), with the archive that
+#: start became when one is recorded.
 _LAN_JOBS = (
     "SELECT r.id AS run_id, r.output_id AS run_subject, r.printer::text AS printer,"
     " e.name, COALESCE(o.slug, r.slug) AS slug, a.archive_id"
     " FROM print_runs r CROSS JOIN LATERAL (SELECT x->>'subtask_name' AS name"
     "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
-    "   THEN r.result->'lan' END) AS x) AS e"
+    "   THEN r.result->'lan' END) AS x WHERE x->>'ended' IS NULL) AS e"
     " LEFT JOIN lan_print_archives a ON a.run_id = r.id AND a.subtask_name = e.name"
     " LEFT JOIN output_index o ON o.output_id ="
     "  CASE WHEN r.output_id LIKE 'library:%%' THEN NULL ELSE r.output_id END"
@@ -357,17 +356,16 @@ class PrintLinkStore:
         self,
         *,
         queue_items: Sequence[int] = (),
-        archives: Sequence[int] = (),
         lan_starts: Sequence[tuple[str, str]] = (),
     ) -> JobMatches:
-        """Which of these jobs ScadBuddy queued or started (#3741), in at most three
+        """Which of these jobs ScadBuddy queued or started (#3741), in at most two
         queries on one connection, one per kind of key given: ``queue_items`` by the
-        sends a run recorded (or a link that names the item), ``archives`` by their
-        linked owner, ``lan_starts`` (registry printer id, ``subtask_name``) by a run on
-        that printer whose result records that start. A LAN start name two runs share
-        matches neither: no match is ever a guess."""
+        send recorded for the item (or a link that names the item), ``lan_starts``
+        (registry printer id, ``subtask_name``) by a run on that printer whose result
+        records that start and not its end. A LAN start name two runs share matches
+        neither: no match is ever a guess."""
         return await asyncio.to_thread(
-            self._jobs, sorted(set(queue_items)), sorted(set(archives)), sorted(set(lan_starts))
+            self._jobs, sorted(set(queue_items)), sorted(set(lan_starts))
         )
 
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
@@ -522,11 +520,9 @@ class PrintLinkStore:
                 (link.archive_id, link.run_id, link.subtask_name, link.plate_id),
             )
 
-    def _jobs(
-        self, queue_items: list[int], archives: list[int], lan_starts: list[tuple[str, str]]
-    ) -> JobMatches:
+    def _jobs(self, queue_items: list[int], lan_starts: list[tuple[str, str]]) -> JobMatches:
         matches = JobMatches()
-        if not (queue_items or archives or lan_starts):
+        if not (queue_items or lan_starts):
             return matches
         with self._pool.connection() as conn:
             if queue_items:
@@ -535,11 +531,6 @@ class PrintLinkStore:
                     matches.queue_items.setdefault(
                         row["queue_item_id"],
                         _job(dict(row), PrintSubject.parse(row["subject"]), "queue_item"),
-                    )
-            if archives:
-                for row in conn.execute(_ARCHIVE_JOBS, {"ids": archives}).fetchall():
-                    matches.archives[row["archive_id"]] = _job(
-                        dict(row), PrintSubject.parse(row["subject"]), "archive"
                     )
             if lan_starts:
                 wanted = set(lan_starts)

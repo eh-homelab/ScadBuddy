@@ -109,6 +109,7 @@ from scadbuddy.bambuddy.printers_now import (
     PrintersNow,
     job_keys,
     printers_now,
+    printing_items,
     with_lan_runs,
     with_scadbuddy_jobs,
 )
@@ -707,7 +708,9 @@ async def post_tray_spool(
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
         "names Bambuddy's archives page. A printing or paused job ScadBuddy queued or "
         "started carries `scadbuddy` (#3741): the output or library file, matched by the "
-        "archive ScadBuddy linked or a run's LAN start on that printer, never by a guess. "
+        "queue item Bambuddy says the printer prints when ScadBuddy recorded that item, or "
+        "by a run's LAN start on that printer. A linked archive alone is not a match, as "
+        "Bambuddy's reprint of it prints the same archive. "
         "A printer whose status cannot be read is a card with `error`, never a failed page."
     ),
 )
@@ -727,22 +730,27 @@ async def get_printers_now(
         cards = await printers_now(
             None, links, printers.store, printers.reports, now=now, native=native
         )
+        items: dict[str, int] = {}
     else:
         async with client_for(settings) as client:
             cards = await printers_now(
                 client, links, printers.store, printers.reports, now=now, native=native
             )
-    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards))
+            # #3741: the queue item each working card prints, in one read of Bambuddy's.
+            items = await printing_items(client, cards)
+    cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, items), items)
     return with_lan_runs(cards, await _lan_controls(runs, cards))
 
 
-async def _scadbuddy_jobs(links: PrintLinkStore, cards: PrintersNow) -> JobMatches:
+async def _scadbuddy_jobs(
+    links: PrintLinkStore, cards: PrintersNow, items: dict[str, int]
+) -> JobMatches:
     """Which working cards' jobs ScadBuddy queued or started (#3741), in one read; none
     when its records cannot be read, so a database blip costs the badges, never the
     strip."""
-    archives, starts = job_keys(cards)
+    queue_items, starts = job_keys(cards, items)
     try:
-        return await links.jobs(archives=archives, lan_starts=starts)
+        return await links.jobs(queue_items=queue_items, lan_starts=starts)
     except DATABASE_ERRORS:
         logger.warning("print links unreadable; the strip shows no ScadBuddy marks")
         return JobMatches()

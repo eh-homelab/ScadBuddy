@@ -21,9 +21,9 @@ export const farmTools: Tool[] = [
       "Bambuddy's print queue, in its order: each item's status, printer (or the printer model it waits for), " +
       'file, times, estimated duration and filament, and why it is waiting or failed. Finished items stay in the ' +
       'queue, so pass `status` (pending or printing for what is to come). `printer_id` -1 is items not assigned ' +
-      'to a printer. An item ScadBuddy queued carries `scadbuddy` (its output or library file, template `slug`, ' +
-      '`run_id` and linked `archive_id`), matched by ScadBuddy\'s own records; an item queued from Bambuddy has ' +
-      'none.' +
+      'to a printer. An item ScadBuddy queued (a print run or a reprint) carries `scadbuddy` (its output or ' +
+      'library file, template `slug`, `run_id` and linked `archive_id`), matched only by ScadBuddy\'s record of ' +
+      'that item; an item queued from Bambuddy, its reprint of a ScadBuddy print too, has none.' +
       PAGED,
     input: z.object({
       printer_id: z.number().int().min(-1).optional(),
@@ -54,7 +54,9 @@ export const farmTools: Tool[] = [
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
       'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`). ' +
       'A printing or paused job ScadBuddy queued or started carries `scadbuddy` (its output or library file, ' +
-      'template `slug`, `run_id` and linked `archive_id`); a job started from Bambuddy or on the printer has none.',
+      'template `slug`, `run_id` and linked `archive_id`), matched by the queue item Bambuddy says the printer ' +
+      "prints when ScadBuddy recorded that item, or by a run's LAN start on that printer; a job queued from " +
+      'Bambuddy (its reprint of a ScadBuddy print too) or started on the printer has none.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

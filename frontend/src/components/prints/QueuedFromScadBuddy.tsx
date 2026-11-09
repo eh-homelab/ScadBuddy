@@ -11,15 +11,17 @@ function source(job: ScadBuddyJob): string {
 
 /**
  * #3741 — marks a queue item or printer job that ScadBuddy queued or started. The
- * backend sets `scadbuddy` only from ScadBuddy's own records (a run's send, a linked
- * archive, a run's LAN start), so a job started from Bambuddy or on the printer has none.
+ * backend sets `scadbuddy` only from a record of that job itself: the send a ScadBuddy
+ * run or reprint recorded for its queue item, or a run's LAN start on that printer. A
+ * linked archive alone is not enough, so a job queued from Bambuddy (its reprint of a
+ * ScadBuddy print too) or started on the printer has none.
  */
 export function QueuedFromScadBuddy({ job, className }: { job: ScadBuddyJob; className?: string }) {
   return (
     <Badge
       variant="outline"
       className={cn('shrink-0 border-primary/30 font-normal text-primary', className)}
-      title={`ScadBuddy queued this job: ${source(job)}`}
+      title={`ScadBuddy queued or started this job: ${source(job)}`}
     >
       Queued from ScadBuddy
     </Badge>

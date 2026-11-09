@@ -26,6 +26,7 @@ from tests.api.test_print_history import link, mock_archive
 from tests.api.test_project_file import project_folder_routes, uploads
 from tests.api.test_send import API, configure, make_output, plate_routes, upload_route
 from tests.api.test_sidebar import PUBLIC
+from tests.bambuddy.conftest import recording
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -44,6 +45,36 @@ def test_reprint_with_a_key_twice_queues_once(client: TestClient, model: str) ->
     assert first.status_code == again.status_code == 201
     assert first.json() == again.json()
     assert queue.call_count == 1
+
+
+@respx.mock
+def test_scadbuddys_own_reprint_keeps_its_mark_in_the_queue(client: TestClient, model: str) -> None:
+    """#3741: ScadBuddy's reprint records its queue item as a send of the archive's
+    subject, so the queue marks it. Bambuddy's own reprint of the same archive has no
+    such record (`test_farm.py`), so only this one is marked."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    mock_enqueue(51)
+    queued = {**recording("queue.json")[1], "id": 51, "archive_id": 35, "status": "pending"}
+    bambuddys = {**queued, "id": 52}
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=[queued, bambuddys]))
+
+    reprinted = client.post(
+        "/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex}
+    )
+    assert reprinted.status_code == 201, reprinted.text
+
+    items = {item["id"]: item for item in client.get("/api/v1/farm/queue").json()}
+    mark = items[51]["scadbuddy"]
+    assert mark is not None
+    assert (mark["subject"], mark["output_id"], mark["matched_by"]) == (
+        f"output:{output_id}",
+        output_id,
+        "queue_item",
+    )
+    assert items[52]["scadbuddy"] is None
 
 
 @respx.mock

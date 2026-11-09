@@ -29,6 +29,7 @@ def _kinds(queue: str) -> set[str]:
         outputs=none,
         uploads=none,
         links=none,
+        sends=none,
         archive_cache=none,
         printers=none,
         reports=none,

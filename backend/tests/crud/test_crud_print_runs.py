@@ -13,6 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import ANY
 
 import pytest
 from temporalio.testing import ActivityEnvironment
@@ -22,6 +23,7 @@ from scadbuddy.api import crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.api.crud_print import EVENT_KIND_REFUSED
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
+from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRunError, PrintRunStore, read_latest
@@ -32,7 +34,13 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.operations import OTHER_CALLERS_KIND, RemoteOperationStore
-from scadbuddy.crud.print import BASE, RemoteEvents, RemoteOutcomes, RemotePrintRunStore
+from scadbuddy.crud.print import (
+    BASE,
+    RemoteEvents,
+    RemoteOutcomes,
+    RemotePrintRunStore,
+    RemoteSends,
+)
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
@@ -116,6 +124,7 @@ async def crud(
         events=bus,
         operations=OperationStore(store.pool, events=bus),
         kinds=KINDS,
+        links=PrintLinkStore(store.pool),
     ) as client:
         yield client
 
@@ -340,6 +349,18 @@ async def test_the_insert_prunes_past_the_apis_own_retention(
         retention=None,
     )
     assert await runs.get("r1") is None and await runs.get("r2") is not None
+
+
+async def test_a_send_sent_twice_is_one_row(crud: CrudClient, store: SettingsStore) -> None:
+    """#3741: the queue item a reprint queued, recorded through the API (#5295): sent
+    again, the first record stays."""
+    remote = RemoteSends(crud)
+    first = PrintSend(queue_item_id=61, plate_id=2, printer_id=3)
+    await remote.record_sends(SUBJECT, [first])
+    await remote.record_sends(SUBJECT, [first.model_copy(update={"plate_id": 9})])
+    assert await PrintLinkStore(store.pool).sends_for(SUBJECT) == [
+        first.model_copy(update={"first_seen": ANY})
+    ]
 
 
 async def test_an_api_out_of_reach_reads_as_no_run() -> None:

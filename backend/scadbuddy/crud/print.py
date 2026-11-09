@@ -21,6 +21,9 @@ the API, which may write every table `PRINTER_REFERENCES` names. `link_bambuddy`
 other method that merges, refuses: it runs on the API only. Its remaining methods stay on
 the worker's SQL until Task 29.
 
+`RemoteSends` records the queue item ScadBuddy's reprint queued as a send (#3741), so the
+Prints page marks it; sent again, the first record stays.
+
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a
 task on the event loop posts each to the API, which logs and NOTIFYs it once by its id.
@@ -34,11 +37,12 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import timedelta
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from scadbuddy.bambuddy.print_links import PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
@@ -278,6 +282,24 @@ class RemoteOutcomes:
             "GET", f"{BASE}/outcomes/older-open?{urlencode({'subject': run_subject})}"
         )
         return [PrintRun.model_validate(run) for run in response.json()]
+
+
+class RemoteSends:
+    """`print_links.SendRecorder` over the API's CRUD route (#3741, #5295): the queue
+    item ScadBuddy's reprint queued, recorded as a send of the archive's subject. Sent
+    again, the first record stays (``ON CONFLICT (queue_item_id) DO NOTHING``)."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def record_sends(self, subject: PrintSubject, sends: Sequence[PrintSend]) -> None:
+        if not sends:
+            return
+        body = {
+            "subject": subject.key,
+            "sends": [send.model_dump(mode="json", exclude={"first_seen"}) for send in sends],
+        }
+        await self._client.request("POST", f"{BASE}/sends", json=body)
 
 
 #: An event and the body that posts it, encoded once by `RemoteEvents.publish`.
