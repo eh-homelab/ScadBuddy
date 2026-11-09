@@ -114,14 +114,17 @@ function decodeCursor(cursor: string): [string, string] | null {
 const itemsOf = (orderId: string) => state.items.filter((i) => i.order_id === orderId).sort((a, b) => a.position - b.position)
 export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_item_id === itemId)
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
-/** `lifecycle.py` `stale_attempt` (#5582, #5592): a production attempt older than the revision
- * the accepted quote prices printed an earlier design. Its accept is refused, and the detail
- * marks it `stale`. */
+/** `lifecycle.py` `stale_attempt` (#5582, #5592, #5704): a production attempt that printed a
+ * revision numbered below the one the accepted quote prices (or none) printed an earlier
+ * design. Its accept is refused, and the detail marks it `stale`. */
 function staleAttempt(attempt: Fulfilment): boolean {
   if (attempt.purpose !== 'production') return false
   const pricedId = quotesOf(attempt.order_item_id).find((q) => q.accepted)?.revision_id
-  const priced = pricedId == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === pricedId)
-  return priced !== undefined && Date.parse(attempt.created_at) < Date.parse(priced.created_at)
+  const numberOf = (id: string | null | undefined) => (id == null ? undefined : revisionsOf(attempt.order_item_id).find((r) => r.id === id)?.number)
+  const priced = numberOf(pricedId)
+  if (priced === undefined) return false
+  const printed = numberOf(attempt.revision_id)
+  return printed === undefined || printed < priced
 }
 /** The attempts that count (#5280): a test print is never one of the item's production. */
 const productionOf = (itemId: string) => attemptsOf(itemId).filter((f) => f.purpose !== 'test')
@@ -873,6 +876,8 @@ const fulfilItems: Parameters<typeof http.post>[1] = async ({ request, params })
         created_by: BROWSER,
         created_at: at,
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         archive_ids: [],
       }
       state.fulfilments.push(attempt)
@@ -1566,6 +1571,8 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         archive_ids: body.archive_id == null ? [] : [body.archive_id],
       }
       state.fulfilments.push(attempt)
@@ -1685,6 +1692,8 @@ export const handlers = [
         created_by: BROWSER,
         created_at: now(),
         purpose: 'production',
+        // The design it prints: the item's current revision (`OrderStore.insert_fulfilment`, #5704).
+        revision_id: found.current_revision_id ?? null,
         print_request_id: printRequestId(found.id, request.headers.get('Idempotency-Key')!),
         print_run_id: newId('run'),
         copies,

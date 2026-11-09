@@ -458,21 +458,22 @@ def stale_attempt(
     item with no accepted quote say nothing. The order detail marks such an attempt
     ``stale`` by this same rule (#5592).
 
-    The two ``created_at`` values come from two transactions: the attempt's is ``now()``,
-    its transaction's start, and the revision's is ``clock_timestamp()``. Their order holds
-    because every writer of an item takes the order's row lock and reads the item after it:
-    a revision after acceptance is refused while a print of the item is open
-    (``print_in_flight``) and puts the item back to `draft`, and no attempt is recorded or
-    claimed on a `draft` item. So an attempt whose transaction began before the revision and
-    waited on the lock finds the item `draft` and is refused, and every attempt made after
-    the revision starts after the new quote's acceptance, later than the revision."""
+    The order is the revisions' numbers, never a wall-clock time: a production attempt
+    names the item's current revision when it is recorded or claimed, under the order's
+    row lock (``OrderStore.insert_fulfilment``). Two ``created_at`` values from two
+    transactions are not ordered when the clock steps back between them (#5704). An
+    attempt that names no revision was made before the item had one."""
     if attempt.purpose != "production":
         return False
     accepted = next((q for q in quotes if q.accepted), None)
     if accepted is None or accepted.revision_id is None:
         return False
-    priced = next((r for r in revisions if r.id == accepted.revision_id), None)
-    return priced is not None and attempt.created_at < priced.created_at
+    numbers = {r.id: r.number for r in revisions}
+    priced = numbers.get(accepted.revision_id)
+    if priced is None:
+        return False
+    printed = None if attempt.revision_id is None else numbers.get(attempt.revision_id)
+    return printed is None or printed < priced
 
 
 def requote_open(order: Order, item: OrderItem, quotes: Iterable[Quote]) -> bool:
@@ -3886,8 +3887,7 @@ class Lifecycle:
 
     def _before_priced_design(self, conn: Conn, item: OrderItem, attempt: Fulfilment) -> bool:
         """Whether the attempt was made before the revision the accepted quote prices: it
-        printed an earlier design (#5350). The rule, and why the order of the two
-        ``created_at`` values holds across their transactions, is :func:`stale_attempt`."""
+        printed an earlier design (#5350). The rule is :func:`stale_attempt`."""
         return stale_attempt(
             attempt,
             self.store.quotes(item.id, conn=conn),
@@ -4245,7 +4245,8 @@ class Lifecycle:
                 if (
                     existing.order_item_id != item_id
                     or existing.purpose != purpose
-                    or existing.revision_id != revision_id
+                    # A production attempt names the item's current revision (#5704).
+                    or (purpose == "test" and existing.revision_id != revision_id)
                 ):
                     # One key on `/print` and on a revision's `/test-print` is two
                     # requests: neither answers with the other's attempt.

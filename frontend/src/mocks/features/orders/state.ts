@@ -360,6 +360,7 @@ function fixtures(): State {
         id: 'f0000000-0000-4000-8000-000000000001',
         order_item_id: ITEM_CLOSED,
         purpose: 'production',
+        revision_id: firstRevisionId(ITEM_CLOSED),
         attempt: 1,
         quantity: 1,
         outcome: 'succeeded',

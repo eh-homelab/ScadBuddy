@@ -471,9 +471,59 @@ def test_the_revisions_migration_gives_every_model_item_revision_one(pg_conninfo
         assert dict(
             conn.execute("SELECT order_item_id, revision_id FROM order_item_quotes").fetchall()
         ) == {"model": rev_id, "custom": None}
+        # #5704's later backfill names the revision a production attempt printed.
         assert conn.execute(
             "SELECT purpose, revision_id FROM order_item_fulfilments"
-        ).fetchone() == ("production", None)
+        ).fetchone() == ("production", rev_id)
+
+
+@pytest.mark.requires_postgres
+def test_the_printed_revision_backfill_names_the_newest_revision_before_each_attempt(
+    pg_conninfo: str,
+) -> None:
+    # #5704: a production attempt from before the file names the item's newest revision
+    # written no later than it; a test print keeps its own, and an item with no revision
+    # names none.
+    backfill = _index("order_attempt_printed_revision")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:backfill])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind, slug,"
+            " commit, inputs, template_name, render_key) VALUES"
+            " ('model', 'o', 0, 1, 'Demo', 'model', 'demo', %s, '{\"params\": {}}', 'Demo', 'k')",
+            ("a" * 40,),
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('custom', 'o', 1, 1, 'B', 'custom')"
+        )
+        for rev, number, at in (("r1", 1, "1 hour"), ("r2", 2, "0 hours")):
+            conn.execute(
+                "INSERT INTO order_item_revisions (id, item_id, number, slug, commit, inputs,"
+                " template_name, render_key, created_at, created_by) VALUES"
+                " (%s, 'model', %s, 'demo', %s, '{}', 'Demo', 'k', now() - %s::interval, '{}')",
+                (rev, number, "a" * 40, at),
+            )
+        conn.execute(
+            "INSERT INTO order_item_fulfilments"
+            " (id, order_item_id, attempt, quantity, outcome, created_by, created_at,"
+            "  purpose, revision_id) VALUES"
+            " ('first', 'model', 1, 1, 'succeeded', '{}', now() - interval '2 hours',"
+            "  'production', NULL),"
+            " ('one', 'model', 2, 1, 'succeeded', '{}', now() - interval '30 minutes',"
+            "  'production', NULL),"
+            " ('two', 'model', 3, 1, 'succeeded', '{}', now(), 'production', NULL),"
+            " ('test', 'model', 4, 1, 'succeeded', '{}', now(), 'test', 'r1'),"
+            " ('none', 'custom', 1, 1, 'succeeded', '{}', now(), 'production', NULL)"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[backfill].id
+        rows = dict(conn.execute("SELECT id, revision_id FROM order_item_fulfilments").fetchall())
+    assert rows == {"first": None, "one": "r1", "two": "r2", "test": "r1", "none": None}
 
 
 @pytest.mark.requires_postgres
