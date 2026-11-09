@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -408,3 +409,21 @@ async def test_reconnected_clears_the_mark(bank: BankLinks) -> None:
 
 def test_the_header_name_is_plaids() -> None:
     assert plaid.VERIFICATION_HEADER == "plaid-verification"
+
+
+async def test_the_webhook_s_sync_tells_the_order_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sync a webhook asks for publishes `order.bank_deposits` on the app's bus, as the
+    sweep's does, so an open order page shows a deposit suggested early."""
+    from scadbuddy.api import bank_link
+
+    heard: list[object] = []
+
+    async def sync(bank: object, bus: object = None) -> int:
+        heard.append(bus)
+        return 0
+
+    monkeypatch.setattr(bank_link, "sync_deposits", sync)
+    bus = object()
+    payments = types.SimpleNamespace(bank=object())
+    await bank_link._sync_logged(payments, bus)  # type: ignore[arg-type]
+    assert heard == [bus]

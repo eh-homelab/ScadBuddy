@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response, status
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.api.payment_webhooks import read_body
+from scadbuddy.core.events import EventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.bank import (
     AccessTokenMissingError,
@@ -200,9 +201,9 @@ async def reconnect_bank_link(payments: PaymentsDep) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-async def _sync_logged(payments: PaymentsDep) -> None:
+async def _sync_logged(payments: PaymentsDep, bus: EventBus) -> None:
     try:
-        await sync_deposits(payments.bank)
+        await sync_deposits(payments.bank, bus)
     except Exception:
         logger.exception("the deposit sync a Plaid webhook asked for failed")
 
@@ -265,5 +266,5 @@ async def receive_bank_webhook(
         ) from None
     if outcome == "sync":
         # Plaid wants an answer within 10 seconds; the sync runs after it.
-        later.add_task(_sync_logged, payments)
+        later.add_task(_sync_logged, payments, state.events)
     return BankWebhookAnswer(outcome=outcome)
