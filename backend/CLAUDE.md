@@ -742,9 +742,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   back office never acts on a visitor's cart. The `housekeeping_sweep_storefront_drafts`
   sweep (both Schedules, behind its patch) deletes a cart idle past
   `storefront_draft_ttl_days` (`Lifecycle.sweep_drafts`: neither the order nor its visitor
-  seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`; its attachments through
+  seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
+  order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
-  the `storefront_renders` rows past a day (`VisitorStore.sweep`). A cancelled order reopened past `quoted`
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance

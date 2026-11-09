@@ -32,7 +32,7 @@ from scadbuddy.orders.models import Order, OrderFilter
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import SliceQuoteRequest, quote_check
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import ATTACHMENT_HOLDER, OrderStore
 from scadbuddy.orders.storefront.visitors import Visitor, VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -600,3 +600,69 @@ def test_the_visitor_sweep_takes_idle_visitors_with_no_order_and_old_renders(
     assert swept == (0, 1)
     ages = owner_conn.execute("SELECT count(*) AS n FROM storefront_renders").fetchone()
     assert ages is not None and ages["n"] == 2
+
+
+def _listed(lifecycle: Lifecycle) -> list[str]:
+    """The sweep's candidates, read and released: a list that may be stale by the time
+    each cart is taken."""
+    with lifecycle.store.transaction() as conn:
+        return lifecycle.store.idle_drafts(conn, before=NOW - timedelta(days=30), limit=200)
+
+
+def _intact(lifecycle: Lifecycle, order: Order, pool: PgPool) -> None:
+    assert lifecycle.store.order(order.id) is not None
+    assert len(lifecycle.store.attachments(order.id)) == 1
+    assert holders(pool, attachment_key(order)) == [(ATTACHMENT_HOLDER, f"att-{order.id}")]
+    assert holders(pool, f"request-file-{order.id}") == [(ATTACHMENT_HOLDER, f"att-{order.id}")]
+
+
+def test_a_visitor_seen_after_the_listing_keeps_its_cart(
+    lifecycle: Lifecycle,
+    idle_draft_with_request: Order,
+    visitors: VisitorStore,
+    pool: PgPool,
+) -> None:
+    # Review Minor 1: the visitor's touch commits between the listing and the cart's
+    # own transaction; the predicate is checked again under the lock.
+    assert _listed(lifecycle) == [idle_draft_with_request.id]
+    assert visitors.find("i" * 43) is not None
+    assert not lifecycle.sweep_draft(idle_draft_with_request.id, NOW - timedelta(days=30))
+    _intact(lifecycle, idle_draft_with_request, pool)
+
+
+def test_a_cart_changed_after_the_listing_loses_nothing(
+    lifecycle: Lifecycle,
+    idle_draft_with_request: Order,
+    owner_conn: Connection[DictRow],
+    pool: PgPool,
+) -> None:
+    # Review Minor 2: a cart that no longer qualifies keeps its attachments and holds.
+    assert _listed(lifecycle) == [idle_draft_with_request.id]
+    owner_conn.execute(
+        "UPDATE orders SET updated_at = now() WHERE id = %s", (idle_draft_with_request.id,)
+    )
+    assert not lifecycle.sweep_draft(idle_draft_with_request.id, NOW - timedelta(days=30))
+    _intact(lifecycle, idle_draft_with_request, pool)
+
+
+def test_the_visitor_sweep_takes_at_most_its_limit(
+    visitors: VisitorStore, owner_conn: Connection[DictRow], pool: PgPool
+) -> None:
+    # Review Minor 4: a backlog drains over later runs.
+    old = [visitors.ensure(letter * 43) for letter in "pq"]
+    for visitor in old:
+        _idle(owner_conn, None, visitor)
+        _render(owner_conn, visitor, timedelta(days=2))
+    keeper = visitors.ensure("k" * 43)
+    _render(owner_conn, keeper, timedelta(days=2))
+    _render(owner_conn, keeper, timedelta(days=3))
+    cutoffs = {
+        "visitors_before": NOW - timedelta(days=30),
+        "renders_before": NOW - timedelta(days=1),
+    }
+    with pool.connection() as conn:
+        assert visitors.sweep(conn, **cutoffs, limit=1) == (1, 1)
+    with pool.connection() as conn:
+        assert visitors.sweep(conn, **cutoffs, limit=10) == (1, 2)
+    with pool.connection() as conn:
+        assert visitors.sweep(conn, **cutoffs, limit=10) == (0, 0)

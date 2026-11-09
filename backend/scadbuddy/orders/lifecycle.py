@@ -769,23 +769,27 @@ class Lifecycle:
 
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
-        housekeeping sweep, after ``storefront_draft_ttl_days``), each in its own
-        transaction: its attachments with their holds (`OrderStore.delete_attachment`),
-        then the order, whose items cascade. A cart a visitor's write holds is skipped
-        (`OrderStore.idle_drafts`); a submitted or back office order is never taken.
-        The ids deleted."""
-        swept: list[str] = []
-        while len(swept) < limit:
-            with self.store.transaction() as conn:
-                found = self.store.idle_drafts(conn, before=before, limit=1)
-                if not found:
-                    break
-                [order_id] = found
-                for attachment in self.store.attachments(order_id, conn=conn):
-                    self.store.delete_attachment(conn, attachment.id)
-                self.store.delete_draft(conn, order_id)
-            swept.append(order_id)
-        return swept
+        housekeeping sweep, after ``storefront_draft_ttl_days``): the candidates
+        (`OrderStore.idle_drafts`), then each in its own transaction (`sweep_draft`). A
+        submitted or back office order is never taken. The ids deleted."""
+        with self.store.transaction() as conn:
+            listed = self.store.idle_drafts(conn, before=before, limit=limit)
+        return [order_id for order_id in listed if self.sweep_draft(order_id, before)]
+
+    def sweep_draft(self, order_id: str, before: datetime) -> bool:
+        """One cart of the sweep, in one transaction: locked and checked again
+        (`OrderStore.claim_idle_draft`), so a cart a visitor touched, changed, wrote to
+        or submitted since the listing loses nothing; then its attachments with their
+        holds (`OrderStore.delete_attachment`), then the order, whose items cascade.
+        Whether it was deleted."""
+        with self.store.transaction() as conn:
+            if not self.store.claim_idle_draft(conn, order_id, before=before):
+                return False
+            for attachment in self.store.attachments(order_id, conn=conn):
+                self.store.delete_attachment(conn, attachment.id)
+            if not self.store.delete_draft(conn, order_id):
+                raise RuntimeError(f"cart {order_id} was claimed but not deleted")
+        return True
 
     def edit_order(self, order_id: str, by: Actor, edit: OrderEdit) -> Order:
         """Notes and the due date in any open state; addresses (the order's own

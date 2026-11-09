@@ -20,6 +20,9 @@ from scadbuddy.orders.store import Conn
 _VISITOR = "id, created_at, last_seen_at"
 #: The edge's visitor id: 32 random bytes as URL-safe base64, unpadded.
 VISITOR_ID = re.compile(r"[A-Za-z0-9_-]{43}")
+#: The most visitors, and the most render rows, one `VisitorStore.sweep` deletes: the
+#: draft sweep's batch (`Lifecycle.sweep_drafts`).
+SWEEP_BATCH = 200
 
 
 @dataclass(frozen=True)
@@ -74,19 +77,28 @@ class VisitorStore:
 
     @staticmethod
     def sweep(
-        conn: Conn, *, visitors_before: datetime, renders_before: datetime
+        conn: Conn,
+        *,
+        visitors_before: datetime,
+        renders_before: datetime,
+        limit: int = SWEEP_BATCH,
     ) -> tuple[int, int]:
-        """The housekeeping pass (#5282), on the caller's connection: the
-        `storefront_renders` rows made before ``renders_before``, then the visitors last
-        seen before ``visitors_before`` that no order names (their newer renders
-        cascade). A visitor with a cart keeps it until the draft sweep takes the cart.
-        The counts deleted: (visitors, renders)."""
+        """The housekeeping pass (#5282), on the caller's connection: up to ``limit``
+        `storefront_renders` rows made before ``renders_before``, oldest first, then up
+        to ``limit`` visitors last seen before ``visitors_before`` that no order names
+        (their newer renders cascade). A visitor with a cart keeps it until the draft
+        sweep takes the cart. A larger backlog drains over later runs. The counts
+        deleted: (visitors, renders)."""
         renders = conn.execute(
-            "DELETE FROM storefront_renders WHERE created_at < %s", (renders_before,)
+            "DELETE FROM storefront_renders WHERE id IN (SELECT id FROM storefront_renders"
+            " WHERE created_at < %s ORDER BY created_at LIMIT %s)",
+            (renders_before, limit),
         ).rowcount
         visitors = conn.execute(
-            "DELETE FROM storefront_visitors v WHERE v.last_seen_at < %s"
-            " AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.storefront_visitor_id = v.id)",
-            (visitors_before,),
+            "DELETE FROM storefront_visitors WHERE id IN (SELECT v.id FROM storefront_visitors v"
+            " WHERE v.last_seen_at < %s"
+            " AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.storefront_visitor_id = v.id)"
+            " ORDER BY v.last_seen_at LIMIT %s)",
+            (visitors_before, limit),
         ).rowcount
         return visitors, renders

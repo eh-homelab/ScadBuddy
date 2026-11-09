@@ -1239,9 +1239,11 @@ async def _settle_payment_captures_logged(state: AppState) -> None:
 STOREFRONT_RENDERS_TTL = timedelta(days=1)
 
 
-def _sweep_storefront(state: AppState) -> tuple[list[str], int, int]:
+def _sweep_storefront(
+    state: AppState, *, now: datetime | None = None
+) -> tuple[list[str], int, int]:
     days = state.settings_store.snapshot().runtime.storefront_draft_ttl_days
-    now = datetime.now(UTC)
+    now = datetime.now(UTC) if now is None else now
     before = now - timedelta(days=days)
     drafts = state.components.get(ORDERS).lifecycle.sweep_drafts(before)
     with state.projection.pool.connection() as conn:

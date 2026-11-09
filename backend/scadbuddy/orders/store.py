@@ -859,7 +859,8 @@ class OrderStore:
     def idle_drafts(self, conn: Conn, *, before: datetime, limit: int) -> list[str]:
         """Up to ``limit`` unsubmitted storefront carts that neither changed nor had
         their visitor seen since ``before`` (#5282), locked for the caller's
-        transaction. A cart a visitor's write holds is skipped, not waited for."""
+        transaction. A cart a visitor's write holds is skipped, not waited for. Only the
+        order is locked: `claim_idle_draft` checks each one again before it goes."""
         rows = conn.execute(
             "SELECT o.id FROM orders o"
             " LEFT JOIN storefront_visitors v ON v.id = o.storefront_visitor_id"
@@ -869,6 +870,29 @@ class OrderStore:
             (before, limit),
         ).fetchall()
         return [row["id"] for row in rows]
+
+    def claim_idle_draft(self, conn: Conn, order_id: str, *, before: datetime) -> bool:
+        """Whether ``order_id`` is still an unsubmitted storefront cart idle since
+        ``before``, read under locks held to the end of the caller's transaction: the
+        order's (skipped, not waited for, while a visitor's write holds it) and its
+        visitor's (``FOR SHARE``: a touch waits for the commit, and one committed before
+        is read). A touch or a change after the listing keeps the cart."""
+        order = conn.execute(
+            "SELECT storefront_visitor_id, updated_at FROM orders WHERE id = %s"
+            " AND source = 'storefront' AND submitted_at IS NULL FOR UPDATE SKIP LOCKED",
+            (order_id,),
+        ).fetchone()
+        if order is None:
+            return False
+        last = order["updated_at"]
+        if order["storefront_visitor_id"] is not None:
+            visitor = conn.execute(
+                "SELECT last_seen_at FROM storefront_visitors WHERE id = %s FOR SHARE",
+                (order["storefront_visitor_id"],),
+            ).fetchone()
+            if visitor is not None:
+                last = max(last, visitor["last_seen_at"])
+        return bool(last < before)
 
     def delete_draft(self, conn: Conn, order_id: str) -> bool:
         """The unsubmitted storefront cart's row; its items, revisions and audit rows
