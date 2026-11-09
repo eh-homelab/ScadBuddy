@@ -168,6 +168,11 @@ def test_a_pending_request_reads_nothing_and_a_failed_one_reads_again(shop: PayS
     with shop.rows.transaction() as conn:
         payments_store.set_request_status(conn, req.id, "failed")
     assert checkout(shop, token) is not None
+    # #5791 review: the token that outlived a refused capture dies once the request ends.
+    with shop.rows.transaction() as conn:
+        payments_store.set_request_status(conn, req.id, "paid")
+    assert checkout(shop, token) is None
+    assert stored_hash(shop, req.id) is None
 
 
 def test_a_cancel_through_the_lifecycle_drops_the_token(shop: PayShop) -> None:
