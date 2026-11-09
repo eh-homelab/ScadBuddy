@@ -16,7 +16,7 @@ const settled = () => new Promise((resolve) => setTimeout(resolve, 2 * CHECK_DEB
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
-// #4250 — "Quote from a slice…" opens the print dialog in its quote mode: the spools slice,
+// #4250 — "Slice…" opens the print dialog in its quote mode: the spools slice,
 // a price-book filament per slot prices, and Quote posts the item's slice quote.
 describe('QuoteEditor · a quote from a slice (#4250)', () => {
   beforeEach(() => resetMockState())
@@ -562,12 +562,16 @@ describe('QuoteEditor · print setups (#4673)', () => {
     const start = vi.fn<(body: SliceQuoteRequest) => Promise<void>>().mockResolvedValue(undefined)
     const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 })
     const { user } = renderPage(
-      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} startSlicing />,
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start, dismiss: vi.fn() }} startSlicing={1} />,
     )
     const dialog = await screen.findByRole('dialog', { name: 'Quote from a slice' })
     const inputs = within(dialog).getByTestId('design-inputs')
     await user.click(within(inputs).getByRole('button', { name: /^Inputs/ }))
     const name = await within(inputs).findByRole('textbox', { name: /Name on the tag/ })
+    // Typed back to the item's own value, nothing is changed (#5797 review).
+    await user.clear(name)
+    await user.type(name, 'Reagan')
+    expect(within(inputs).getByRole('button', { name: /^Inputs/ })).toHaveTextContent(/^Inputs$/)
     await user.clear(name)
     await user.type(name, 'Ada')
     expect(within(inputs).getByRole('button', { name: /changed: a new revision/ })).toBeInTheDocument()

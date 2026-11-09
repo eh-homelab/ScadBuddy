@@ -146,7 +146,7 @@ export function QuoteEditor({
   item,
   slice,
   parts = '',
-  startSlicing = false,
+  startSlicing = 0,
 }: {
   orderId: string
   itemId: string
@@ -166,13 +166,13 @@ export function QuoteEditor({
   /** #5543: the item's parts as a key (`part:per_unit,…`): the history's unit cost carries
    * them, so a change reads it again. */
   parts?: string
-  /** #4673 — open the slice dialog at once: the row's Slice… opened the drawer for it. */
-  startSlicing?: boolean
+  /** #4673 — the row's Slice… clicks, counted (0 for none): each new count opens the slice dialog. */
+  startSlicing?: number
 }) {
-  const [slicing, setSlicing] = useState(startSlicing)
+  const [slicing, setSlicing] = useState(startSlicing > 0)
   // Slice… again on the row while the drawer is open: the dialog opens again.
   useEffect(() => {
-    if (startSlicing) setSlicing(true)
+    if (startSlicing > 0) setSlicing(true)
   }, [startSlicing])
   const [fromPrint, setFromPrint] = useState(false)
   // What a slice quote slices: the item's output, or a library file item's file (#5544).
@@ -280,7 +280,8 @@ export function QuoteEditor({
                   )
                 )}
               </span>
-              {!quote.accepted && editable && oldRevision(quote, item?.current_revision_id) && (
+              {/* Beside every Accept it holds, so a touch screen shows the reason too. */}
+              {!quote.accepted && (editable || (acceptPending && quote.id === pending?.id)) && oldRevision(quote, item?.current_revision_id) && (
                 <span className="text-xs text-muted-foreground" data-testid="setup-old-revision">
                   {OLD_REVISION_TEXT}
                 </span>

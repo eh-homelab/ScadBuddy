@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { api } from '../../api/client'
 import type { CustomizerSchema, ParamValue } from '../../api/types'
-import { defaultValues, sameValues, type ParamValues } from '../../lib/params'
+import { defaultValues, type ParamValues } from '../../lib/params'
 import { useAsync } from '../../lib/useAsync'
 import { ParameterPanel } from '../ParameterPanel'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -16,6 +16,12 @@ export interface ItemDesign {
 
 /** Why a template with its own page takes no inputs here (#4673 PR 4). */
 export const OWN_UI_TEXT = 'This template has its own page: change its inputs there and add the output to the order.'
+
+/** Whether two parameter sets hold the same values, a vector compared by its items. */
+function sameParams(a: ParamValues, b: ParamValues): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  return [...keys].every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key]))
+}
 
 /** The item's own parameter values: `inputs.params`, the ones a template's form edits. */
 function paramsOf(inputs: Record<string, unknown>): ParamValues {
@@ -35,19 +41,20 @@ export function DesignInputs({ design, onChange }: { design: ItemDesign; onChang
   const fonts = useAsync(() => api.listFonts(), [])
   const own = useMemo(() => paramsOf(design.inputs), [design.inputs])
   const [edits, setEdits] = useState<ParamValues>({})
+  const changed = !sameParams({ ...own, ...edits }, own)
   const form = schema.data as (CustomizerSchema & { ui?: unknown }) | undefined
   const values = useMemo(() => ({ ...(form ? defaultValues(form) : {}), ...own, ...edits }), [form, own, edits])
 
   function publish(next: ParamValues) {
     setEdits(next)
     const merged = { ...own, ...next }
-    onChange(sameValues(merged, own) ? null : { ...design.inputs, params: merged })
+    onChange(sameParams(merged, own) ? null : { ...design.inputs, params: merged })
   }
 
   return (
     <Collapsible className="mb-4 rounded-md border px-3 py-2" data-testid="design-inputs">
       <CollapsibleTrigger className="cursor-pointer text-left text-sm">
-        Inputs{Object.keys(edits).length > 0 ? ' (changed: a new revision)' : ''}
+        Inputs{changed ? ' (changed: a new revision)' : ''}
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-2 flex flex-col gap-2">
         <p className="text-xs text-muted-foreground">

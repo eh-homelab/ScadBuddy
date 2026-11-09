@@ -473,6 +473,24 @@ describe('OrderItemsTable · the items card (#4955)', () => {
     expect(within(drawer).getByTestId('item-section-quote')).toBeInTheDocument()
   })
 
+  it('opens the slice dialog again on a second Slice… of the open item (#4673)', async () => {
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Slice…' }))
+    const slicing = await screen.findByRole('dialog', { name: 'Quote from a slice' })
+    // Beside the assistant the dialogs are not modal (#798): Cancel by its click.
+    fireEvent.click(await within(slicing).findByRole('button', { name: 'Cancel', hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quote from a slice', hidden: true })).toBeNull())
+    // The drawer stays open on the item.
+    expect(screen.getByRole('dialog', { name: 'Name Keychain', hidden: true })).toBeInTheDocument()
+    // Beside the drawer the row's menu stays reachable (#798).
+    const trigger = within(row(ITEM_DRAFT)).getByRole('button', { name: 'Row actions', hidden: true })
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Slice…', hidden: true }))
+    expect(await screen.findByRole('dialog', { name: 'Quote from a slice', hidden: true })).toBeInTheDocument()
+  })
+
   describe('the section a menu action opens the drawer at', () => {
     const scrolled: string[] = []
     const original = Element.prototype.scrollIntoView

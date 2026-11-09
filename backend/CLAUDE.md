@@ -697,7 +697,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   The agent's `order_item_quote` takes `manual` or `slice`, beside `price_book_get`,
   `price_book_set` and `order_estimate`. Frontend: the Settings page's Orders section
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
-  `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
+  `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
