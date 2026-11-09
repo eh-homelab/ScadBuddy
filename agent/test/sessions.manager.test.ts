@@ -1,8 +1,10 @@
+import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
-import { SettingsStore } from '../src/credentials.js'
-import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
+import { CredentialStore, SettingsStore } from '../src/credentials.js'
+import { CONTINUE_PROMPT, CredentialPool, NoUsableCredentialError } from '../src/harness/fallback.js'
+import { kekFromBase64 } from '../src/secrets.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
@@ -641,6 +643,63 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         expect(fallback).toBeGreaterThanOrEqual(0)
         expect(reply).toBeGreaterThan(fallback)
       })
+    })
+
+    it('puts the credential names in the session events only: no logged line, audit row or outcome has them (#5779)', async () => {
+      const paths = await tempPaths()
+      const kek = kekFromBase64(randomBytes(32).toString('base64'))
+      const store = new CredentialStore(db.sql)
+      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-first-key-aaaa', name: 'Personal Max' }, kek)
+      await store.create({ kind: 'anthropic_api_key', secret: 'sk-ant-api03-second-key-bbbb', name: 'Team Work' }, kek)
+      const audit = new AuditLog({ sql: db.sql })
+      const logged: string[] = []
+      const credentials = new CredentialPool({ repo: store, kek: { ok: true, kek }, audit, log: (line) => logged.push(line) })
+      // Both credentials are refused: the first after its init, the second at once.
+      let attempts = 0
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> => {
+        const attempt = ++attempts
+        const session_id = run.sessionId ?? run.resume ?? 'unknown'
+        return (async function* () {
+          for await (const _message of run.prompt as AsyncIterable<SDKUserMessage>) {
+            if (attempt === 1) yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+            yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+            return
+          }
+        })()
+      }
+      const m = manager({
+        sql: db.sql,
+        paths,
+        run: runner,
+        audit,
+        credentials,
+        stderr: (line) => logged.push(line),
+        probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+      })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+      const done = await turn!.done
+      const events = (await m.events.read(session.id)).map((e) => e.event)
+
+      // The person reads the names in the session's events.
+      expect(events.find((e) => e.type === 'credential.fallback')).toMatchObject({
+        from: 'credential 1 "Personal Max" (API key …aaaa)',
+        to: 'credential 2 "Team Work" (API key …bbbb)',
+        outcome: 'refused',
+      })
+      const error = events.find((e) => e.type === 'error')
+      expect(error).toMatchObject({ code: 'turn_failed', shown: expect.stringContaining('"Team Work"') })
+
+      // Nothing else does: the error's message, the turn's outcome, the logged lines, the audit rows.
+      const names = /Personal Max|Team Work/
+      expect((error as { message: string }).message).not.toMatch(names)
+      expect(done).toMatchObject({ kind: 'failed' })
+      expect(JSON.stringify(done)).not.toMatch(names)
+      expect(logged.some((line) => line.includes('credential 1 (API key …aaaa)'))).toBe(true)
+      expect(logged.join('\n')).not.toMatch(names)
+      await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'credential' })).entries.length).toBeGreaterThan(0)
+      const rows = (await audit.list({ kind: 'credential' })).entries
+      expect(rows.map((r) => r.action)).toEqual(expect.arrayContaining(['disable', 'fallback']))
+      expect(JSON.stringify(rows)).not.toMatch(names)
     })
 
     it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
