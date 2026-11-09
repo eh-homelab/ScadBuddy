@@ -3,6 +3,7 @@ import { USER_ONLY } from '../../../agent/dom'
 import { api, ApiError } from '../../../api/client'
 import type { ProviderStatus } from '../../../api/types'
 import { When } from '../../../components/orders/When'
+import { BankAccount } from '../../../components/settings/BankAccount'
 import { WebhookError } from '../../../components/settings/WebhookError'
 import { refusalText } from '../../../components/orders/refusal'
 import { Badge } from '@/components/ui/badge'
@@ -53,6 +54,9 @@ export function Component() {
           ))}
         </div>
       )}
+      <div className="mt-3">
+        <BankAccount />
+      </div>
       <Instructions />
     </Section>
   )

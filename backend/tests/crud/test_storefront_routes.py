@@ -20,6 +20,7 @@ from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.storefront import EDGE_AREAS
 from scadbuddy.main import create_app
 from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
@@ -118,7 +119,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
-    assert r.json() == {"areas": ["pay"]}
+    assert r.json() == {"areas": ["listings", "renders", "pay"]}
 
 
 def test_the_storefront_routes_are_not_in_the_schema() -> None:
@@ -187,3 +188,21 @@ def test_the_other_callers_keep_their_paths(client: TestClient, render_token: st
     # The storefront has no path of its own outside `/internal/crud/`.
     storefront = bearer("sbsvc_storefront")
     assert client.get("/api/v1/internal/storefront/areas", headers=storefront).status_code == 404
+
+
+def test_the_edge_waits_for_every_area_it_calls() -> None:
+    """The edge serves only once the API lists each area it calls, and the API lists
+    only areas it serves whole."""
+    assert {"listings", "renders", "pay"} == EDGE_AREAS
+    assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
+
+
+@pytest.mark.parametrize("path", ["/listings", "/listings/00000000-0000-0000-0000-000000000000"])
+def test_the_listing_routes_need_the_storefront_credential(
+    client: TestClient, render_token: str, path: str
+) -> None:
+    url = f"/api/v1/internal/crud/storefront{path}"
+    headers = {VISITOR_HEADER: VISITOR, CLIENT_HEADER: "203.0.113.1"}
+    assert client.get(url, headers=headers).status_code == 401
+    refused = client.get(url, headers={**headers, **bearer(render_token)})
+    assert refused.status_code == 403 and refused.json()["reason"] == "wrong_caller"

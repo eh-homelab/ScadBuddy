@@ -6,7 +6,9 @@ The edge holds no database: it calls ``/api/v1/internal/crud/storefront/…`` wi
 `CrudRefusedError` for a CRUD route's 4xx; the edge answers a public one with its status,
 problem and ``Retry-After``, and any other with a bare 502 (`storefront/app.py`). Each call
 sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's address
-(`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry.
+(`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry. A
+render's body goes as the visitor sent it, unread; its preview comes back as a stream
+(`CrudStream`), which the edge relays without holding it whole.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -18,13 +20,14 @@ import asyncio
 from typing import Any, Final
 
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
-from scadbuddy.crud.client import CrudClient, wait_for_areas
+from scadbuddy.crud.client import CrudClient, CrudStream, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
-#: task that adds an area to both sides adds it here.
-EDGE_AREAS: Final[frozenset[str]] = frozenset()
+#: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
+#: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
+EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "pay"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 
 
@@ -57,18 +60,55 @@ class StorefrontCrud:
         *,
         visitor_id: str,
         client: str,
-        json: Any = None,
+        content: bytes | None = None,
         key: str | None = None,
     ) -> Any:
         response = await self._crud.request(
             method,
             f"{BASE}{path}",
-            json=json,
+            content=content,
             idempotency_key=key,
             headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
         )
         return response.json()
 
     async def listings(self, *, visitor_id: str, client: str) -> Any:
-        """``GET …/storefront/listings``: the published listings (Task 6 adds the route)."""
+        """``GET …/storefront/listings``: the published listings."""
         return await self._call("GET", "/listings", visitor_id=visitor_id, client=client)
+
+    async def listing(self, listing_id: str, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/listings/{id}``: one published listing. ``listing_id`` must
+        be a listing id (`storefront/routes.py` checks it), so it cannot leave the path."""
+        return await self._call(
+            "GET", f"/listings/{listing_id}", visitor_id=visitor_id, client=client
+        )
+
+    async def render(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/renders``: the visitor's JSON body as it came, unread, and
+        the request's ``Idempotency-Key``."""
+        return await self._call(
+            "POST", "/renders", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def render_status(self, job_id: str, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/renders/{id}``. ``job_id`` must be a job id
+        (`storefront/routes.py` checks it), so it cannot leave the path."""
+        return await self._call("GET", f"/renders/{job_id}", visitor_id=visitor_id, client=client)
+
+    async def render_estimate(self, job_id: str, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/renders/{id}/estimate``: the render's rough price."""
+        return await self._call(
+            "GET", f"/renders/{job_id}/estimate", visitor_id=visitor_id, client=client
+        )
+
+    async def render_preview(
+        self, job_id: str, *, plate: int | None, visitor_id: str, client: str
+    ) -> CrudStream:
+        """``GET …/storefront/renders/{id}/preview.glb``, its body unread: the caller
+        reads it as a stream, then closes it."""
+        return await self._crud.stream(
+            "GET",
+            f"{BASE}/renders/{job_id}/preview.glb",
+            params=None if plate is None else {"plate": str(plate)},
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+        )

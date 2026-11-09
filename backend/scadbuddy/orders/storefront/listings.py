@@ -15,15 +15,22 @@ listing id) while the listing is published; unpublishing, an edit and a delete d
 hold in the same transaction as the row, and a failed publish drops every hold the row
 does not name. Publishes of one listing never overlap (``begin_publish``), so a failing
 one cannot drop the holds a running one took.
+
+``public_listing`` is a published listing as the public site sees it (Task 6): its bounds
+with each parameter's label and group, its filaments, and its media as presigned GETs
+of `PUBLIC_MEDIA_TTL`. Only an S3 store presigns (`public_content`); on any other the
+public routes answer 503, since the fault is the operator's.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import threading
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -37,8 +44,10 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.pg_pool import record_connection
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
+from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.storefront.wire import (
     ChoiceBound,
@@ -48,6 +57,13 @@ from scadbuddy.orders.storefront.wire import (
     ListingSnapshot,
     NumberBound,
     ParamBound,
+    PublicChoice,
+    PublicFilament,
+    PublicListing,
+    PublicMedia,
+    PublicNumber,
+    PublicParam,
+    PublicText,
     TextBound,
 )
 from scadbuddy.render.jobs import resolve_source
@@ -55,10 +71,14 @@ from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_va
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
+from scadbuddy.store.s3 import S3ContentBackend
+from scadbuddy.storefront.wire import LISTING_ID, STOREFRONT_PROBLEMS
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Core
+    from scadbuddy.store.content import ContentStore
     from scadbuddy.store.snapshots import SnapshotStore
 
 #: The ``blob_refs`` holder kind of a published listing's snapshot and media.
@@ -72,6 +92,13 @@ PUBLISH_LOCKS_MAX: Final = 2
 POSITION_LOCK: Final = f"{HOLDER}:position"
 #: The publish locks' name in `core/pg_pool.py`'s registry and in ``pg_stat_activity``.
 PUBLISH_LOCKS_NAME: Final = "scadbuddy-storefront-publish"
+#: How long a listing media URL the public site gets works.
+PUBLIC_MEDIA_TTL: Final = timedelta(hours=1)
+#: The public routes log the operator's text of ``storefront_needs_s3`` at most this
+#: often (seconds).
+NEEDS_S3_WARN_EVERY: Final = 60.0
+#: When the public routes last logged it (`time.monotonic`), or None.
+_needs_s3_warned: float | None = None
 
 _COLUMNS = (
     "id, slug, commit, title, description, position, published, params, fixed, colours,"
@@ -89,6 +116,15 @@ def problem(status_code: int, slug: str, detail: str, **extensions: Any) -> ApiE
 
 def _not_found(listing_id: str) -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", f"no listing {listing_id!r}")
+
+
+def needs_s3() -> ApiError:
+    """409 ``storefront_needs_s3``."""
+    return problem(
+        status.HTTP_409_CONFLICT,
+        "storefront_needs_s3",
+        "the storefront needs store_backend s3: set it in Settings first",
+    )
 
 
 def _changed(listing_id: str) -> ApiError:
@@ -663,11 +699,7 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     # The public site serves listing media as presigned GETs, and a visitor's render
     # reads the snapshot from the content store (plan).
     if core.store.backend != "s3" or snapshots is None:
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "storefront_needs_s3",
-            "the storefront needs store_backend s3: set it in Settings first",
-        )
+        raise needs_s3()
     end = await asyncio.to_thread(store.begin_publish, listing.id)
     try:
         return await _publish(core, store, listing, snapshots)
@@ -702,3 +734,114 @@ async def unpublish(store: ListingStore, listing_id: str) -> Listing:
     """The listing off the public site; its hold on the snapshot and the media goes with
     it, so the sweep may take them once nothing else holds them."""
     return await asyncio.to_thread(store.mark_unpublished, listing_id)
+
+
+# -- the public site's view (#5282 Task 6) ----------------------------------------------
+
+
+def public_content(core: Core) -> ContentStore:
+    """The S3 content store the public site's media is presigned on. On any other the
+    fault is the operator's, not the visitor's: 503 ``storefront_needs_s3`` with a
+    plain text and reason ``not_configured`` (the edge's client answers it at once),
+    and the operator's text logged at most once a minute."""
+    global _needs_s3_warned
+    content = core.store.content
+    if (
+        core.store.backend == "s3"
+        and content is not None
+        and isinstance(content.backend, S3ContentBackend)
+    ):
+        return content
+    now = time.monotonic()
+    if _needs_s3_warned is None or now - _needs_s3_warned >= NEEDS_S3_WARN_EVERY:
+        _needs_s3_warned = now
+        logger.warning("the public storefront is off: set store_backend to s3 in Settings")
+    raise problem(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "storefront_needs_s3",
+        "The shop is not available right now.",
+        reason=NOT_CONFIGURED,
+    )
+
+
+def _public_param(
+    name: str, bound: ParamBound, by_name: Mapping[str, Parameter], colours: Collection[str]
+) -> PublicParam:
+    """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
+    listing filaments the price book still has, casefolded)."""
+    parameter = by_name.get(name)
+    shown = {
+        "label": (parameter.caption if parameter is not None else None) or name,
+        "group": parameter.group if parameter is not None else "",
+        "colour": parameter is not None and parameter.type == "color",
+    }
+    fields = {**bound.model_dump(), **shown}
+    if isinstance(bound, ChoiceBound) and shown["colour"]:
+        fields["choices"] = [
+            c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
+        ]
+    if isinstance(bound, NumberBound):
+        return PublicNumber.model_validate(fields)
+    if isinstance(bound, ChoiceBound):
+        return PublicChoice.model_validate(fields)
+    return PublicText.model_validate(fields)
+
+
+async def _media_url(content: ContentStore, listing_id: str, key: str) -> str | None:
+    """A presigned GET of the held blob ``key``, or None (logged, never with a URL) when
+    the index lost it. It reads the index only: the listing holds the blob, so no HEAD
+    is needed."""
+    stat = await asyncio.to_thread(content.index.get, key)
+    if stat is None or stat.ref.backend != content.name:
+        logger.warning(
+            "listing %s names media %s, which the blob index does not have; left out",
+            listing_id,
+            key,
+            extra={"listing_id": listing_id, "blob_key": key},
+        )
+        return None
+    backend = content.backend
+    assert isinstance(backend, S3ContentBackend)
+    return await backend.presign_get(stat.ref.backend_id, PUBLIC_MEDIA_TTL)
+
+
+async def public_listing(
+    content: ContentStore, listing: Listing, filaments: Mapping[str, Filament]
+) -> PublicListing:
+    """The published ``listing`` as the public site shows it: each bound with its
+    schema label and group, the listing's filaments the price book still has
+    (``filaments``, by id), and each media file as a presigned GET of
+    `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and logged."""
+    assert listing.snapshot is not None
+    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    offered = [filaments[i] for i in listing.colours if i in filaments]
+    colours = {f.colour.casefold() for f in offered}
+    media: list[PublicMedia] = []
+    for item in listing.media:
+        url = await _media_url(content, listing.id, item.blob_key)
+        if url is not None:
+            media.append(PublicMedia(url=url, kind=item.kind, caption=item.caption))
+    return PublicListing(
+        id=listing.id,
+        title=listing.title,
+        description=listing.description,
+        params={
+            name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
+        },
+        colours=[
+            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            for f in offered
+        ],
+        media=media,
+        updated_at=listing.updated_at,
+    )
+
+
+def published_listing(store: ListingStore, listing_id: str) -> Listing:
+    """The listing, when it is published; 404 ``listing_not_found`` for an unpublished
+    or unknown one alike, so a visitor cannot tell them apart, and for an id that is not
+    one, before any lookup."""
+    listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
+    if listing is None or not listing.published or listing.snapshot is None:
+        raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+    return listing

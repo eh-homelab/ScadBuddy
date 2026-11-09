@@ -14,6 +14,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.payments.bank import BankLinks
 from scadbuddy.payments.credentials import PaymentCredentials
 from scadbuddy.payments.registry import providers
 from scadbuddy.payments.service import Payments
@@ -24,6 +25,7 @@ class PaymentsComponent:
         self.core = core
         self.orders = orders
         self._service: Payments | None = None
+        self._bank: BankLinks | None = None
 
     @property
     def service(self) -> Payments:
@@ -38,6 +40,15 @@ class PaymentsComponent:
                 lambda: self.core.settings.storefront_public_url,
             )
         return self._service
+
+    @property
+    def bank(self) -> BankLinks:
+        """The shop's bank account linked through Plaid (#4961): beside the seam, not a
+        provider."""
+        if self._bank is None:
+            kek = settings_kek(self.core.settings.secret_key_file)
+            self._bank = BankLinks(self.orders.store, kek)
+        return self._bank
 
 
 PAYMENTS: Key[PaymentsComponent] = Key("payments")

@@ -877,7 +877,7 @@ async def test_a_capture_made_reads_as_paid_keyed_by_the_capture(
     pp.routes["order"].respond(json=captured_order(status, fee="0.50"))
     read = await paypal.read_capture(CRED, ORDER)
     assert read == ProviderEvent(
-        event_id=f"capture:{CAPTURE}",
+        event_id=f"capture:{CAPTURE}:paid",
         kind="paid",
         provider_ref=ORDER,
         amount_minor=700,
@@ -904,7 +904,8 @@ async def test_a_capture_that_failed_reads_as_failed(
     pp.routes["order"].respond(json=captured_order(status))
     read = await paypal.read_capture(CRED, ORDER)
     assert isinstance(read, ProviderEvent)
-    assert (read.kind, read.event_id, read.provider_ref) == ("failed", f"capture:{CAPTURE}", ORDER)
+    expected = ("failed", f"capture:{CAPTURE}:failed", ORDER)
+    assert (read.kind, read.event_id, read.provider_ref) == expected
 
 
 async def test_a_pending_capture_reads_as_pending(paypal: PayPalProvider, pp: Any) -> None:
@@ -912,6 +913,11 @@ async def test_a_pending_capture_reads_as_pending(paypal: PayPalProvider, pp: An
     read = await paypal.read_capture(CRED, ORDER)
     assert isinstance(read, ProviderEvent)
     assert read.kind == "pending"
+    # The same capture read once it completed is a new event, never a replay of this one.
+    pp.routes["order"].respond(json=captured_order("COMPLETED"))
+    completed = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(completed, ProviderEvent)
+    assert completed.event_id != read.event_id
 
 
 async def test_an_approved_order_with_no_capture_reads_uncaptured(

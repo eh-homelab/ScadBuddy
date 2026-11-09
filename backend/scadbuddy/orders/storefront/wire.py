@@ -1,5 +1,6 @@
 """The storefront listing's shapes (#5282, spec 2026-11-02 §5.3): the back office's body,
-the stored row, and what publish captures from the template's commit.
+the stored row, what publish captures from the template's commit, and the public site's
+view of a published listing (`PublicListing`).
 
 A listing offers one commit of a template. Each parameter a customer may change has a
 bound (``ParamBound``) inside the schema's own; every other parameter is fixed. Publish
@@ -18,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 
 #: A commit of the models repository, whole: a listing never pins a short id.
@@ -136,3 +139,108 @@ class ListingOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ids: list[str]
+
+
+# -- the public site's view (Task 6) --------------------------------------------------
+
+
+class _Shown(BaseModel):
+    """What the page shows beside a bound: the schema's label (its caption, else its
+    name) and group, and whether it is a ``// color`` parameter, whose choices are the
+    colours of the listing's filaments. The schema has no help text to show."""
+
+    label: str
+    group: str = ""
+    colour: bool = False
+
+
+class PublicNumber(NumberBound, _Shown):
+    pass
+
+
+class PublicChoice(ChoiceBound, _Shown):
+    #: A colour's choices are the listing filaments the price book still has, so none
+    #: may be left.
+    choices: list[ParamValue]
+
+
+class PublicText(TextBound, _Shown):
+    pass
+
+
+PublicParam = Annotated[PublicNumber | PublicChoice | PublicText, Field(discriminator="kind")]
+
+
+class PublicFilament(BaseModel):
+    """A filament a visitor may pick: never its price."""
+
+    id: str
+    colour: str
+    colour_name: str | None
+    material: str
+
+
+class PublicMedia(BaseModel):
+    """A media file as a presigned GET (`PUBLIC_MEDIA_TTL`)."""
+
+    url: str
+    kind: MediaKind
+    caption: str
+
+
+class PublicListing(BaseModel):
+    """A published listing as the public site shows it. Every text is the shop's, shown
+    as text, never as HTML (spec §5.8)."""
+
+    id: str
+    title: str
+    description: str
+    params: dict[str, PublicParam]
+    colours: list[PublicFilament]
+    media: list[PublicMedia]
+    updated_at: datetime
+
+
+class PublicListings(BaseModel):
+    listings: list[PublicListing]
+    #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
+    requests_enabled: bool
+
+
+# -- a visitor's renders (Task 7) ------------------------------------------------------
+
+
+#: A colour slot of a render: an index into its colours, never negative.
+ColourSlotIndex = Annotated[int, Field(ge=0)]
+
+
+class RenderBody(BaseModel):
+    """``POST …/storefront/renders``: the visitor's values for the listing as it read it.
+    The CRUD side checks every value against the listing (`inputs.py` `listing_values`),
+    never only against the schema."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    listing_id: str = Field(max_length=64)
+    #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
+    listing_updated_at: datetime
+    values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
+    #: The listing filament the visitor chose for each colour slot of the render.
+    colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+
+
+class StoreRender(BaseModel):
+    """A visitor's render: the fields of the back office's job that ``Preview.tsx`` reads.
+    ``error`` is a fixed text, never the render's log: the visitor never sees a path or a
+    stack."""
+
+    id: str
+    status: JobState
+    #: The step the render is in while it runs, as ``job.progress`` names it.
+    stage: str | None
+    plates: list[PlateInfo]
+    bbox_mm: BoundingBox | None
+    colors: list[str] | None
+    #: The edge's path of the preview, once the render is done.
+    preview_url: str | None
+    error: str | None

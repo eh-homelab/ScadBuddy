@@ -1037,9 +1037,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pending`) whose wait is over (`captures_due`: `CAPTURE_SETTLE_FIRST_MINUTES` after the
   approval or the last read, doubled per unknown read, at most a day; claimed `FOR UPDATE
   SKIP LOCKED`), read with no lock held (`CapturingProvider.read_capture`). A capture
-  found is recorded through `record_provider_event` (keyed `capture:<id>`; a later webhook
-  writes no second payment, matched by the order) and its closes run; a pending one stops
-  the reads; an `APPROVED` order with no capture is captured again under the approval's
+  found is recorded through `record_provider_event` (keyed `capture:<id>:<kind>`, so a pending read and a later paid one are two events; a later webhook
+  writes no second payment, matched by the order) and its closes run, and one that leaves
+  the request `pending` (`currency_mismatch`, `ignored`, `unmatched`) counts as an
+  unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), each read
+  counted toward the give-up; a request whose settling raises is logged and counted, and
+  the batch (`CAPTURE_SETTLE_BATCH`, 4) goes on; an `APPROVED` order with no capture is captured again under the approval's
   key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
   (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
   `CAPTURE_GIVE_UP_ATTEMPTS` unknown reads (`capture_unsettled`) mark it `failed`. The capture's events record the money. Each
@@ -1172,3 +1175,30 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and the mark (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`),
   so the sweep retries it like any other. A late page whose reference another request
   holds names that request's live page: it is not kept, not marked and not closed.
+  The shop's bank account through Plaid (#4961) sits beside the seam, not in it: Plaid
+  opens no payment request, so it is not in `registry.py` and not a `payment_credentials`
+  row. `payments/plaid.py` (the stateless Plaid calls: link token, public-token exchange,
+  `/accounts/get` of the chosen account, `/item/remove`; keys in the `PLAID-CLIENT-ID` and
+  `PLAID-SECRET` headers; the facts, each with its Plaid link, are its docstring),
+  `payments/bank.py` (`BankLinks`, `PaymentsComponent.bank`: one `bank_links` row, the keys
+  and the access token sealed under AAD `bank_links:<id>`, and in the clear only Plaid's
+  ids and the account's name, type and mask; Plaid is called outside every transaction, and
+  a link that lost a race, chose an account that is not checking or savings, or failed to
+  store removes its Item at Plaid (the page sends Link's token with every chosen id, and
+  `link` exchanges it before refusing none or several, `BankChoiceError`, so no Item Link
+  made is left behind; Plaid not answering is `PlaidUnavailableError`, 503
+  `plaid_unavailable`; a linked row with no access token is `AccessTokenMissingError`,
+  whose unlink drops the link and keeps the keys, `TOKEN_MISSING`) (`bank_keys_changed` when the keys were replaced or
+  forgotten meanwhile); new keys are refused while linked, `bank_linked`; two first saves
+  at once meet on the `singleton` column and the second updates the first's row; every
+  Postgres call of an async method runs in `asyncio.to_thread`; an unlink Plaid does not
+  answer keeps the token, an unlink without the key file is 409 `kek_missing` and keeps
+  the row (the file may come back), and one whose keys Plaid refuses
+  (`plaid.KEYS_REFUSED`) drops the link here only and keeps the keys (`REMOVE_AT_PLAID`),
+  while one whose keys are sealed under another key file deletes the row, keys and all
+  (`KEYS_UNREADABLE`: remove the Item in the Plaid Dashboard, then save the keys again);
+  either way `BankUnlinked.note` says what to do), routes `api/bank_link.py` (`/payments/bank`; every write in
+  `PERSON_ENDPOINTS`), frontend `components/settings/BankAccount.tsx` and
+  `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
+  allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.
+  Tests replay `tests/payments/plaid_payloads/` (Plaid's sandbox examples) through respx.

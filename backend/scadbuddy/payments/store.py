@@ -42,8 +42,14 @@ CLOSE_GIVE_UP_ATTEMPTS = 10
 #: well within this. Each read that finds the outcome still unknown doubles the wait, up
 #: to a day.
 CAPTURE_SETTLE_FIRST_MINUTES = 60
-#: The most pending captures one sweep reads.
-CAPTURE_SETTLE_BATCH = 8
+#: The most pending captures one sweep reads; the housekeeping budget
+#: (`PAYMENT_CAPTURES_TIMEOUT`) counts the provider calls of this many.
+CAPTURE_SETTLE_BATCH = 4
+#: A read that found the capture pending at the provider sets the count to at least
+#: this, so the backoff (60 minutes doubled 5 times is past a day) is at its daily cap:
+#: the capture's own event settles it, and the sweep reads it once a day in case that
+#: event is lost too.
+CAPTURE_DAILY_ATTEMPTS = 5
 #: After this many reads that found the outcome unknown (about five days with the
 #: backoff: 1 + 2 + ... + 16 hours, then a day each), the request is marked `failed`, so
 #: it never blocks its order's cancel and the disconnect for good.
@@ -226,14 +232,19 @@ def capture_unsettled(conn: Conn, request_id: str) -> int:
     return 0 if row is None else int(row["capture_attempts"])
 
 
-def capture_settled(conn: Conn, request_id: str) -> None:
-    """The capture was made and is pending at the provider (#4959): its own event settles
-    it, as a bank debit's does, so the sweep stops reading it."""
-    conn.execute(
-        "UPDATE payment_requests SET capture_pending_at = NULL, capture_tried_at = NULL,"
-        " capture_attempts = 0 WHERE id = %s",
-        (request_id,),
-    )
+def capture_read_daily(conn: Conn, request_id: str) -> int:
+    """The capture was made and is pending at the provider (#4959): its own event
+    settles it, as a bank debit's does, and the sweep reads it once a day in case that
+    event is lost (`CAPTURE_DAILY_ATTEMPTS`). The read counts toward the give-up; how
+    many there were. A request no longer marked is left as it is (0)."""
+    row = conn.execute(
+        "UPDATE payment_requests SET capture_attempts = GREATEST(capture_attempts + 1, %s),"
+        " capture_tried_at = clock_timestamp()"
+        " WHERE id = %s AND status = 'pending' AND capture_pending_at IS NOT NULL"
+        " RETURNING capture_attempts",
+        (CAPTURE_DAILY_ATTEMPTS, request_id),
+    ).fetchone()
+    return 0 if row is None else int(row["capture_attempts"])
 
 
 def close_confirmed(conn: Conn, request_id: str, provider_ref: str) -> None:
