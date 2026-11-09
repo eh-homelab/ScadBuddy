@@ -16,7 +16,9 @@ name: GHCR Cleanup
 # cache (`type=gha`), which GitHub evicts on its own. If build-image.yml is
 # ever moved back to a `type=registry` cache, add `buildcache` to the
 # never-touch reasoning — deleting it turns the next few CI runs into cold
-# builds.
+# builds. The slicer image's registry cache
+# (`ghcr.io/eh-homelab/scadbuddy-slicer:buildcache`, #4059) is in another
+# package, which this workflow does not prune.
 #
 # FIRST RUN: once this lands on the default branch, dispatch it manually (it
 # defaults to dry-run) and review the deletion set before the first cron fires.
