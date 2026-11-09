@@ -12,6 +12,7 @@ import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
@@ -50,6 +51,16 @@ const IN_PRODUCTION = new Set(['accepted', 'in_production', 'ready', 'shipped'])
 const NONE = '__none__'
 /** The "For request" select's value for a payment that answers no request. */
 const NO_REQUEST = '__no_request__'
+/** #4960 — the methods a payment received by hand can name, stored as the value. */
+const MANUAL_METHODS = [
+  { value: 'cash', label: 'Cash' },
+  { value: 'check', label: 'Check' },
+  { value: 'bank_transfer', label: 'Bank transfer' },
+  { value: 'venmo', label: 'Venmo' },
+  { value: 'zelle', label: 'Zelle' },
+] as const
+const OTHER_METHOD = '__other__'
+const methodLabel = (method: string) => MANUAL_METHODS.find((m) => m.value === method)?.label ?? method
 /** #4693 — the search parameter naming the open line item: `/orders/<id>?item=<item id>`. */
 const ITEM_PARAM = 'item'
 const ITEM_HASH = `#${itemAnchor('')}`
@@ -126,15 +137,17 @@ export function OrderPage() {
   }, [loaded, openItem])
   const [adding, setAdding] = useState(false)
   // #4955 — the drawer section a row's ⋯ action opened an item at, scrolled to once. Kept
-  // with the item's id, so it never reaches another item's drawer.
-  const [section, setSection] = useState<{ item: string; at: ItemSection } | null>(null)
+  // with the item's id, so it never reaches another item's drawer. `n` counts the clicks, so
+  // a second Slice… of the open item opens its dialog again (#4673).
+  const [section, setSection] = useState<{ item: string; at: ItemSection; n: number } | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [reason, setReason] = useState('')
   const [notes, setNotes] = useState<string | null>(null)
   const [due, setDue] = useState<string | null>(null)
   const providers = useAsync(() => api.paymentProviders(), []).data
   const providerLabel = (id: string) => (providers ?? []).find((p) => p.id === id)?.label ?? id
-  const [payment, setPayment] = useState({ amount: '', method: '', request: NO_REQUEST })
+  const [payment, setPayment] = useState({ amount: '', method: NONE, other: '', request: NO_REQUEST })
+  const paymentMethod = payment.method === OTHER_METHOD ? payment.other.trim() || 'other' : payment.method === NONE ? null : payment.method
   // #5281 — the charges editor's unsaved rows hold the shipping option picker, which writes
   // the same list: a save of stale rows would undo the option.
   const [chargesDirty, setChargesDirty] = useState(false)
@@ -303,7 +316,7 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           onAdd={() => setAdding(true)}
           onSection={(item, at) => {
-            setSection({ item: item.id, at })
+            setSection((was) => ({ item: item.id, at, n: (was?.n ?? 0) + 1 }))
             setOpenItem(item.id)
           }}
           busy={busy}
@@ -400,7 +413,7 @@ export function OrderPage() {
                   {payments.map((p) => (
                     <li key={p.id} className="flex justify-between gap-2">
                       <span>
-                        {p.provider ? `Paid by ${providerLabel(p.provider)}` : (p.method ?? 'Payment')} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
+                        {p.provider ? (p.method && p.method !== p.provider ? `Paid by ${methodLabel(p.method)} via ${providerLabel(p.provider)}` : `Paid by ${providerLabel(p.provider)}`) : p.method ? methodLabel(p.method) : 'Payment'} {p.reference ? `(${p.reference})` : ''} · {timeAgo(p.created_at)}
                       </span>
                       <span className="sb-num">{formatMoney(p.amount_minor, order.currency, order.minor_exponent)}</span>
                     </li>
@@ -409,6 +422,7 @@ export function OrderPage() {
               )}
               <DepositControls order={order} totals={totals} requests={requests} onChanged={reload} />
               <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
+              <DepositSuggestions order={order} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
                   className="flex flex-wrap items-end gap-2"
@@ -419,7 +433,7 @@ export function OrderPage() {
                       setRefusal({ text: 'Enter the amount received, such as 12.50.', items: [] })
                       return
                     }
-                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: payment.method.trim() || null, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: '', request: NO_REQUEST }))
+                    void act(() => api.addPayment(order.id, { amount_minor: minor, method: paymentMethod, ...(chosenRequest === NO_REQUEST ? {} : { payment_request_id: chosenRequest }) })).then(() => setPayment({ amount: '', method: NONE, other: '', request: NO_REQUEST }))
                   }}
                 >
                   <div className="flex flex-col gap-1">
@@ -428,8 +442,27 @@ export function OrderPage() {
                   </div>
                   <div className="flex flex-col gap-1">
                     <Label htmlFor="payment-method">Method</Label>
-                    <Input id="payment-method" className="w-28" placeholder="cash, card" value={payment.method} onChange={(e) => setPayment({ ...payment, method: e.target.value })} />
+                    <Select value={payment.method} onValueChange={(method) => setPayment({ ...payment, method })}>
+                      <SelectTrigger id="payment-method" aria-label="Method" className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value={NONE}>Not given</SelectItem>
+                        {MANUAL_METHODS.map((m) => (
+                          <SelectItem key={m.value} value={m.value}>
+                            {m.label}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value={OTHER_METHOD}>Other</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
+                  {payment.method === OTHER_METHOD && (
+                    <div className="flex flex-col gap-1">
+                      <Label htmlFor="payment-other">Other method</Label>
+                      <Input id="payment-other" className="w-28" value={payment.other} onChange={(e) => setPayment({ ...payment, other: e.target.value })} />
+                    </div>
+                  )}
                   {openRequests.length > 0 && (
                     <div className="flex flex-col gap-1">
                       <Label htmlFor="payment-request">For request</Label>
@@ -529,6 +562,9 @@ export function OrderPage() {
           slices={slices}
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
+          sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
+          // Once its dialog opened, a slice request is the quote's section only (#5797 review).
+          onSliceOpened={() => setSection((was) => (was?.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -547,6 +583,8 @@ function ItemDrawer({
   slices,
   unfulfilAllowed,
   section = null,
+  sliceAsked = 0,
+  onSliceOpened,
   onClose,
   onChanged,
 }: {
@@ -559,6 +597,9 @@ function ItemDrawer({
   unfulfilAllowed: boolean
   /** #4955 — the section a row's ⋯ action opened the drawer at: scrolled into view. */
   section?: ItemSection | null
+  /** #4673 — each row Slice… of this item, counted: a new count opens the slice dialog. */
+  sliceAsked?: number
+  onSliceOpened?: () => void
   onClose: () => void
   onChanged: () => void
 }) {
@@ -589,7 +630,8 @@ function ItemDrawer({
   // after this component's own effects run), and scrolled to; another section's attaches in its
   // place, so a second ⋯ section for this item scrolls again.
   const [target, setTarget] = useState<HTMLDivElement | null>(null)
-  const sectionRef = (name: ItemSection) => (name === section ? setTarget : undefined)
+  // Slice… (#4673) opens the quote's section with its dialog.
+  const sectionRef = (name: ItemSection) => (name === section || (name === 'quote' && section === 'slice') ? setTarget : undefined)
   useEffect(() => {
     target?.scrollIntoView?.({ block: 'start' })
   }, [target])
@@ -792,7 +834,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} />
       )}
       </div>
       )}

@@ -102,6 +102,7 @@ import { QueuedPanel } from './print/QueuedPanel'
 import { PlateClearNotice } from './print/PlateClearNotice'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
+import { DesignInputs, type ItemDesign } from './orders/DesignInputs'
 import { QuoteFilaments } from './orders/QuoteFilaments'
 import { refusalText } from './orders/refusal'
 import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
@@ -267,6 +268,12 @@ interface Props {
      * so a new quote keeps them. Left out, the model's remembered ones.
      */
     partSettings?: PartSettingsMap | null
+    /**
+     * #4673 PR 4 — the item's design, whose inputs the dialog edits in place: changed, the
+     * quote sends them, and the backend makes a revision of them first. Left out (a
+     * library file item), no inputs are shown.
+     */
+    design?: ItemDesign
     /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
     start: (body: SliceQuoteRequest) => Promise<void>
   }
@@ -287,6 +294,12 @@ interface Props {
      * ones would print what was not priced, so Print is held while the dialog's differ.
      */
     quoted?: PartSettingsMap | null
+    /**
+     * #4673 — the accepted quote's print setup, which the dialog opens on as a batch step
+     * opens on its own seed: the printer, spools, nozzles, quality, tower, supports and
+     * sequence. The backend refuses another setup (`requote_needed`).
+     */
+    seed?: PrintRunRequest | null
     start: (body: OrderItemPrintRequest) => Promise<void>
   }
 }
@@ -928,6 +941,8 @@ export function PrintPicker({
   const [priced, setPriced] = useState<Record<string, string>>({})
   // #4625 §6.3 — each support slot's price-book filament, keyed as `priced` is.
   const [support, setSupport] = useState<Record<string, string>>({})
+  // #4673 PR 4 — the inputs edited in the quote dialog, null while they are the item's.
+  const [designInputs, setDesignInputs] = useState<Record<string, unknown> | null>(null)
   // The quote and item-print modes (`handing`): the one request the dialog hands the page.
   const [handingBusy, setHandingBusy] = useState(false)
   const [handingError, setHandingError] = useState<string | null>(null)
@@ -1329,27 +1344,46 @@ export function PrintPicker({
    * again for it), then, once this file's spools are known, the rest.
    */
   const seeding = useRef<'printer' | 'rest' | 'done'>('printer')
+  // #4673: an item print's quote seeds the dialog as a batch step's own seed does.
+  const itemSeed = itemPrint?.seed ?? null
+  const seeded = useMemo(
+    () => batch ?? (itemSeed ? { seed: itemSeed, seedIsOwn: true, seedSlots: NO_IDS } : undefined),
+    [batch, itemSeed],
+  )
   const { askPrinter, changeNozzles, changeQuality, setPlate, setPartSettings, setSeededParts } = picker
   const restoreProfiles = filamentProfiles.restore
   useEffect(() => {
-    const seed = batch?.seed
-    if (!seed || seeding.current === 'done' || !choices) return
+    const seed = seeded?.seed
+    if (!seeded || !seed || seeding.current === 'done' || !choices) return
     const wanted = seed.printer_id ?? null
     const known = wanted !== null && printers.some((entry) => entry.id === wanted)
+    // A seed naming only a registry row (an item print's quote on a LAN-only printer,
+    // #4673): that row, when the server says a run reaches it. The wait below holds only
+    // while it is choosable: a read that stops listing it makes `lanRow` null, and the
+    // rest of the seed applies on the printer in view (#5761 review).
+    const row = wanted === null && seed.printer ? seed.printer : null
+    const lanRow = row !== null && lanChoosable.some((entry) => entry.id === row) ? row : null
+    // The rows first: before they load no row is choosable yet.
+    if (row !== null && registry.data === undefined && registry.error === undefined) return
     if (seeding.current === 'printer') {
       seeding.current = 'rest'
       if (known && wanted !== printerId) {
         askPrinter(wanted)
         return
       }
+      if (lanRow !== null && registryPrinter !== lanRow) {
+        askRegistry(lanRow)
+        return
+      }
     }
-    if ((known && printerId !== wanted) || !filaments || !planReady || (!project && ownProjects.loading)) return
+    if ((known && printerId !== wanted) || (lanRow !== null && registryPrinter !== lanRow) || !filaments || !planReady || (!project && ownProjects.loading)) return
     seeding.current = 'done'
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
-    const chosen = seed.filament_plan.slots ?? []
+    // An item print's quote with no plan seeds none (#4673): the picks stay.
+    const chosen = (seed.filament_plan as PrintRunRequest['filament_plan'] | undefined)?.slots ?? []
     const mine = slotKeys(filaments)
-    const same = mine.length === batch.seedSlots.length && mine.every((key, at) => key === batch.seedSlots[at])
-    if (!batch.seedIsOwn && !same) return
+    const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
+    if (!seeded.seedIsOwn && !same) return
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
       current.map((choice) => {
@@ -1367,9 +1401,9 @@ export function PrintPicker({
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
     // A step's own seed is its sequence, Default included; another step's names one only
     // when it has one, and otherwise leaves the subject's remembered one (#4970).
-    if (batch.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
+    if (seeded.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
     else if (seed.print_sequence) setPrintSequence(seed.print_sequence)
-    if (batch.seedIsOwn) {
+    if (seeded.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or
       // profiles the user chose.
@@ -1383,10 +1417,15 @@ export function PrintPicker({
       }
     }
   }, [
-    batch,
+    seeded,
     choices,
     printers,
     printerId,
+    lanChoosable,
+    registryPrinter,
+    askRegistry,
+    registry.data,
+    registry.error,
     filaments,
     planReady,
     project,
@@ -1470,6 +1509,11 @@ export function PrintPicker({
         support_filaments: Object.fromEntries(Object.entries(support).filter(([, filament]) => filament)),
         // #5627: what the quote slices with, so its print can send the same.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
+        // #4673: the whole print setup, which the quote records and its print sends.
+        ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...(supports === null ? {} : { supports }),
+        ...(primeTower === null ? {} : { prime_tower: primeTower }),
+        ...(designInputs === null ? {} : { inputs: designInputs }),
       })
       close()
     } catch (cause) {
@@ -1697,6 +1741,7 @@ export function PrintPicker({
       ) : (
         <>
           {batch?.strip((step) => batch.onJump(step, stepChoice()))}
+          {quote?.design && <DesignInputs design={quote.design} onChange={setDesignInputs} />}
           {loading && !choices && (
             <div className="mb-4 space-y-2" data-testid="print-loading">
               <p className="text-sm text-muted-foreground">Reading the printer and the inventory</p>

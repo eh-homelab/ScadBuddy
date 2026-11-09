@@ -1,0 +1,114 @@
+import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
+import { ActionKey, errorText, store, type Draft, type DraftItem } from '../api/client'
+import { useDraftChanged } from '../draftCount'
+
+/**
+ * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed,
+ * one at a time: every Remove waits while one runs, so the answers come back in order and
+ * the last one is the cart. A request's text, a file's name and each value are the
+ * visitor's own, shown as text; each value is named by its label.
+ */
+export function DraftPage() {
+  const [draft, setDraft] = useState<Draft | null>()
+  const [error, setError] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+  const keys = useRef(new ActionKey())
+  const draftChanged = useDraftChanged()
+
+  useEffect(() => {
+    let live = true
+    store.draft().then(
+      (answer) => {
+        if (!live) return
+        setDraft(answer)
+        draftChanged(answer)
+      },
+      (caught: unknown) => live && setError(errorText(caught)),
+    )
+    return () => {
+      live = false
+    }
+  }, [draftChanged])
+
+  const remove = async (item: DraftItem) => {
+    if (removing !== null) return
+    setRemoving(item.id)
+    setError(null)
+    try {
+      const next = await store.removeItem(item.id, keys.current.for(`remove:${item.id}`))
+      keys.current.done()
+      setDraft(next)
+      draftChanged(next)
+    } catch (caught) {
+      setError(errorText(caught))
+    } finally {
+      setRemoving(null)
+    }
+  }
+
+  const items = draft?.items ?? []
+  return (
+    <section>
+      <h1 className="sf-h1">Your order</h1>
+      {error && (
+        <p className="sf-error" role="alert">
+          {error}
+        </p>
+      )}
+      {draft === undefined && !error && <p className="sf-hint">Loading your order…</p>}
+      {draft !== undefined && items.length === 0 && (
+        <div className="sf-panel">
+          <p className="sf-lead">Your order is empty.</p>
+          <Link className="sf-button" to="/">
+            Browse the designs
+          </Link>
+        </div>
+      )}
+      {items.length > 0 && (
+        <ul className="sf-items">
+          {items.map((item) => (
+            <li key={item.id} className="sf-item">
+              <div className="sf-item-head">
+                <h2 className="sf-item-title">{item.title}</h2>
+                <span className="sf-item-qty">{`Quantity ${item.quantity}`}</span>
+              </div>
+              {item.inputs && Object.keys(item.inputs).length > 0 && (
+                <dl className="sf-values">
+                  {Object.entries(item.inputs).map(([name, value]) => (
+                    <div key={name}>
+                      <dt>{item.labels?.[name] ?? name}</dt>
+                      <dd>{String(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
+              {item.inputs && Object.keys(item.inputs).length === 0 && <p className="sf-hint">As the shop designed it.</p>}
+              {item.notes !== null && <p className="sf-notes">{item.notes}</p>}
+              {item.attachments.length > 0 && (
+                <ul className="sf-filelist">
+                  {item.attachments.map((file) => (
+                    <li key={file.url}>
+                      <a href={file.url} rel="noopener noreferrer" target="_blank">
+                        {file.filename}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button
+                type="button"
+                className="sf-link"
+                aria-label={`Remove ${item.title}`}
+                disabled={removing !== null}
+                onClick={() => void remove(item)}
+              >
+                {removing === item.id ? 'Removing…' : 'Remove'}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}

@@ -11,6 +11,7 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.proxies import parse_cidr_list
+from scadbuddy.core.urls import https_origin
 
 #: The edge refuses to start when any of these is set: it must never hold a database
 #: secret or the KEK's file.
@@ -24,6 +25,10 @@ STOREFRONT_PORT: Final = 8083
 STOREFRONT_PREFIX: Final = "/api/store/v1"
 MIN_COOKIE_KEY_BYTES: Final = 32
 LOG_LEVELS: Final = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+#: Where the image holds the built page (the Dockerfile's `app` stage).
+CONTAINER_FRONTEND_DIR: Final = Path("/app/frontend/dist")
+# scadbuddy/storefront/settings.py -> storefront -> scadbuddy -> backend -> repo root
+REPO_FRONTEND_DIR: Final = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
 
 class EdgeRefusal(Exception):  # noqa: N818  (a refusal to start, not an error)
@@ -51,11 +56,13 @@ class StorefrontSettings(BaseSettings):
     service_bootstrap_file: Path | None = None
     #: The cookie's signing key: its own, never the KEK.
     storefront_cookie_key_file: Path
-    #: The page's origin, as the browser sees it. A later task's `Origin` check compares
-    #: to it.
+    #: The page's origin, as the browser sees it: a write's ``Origin`` must be it
+    #: (`app.py` `CrossSiteGate`).
     storefront_public_url: str
     trusted_proxies: str = ""
     log_level: str = "INFO"
+    #: The built page (`static.py`); else the repo's ``frontend/dist`` or the image's.
+    frontend_dir: Path | None = None
 
     @field_validator("api_internal_url")
     @classmethod
@@ -68,19 +75,7 @@ class StorefrontSettings(BaseSettings):
     @field_validator("storefront_public_url")
     @classmethod
     def _public_url_is_an_https_origin(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if (
-            parts.scheme != "https"
-            or not parts.netloc
-            or parts.path
-            or parts.query
-            or parts.fragment
-        ):
-            raise ValueError(
-                f"SCADBUDDY_STOREFRONT_PUBLIC_URL must be an https:// origin with no path,"
-                f" not {value!r}"
-            )
-        return value
+        return https_origin(value, "SCADBUDDY_STOREFRONT_PUBLIC_URL")
 
     @field_validator("trusted_proxies")
     @classmethod
@@ -97,6 +92,15 @@ class StorefrontSettings(BaseSettings):
                 f"SCADBUDDY_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, not {value!r}"
             )
         return level
+
+    def resolve_frontend_dir(self) -> Path | None:
+        """The bundle to serve the page from: one with a ``storefront.html``, or None."""
+        candidates = (
+            (self.frontend_dir,)
+            if self.frontend_dir is not None
+            else (REPO_FRONTEND_DIR, CONTAINER_FRONTEND_DIR)
+        )
+        return next((c for c in candidates if (c / "storefront.html").is_file()), None)
 
     @model_validator(mode="after")
     def _one_proof_and_a_strong_key(self) -> StorefrontSettings:

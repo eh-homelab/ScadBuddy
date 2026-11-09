@@ -17,7 +17,7 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.payments import store as payments_store
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.fake import FAKE, signed_event
-from scadbuddy.payments.models import CaptureOutcome, ProviderEvent
+from scadbuddy.payments.models import CaptureOutcome, CaptureState, ProviderEvent
 from scadbuddy.payments.provider import Credential, ProviderError, ProviderUnavailableError
 from tests.api.test_order_payments import (
     connect_fake,
@@ -30,6 +30,9 @@ from tests.api.test_settings_runtime import _state
 pytestmark = pytest.mark.requires_postgres
 
 HOOK = "/api/v1/payments/webhooks/fake"
+BACKFILL = (
+    Path(__file__).parents[2] / "scadbuddy/migrations/20261109T0026Z_payment_capture_backfill.sql"
+)
 
 
 @pytest.fixture
@@ -87,6 +90,16 @@ def due(client: TestClient, request_id: str) -> None:
         )
 
 
+def tried(client: TestClient, request_id: str, ago: str) -> None:
+    """The sweep's last read of the request was ``ago``."""
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_tried_at = clock_timestamp() - %s::interval"
+            " WHERE id = %s",
+            (ago, request_id),
+        )
+
+
 def marks(client: TestClient, request_id: str) -> tuple[Any, int]:
     with _state(client).components.get(ORDERS).store.transaction() as conn:
         row = conn.execute(
@@ -104,7 +117,7 @@ def settle(client: TestClient) -> int:
 
 def paid_read(req: dict[str, Any]) -> ProviderEvent:
     return ProviderEvent(
-        event_id="capture:CAP1",
+        event_id="capture:CAP1:paid",
         kind="paid",
         provider_ref=req["provider_ref"],
         amount_minor=req["amount_minor"],
@@ -167,31 +180,115 @@ def test_a_declined_capture_is_failed(client: TestClient, captures: list[tuple[s
     order_id, req = stuck(client)
     due(client, req["id"])
     FAKE.capture_reads[req["provider_ref"]] = ProviderEvent(
-        event_id="capture:CAP1", kind="failed", provider_ref=req["provider_ref"]
+        event_id="capture:CAP1:failed", kind="failed", provider_ref=req["provider_ref"]
     )
     assert settle(client) == 1
     assert status_of(client, order_id, req["id"]) == "failed"
     assert marks(client, req["id"]) == (None, 0)
 
 
-def test_a_pending_capture_is_left_to_its_own_event(
-    client: TestClient, captures: list[tuple[str, str]]
-) -> None:
-    order_id, req = stuck(client)
-    due(client, req["id"])
-    FAKE.capture_reads[req["provider_ref"]] = ProviderEvent(
-        event_id="capture:CAP1",
+def pending_read(req: dict[str, Any]) -> ProviderEvent:
+    return ProviderEvent(
+        event_id="capture:CAP1:pending",
         kind="pending",
         provider_ref=req["provider_ref"],
         amount_minor=req["amount_minor"],
         currency=req["currency"],
     )
-    assert settle(client) == 1
-    assert status_of(client, order_id, req["id"]) == "pending"
-    assert marks(client, req["id"]) == (None, 0)
-    # Not read again: a bank debit's pending is settled by its own event.
-    FAKE.capture_reads[req["provider_ref"]] = paid_read(req)
+
+
+def test_a_pending_capture_is_read_once_a_day(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """The capture's own event settles a pending capture, as a bank debit's does; but
+    that event can be lost too, so the sweep still reads it, at the daily cap."""
+    order_id, req = stuck(client)
+    due(client, req["id"])
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
     assert settle(client) == 0
+    assert status_of(client, order_id, req["id"]) == "pending"
+    pending_at, attempts = marks(client, req["id"])
+    assert pending_at is not None
+    assert attempts == payments_store.CAPTURE_DAILY_ATTEMPTS
+    # Not read again within the day.
+    FAKE.capture_reads[req["provider_ref"]] = paid_read(req)
+    tried(client, req["id"], "23 hours")
+    assert settle(client) == 0
+    tried(client, req["id"], "25 hours")
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "paid"
+
+
+def approved(client: TestClient, request_id: str, ago: str) -> None:
+    """The approval that moved the request to ``pending`` was ``ago``."""
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_pending_at = clock_timestamp() - %s::interval"
+            " WHERE id = %s",
+            (ago, request_id),
+        )
+
+
+def test_pending_reads_are_not_counted_toward_the_give_up(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """#5780 review: a capture PayPal reports as pending (an eCheck can take more than a
+    week) is not failed by the read count, even after unknown reads: only by its own,
+    longer bound."""
+    order_id, req = stuck(client)
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_attempts = %s WHERE id = %s",
+            (payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1, req["id"]),
+        )
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
+    for _ in range(payments_store.CAPTURE_GIVE_UP_ATTEMPTS + 2):
+        due(client, req["id"])
+        assert settle(client) == 0
+        assert status_of(client, order_id, req["id"]) == "pending"
+    assert marks(client, req["id"])[1] == payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1
+
+
+def test_an_unknown_read_after_a_pending_read_counts_again(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """#5786 review: a pending read keeps the count; the next read that cannot tell adds
+    to it, so a request with one counted read left gives up on that read."""
+    order_id, req = stuck(client)
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_attempts = %s WHERE id = %s",
+            (payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1, req["id"]),
+        )
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
+    due(client, req["id"])
+    assert settle(client) == 0
+    assert marks(client, req["id"])[1] == payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1
+    FAKE.capture_reads[req["provider_ref"]] = "unknown"
+    due(client, req["id"])
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "failed"
+    assert audit(client, order_id, "payment_request.failed")[-1]["reason"] == "capture_unsettled"
+
+
+def test_a_capture_pending_past_its_bound_is_failed(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """The request never blocks its order's cancel for good: once ``capture_pending_at``
+    (here the approval) is `CAPTURE_PENDING_GIVE_UP_DAYS` old, a pending read marks it
+    failed."""
+    order_id, req = stuck(client)
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
+    days = payments_store.CAPTURE_PENDING_GIVE_UP_DAYS
+    approved(client, req["id"], f"{days - 1} days")
+    assert settle(client) == 0
+    assert status_of(client, order_id, req["id"]) == "pending"
+    approved(client, req["id"], f"{days} days 1 hour")
+    tried(client, req["id"], "25 hours")
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "failed"
+    failed = audit(client, order_id, "payment_request.failed")
+    assert failed[-1]["reason"] == "capture_pending_unsettled"
 
 
 def test_an_order_gone_with_no_capture_is_failed(
@@ -295,3 +392,77 @@ def test_a_bank_debits_pending_is_never_read(
     FAKE.capture_reads[req["provider_ref"]] = paid_read(req)
     assert settle(client) == 0
     assert status_of(client, order["id"], req["id"]) == "pending"
+
+
+def test_a_paid_read_the_lifecycle_does_not_take_counts_as_unsettled(
+    client: TestClient, captures: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read whose event leaves the request ``pending`` (``currency_mismatch`` here,
+    ``ignored`` or ``unmatched`` alike) is a read that could not tell: it is counted, so
+    the give-up still bounds it."""
+    monkeypatch.setattr(payments_store, "CAPTURE_GIVE_UP_ATTEMPTS", 2)
+    order_id, req = stuck(client)
+    wrong = paid_read(req).model_copy(
+        update={"currency": "JPY" if req["currency"] != "JPY" else "USD"}
+    )
+    FAKE.capture_reads[req["provider_ref"]] = wrong
+    due(client, req["id"])
+    assert settle(client) == 0
+    assert status_of(client, order_id, req["id"]) == "pending"
+    assert marks(client, req["id"])[1] == 1
+    due(client, req["id"])
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "failed"
+    assert audit(client, order_id, "payment_request.failed")[-1]["reason"] == "capture_unsettled"
+
+
+def test_one_request_that_raises_does_not_stop_the_batch(
+    client: TestClient, captures: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing request's read is counted, as one that could not tell, and the rest of
+    the batch is still read."""
+    first_id, first = stuck(client)
+    second = payable_order(client)
+    other = request_payment(client, second["id"])
+    # Captured this time; the capture's event is never told.
+    answer = post(client, {"id": "ap2", "type": "approved", "provider_ref": other["provider_ref"]})
+    assert answer.status_code == 200, answer.text
+    assert status_of(client, second["id"], other["id"]) == "pending"
+    FAKE.capture_reads[other["provider_ref"]] = paid_read(other)
+    reads = FAKE.read_capture
+
+    async def broken(credential: Credential, provider_ref: str) -> ProviderEvent | CaptureState:
+        if provider_ref == first["provider_ref"]:
+            raise RuntimeError("boom")
+        return await reads(credential, provider_ref)
+
+    monkeypatch.setattr(FAKE, "read_capture", broken)
+    due(client, first["id"])
+    due(client, other["id"])
+    assert settle(client) == 1
+    assert status_of(client, second["id"], other["id"]) == "paid"
+    assert status_of(client, first_id, first["id"]) == "pending"
+    assert marks(client, first["id"])[1] == 1
+
+
+def test_the_backfill_marks_requests_an_approval_left_pending(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """Requests an approval moved to ``pending`` before ``capture_pending_at`` existed
+    are marked, so the sweep reads them; a bank debit's ``pending`` is not."""
+    order_id, req = stuck(client)
+    connect_fake(client)
+    debit_order = payable_order(client)
+    debit = request_payment(client, debit_order["id"])
+    assert post(
+        client, {"id": "p1", "type": "pending", "provider_ref": debit["provider_ref"]}
+    ).json() == {"outcome": "recorded"}
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute("UPDATE payment_requests SET capture_pending_at = NULL")
+        conn.execute(BACKFILL.read_text())
+    assert marks(client, req["id"])[0] is not None
+    assert marks(client, debit["id"])[0] is None
+    due(client, req["id"])
+    FAKE.capture_reads[req["provider_ref"]] = paid_read(req)
+    assert settle(client) == 1
+    assert status_of(client, order_id, req["id"]) == "paid"

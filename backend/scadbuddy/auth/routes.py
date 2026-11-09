@@ -67,6 +67,8 @@ PUBLIC_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.delegated_sign_in",
         # A payment provider's event (#4957): its signature is the credential.
         "scadbuddy.api.payment_webhooks.receive_webhook",
+        # Plaid's webhook for the linked bank account (#4961): its JWT is the credential.
+        "scadbuddy.api.bank_link.receive_bank_webhook",
     }
 )
 #: The service-token exchange (#5494, spec 2026-11-05 §6.2): the proof in its body is
@@ -108,6 +110,16 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.payments.connect_provider",
         "scadbuddy.api.payments.disconnect_provider",
         "scadbuddy.api.payments.default_provider",
+        # The shop's bank account through Plaid (#4961): keys, link and unlink.
+        "scadbuddy.api.bank_link.put_bank_keys",
+        "scadbuddy.api.bank_link.delete_bank_keys",
+        "scadbuddy.api.bank_link.create_bank_link_token",
+        "scadbuddy.api.bank_link.create_bank_link",
+        "scadbuddy.api.bank_link.delete_bank_link",
+        "scadbuddy.api.bank_link.reconnect_bank_link",
+        # A suggested deposit is recorded or dismissed by the shop on the order (#4961).
+        "scadbuddy.api.order_bank_deposits.record_order_bank_deposit",
+        "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit",
     }
 )
 #: The public routes the projects worker's flow host functions and grant checks call

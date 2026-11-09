@@ -27,6 +27,7 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
 )
 from scadbuddy.payments.registry import providers
+from scadbuddy.payments.venmo import PAY_PAGE_MISSING
 
 PAYLOADS = Path(__file__).parent / "paypal_payloads"
 SANDBOX = API["sandbox"]
@@ -35,6 +36,7 @@ SECRET = "EGnHDxD_qRPdaLdZz8iCr8N7_MzF-YHPTkjs6NKYQvQSBngp4PTTVWkPZRbL"
 WEBHOOK_ID = "0NH55953DH663215D"
 SETTINGS = {"environment": "sandbox", "client_id": CLIENT_ID, "webhook_id": WEBHOOK_ID}
 CRED = Credential(settings=SETTINGS, secrets={"client_secret": SECRET})
+VENMO_CRED = Credential(settings=SETTINGS | {"venmo": "on"}, secrets={"client_secret": SECRET})
 ORDER = "5O190127TN364715T"
 CAPTURE = "3C679366HH908993F"
 #: The headers PayPal sends with a webhook
@@ -100,9 +102,9 @@ def pp() -> Any:
         yield router
 
 
-async def parse(paypal: PayPalProvider, name: str) -> ProviderEvent:
+async def parse(paypal: PayPalProvider, name: str, credential: Credential = CRED) -> ProviderEvent:
     body = (PAYLOADS / name).read_bytes()
-    return await paypal.parse_webhook(CRED, HEADERS, body)
+    return await paypal.parse_webhook(credential, HEADERS, body)
 
 
 # -- the provider ----------------------------------------------------------------------------
@@ -115,12 +117,27 @@ def test_the_registry_offers_paypal() -> None:
 
 
 def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:
-    assert [(f.name, f.secret) for f in PAYPAL.fields] == [
-        ("environment", False),
-        ("client_id", False),
-        ("webhook_id", False),
-        ("client_secret", True),
+    assert [(f.name, f.secret, f.choices) for f in PAYPAL.fields] == [
+        ("environment", False, ["sandbox", "live"]),
+        ("client_id", False, None),
+        ("webhook_id", False, None),
+        ("venmo", False, ["off", "on"]),
+        ("client_secret", True, None),
     ]
+
+
+def test_venmo_is_off_when_left_out_and_on_is_unavailable_until_the_pay_page() -> None:
+    """#4960: a reconnect from before the field existed still saves; the form shows
+    ``on`` as unavailable, with why."""
+    (venmo,) = [f for f in PAYPAL.fields if f.name == "venmo"]
+    assert venmo.default == "off"
+    assert venmo.unavailable == {"on": PAY_PAGE_MISSING}
+
+
+def test_the_environment_defaults_to_sandbox() -> None:
+    """#5769 review: a fresh connect form opens on a choice, the one that moves no money."""
+    (environment,) = [f for f in PAYPAL.fields if f.name == "environment"]
+    assert environment.default == "sandbox"
 
 
 async def test_verify_reads_the_webhook_and_names_the_app_and_environment(
@@ -697,6 +714,35 @@ async def test_a_completed_capture_is_paid_with_its_fee(paypal: PayPalProvider, 
         amount_minor=700, currency="USD", fee_minor=69,
         created_at=datetime(2026, 11, 7, 10, 0, 6, 355000, tzinfo=UTC),
     )  # fmt: skip
+    # #5769 review: with Venmo off, no order is read for a funding source.
+    assert not pp["order"].called
+
+
+async def test_a_capture_funded_by_venmo_names_venmo(paypal: PayPalProvider, pp: Any) -> None:
+    """The capture does not name its funding source; the order's ``payment_source``
+    does (#4960), read only while Venmo is on."""
+    pp["order"].respond(json=payload("api.order.completed.venmo.json"))
+    event = await parse(paypal, "payment.capture.completed.json", VENMO_CRED)
+    assert (event.kind, event.method, event.amount_minor) == ("paid", "venmo", 700)
+    assert pp["order"].called
+
+
+async def test_a_funding_source_scadbuddy_does_not_know_names_no_method(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    order = payload("api.order.completed.venmo.json") | {"payment_source": {"card": {}}}
+    pp["order"].respond(json=order)
+    event = await parse(paypal, "payment.capture.completed.json", VENMO_CRED)
+    assert (event.kind, event.method) == ("paid", None)
+
+
+async def test_paypal_not_answering_for_the_funding_source_records_no_method(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """#5769 review: the capture is recorded without its method rather than held back."""
+    pp["order"].respond(500, json={})
+    event = await parse(paypal, "payment.capture.completed.json", VENMO_CRED)
+    assert (event.kind, event.method, event.amount_minor) == ("paid", None, 700)
 
 
 async def test_a_fee_in_another_currency_is_not_recorded(paypal: PayPalProvider, pp: Any) -> None:
@@ -840,13 +886,28 @@ async def test_a_capture_made_reads_as_paid_keyed_by_the_capture(
     pp.routes["order"].respond(json=captured_order(status, fee="0.50"))
     read = await paypal.read_capture(CRED, ORDER)
     assert read == ProviderEvent(
-        event_id=f"capture:{CAPTURE}",
+        event_id=f"capture:{CAPTURE}:paid",
         kind="paid",
         provider_ref=ORDER,
         amount_minor=700,
         currency="USD",
         fee_minor=50,
     )
+
+
+async def test_a_capture_read_from_a_venmo_order_names_venmo(
+    paypal: PayPalProvider, pp: Any
+) -> None:
+    """The sweep's read names the funding source as the webhook's path does (#4960)."""
+    order = captured_order("COMPLETED") | {"payment_source": {"venmo": {}}}
+    pp.routes["order"].respond(json=order)
+    read = await paypal.read_capture(VENMO_CRED, ORDER)
+    assert isinstance(read, ProviderEvent)
+    assert (read.kind, read.method) == ("paid", "venmo")
+    # #5769 review: with Venmo off, the read names no method, as the webhook names none.
+    read = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(read, ProviderEvent)
+    assert (read.kind, read.method) == ("paid", None)
 
 
 @pytest.mark.parametrize("status", ["DECLINED", "FAILED"])
@@ -856,7 +917,8 @@ async def test_a_capture_that_failed_reads_as_failed(
     pp.routes["order"].respond(json=captured_order(status))
     read = await paypal.read_capture(CRED, ORDER)
     assert isinstance(read, ProviderEvent)
-    assert (read.kind, read.event_id, read.provider_ref) == ("failed", f"capture:{CAPTURE}", ORDER)
+    expected = ("failed", f"capture:{CAPTURE}:failed", ORDER)
+    assert (read.kind, read.event_id, read.provider_ref) == expected
 
 
 async def test_a_pending_capture_reads_as_pending(paypal: PayPalProvider, pp: Any) -> None:
@@ -864,6 +926,11 @@ async def test_a_pending_capture_reads_as_pending(paypal: PayPalProvider, pp: An
     read = await paypal.read_capture(CRED, ORDER)
     assert isinstance(read, ProviderEvent)
     assert read.kind == "pending"
+    # The same capture read once it completed is a new event, never a replay of this one.
+    pp.routes["order"].respond(json=captured_order("COMPLETED"))
+    completed = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(completed, ProviderEvent)
+    assert completed.event_id != read.event_id
 
 
 async def test_an_approved_order_with_no_capture_reads_uncaptured(

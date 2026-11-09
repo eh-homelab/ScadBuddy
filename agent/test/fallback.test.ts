@@ -4,6 +4,7 @@ import type { Credential } from '../src/credentials.js'
 import {
   type AttemptOutcome,
   CONTINUE_PROMPT,
+  CredentialFailedError,
   DEFAULT_TRANSIENT_RETRIES,
   NoUsableCredentialError,
   type PooledCredential,
@@ -69,6 +70,8 @@ function harness(script: Script) {
   const attempts: number[] = []
   /** Every `onAttempt` call, the first attempt's too: the credential's id and its index. */
   const started: [string, number][] = []
+  /** Every `onFallback` call (#3710): from, how it failed, to. */
+  const fallbacks: [string, AttemptOutcome['class'], string][] = []
   const run = (r: HarnessRun): AsyncIterable<SDKMessage> => {
     runs.push(r)
     const out = script(r, runs.length - 1)
@@ -89,6 +92,7 @@ function harness(script: Script) {
     order,
     attempts,
     started,
+    fallbacks,
     async collect(
       candidates: PooledCredential[],
       base: Partial<HarnessRun> = {},
@@ -120,6 +124,9 @@ function harness(script: Script) {
             onAttempt: (credential, index) => {
               started.push([credential.id, index])
               if (index > 0) attempts.push(messages.length)
+            },
+            onFallback: (from, outcome, to) => {
+              fallbacks.push([from.id, outcome.class, to.id])
             },
           },
         )) {
@@ -608,6 +615,31 @@ describe('runWithFallback (#1093)', () => {
     const h = harness(() => [init(), retry(401, 'authentication_failed')])
     const { error } = await h.collect([A])
     expect((error as Error).message).toBe('the Claude credential (credential a) was refused: HTTP 401: authentication_failed')
+  })
+
+  it('names the refused credential to the user by its name, and keeps the name out of the message (#3710)', async () => {
+    const named: PooledCredential = { ...A, displayLabel: 'credential 1 "Personal Max" (API key …1111)' }
+    const h = harness(() => [init(), retry(401, 'authentication_failed')])
+    const { error } = await h.collect([named])
+    expect(error).toBeInstanceOf(CredentialFailedError)
+    // `message` goes to logs and audit rows; `shown` only to the person.
+    expect((error as Error).message).toBe('the Claude credential (credential a) was refused: HTTP 401: authentication_failed')
+    expect((error as CredentialFailedError).shown).toBe(
+      'the Claude credential (credential 1 "Personal Max" (API key …1111)) was refused: HTTP 401: authentication_failed',
+    )
+  })
+
+  it('tells the caller of each fallback, with how the credential failed and the next one (#3710)', async () => {
+    const h = harness((_r, n) =>
+      n === 0 ? [init(), retry(401, 'authentication_failed')] : n === 1 ? [init(), retry(429, 'rate_limit')] : [init(), success('ok')],
+    )
+    await h.collect([A, B, C], {}, { verdict: 'refused', reason: 'HTTP 401 again' })
+    expect(h.fallbacks).toEqual([
+      ['a', 'permanent', 'b'],
+      ['b', 'rate_limited', 'c'],
+    ])
+    // The model is told only that another credential was used, never which.
+    expect(h.runs.slice(1).map((r) => r.prompt)).toEqual([CONTINUE_PROMPT, CONTINUE_PROMPT])
   })
 
   it('redacts the credential from the recorded reason', async () => {

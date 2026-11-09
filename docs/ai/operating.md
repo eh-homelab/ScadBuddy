@@ -484,7 +484,16 @@ fails mid-way (after tool calls ran) resumes the session on the next credential 
 short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
 credential is tried at most once per turn. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
-like `credential 2 (API key …abcd)`, never with the secret. When no credential is
+like `credential 2 (API key …abcd)`, never with the secret or the credential's name.
+What the person sees names a credential by its name too (#3710,
+`credentialDisplayLabel()`), as `credential 2 "Work" (API key …abcd)`. The panel shows
+each fallback as a `credential.fallback` event: which credential failed, how, and which
+one the turn continues on. A turn's `error` event that names a credential also carries
+`shown`, the same text with the name, which the panel shows in place of `message`.
+`message`, which logs, a flow's failure and the turn's outcome read, keeps the label.
+Logs, audit rows, `WebFetch` and `WebSearch` results and the "continue" prompt to the
+model keep the label without the name. The `sessions_*` tools return a session's events,
+so an MCP client sees these messages there, with the name as quoted data. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
 is usable again, and `GET /api/v1/ai/status` answers `state: "unavailable"` with `ai`
 set to one of:

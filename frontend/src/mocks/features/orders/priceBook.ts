@@ -3,7 +3,7 @@ import type { ArchiveQuoteRequest, Filament, FilamentInput, FilamentPatch, Order
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
-import { FilamentsRefused, event, itemOf, lock, notEnded, rederive, requoteOpen, refused, SETTLED, withFilaments } from './orders'
+import { FilamentsRefused, event, itemOf, lock, notEnded, quotesOf, rederive, requoteOpen, refused, SETTLED, TAKES_ITEMS, withFilaments } from './orders'
 import { machineRateFor } from './machineRates'
 import { pushRevision } from './revisions'
 import { pastPrint } from './pastPrints'
@@ -198,6 +198,12 @@ function priced(
   }
 }
 
+/** A 1×1 grey PNG: every mocked plate image. */
+const PLATE_PNG = Uint8Array.from(
+  atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGO4BwAA6gDpRGJRjQAAAABJRU5ErkJggg=='),
+  (c) => c.charCodeAt(0),
+)
+
 export const handlers = [
   http.get(`${base}/price-book`, ({ request }) => HttpResponse.json(book(new URL(request.url).searchParams.get('include_archived') === 'true'))),
   http.put(`${base}/price-book`, async ({ request }) => {
@@ -294,6 +300,17 @@ export const handlers = [
     try {
       const order = lock(String(params.id))
       const found = itemOf(order, String(params.item))
+      // #4673 PR 3 (`api/orders.py` `_slice_revision`): new inputs or a commit are a revision
+      // of the item first, through the revise path (after acceptance for an accepted item).
+      if ((body.inputs ?? null) !== null || (body.commit ?? null) !== null) {
+        if (found.reference === null) throw new Refused('item_custom', `item ${found.id} has no design to slice with new inputs`, [found.id])
+        const next = { ...found.reference, ...(body.commit ? { commit: body.commit } : {}), ...(body.inputs ? { inputs: body.inputs } : {}) }
+        if (JSON.stringify(next) !== JSON.stringify(found.reference)) {
+          notEnded(order)
+          const after = TAKES_ITEMS.has(order.status) && quotesOf(found.id).some((q) => q.accepted) && !found.revised_after_acceptance
+          pushRevision(order, found, next, found.colours, '', after)
+        }
+      }
       // The check (Ruling 8): the rows alone, nothing written.
       // `lifecycle.py` `requote_open` (#5349, #5350): past `quoted`, an item with no accepted
       // quote, or one revised after acceptance, is quoted too.
@@ -334,6 +351,17 @@ export const handlers = [
         quantity: found.quantity,
         created_by: BROWSER,
         ...priced(found.colours, order.currency, body),
+        // #4673 PR 1 (`quote.py` `print_setup`): the whole print setup, as recorded.
+        choices: {
+          printer_id: body.printer_id ?? null,
+          printer: body.printer ?? null,
+          path: body.path ?? null,
+          choices: body.choices,
+          prime_tower: body.prime_tower ?? null,
+          supports: body.supports ?? null,
+          print_sequence: body.print_sequence ?? null,
+        },
+        filament_plan: body.filament_plan as Quote['filament_plan'],
         total_minor: 0,
       }
       made.total_minor = made.unit_price_minor * made.quantity
@@ -347,6 +375,16 @@ export const handlers = [
     } catch (error) {
       return refused(request, error)
     }
+  }),
+
+  // #4673 PR 4 — a slice quote's plate image, from its sliced file: one grey square here.
+  http.get(`${base}/:id/items/:item/quotes/:quote/plates/:plate/thumbnail`, ({ request, params }) => {
+    const quote = state.quotes.find((q) => q.id === params.quote && q.order_item_id === params.item)
+    const plate = Number(params.plate)
+    if (!quote?.sliced_blob_key || !(quote.plates as { index?: number }[]).some((p) => p.index === plate)) {
+      return problem(request, 404, `quote ${String(params.quote)} has no image of plate ${plate}`)
+    }
+    return new HttpResponse(PLATE_PNG, { headers: { 'Content-Type': 'image/png' } })
   }),
 
   // #4777 — an `archive` quote (`orders/past_prints.py` `quote_from_archive`): every plate

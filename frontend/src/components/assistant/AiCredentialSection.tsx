@@ -109,6 +109,17 @@ function noneUsable(credentials: readonly AiCredentialEntry[], canSave: boolean)
   return 'No credential is usable now: each one needs a reset or a new key.'
 }
 
+/** ", “Work”," for the named credential that recovers at `at` (#3710); empty when it has no name. */
+function recovering(credentials: readonly AiCredentialEntry[], at: string): string {
+  // Compared as instants, not strings (#5779): the agent writes both with toISOString today,
+  // but a change of format there must not drop the name.
+  const instant = Date.parse(at)
+  const name = credentials.find(
+    (c) => c.status === 'cooling_down' && c.cooldown_until !== null && Date.parse(c.cooldown_until) === instant,
+  )?.name
+  return name ? `, “${name}”,` : ''
+}
+
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -473,7 +484,7 @@ export function AiCredentialSection() {
           {!current.usable_now && (
             <p role="status" data-testid="ai-credentials-none-usable" className="text-warn">
               {current.recovers_at
-                ? `No credential is usable now. The first rate-limited one is usable again at ${clock(current.recovers_at)}.`
+                ? `No credential is usable now. The first rate-limited one${recovering(credentials, current.recovers_at)} is usable again at ${clock(current.recovers_at)}.`
                 : noneUsable(credentials, current.can_save)}
             </p>
           )}
@@ -689,6 +700,7 @@ export function AiCredentialSection() {
                     data-testid="ai-credential-test"
                     className={`text-xs ${tests[entry.id]!.ok ? 'text-ok' : 'text-warn'}`}
                   >
+                    {entry.name && `${entry.name}: `}
                     {tests[entry.id]!.ok
                       ? `Works${tests[entry.id]!.model ? ` (${tests[entry.id]!.model})` : ''}, ${(tests[entry.id]!.duration_ms / 1000).toFixed(1)} s.`
                       : `Failed: ${tests[entry.id]!.detail}`}

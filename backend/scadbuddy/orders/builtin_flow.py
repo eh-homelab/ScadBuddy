@@ -23,8 +23,10 @@ so the price the customer accepted stands until they make it.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
+import tokenize
 from datetime import UTC, datetime
 from typing import Any
 
@@ -54,6 +56,8 @@ NEWER_NOTICE = (
 )
 #: A script's calls a grant can admit (`flows/grants.py` `HostFn`), and `agent(`, which
 #: no rule admits: `queue_print(...)`, `arrange(...)`, `tool("<name>", ...)`.
+#: The one form of a tool's name `_CALL` reads: a plain string literal.
+_TOOL_NAME = re.compile(r"""["'][A-Za-z0-9_]+["']""")
 _CALL = re.compile(r"""\b(queue_print|arrange|agent)\s*\(|\btool\(\s*["']([A-Za-z0-9_]+)["']""")
 
 INPUTS_SCHEMA: dict[str, Any] = {
@@ -338,12 +342,7 @@ async def ensure_builtin_flow(
             return False
         # The check a registration route applies (review of #5682): a build whose script
         # no longer type-checks registers nothing.
-        if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
-            logger.error(
-                "the built-in %s flow does not type-check; not registered",
-                NAME,
-                extra={"problems": len(problems)},
-            )
+        if not await _checked(SCRIPT, "registered"):
             return False
         made = await definitions.register_new(
             NAME,
@@ -380,12 +379,7 @@ async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
     script = await asyncio.to_thread(definitions.history.script_at, NAME, newest.commit)
     if script == SCRIPT:
         return False
-    if problems := await check_script(SCRIPT, INPUTS_SCHEMA, stored=True):
-        logger.error(
-            "the built-in %s flow does not type-check; not upgraded",
-            NAME,
-            extra={"problems": len(problems)},
-        )
+    if not await _checked(SCRIPT, "upgraded"):
         return False
     made = await definitions.upgrade_builtin(
         NAME,
@@ -396,6 +390,50 @@ async def _upgraded(definitions: FlowDefinitions, newest: FlowCommit) -> bool:
         message="Update the built-in order-fulfilment flow",
     )
     return made is not None
+
+
+async def _checked(script: str, written: str) -> bool:
+    """Whether ``script`` may be written: it type-checks, and names every tool it calls
+    as a literal, the one form :func:`script_calls` reads (#5732 review), so moving a
+    trigger never misses a call. A refusal is logged; nothing is ``written``."""
+    if unread := unread_tool_calls(script):
+        logger.error(
+            "the built-in %s flow names a tool other than by a literal; not %s",
+            NAME,
+            written,
+            extra={"calls": unread},
+        )
+        return False
+    if problems := await check_script(script, INPUTS_SCHEMA, stored=True):
+        logger.error(
+            "the built-in %s flow does not type-check; not %s",
+            NAME,
+            written,
+            extra={"problems": len(problems)},
+        )
+        return False
+    return True
+
+
+def unread_tool_calls(script: str) -> int:
+    """How many ``tool(...)`` calls in ``script`` name their tool other than by a plain
+    literal, which :func:`script_calls` cannot read. Read from Python's tokens, so a
+    ``tool(`` in a comment or a string is no call (#5761 review)."""
+    tokens = [
+        token
+        for token in tokenize.generate_tokens(io.StringIO(script).readline)
+        if token.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT)
+    ]
+    unread = 0
+    for at, token in enumerate(tokens[:-1]):
+        if token.type != tokenize.NAME or token.string != "tool":
+            continue
+        if tokens[at + 1].string != "(" or (at > 0 and tokens[at - 1].string == "."):
+            continue
+        name = tokens[at + 2] if at + 2 < len(tokens) else None
+        if name is None or name.type != tokenize.STRING or not _TOOL_NAME.fullmatch(name.string):
+            unread += 1
+    return unread
 
 
 def script_calls(script: str) -> set[tuple[str, str | None]]:

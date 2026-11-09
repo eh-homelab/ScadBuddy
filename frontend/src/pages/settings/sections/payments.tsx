@@ -3,6 +3,7 @@ import { USER_ONLY } from '../../../agent/dom'
 import { api, ApiError } from '../../../api/client'
 import type { ProviderStatus } from '../../../api/types'
 import { When } from '../../../components/orders/When'
+import { BankAccount } from '../../../components/settings/BankAccount'
 import { WebhookError } from '../../../components/settings/WebhookError'
 import { refusalText } from '../../../components/orders/refusal'
 import { Badge } from '@/components/ui/badge'
@@ -10,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useAsync } from '../../../lib/useAsync'
 import { useSettingsCache } from '../cache'
 import { Section } from '../controls'
@@ -52,6 +54,9 @@ export function Component() {
           ))}
         </div>
       )}
+      <div className="mt-3">
+        <BankAccount />
+      </div>
       <Instructions />
     </Section>
   )
@@ -145,7 +150,7 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
   async function save() {
     const settings: Record<string, string> = {}
     const secrets: Record<string, string> = {}
-    for (const field of provider.fields) (field.secret ? secrets : settings)[field.name] = values[field.name] ?? ''
+    for (const field of provider.fields) (field.secret ? secrets : settings)[field.name] = values[field.name] ?? field.default ?? ''
     const saved = await run(() => api.connectPaymentProvider(provider.id, { settings, secrets }))
     // The secret leaves the page as soon as it is sent.
     if (saved) {
@@ -205,6 +210,22 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
           {provider.fields.map((field) => (
             <div key={field.name} className="flex flex-col gap-1">
               <Label htmlFor={`${provider.id}-${field.name}`}>{field.label}</Label>
+              {/* #4960 — a field with choices takes one of them, its default preselected; a
+                  choice the server refuses for now is shown disabled, with why. */}
+              {field.choices ? (
+                <Select value={values[field.name] ?? field.default ?? ''} onValueChange={(v) => setValues({ ...values, [field.name]: v })}>
+                  <SelectTrigger id={`${provider.id}-${field.name}`} aria-label={field.label} className="w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    {field.choices.map((choice) => (
+                      <SelectItem key={choice} value={choice} disabled={field.unavailable?.[choice] !== undefined}>
+                        {field.unavailable?.[choice] !== undefined ? `${choice} (unavailable)` : choice}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
               <Input
                 id={`${provider.id}-${field.name}`}
                 type={field.secret ? 'password' : 'text'}
@@ -213,6 +234,12 @@ function Provider({ provider, onChanged }: { provider: ProviderStatus; onChanged
                 value={values[field.name] ?? ''}
                 onChange={(e) => setValues({ ...values, [field.name]: e.target.value })}
               />
+              )}
+              {Object.entries(field.unavailable ?? {}).map(([choice, why]) => (
+                <p key={choice} className="max-w-56 text-xs text-muted-foreground">
+                  {choice}: {why}
+                </p>
+              ))}
             </div>
           ))}
           <Button type="submit" size="sm" disabled={busy} {...USER_ONLY}>

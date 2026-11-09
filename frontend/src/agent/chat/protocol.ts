@@ -465,6 +465,20 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     mediaType: z.string().optional(),
     sha256: z.string().optional(),
   }),
+  /**
+   * #3710 — a model request failed on one Claude credential and the turn continues on the
+   * next: both named as the agent names them for the person (`credentialDisplayLabel`, a
+   * credential's name in quotes). Plain text, shown as text.
+   */
+  z.object({
+    v,
+    type: z.literal('credential.fallback'),
+    sessionId,
+    from: z.string().min(1),
+    to: z.string().min(1),
+    outcome: z.enum(['refused', 'rate_limited', 'failed']),
+    until: z.string().optional(),
+  }),
   z.object({
     v,
     type: z.literal('error'),
@@ -473,6 +487,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     message: z.string().min(1),
     /** #940 — the error refused the panel's answer to this question: its card is answerable again. */
     questionId: z.string().min(1).optional(),
+    /** #3710 — `message` with the credential named by its name: shown in its place. */
+    shown: z.string().min(1).optional(),
   }),
   /**
    * An automatic Hindsight recall or retain (#818): memory the agent read or wrote

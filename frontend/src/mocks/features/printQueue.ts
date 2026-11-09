@@ -3,8 +3,8 @@ import type { ArchiveStats, QueueItem } from '../../api/types'
 
 /**
  * #2351 — Bambuddy's queue and the farm's totals: two waiting items (one for a
- * printer, one for any H2C, short of filament) and finished history, which the panel
- * never asks for.
+ * printer that ScadBuddy queued, #3741; one for any H2C, short of filament) and finished
+ * history, which the panel never asks for.
  */
 export const PRINT_QUEUE: QueueItem[] = [
   {
@@ -30,6 +30,16 @@ export const PRINT_QUEUE: QueueItem[] = [
     filament_used_grams: 12.4,
     manual_start: true,
     filament_short: false,
+    // #3741 — a ScadBuddy run queued it.
+    scadbuddy: {
+      subject: 'output:luna-0002',
+      output_id: 'luna-0002',
+      library_file_id: null,
+      slug: 'keychain',
+      run_id: 'run-luna-2',
+      archive_id: null,
+      matched_by: 'queue_item',
+    },
   },
   {
     id: 260,

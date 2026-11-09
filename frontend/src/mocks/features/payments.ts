@@ -115,7 +115,8 @@ export const FAKE_FEE_MINOR = 30
  * and `failed` ends an open or pending one (#4958); neither writes money. It is recorded on
  * a cancelled order too.
  */
-export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid' | 'pending' | 'failed' | 'refunded' | 'expired'): void {
+/** `method` (#4960): the method a provider names, as `ProviderEvent.method` (a PayPal capture funded by Venmo). */
+export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid' | 'pending' | 'failed' | 'refunded' | 'expired', method?: 'venmo'): void {
   const order: Order = lock(orderId)
   const found: PaymentRequestView | undefined = state.paymentRequests.find((r) => r.id === requestId && r.order_id === orderId)
   if (!found?.provider) throw new Error(`no provider request ${requestId}`)
@@ -143,7 +144,7 @@ export function mockPaymentEvent(orderId: string, requestId: string, kind: 'paid
     id: newId('p'),
     order_id: order.id,
     amount_minor: kind === 'paid' ? found.amount_minor : -found.amount_minor,
-    method: found.provider,
+    method: method ?? found.provider,
     reference: found.provider_ref,
     received_at: null,
     notes: '',

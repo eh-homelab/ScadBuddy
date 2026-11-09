@@ -61,7 +61,10 @@ Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.t
 client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
 uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
 the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
-from its `api-spec` stage. A frontend vitest run outside `pnpm test` (`pnpm exec vitest
+from its `api-spec` stage. The frontend's `gen:api` also writes
+`src/storefront/api/schema.d.ts` (gitignored) from the storefront edge's spec
+(`export_openapi --storefront`, `backend/storefront-openapi.json`, gitignored), or from
+`SCADBUDDY_STOREFRONT_OPENAPI_JSON` when it is set (#5282). A frontend vitest run outside `pnpm test` (`pnpm exec vitest
 <file>`) needs `pnpm gen:api` first, or `SCADBUDDY_OPENAPI_JSON` set, because some unit
 tests read bounds from the exported spec (`components/settings/Printers.test.tsx`
 `specAccessCodeMax`, #4502). The `freshness` job no longer commits anything. It checks
@@ -222,8 +225,13 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new
   `type=gha` scope should use `mode=min` unless it needs its intermediate stages; if a
-  scope's hit rate drops, move it to `type=registry` on GHCR, which works only on
-  pushes and same-repo PRs, not forks (#743).
+  scope's hit rate drops, move it to `type=registry` on GHCR: writes to it work only on
+  pushes and same-repo PRs, not forks (#743); reads of a public package work on fork
+  PRs too. The slicer image's cache is there now
+  (#4059): `ghcr.io/eh-homelab/scadbuddy-slicer:buildcache`, `mode=max`, so the
+  `slicer-build` stage's cargo-chef dependency layer is kept. Only `build-image.yml`'s
+  `slicer` job writes it; `ci.yml`'s `slicer-image` and `hot-path-e2e.yml` only read it,
+  which works on fork PRs too because the package is public.
 - No CI job builds arm64. `build-image.yml` (all three images) and `build-go-image.yml`
   publish `linux/amd64` only, and nothing in `build-image.yml` runs on PRs. arm64
   (QEMU-emulated, with a PR-time `openscad-lsp-arm64` check, #199) was dropped; the

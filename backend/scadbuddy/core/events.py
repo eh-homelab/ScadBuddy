@@ -245,6 +245,15 @@ class OrderChanged(BaseEvent):
     cart: bool = False
 
 
+class OrderBankDepositsChanged(BaseEvent):
+    """The deposit sync (#4961) suggested a deposit for the order, or changed or removed a
+    deposit recorded on it: re-read ``GET /orders/{order_id}/bank-deposits``. Published on
+    ``order:<order id>``."""
+
+    kind: Literal["order.bank_deposits"] = "order.bank_deposits"
+    order_id: str
+
+
 class OrderItemChanged(BaseEvent):
     """A line item changed (#4249, §7.1): its status, or the attempt just recorded or
     accepted (``attempt``, else ``None``). Published where :class:`OrderChanged` is."""
@@ -398,6 +407,7 @@ Event = Annotated[
     | ActivityEvent
     | OrderChanged
     | OrderItemChanged
+    | OrderBankDepositsChanged
     | AgentOperationEvent
     | AuthSessionRevoked
     | LibraryChanged

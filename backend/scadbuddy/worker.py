@@ -70,6 +70,7 @@ from scadbuddy.crud.print import (
     RemoteOutcomes,
     RemotePrinterStore,
     RemotePrintRunStore,
+    RemoteReprints,
     RemoteSettingsStore,
 )
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
@@ -1367,6 +1368,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         outputs=outputs,
         uploads=uploads,
         links=links,
+        # A reprint's queue item is recorded through the API, not this worker's SQL
+        # (#3741, #5295).
+        reprints=RemoteReprints(crud),
         archive_cache=ArchiveCache(),
         library=partial(_given, library),
         native_slices=NativeSliceStore(pool),
@@ -1440,7 +1444,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
 
 #: The CRUD areas the print worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PRINT_CRUD_AREAS = frozenset({"settings", "runs", "operations", "events", "printer-ensure"})
+PRINT_CRUD_AREAS = frozenset(
+    {"settings", "runs", "operations", "events", "printer-ensure", "reprints"}
+)
 
 
 async def run_print_worker(

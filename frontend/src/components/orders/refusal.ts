@@ -17,8 +17,13 @@ export function refusalItems(error: unknown): string[] {
   return Array.isArray(items) ? items.filter((id): id is string => typeof id === 'string') : []
 }
 
+/** #4673 PR 3 — `revision_superseded`: a slice made for a design that changed since. */
+export const SUPERSEDED_TEXT =
+  "The item's design changed while this slice ran, so it recorded nothing (revision_superseded). Slice it again for the current design."
+
 /** What to tell the person: the backend's detail, else the error's message. */
 export function refusalText(error: unknown): string {
+  if (refusalSlug(error) === 'revision_superseded') return SUPERSEDED_TEXT
   if (error instanceof ApiError) {
     const errors = (error.problem as { errors?: { msg?: string }[] }).errors
     const first = errors?.[0]?.msg

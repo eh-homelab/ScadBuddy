@@ -407,10 +407,16 @@ class OrderStore:
     # -- connections ------------------------------------------------------------------
 
     @contextmanager
-    def transaction(self) -> Iterator[Conn]:
-        """A connection inside one transaction: what a transition writes everything on."""
-        with self._pool.connection() as conn, conn.transaction():
-            yield conn
+    def transaction(self, conn: Conn | None = None) -> Iterator[Conn]:
+        """A connection inside one transaction: what a transition writes everything on.
+        With ``conn``, a savepoint in the caller's transaction on it, which commits only
+        with that transaction."""
+        if conn is not None:
+            with conn.transaction():
+                yield conn
+            return
+        with self._pool.connection() as own, own.transaction():
+            yield own
 
     @contextmanager
     def _write(self, conn: Conn | None) -> Iterator[Conn]:
@@ -850,6 +856,55 @@ class OrderStore:
             ).fetchone()
         return None if row is None else Order.model_validate(row)
 
+    def idle_drafts(self, conn: Conn, *, before: datetime, limit: int) -> list[str]:
+        """Up to ``limit`` unsubmitted storefront carts that neither changed nor had
+        their visitor seen since ``before`` (#5282), locked for the caller's
+        transaction. A cart a visitor's write holds is skipped, not waited for. Only the
+        order is locked: `claim_idle_draft` checks each one again before it goes."""
+        rows = conn.execute(
+            "SELECT o.id FROM orders o"
+            " LEFT JOIN storefront_visitors v ON v.id = o.storefront_visitor_id"
+            " WHERE o.source = 'storefront' AND o.submitted_at IS NULL"
+            " AND GREATEST(o.updated_at, v.last_seen_at) < %s"
+            " ORDER BY o.updated_at, o.id LIMIT %s FOR UPDATE OF o SKIP LOCKED",
+            (before, limit),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    def claim_idle_draft(self, conn: Conn, order_id: str, *, before: datetime) -> bool:
+        """Whether ``order_id`` is still an unsubmitted storefront cart idle since
+        ``before``, read under locks held to the end of the caller's transaction: the
+        order's (skipped, not waited for, while a visitor's write holds it) and its
+        visitor's (``FOR SHARE``: a touch waits for the commit, and one committed before
+        is read). A touch or a change after the listing keeps the cart."""
+        order = conn.execute(
+            "SELECT storefront_visitor_id, updated_at FROM orders WHERE id = %s"
+            " AND source = 'storefront' AND submitted_at IS NULL FOR UPDATE SKIP LOCKED",
+            (order_id,),
+        ).fetchone()
+        if order is None:
+            return False
+        last = order["updated_at"]
+        if order["storefront_visitor_id"] is not None:
+            visitor = conn.execute(
+                "SELECT last_seen_at FROM storefront_visitors WHERE id = %s FOR SHARE",
+                (order["storefront_visitor_id"],),
+            ).fetchone()
+            if visitor is not None:
+                last = max(last, visitor["last_seen_at"])
+        return bool(last < before)
+
+    def delete_draft(self, conn: Conn, order_id: str) -> bool:
+        """The unsubmitted storefront cart's row; its items, revisions and audit rows
+        cascade. Its attachments must be gone first (`delete_attachment`): their foreign
+        key refuses the delete otherwise. Never a submitted or back office order."""
+        row = conn.execute(
+            "DELETE FROM orders WHERE id = %s AND source = 'storefront'"
+            " AND submitted_at IS NULL RETURNING id",
+            (order_id,),
+        ).fetchone()
+        return row is not None
+
     def order(self, order_id: str, *, conn: Conn | None = None) -> Order | None:
         with self._read(conn) as c:
             row = c.execute(f"SELECT {_ORDER} FROM orders WHERE id = %s", (order_id,)).fetchone()
@@ -1093,19 +1148,22 @@ class OrderStore:
         sku: str | None = None,
         approval: Approval | None = None,
         origin_archive_ids: Sequence[int] = (),
+        storefront_offered: Sequence[str] | None = None,
     ) -> OrderItem:
         """Appended after the order's items; ``title`` defaults to the template's name
         and is required for a ``request`` item, which has no reference yet. ``approval``
-        None picks the kind's default: a request is approved design first."""
+        None picks the kind's default: a request is approved design first.
+        ``storefront_offered`` names the parameters a storefront listing offered (#5282)."""
         name = title or (reference.template_name if reference is not None else None)
         if name is None:
             raise ValueError("an item without a reference needs a title")
         row = conn.execute(
             "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
             " approval, slug, commit, inputs, libraries, template_name, render_key, colours,"
-            " output_id, origin_archive_ids) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
+            " output_id, origin_archive_ids, storefront_offered)"
+            " VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
             " FROM order_items WHERE order_id = %s),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
@@ -1124,10 +1182,23 @@ class OrderStore:
                 Jsonb(_dump(list(colours))),
                 output_id,
                 list(origin_archive_ids),
+                None if storefront_offered is None else list(storefront_offered),
             ),
         ).fetchone()
         assert row is not None
         return _item_of(row)
+
+    def storefront_offered(
+        self, order_id: str, *, conn: Conn | None = None
+    ) -> dict[str, list[str] | None]:
+        """Each item of the order, by id, and the parameter names a storefront listing
+        offered when it was added (None for an item not added from a listing)."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT id, storefront_offered FROM order_items WHERE order_id = %s",
+                (order_id,),
+            ).fetchall()
+        return {row["id"]: row["storefront_offered"] for row in rows}
 
     def insert_custom_item(
         self,
@@ -2518,12 +2589,22 @@ class OrderStore:
             (holder_kind, holder_id, sorted(keep)),
         )
 
+    def hold_with_attachment(self, conn: Conn, key: str, attachment_id: str) -> None:
+        """One more blob the attachment holds, under its own holder, in the caller's
+        transaction (a storefront file's raw copy, #5282): `delete_attachment` drops it
+        with the row's own hold."""
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (key, ATTACHMENT_HOLDER, attachment_id),
+        )
+
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
         once nothing else holds them. The one way an attachment goes: nothing cascades
-        the holds, so an order's delete (none is written yet) must run this for each
-        of its attachments first, which the foreign key (``ON DELETE RESTRICT``,
-        #4678) enforces."""
+        the holds, so an order's delete (only a storefront cart's, `delete_draft`) must
+        run this for each of its attachments first, which the foreign key (``ON DELETE
+        RESTRICT``, #4678) enforces."""
         conn.execute(
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (ATTACHMENT_HOLDER, attachment_id),

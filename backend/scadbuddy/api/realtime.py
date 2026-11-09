@@ -102,9 +102,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from typing import Any, assert_never
-from urllib.parse import urlsplit
 
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -130,6 +129,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OperationEvent,
+    OrderBankDepositsChanged,
     OrderChanged,
     OrderItemChanged,
     OutputEvent,
@@ -145,6 +145,7 @@ from scadbuddy.core.events import (
     UpstreamAvailable,
     VersionCommitted,
 )
+from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
@@ -174,9 +175,6 @@ CHECK_PAGE = 500
 CHECK_MAX_SINCE = 8
 #: The most ``check`` frames one socket keeps waiting for its worker.
 CHECK_QUEUE = 32
-
-#: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 COLLECTION_TOPICS = frozenset(
     {
@@ -261,6 +259,8 @@ def topics_of(event: Event) -> list[str]:
             return ["activity", f"activity:{event.activity_id}"]
         case OrderChanged() | OrderItemChanged():
             return ["orders", f"order:{event.order_id}"]
+        case OrderBankDepositsChanged():
+            return [f"order:{event.order_id}"]
         case AgentOperationEvent():
             return []
         case AuthSessionRevoked():
@@ -285,38 +285,6 @@ def event_frame(event: Event, topics: list[str]) -> dict[str, Any]:
     # spec 2026-10-18 §7.1's fields.
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})
     return {"type": "event", "id": event.id, "kind": event.kind, "topics": topics, "data": data}
-
-
-def _origin(value: str) -> str | None:
-    """``scheme://host[:port]``, lower-cased, default port dropped; None if not http(s)."""
-    try:
-        parts = urlsplit(value.strip())
-        port = parts.port
-    except ValueError:
-        return None
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return None
-    host = parts.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    default = 443 if parts.scheme == "https" else 80
-    return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
-
-
-def origin_allowed(
-    origin: str | None, public_url: str | None, allowed_origins: Iterable[str] = ()
-) -> bool:
-    if origin is None:
-        return True
-    normalised = _origin(origin)
-    if normalised is None:
-        return False
-    if urlsplit(normalised).hostname in LOOPBACK_HOSTS:
-        return True
-    candidates = [public_url, *allowed_origins]
-    return any(
-        candidate is not None and normalised == _origin(candidate) for candidate in candidates
-    )
 
 
 class RateLimit:

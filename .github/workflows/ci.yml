@@ -487,6 +487,18 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # #5282, spec 2026-11-02 §5.1: the public storefront page's closure in this
+      # production build holds no back-office API module and no mocks.
+      - name: Storefront bundle
+        run: pnpm check:storefront-bundle
+
+      # The edge serves this build's closure, fonts included (no database needed).
+      - name: Storefront edge serves the build
+        env:
+          SCADBUDDY_STOREFRONT_DIST: ${{ github.workspace }}/frontend/dist
+        working-directory: backend
+        run: uv run --frozen pytest tests/storefront/test_real_build.py -p no:cacheprovider
+
   # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
   #
   # The MSW-BACKED half of the e2e suite lives here and NOT in the image
@@ -1830,8 +1842,8 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
 
-      # Its own `scope=slicer`, which build-image.yml's `slicer` job writes. The
-      # build already runs `scadbuddy-slicer --check-cli` as root; the two runs
+      # The GHCR registry cache that build-image.yml's `slicer` job writes (#4059).
+      # The build already runs `scadbuddy-slicer --check-cli` as root; the two runs
       # below repeat it as the image's own user, the way the cluster runs it.
       - name: Build the slicer image
         uses: docker/build-push-action@v7
@@ -1840,9 +1852,10 @@ jobs:
           target: slicer
           load: true
           tags: scadbuddy-slicer:ci
-          # Read-only: the repo's Actions cache is at its ceiling (#743); build-image.yml's
-          # `slicer` job is the scope's only writer.
-          cache-from: type=gha,scope=slicer
+          # Read-only: build-image.yml's `slicer` job is the cache's only writer, so
+          # this job needs no `packages: write` and a fork PR reads it the same way
+          # (the package is public). With no cache, the build only runs slower.
+          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache
 
       - name: Slicer smoke
         run: |
@@ -1867,7 +1880,8 @@ jobs:
   #      the FastAPI app with `frontend_dir=/nonexistent` and dumps
   #      `app.openapi()` with `indent=2, sort_keys=True`, so two exports of one
   #      tree must be byte-identical. The clients, the image's `api-spec` stage
-  #      and the diff below all depend on that.
+  #      and the diff below all depend on that. The storefront edge's spec
+  #      (`--storefront`, the public page's client) is checked the same way.
   #
   #   2. frontend/public/mockServiceWorker.js matches the installed msw. It
   #      stays committed: it is a verbatim copy out of the msw package, not
@@ -1993,6 +2007,15 @@ jobs:
             exit 1
           fi
           echo "Two exports are byte-identical."
+          # The storefront edge's spec too (#5282): the public page's client is typed from it.
+          uv run --frozen python -m scadbuddy.tools.export_openapi --storefront "$RUNNER_TEMP/store.json" >/dev/null
+          uv run --frozen python -m scadbuddy.tools.export_openapi --storefront "$RUNNER_TEMP/store-again.json" >/dev/null
+          if ! cmp -s "$RUNNER_TEMP/store.json" "$RUNNER_TEMP/store-again.json"; then
+            echo "::error::Two exports of the storefront spec differ, so the public page's client is not a function of the source."
+            diff -u "$RUNNER_TEMP/store.json" "$RUNNER_TEMP/store-again.json" | head -200 || true
+            exit 1
+          fi
+          echo "Two storefront exports are byte-identical."
 
       # Here, not in pytest: the pytest step runs in the test image, which has no
       # frontend tree, so `test_the_page_carries_the_csp` skips its comparison with

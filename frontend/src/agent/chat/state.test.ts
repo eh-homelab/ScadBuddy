@@ -589,6 +589,53 @@ describe('chatReducer', () => {
   })
 })
 
+describe('a turn that moves to another credential (#3710)', () => {
+  it('shows an error in the words that name the credential, when the agent gives them', () => {
+    const state = run(
+      [
+        server({
+          type: 'error',
+          sessionId: 's1',
+          code: 'turn_failed',
+          message: 'the Claude credential (credential 1 (API key …GwAA)) was refused: HTTP 401',
+          shown: 'the Claude credential (credential 1 "Work" (API key …GwAA)) was refused: HTTP 401',
+        }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.items.at(-1)).toMatchObject({
+      kind: 'error',
+      message: 'the Claude credential (credential 1 "Work" (API key …GwAA)) was refused: HTTP 401',
+    })
+  })
+
+  it('notes the move in the feed, with both credentials as the agent named them', () => {
+    const state = run(
+      [
+        server({
+          type: 'credential.fallback',
+          sessionId: 's1',
+          from: 'credential 1 "Personal Max" (OAuth token …GwAA)',
+          to: 'credential 2 (API key …JwAA)',
+          outcome: 'rate_limited',
+          until: '2099-01-01T12:30:00.000Z',
+        }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.items.slice(started.sessions.s1?.items.length)).toEqual([
+      {
+        kind: 'credential',
+        id: expect.stringMatching(/^credential-/),
+        from: 'credential 1 "Personal Max" (OAuth token …GwAA)',
+        to: 'credential 2 (API key …JwAA)',
+        outcome: 'rate_limited',
+        until: '2099-01-01T12:30:00.000Z',
+      },
+    ])
+  })
+})
+
 describe('workspace changes (#2329)', () => {
   it('counts each workspace.file event, so the Files list reads again, and notes each in the feed (#2399)', () => {
     const state = run(

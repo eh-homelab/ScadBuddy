@@ -18,7 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "gen:api": "node scripts/gen-api.mjs"
+    "gen:api": "node scripts/gen-api.mjs",
+    "check:storefront-bundle": "node scripts/check-storefront-bundle.mjs dist"
   },
   "dependencies": {
     "@fontsource-variable/geist": "5.3.0",

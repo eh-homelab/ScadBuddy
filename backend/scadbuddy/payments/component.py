@@ -14,6 +14,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.payments.bank import BankLinks
 from scadbuddy.payments.credentials import PaymentCredentials
 from scadbuddy.payments.registry import providers
 from scadbuddy.payments.service import Payments
@@ -24,6 +25,7 @@ class PaymentsComponent:
         self.core = core
         self.orders = orders
         self._service: Payments | None = None
+        self._bank: BankLinks | None = None
 
     @property
     def service(self) -> Payments:
@@ -35,8 +37,24 @@ class PaymentsComponent:
                 providers(fake=settings.payments_fake_provider),
                 # Live (#322): read on each call.
                 lambda: self.core.settings.public_url,
+                lambda: self.core.settings.storefront_public_url,
             )
         return self._service
+
+    @property
+    def bank(self) -> BankLinks:
+        """The shop's bank account linked through Plaid (#4961): beside the seam, not a
+        provider."""
+        if self._bank is None:
+            kek = settings_kek(self.core.settings.secret_key_file)
+            self._bank = BankLinks(self.orders.store, kek, webhook_url=self._webhook_url)
+        return self._bank
+
+    def _webhook_url(self) -> str | None:
+        """Where Plaid sends the linked Item's webhooks (#4961); none without a public URL.
+        Live (#322): read on each link token."""
+        public = self.core.settings.public_url
+        return f"{public.rstrip('/')}/api/v1/payments/bank/webhook" if public else None
 
 
 PAYMENTS: Key[PaymentsComponent] = Key("payments")

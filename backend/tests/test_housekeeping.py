@@ -28,6 +28,8 @@ from scadbuddy.workflows.housekeeping import (
     ATTACHMENTS_TIMEOUT,
     AUTH_SESSIONS_SWEEP,
     AUTH_SESSIONS_TIMEOUT,
+    BANK_DEPOSITS_SWEEP,
+    BANK_DEPOSITS_TIMEOUT,
     CLAIMS_TIMEOUT,
     GIT_REMOTE_SWEEP,
     GIT_REMOTE_TIMEOUT,
@@ -58,6 +60,8 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_TIMEOUT,
     QUOTE_HOLDS_SWEEP,
     QUOTE_HOLDS_TIMEOUT,
+    STOREFRONT_DRAFTS_SWEEP,
+    STOREFRONT_DRAFTS_TIMEOUT,
     SWEEP_TIMEOUT,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
@@ -69,6 +73,7 @@ from scadbuddy.workflows.housekeeping import (
     library_worker,
     prune_schedule_id_for,
     schedule_id_for,
+    sweep_timeout,
 )
 from tests.support.temporal import NO_TICK, temporal_client, terminate_open_workflows
 
@@ -152,9 +157,17 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         AUTH_SESSIONS_SWEEP: AUTH_SESSIONS_TIMEOUT,
         PAYMENT_CLOSES_SWEEP: PAYMENT_CLOSES_TIMEOUT,
         PAYMENT_CAPTURES_SWEEP: PAYMENT_CAPTURES_TIMEOUT,
+        BANK_DEPOSITS_SWEEP: BANK_DEPOSITS_TIMEOUT,
+        STOREFRONT_DRAFTS_SWEEP: STOREFRONT_DRAFTS_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
+
+
+def test_the_storefront_drafts_sweep_is_last_on_both_schedules() -> None:
+    """#5282: idle carts go even with the sweeps off, behind their own patch."""
+    assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == STOREFRONT_DRAFTS_SWEEP
+    assert sweep_timeout(STOREFRONT_DRAFTS_SWEEP) == STOREFRONT_DRAFTS_TIMEOUT
 
 
 def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:
@@ -306,9 +319,13 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_retry_payment_closes",
         # #4959: a PayPal capture never told is settled within the interval.
         "housekeeping_settle_payment_captures",
+        # #5282: idle storefront carts go with the sweeps off too.
+        "housekeeping_sweep_storefront_drafts",
     ]
     # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps
+    # #4961: the deposit sync calls Plaid and suggests, so it obeys the switch.
+    assert BANK_DEPOSITS_SWEEP not in sweeps
     # #4337: the per-print copies' sweep trashes files, so it obeys the switch.
     assert NATIVE_COPIES_SWEEP not in sweeps
     # The native slices obey the switch, as the Bambuddy background slices do.
@@ -439,9 +456,9 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    # 77 minutes since #5700's payment closes (10 minutes) and #4959's pending captures
-    # (12 minutes) joined the prune Schedule.
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=77)
+    # 85 minutes since #5700's payment closes (10 minutes), #4959's pending captures
+    # (15 minutes) and #5282's idle storefront carts (5 minutes) joined the prune Schedule.
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=85)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

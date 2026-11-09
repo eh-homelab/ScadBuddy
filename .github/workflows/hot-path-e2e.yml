@@ -133,9 +133,10 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
 
-      # Read the scopes ci.yml and build-image.yml write (the default one for the app's
-      # layers, `slicer` for the Rust build), and write this workflow's own at mode=min:
-      # the repo's Actions cache is at its ceiling (#743).
+      # Read the caches ci.yml and build-image.yml write (the default `type=gha` scope
+      # for the app's layers, the GHCR `scadbuddy-slicer:buildcache` for the Rust build,
+      # #4059), and write this workflow's own scopes at mode=min: the repo's Actions
+      # cache is at its ceiling (#743).
       - name: Build the app image
         uses: docker/build-push-action@v7
         with:
@@ -168,7 +169,7 @@ jobs:
           load: true
           tags: scadbuddy-slicer:hot-path
           cache-from: |
-            type=gha,scope=slicer
+            type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache
             type=gha,scope=hot-path-slicer
           cache-to: type=gha,scope=hot-path-slicer,mode=min
 

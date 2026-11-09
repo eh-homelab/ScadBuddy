@@ -197,9 +197,18 @@ def test_the_page_carries_the_csp() -> None:
 
     from scadbuddy.api.static import PAGE_CSP
 
-    # 'self' and one hash, index.html's inline entry-reload handler (#4873); nothing else.
-    assert re.search(r"script-src 'self' 'sha256-[A-Za-z0-9+/]{43}=';", PAGE_CSP)
-    assert "connect-src 'self';" in PAGE_CSP
+    # 'self', one hash (index.html's inline entry-reload handler, #4873) and Plaid Link's
+    # one script (#4961); nothing else.
+    assert re.search(
+        r"script-src 'self' 'sha256-[A-Za-z0-9+/]{43}='"
+        r" https://cdn\.plaid\.com/link/v2/stable/link-initialize\.js;",
+        PAGE_CSP,
+    )
+    # #4961: Link's frame and Plaid's two API hosts, as Plaid's CSP section lists them.
+    assert (
+        "connect-src 'self' https://production.plaid.com/ https://sandbox.plaid.com/;" in PAGE_CSP
+    )
+    assert "frame-src 'self' https://cdn.plaid.com/;" in PAGE_CSP
     assert "https://fonts.googleapis.com" in PAGE_CSP  # the font picker's previews
     assert "https://fonts.gstatic.com" in PAGE_CSP
     shared = Path(__file__).parents[3] / "frontend" / "page-csp.txt"

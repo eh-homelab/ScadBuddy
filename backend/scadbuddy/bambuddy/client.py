@@ -1598,7 +1598,18 @@ class BambuddyClient:
             operation="version",
             what="read Bambuddy's version",
         )
-        return str(response.json().get("version") or "unknown")
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            # #5840: an answer that is not an object names no version.
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered {type(body).__name__}, not an object, "
+                "when asked to read Bambuddy's version",
+            )
+        return str(body.get("version") or "unknown")
 
     async def capture_finish_photo(self) -> bool:
         """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which

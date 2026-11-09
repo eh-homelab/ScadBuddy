@@ -63,8 +63,8 @@ export function itemEdits(order: Order, item: OrderItemDetail): ItemEdits {
   return { title: true, quantity, price, locked: quantity ? null : price ? REVISED_TEXT : lockedText(order, item) }
 }
 
-/** The drawer's sections an action opens it at. */
-export type ItemSection = 'quote' | 'print' | 'fulfil'
+/** The drawer's sections an action opens it at; `slice` is the quote's, with the slice dialog open (#4673). */
+export type ItemSection = 'quote' | 'slice' | 'print' | 'fulfil'
 
 export type ItemActionKey = 'open' | 'quote' | 'print' | 'fulfil' | 'unfulfil' | 'reopen' | 'duplicate' | 'delete' | 'cancel'
 
@@ -90,7 +90,7 @@ export function itemActions(
   if (ENDED.has(order.status) || isCart(order)) return actions
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   if (item.kind !== 'custom' && !settled && priceOpen(order, item, item.quotes)) {
-    actions.push({ key: 'quote', label: 'Quote from a slice…', blocked: item.output_id || item.library_file ? null : NO_SLICE_SOURCE })
+    actions.push({ key: 'quote', label: 'Slice…', blocked: item.output_id || item.library_file ? null : NO_SLICE_SOURCE })
   }
   // Print's own rule, with the hold left out: on hold it shows, refused, with the reason.
   if (offersPrint({ ...order, on_hold: false }, item)) {

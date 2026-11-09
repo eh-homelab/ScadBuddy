@@ -167,6 +167,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'POST /api/v1/payments/webhooks/{provider}',
     reason: "A payment provider's call, signed with its own secret (#4957); never an agent's.",
   },
+  {
+    operation: 'POST /api/v1/payments/bank/webhook',
+    reason: "Plaid's call for the linked bank account, signed with its own key (#4961); never an agent's.",
+  },
   ...(
     [
       'GET /api/v1/payments/providers',
@@ -177,6 +181,30 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ).map((operation) => ({
     operation,
     reason: "Settings → Payments (#4957): a person connects, disconnects and chooses a provider; its credentials are never an agent's.",
+  })),
+  ...(
+    [
+      'GET /api/v1/payments/bank',
+      'PUT /api/v1/payments/bank/keys',
+      'DELETE /api/v1/payments/bank/keys',
+      'POST /api/v1/payments/bank/link-token',
+      'POST /api/v1/payments/bank/link',
+      'DELETE /api/v1/payments/bank/link',
+      'POST /api/v1/payments/bank/reconnected',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Settings → Payments' bank account (#4961): a person links it in Plaid Link in their own browser; the Plaid keys and the link are never an agent's.",
+  })),
+  ...(
+    [
+      'GET /api/v1/orders/{order_id}/bank-deposits',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/record',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/dismiss',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "The order page's suggested bank deposits (#4961): a suggestion is never recorded by itself, and only the shop confirms or dismisses one there.",
   })),
   ...(
     [
@@ -461,6 +489,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
+  {
+    operation: 'GET /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail',
+    reason:
+      "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +
+      "agent reads each setup's plates, time, grams and choices from order_get; it has no use for the bytes.",
+  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',

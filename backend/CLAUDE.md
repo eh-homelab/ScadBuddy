@@ -675,14 +675,29 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   null, or the spools; the dialog adds its hint only then), a quote's `native` path taken
   on a printer no longer on the LAN is `requote_needed` naming that
   (`quoted_path_refusal`), and a quote
-  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The lifecycle drops the quote holders §3.4 releases
+  with no setup needs `choices` and `filament_plan` sent (422 `print_setup_missing`). The
+  quote route's body (`ItemSliceQuoteRequest`) also takes `inputs` and `commit`: a design
+  that differs from the item's is made a revision first (`api/orders.py` `_slice_revision`,
+  through `Lifecycle.add_revision`, after acceptance for an accepted item on a
+  `TAKES_ITEMS` order) in `run_operation`'s `before_start`, after the quote's check of
+  the body alone (`quote_check` `body_only`: the filaments named, never the new design's
+  slots, which the run judges after the render with the support slots, so a 422 writes
+  nothing); the render's slots
+  take the item's earlier filaments (`carried_filaments`, unkeyed), and a slot the new
+  design adds that neither the item nor the body covers is refused after the revision is
+  written; the quote is of it (`revision_id` in the operation's request;
+  409 `revision_superseded` once another is current, the record's locked check
+  included; a cart is refused `order_not_submitted` first). The page (#4673 PR 4): the
+  row's "Slice…" and the drawer's print setups (`QuoteEditor`, `printSetups.ts`,
+  `DesignInputs.tsx` for the inputs), each plate's image from the quote's sliced file
+  (`GET …/quotes/{quote}/plates/{plate}/thumbnail`, `quote.py` `plate_image`). The lifecycle drops the quote holders §3.4 releases
   after each commit, and `housekeeping_reap_quote_holds` (both Schedules, behind its patch)
   drops any holder older than `QUOTE_TIMEOUT` that no standing quote names. `GET
   /orders/estimate` is the rough estimate from every plate's part volumes, never a record.
   The agent's `order_item_quote` takes `manual` or `slice`, beside `price_book_get`,
   `price_book_set` and `order_estimate`. Frontend: the Settings page's Orders section
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
-  `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
+  `QuoteFilaments` ("Slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
   `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
@@ -739,7 +754,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   cancel opens none and does not). A storefront cart refuses (`order_not_submitted`) a
   deposit set or applied, both waivers and accept, and refuses its shipping option and its
   charges (`PATCH` with `charges`) to anyone but the visitor (`check_visitors_cart`): the
-  back office never acts on a visitor's cart. A cancelled order reopened past `quoted`
+  back office never acts on a visitor's cart. The `housekeeping_sweep_storefront_drafts`
+  sweep (both Schedules, behind its patch) deletes a cart idle past
+  `storefront_draft_ttl_days` (`Lifecycle.sweep_drafts`: neither the order nor its visitor
+  seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
+  order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
+  `delete_attachment`, then the order), then the visitors idle as long with no order and
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -1037,9 +1058,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pending`) whose wait is over (`captures_due`: `CAPTURE_SETTLE_FIRST_MINUTES` after the
   approval or the last read, doubled per unknown read, at most a day; claimed `FOR UPDATE
   SKIP LOCKED`), read with no lock held (`CapturingProvider.read_capture`). A capture
-  found is recorded through `record_provider_event` (keyed `capture:<id>`; a later webhook
-  writes no second payment, matched by the order) and its closes run; a pending one stops
-  the reads; an `APPROVED` order with no capture is captured again under the approval's
+  found is recorded through `record_provider_event` (keyed `capture:<id>:<kind>`, so a pending read and a later paid one are two events; a later webhook
+  writes no second payment, matched by the order) and its closes run, and one that leaves
+  the request `pending` (`currency_mismatch`, `ignored`, `unmatched`) counts as an
+  unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), not
+  counted, and is `failed` (`capture_pending_unsettled`) once `capture_pending_at` (the
+  latest approval, or the backfill's run) is `CAPTURE_PENDING_GIVE_UP_DAYS` (30) old; a request whose settling raises is logged and counted, and
+  the batch (`CAPTURE_SETTLE_BATCH`, 4) goes on; an `APPROVED` order with no capture is captured again under the approval's
   key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
   (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
   `CAPTURE_GIVE_UP_ATTEMPTS` unknown reads (`capture_unsettled`) mark it `failed`. The capture's events record the money. Each
@@ -1056,6 +1081,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `FAILED` move the request, a declined card leaves it open, and a payment or refund
   with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
+  `venmo.py` (#4960: once the storefront's `/pay/<token>` page ships (#5283 phase 4,
+  `PAY_PAGE_READY`, false until then), a USD PayPal request from a shop with the `venmo`
+  setting on will link to it; until then no link is rewritten and a connect with `venmo`
+  `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
+  it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
+  show `on` disabled, with why). Only the token's sha256 is kept, in
+  `payment_requests.pay_token_hash`, read while the request is open or failed (not
+  pending), dropped when it is paid, cancelled or expired, or linked again
+  without one; `venmo_checkout` is what the edge's CRUD route reads,
+  `POST /api/v1/internal/crud/storefront/pay/checkout` (`api/crud_storefront.py`, area
+  `pay`, the token in the body, a bare 404 for None); a Venmo-funded capture is
+  `ProviderEvent.method` `venmo`, and one whose order PayPal does not answer is recorded
+  with no method),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -1160,3 +1198,97 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and the mark (`Lifecycle.set_request_link`, `store.set_request_link` `close_pending`),
   so the sweep retries it like any other. A late page whose reference another request
   holds names that request's live page: it is not kept, not marked and not closed.
+  The shop's bank account through Plaid (#4961) sits beside the seam, not in it: Plaid
+  opens no payment request, so it is not in `registry.py` and not a `payment_credentials`
+  row. `payments/plaid.py` (the stateless Plaid calls: link token, public-token exchange,
+  `/accounts/get` of the chosen account, `/item/remove`; keys in the `PLAID-CLIENT-ID` and
+  `PLAID-SECRET` headers; the facts, each with its Plaid link, are its docstring),
+  `payments/bank.py` (`BankLinks`, `PaymentsComponent.bank`: one `bank_links` row, the keys
+  and the access token sealed under AAD `bank_links:<id>`, and in the clear only Plaid's
+  ids and the account's name, type and mask; Plaid is called outside every transaction, and
+  a link that lost a race, chose an account that is not checking or savings, or failed to
+  store removes its Item at Plaid (the page sends Link's token with every chosen id, and
+  `link` exchanges it before refusing none or several, `BankChoiceError`, so no Item Link
+  made is left behind; Plaid not answering is `PlaidUnavailableError`, 503
+  `plaid_unavailable`; a linked row with no access token is `AccessTokenMissingError`,
+  whose unlink drops the link and keeps the keys, `TOKEN_MISSING`) (`bank_keys_changed` when the keys were replaced or
+  forgotten meanwhile); new keys are refused while linked, `bank_linked`; two first saves
+  at once meet on the `singleton` column and the second updates the first's row; every
+  Postgres call of an async method runs in `asyncio.to_thread`; an unlink Plaid does not
+  answer keeps the token, an unlink without the key file is 409 `kek_missing` and keeps
+  the row (the file may come back), and one whose keys Plaid refuses
+  (`plaid.KEYS_REFUSED`) drops the link here only and keeps the keys (`REMOVE_AT_PLAID`),
+  while one whose keys are sealed under another key file deletes the row, keys and all
+  (`KEYS_UNREADABLE`: remove the Item in the Plaid Dashboard, then save the keys again);
+  either way `BankUnlinked.note` says what to do), routes `api/bank_link.py` (`/payments/bank`; every write in
+  `PERSON_ENDPOINTS`), frontend `components/settings/BankAccount.tsx` and
+  `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
+  allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.
+  Tests replay `tests/payments/plaid_payloads/` (Plaid's sandbox examples) through respx.
+  The deposit sync (`payments/deposits.py` `sync_deposits`) is the housekeeping sweep
+  `housekeeping_sync_bank_deposits` (the sweep Schedule only, behind its patch, never a loop
+  in the API): `/transactions/sync` from `bank_links.sync_cursor`, at most `MAX_PAGES` pages,
+  the loop started again from its first cursor on a mutation during pagination (an update
+  `MAX_PAGES` cut short keeps that first cursor in `sync_loop_cursor` for the next run); each
+  open order's balance is read once per sync (`_Balances`); keys that will not open, or a
+  link with no access token, set `sync_error` instead of failing every run; the cursor
+  is stored only when the link and the cursor are still the ones it started from. Posted
+  deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
+  (`mask`: every run of five or more digits, a run going on across single spaces or
+  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
+  deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
+  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below, and every
+  suggestion; nothing prunes a kept row while its payment stands.
+  The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
+  `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
+  lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
+  `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
+  method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
+  deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
+  currency; `deposit_changed` when a sync changed its amount meanwhile); the lock is taken in the payment's own transaction (`add_payment`'s
+  `on_insert`), so a confirmation holds one connection. "Not this order" (`…/{tx}/dismiss`)
+  writes a `bank_deposit_dismissals` row (transaction id and order), kept apart from the
+  Item's deposits, so a later sync, an unlink and a new link all keep it. Both are in
+  `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and its reference) is
+  never suggested again, after a new link too. A recorded deposit Plaid changed since is
+  listed with `reason` `changed`, and one Plaid removed (its row kept, `removed_at`) with
+  `removed`, each with `recorded_minor`, the sum of the order's `bank_transfer` payments
+  whose reference is the transaction id, while that sum is not the deposit's amount (0 when
+  removed), and only once the bank moved it (removed, or `changed_at`: set the first time a
+  sync reads a new amount for a recorded deposit and kept, so a change back after the
+  shop's correction warns again). Payments are never edited, so the page's warning asks the shop to
+  record the difference with that reference, which clears it. A cancelled order takes no
+  payment and shows no such warning; a removed row whose payment is gone is deleted by the
+  next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
+  deposit whose amount it changed or that it removed, so an open order page reloads.
+  Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
+  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
+  `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
+  asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
+  the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`, which reads the
+  `bank_links` row only after the key caches and the bucket, so a forged `kid` costs no
+  database read or unseal); a bad one is 400 and changes nothing, a key Plaid could not
+  give, or a link whose keys or access token cannot be read, is 503 (Plaid sends it
+  again). Only a key that verified a webhook is kept by `kid`
+  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
+  `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
+  nothing and is kept with the unknown ones; a `kid` Plaid does not
+  have (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and goes in a cache of its own for
+  `UNKNOWN_KEY_SECONDS`, so forged `kid`s never evict a verified key. A `kid` in neither
+  cache takes a token from `_KEY_LOOKUPS` (`KeyLookups`): the sender's bucket first (the
+  address `relay_client` trusts, never a raw `X-Forwarded-For`), then the process's
+  (a burst of `KEY_LOOKUP_BURST`); a refusal is 429 with `Retry-After`, which Plaid honours
+  ([webhook retries](https://plaid.com/docs/api/webhooks/#webhook-retries)). A webhook
+  whose `kid` is already being looked up waits for that lookup and takes no token.
+  `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
+  sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
+  `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
+  and Settings shows "Reconnect": the link token is then for Link's update mode (the
+  Item's `access_token`, no `products`; a linked row with no token is 409
+  `access_token_missing`, never a fresh Link), and `POST …/reconnected` (person) clears it,
+  with a `sync_error` that was `ITEM_LOGIN_REQUIRED`, and syncs after the answer;
+  `LOGIN_REPAIRED` clears both too, and any sync that reads Plaid clears it. A webhook for another Item is `ignored`.

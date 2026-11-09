@@ -126,7 +126,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 # The venv's python, not `uv run`: that would sync the dev group too.
 COPY backend/ ./
 RUN uv sync --frozen --no-dev \
-    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi --storefront /src/storefront-openapi.json
 
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
@@ -161,9 +162,11 @@ RUN corepack enable
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# After the install, so an API change does not re-download node_modules.
-COPY --from=api-spec /src/openapi.json /src/openapi.json
-ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+# After the install, so an API change does not re-download node_modules. The storefront
+# edge's spec types the public page (src/storefront/api/schema.d.ts, #5282).
+COPY --from=api-spec /src/openapi.json /src/storefront-openapi.json /src/
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json \
+    SCADBUDDY_STOREFRONT_OPENAPI_JSON=/src/storefront-openapi.json
 
 COPY frontend/ ./
 # The browser's `service.version` (tracing spec 2026-10-01 §3): the same label the
@@ -372,16 +375,31 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
 # build script fails with "google/protobuf/field_mask.proto: File not found".
-FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS slicer-build
+#
+# The dependencies build in a layer of their own (#4059): cargo-chef writes a recipe
+# (the manifests and Cargo.lock, with no source code), `cargo chef cook` builds the
+# dependencies from it, and only then is the source copied. A change to the crates'
+# own code keeps the recipe, so the cook layer comes from the cache and only the
+# workspace crates compile. A change to a Cargo.toml or Cargo.lock cooks again.
+# build-image.yml keeps these layers in a GHCR registry cache at mode=max.
+FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS slicer-chef
 
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
-# The whole workspace at once, so any source edit rebuilds every dependency; caching
-# them in a layer of their own (cargo-chef) is follow-up #4059.
-COPY workers/rust /src
+# Pinned exactly; bump it deliberately.
+RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /src
+
+FROM slicer-chef AS slicer-plan
+COPY workers/rust /src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM slicer-chef AS slicer-build
+COPY --from=slicer-plan /src/recipe.json recipe.json
+RUN cargo chef cook --release --locked -p scadbuddy-slicer --recipe-path recipe.json
+COPY workers/rust /src
 RUN cargo build --release --locked -p scadbuddy-slicer
 
 # ── slicer-dist: Bambu Studio itself, downloaded and checked once ─────────────

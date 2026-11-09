@@ -10,6 +10,9 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
 INDEX_NAME = "index.html"
+#: The public storefront page's entry (#5282). The bundle holds it, but only the storefront
+#: edge serves it, on its own host (`storefront/static.py`): here it is a 404.
+STOREFRONT_ENTRY = "storefront.html"
 ASSETS_DIR = "assets"
 #: Every API route lives under ``/api/``. One that reached this mount matched no route,
 #: so it is a 404 problem document, never the SPA's HTML or a 405 (#365).
@@ -39,18 +42,25 @@ def _is_api(path: str) -> bool:
 
 #: The app document's policy (spec 2026-09-27 §9). A template UI runs unsandboxed in
 #: this page. The policy stops it loading script from anywhere but this origin, and stops
-#: fetch/XHR/WebSocket and image, media and font beacons to other hosts. Google Fonts is
-#: the one exception, for style and font files only (the font picker's previews,
+#: fetch/XHR/WebSocket and image, media and font beacons to other hosts, Plaid's aside
+#: (below). Google Fonts is the one other exception, for style and font files only (the
+#: font picker's previews,
 #: `frontend/src/lib/fonts.ts` `googleFontsCssUrl`). The policy does NOT stop same-origin
 #: abuse: a module can call every /api/v1 route with the user's session. Nor does it stop
 #: exfiltration by top-level navigation, window.open or WebRTC. No frame-ancestors:
 #: Bambuddy's origin, which frames this page, is not known here. The one hash in
 #: script-src is index.html's inline entry-reload handler (#4873); the frontend's
-#: src/entryReload.test.ts fails when it no longer matches.
+#: src/entryReload.test.ts fails when it no longer matches. Plaid Link (#4961, Settings →
+#: Payments) adds its one script, its frame and Plaid's two API hosts, as Link's CSP
+#: section lists them (https://plaid.com/docs/link/web/); not its `'unsafe-inline'`
+#: script-src, which the nonce variant there shows is for the script tag alone. A template
+#: UI can so reach Plaid's API too, an exfiltration path no wider than the navigation above.
 PAGE_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'sha256-Rj6+2fB2Z4lK/lRKWJfaWIDmhqY3Ffti9UBR4X6oq2U='; "
-    "connect-src 'self'; "
+    "script-src 'self' 'sha256-Rj6+2fB2Z4lK/lRKWJfaWIDmhqY3Ffti9UBR4X6oq2U='"
+    " https://cdn.plaid.com/link/v2/stable/link-initialize.js; "
+    "connect-src 'self' https://production.plaid.com/ https://sandbox.plaid.com/; "
+    "frame-src 'self' https://cdn.plaid.com/; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
@@ -130,6 +140,8 @@ class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> Response:
         if _is_api(path):
             _refuse_api(path, scope, self)
+        if PurePosixPath(path).parts == (STOREFRONT_ENTRY,):
+            return _missing_asset()
         response = await self._response_or_fallback(path, scope)
         ok = response.status_code in (200, 304)
         response.headers["Cache-Control"] = IMMUTABLE if ok and _is_asset(path) else REVALIDATE

@@ -184,15 +184,27 @@ class S3ContentBackend:
             raise
         return True
 
-    async def presign_get(self, backend_id: str, expires: timedelta) -> str:
+    async def presign_get(
+        self,
+        backend_id: str,
+        expires: timedelta,
+        *,
+        media_type: str | None = None,
+        disposition: str | None = None,
+    ) -> str:
         """A URL that GETs the object without credentials until ``expires`` from now
-        (aiobotocore's `generate_presigned_url` is a coroutine). The query carries the
-        signature: never log it."""
+        (aiobotocore's `generate_presigned_url` is a coroutine). ``media_type`` and
+        ``disposition`` are the ``Content-Type`` and ``Content-Disposition`` S3 answers
+        with (signed into the URL, so the holder cannot change them). The query carries
+        the signature: never log it."""
+        params: dict[str, str] = {"Bucket": self.settings.bucket, "Key": self._key(backend_id)}
+        if media_type is not None:
+            params["ResponseContentType"] = media_type
+        if disposition is not None:
+            params["ResponseContentDisposition"] = disposition
         client = await self._s3()
         return await client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.settings.bucket, "Key": self._key(backend_id)},
-            ExpiresIn=int(expires.total_seconds()),
+            "get_object", Params=params, ExpiresIn=int(expires.total_seconds())
         )
 
     async def remove(self, backend_id: str) -> None:

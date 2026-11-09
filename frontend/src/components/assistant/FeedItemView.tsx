@@ -652,6 +652,18 @@ export function FeedItemView({
           {item.change === 'deleted' && ' from the workspace'}
         </p>
       )
+    case 'credential':
+      return (
+        <p className="text-[11.5px] text-muted-foreground" data-testid="agent-credential-fallback">
+          {item.from}{' '}
+          {item.outcome === 'refused'
+            ? 'was refused, so it is off until it is reset in Settings.'
+            : item.outcome === 'rate_limited'
+              ? `is rate limited${item.until ? ` until ${new Date(item.until).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}` : ''}.`
+              : 'failed.'}{' '}
+          The turn continues on {item.to}.
+        </p>
+      )
     case 'error':
       return (
         <p role="alert" className="text-xs text-warn">

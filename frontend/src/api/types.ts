@@ -365,8 +365,12 @@ export type PrintProgress = Schemas['PrintProgress']
 export type LanRunControl = Schemas['LanRunControl']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']
-/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. */
-export type QueueItem = Schemas['QueueItem']
+/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. Each item
+ * carries `scadbuddy` when ScadBuddy queued it and it is pending or printing (#3741,
+ * #5833). */
+export type QueueItem = Schemas['FarmQueueItem']
+/** #3741 — a queue item or printer job ScadBuddy queued or started. */
+export type ScadBuddyJob = Schemas['ScadBuddyJob']
 export type ArchiveStats = Schemas['ArchiveStats']
 export type PrinterNow = Schemas['PrinterNow']
 /** #3823 — the printer registry: one row per physical printer, keyed by serial. */
@@ -468,6 +472,13 @@ export type ShipmentEdit = Schemas['ShipmentEdit']
 export type PaymentRequestView = Schemas['PaymentRequestView']
 export type ProviderStatus = Schemas['ProviderStatus']
 export type ProviderConnect = Schemas['ProviderConnect']
+/** #4961 — the shop's bank account linked through Plaid, beside the providers. */
+export type BankStatus = Schemas['BankStatus']
+export type BankKeys = Schemas['BankKeys']
+export type BankLinkCreate = Schemas['BankLinkCreate']
+export type BankUnlinked = Schemas['BankUnlinked']
+/** A deposit of the linked account suggested for an order; it records nothing by itself. */
+export type DepositSuggestion = Schemas['DepositSuggestion']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** #5281 — the shop's money rules (Settings → Orders): a rule of the deposit policy, and a
@@ -508,8 +519,9 @@ export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
- * colour slot (`colours[].slot`, from 0). */
-export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
+ * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first
+ * (#4673). */
+export type SliceQuoteRequest = Schemas['ItemSliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
  * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
  * sends the quote's own, so the body matches the background slice's; the server refuses

@@ -61,17 +61,24 @@ def edge_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def crud_mock() -> Iterator[respx.Router]:
-    """The CRUD service: the exchange, the storefront's areas and its listings."""
+    """The CRUD service: the exchange, the storefront's areas, its listings, its renders
+    and whether design requests are on."""
     with respx.mock(base_url=API, assert_all_called=False) as router:
         router.post("/api/v1/auth/service-token", name="exchange").respond(
             200, json={"access_token": TOKEN, "expires_in": 900}
         )
         router.get("/api/v1/internal/crud/storefront/areas", name="areas").respond(
-            200, json={"areas": []}, headers=CRUD
+            200, json={"areas": ["listings", "renders", "drafts", "requests", "pay"]}, headers=CRUD
         )
         router.get("/api/v1/internal/crud/storefront/listings", name="listings").respond(
             200, json=LISTINGS, headers=CRUD
         )
+        router.post("/api/v1/internal/crud/storefront/renders", name="renders").respond(
+            202, json={}, headers=CRUD
+        )
+        router.get(
+            "/api/v1/internal/crud/storefront/requests-enabled", name="requests_enabled"
+        ).respond(200, json={"enabled": True}, headers=CRUD)
         yield router
 
 
@@ -154,7 +161,8 @@ def test_a_crud_refusal_passes_through_with_its_retry_after(
     assert r.status_code == 429
     assert r.headers["Retry-After"] == "7"
     assert r.headers["content-type"] == "application/problem+json"
-    assert r.json() == limited
+    # The edge's own path, not the CRUD route's.
+    assert r.json() == {**limited, "instance": "/api/store/v1/listings"}
 
 
 def test_a_trusted_proxy_names_the_client_and_is_parsed_once(

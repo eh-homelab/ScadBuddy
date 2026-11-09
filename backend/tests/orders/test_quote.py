@@ -308,6 +308,33 @@ def test_the_check_refuses_a_settled_item(shop: Shop) -> None:
     assert gone.value.status == 404
 
 
+def test_the_check_refuses_a_slice_of_a_revision_no_longer_current(shop: Shop) -> None:
+    """#4673 PR 3: a slice made for a revision (`expected_revision_id`, the revision its
+    new inputs made) is refused once a newer one exists, before anything is written."""
+    first = shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY)
+    shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY)
+    with pytest.raises(ApiError) as refused:
+        quote_check(
+            shop.rows,
+            POLICY,
+            shop.order.id,
+            shop.item.id,
+            shop.request(s0=shop.pla, s1=shop.petg),
+            expected_revision_id=first.id,
+        )
+    assert (refused.value.status, refused.value.type) == (409, PROBLEMS + "revision_superseded")
+    current = shop.rows.item(shop.item.id)
+    assert current is not None and current.current_revision_id is not None
+    quote_check(
+        shop.rows,
+        POLICY,
+        shop.order.id,
+        shop.item.id,
+        shop.request(s0=shop.pla, s1=shop.petg),
+        expected_revision_id=current.current_revision_id,
+    )
+
+
 def test_the_check_refuses_a_request_with_no_design(shop: Shop) -> None:
     request = shop.lifecycle.add_request_item(shop.order.id, BY, title="A dragon", quantity=1)
     with pytest.raises(ApiError) as refused:
@@ -412,6 +439,26 @@ def test_a_refused_check_leaves_the_item_unchanged(shop: Shop) -> None:
 
 
 # -- the run's writes, in order ----------------------------------------------------------------
+
+
+def test_a_body_only_check_prices_nothing_with_archived_pins_alone(shop: Shop) -> None:
+    """#5761 review: before a slice's new revision, the pins it carries price it only
+    while they stand; an archived pin is the run's to refuse, never a price."""
+    shop.lifecycle.update_item(
+        shop.order.id, shop.item.id, BY, filaments={0: shop.pla, 1: shop.petg}
+    )
+    shop.rows.archive_filament(shop.pla)
+    shop.rows.archive_filament(shop.petg)
+    with pytest.raises(ApiError) as refused:
+        quote_check(
+            shop.rows,
+            PricingPolicy(markup_percent="20"),
+            shop.order.id,
+            shop.item.id,
+            shop.request(),
+            body_only=True,
+        )
+    assert refused.value.type.endswith("/price_book")
 
 
 async def test_ensure_output_reuses_a_matching_output(shop: Shop) -> None:
@@ -1178,3 +1225,44 @@ async def test_a_support_filament_archived_since_the_check_refuses_the_quote(
         await quote_run(run_of(shop, tmp_path, files), shop.order.id, shop.item.id, request, BY)
     assert refused.value.status == 422
     assert "slot 2" in refused.value.detail
+
+
+async def test_a_revision_made_after_the_check_refuses_the_slice(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """#4673 PR 3: a slice for one revision (its new inputs') records nothing once another
+    is current, whether that one came before the run read the item or while it sliced:
+    the record's own check, under the order's lock, catches the second. Both are
+    `revision_superseded`."""
+    files = {1: sliced_plate(1, 3600, [12.5, 3.0]), 2: sliced_plate(2, 1800, [10.0, 2.0])}
+    request = shop.request(s0=shop.pla, s1=shop.petg)
+    meant = shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY)
+
+    # Before the run: the revision it reads is not the one it was made for.
+    shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY)
+    with pytest.raises(ApiError) as before:
+        await quote_run(
+            run_of(shop, tmp_path, files),
+            shop.order.id,
+            shop.item.id,
+            request,
+            BY,
+            expected_revision_id=meant.id,
+        )
+    assert before.value.type == PROBLEMS + "revision_superseded"
+
+    # While it slices: the record refuses it under the order's lock.
+    current = shop.get_item().current_revision_id
+    assert current is not None
+    run = run_of(shop, tmp_path, files)
+    record = shop.lifecycle.record_slice_quote
+
+    def revised_first(*args: Any, **kwargs: Any) -> Any:
+        shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY)
+        return record(*args, **kwargs)
+
+    shop.lifecycle.record_slice_quote = revised_first  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as during:
+        await quote_run(run, shop.order.id, shop.item.id, request, BY, expected_revision_id=current)
+    assert during.value.type == PROBLEMS + "revision_superseded"
+    assert shop.rows.quotes(shop.item.id) == []

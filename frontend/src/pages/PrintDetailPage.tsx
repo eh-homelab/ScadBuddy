@@ -291,6 +291,7 @@ function GallerySection({ print }: { print: PrintDetail }) {
  * render, or the library file's plate, read from its 3MF as a print of it reads it (#1753).
  */
 function RenderSection({ print }: { print: PrintDetail }) {
+  const unit = useDisplayUnit()
   const glb = print.files.find((file) => file.kind === 'preview_glb')
   const output = useAsync(
     async () => (glb && print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
@@ -354,7 +355,7 @@ function RenderSection({ print }: { print: PrintDetail }) {
         ) : (
           !output.loading && (
             <Suspense fallback={null}>
-              <Preview job={job} rendering={false} />
+              <Preview job={job} unit={unit} rendering={false} />
             </Suspense>
           )
         )}

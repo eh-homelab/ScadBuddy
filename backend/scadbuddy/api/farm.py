@@ -7,12 +7,13 @@ Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.farm import (
     ArchiveOutcome,
@@ -22,6 +23,10 @@ from scadbuddy.bambuddy.farm import (
     spool_summary,
 )
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
+from scadbuddy.core.problems import DATABASE_ERRORS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/farm", tags=["farm"])
 
@@ -34,18 +39,59 @@ DateFrom = Annotated[date | None, Query(description="First day, inclusive (creat
 DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_at)")]
 
 
-@router.get("/queue", response_model=list[QueueItem], summary="Bambuddy's print queue")
+#: The queue item states that can carry the "Queued from ScadBuddy" mark (#3741, #5833):
+#: a job still to print or printing. Bambuddy's queue item states are pending, printing,
+#: completed, failed, skipped and cancelled; it has no "paused" state. Source:
+#: maziggy/bambuddy `backend/app/models/print_queue.py` line 140 at commit 918353a
+#: (https://github.com/maziggy/bambuddy/blob/918353a945d2993a475d5cf1ce135c52c9e11932/backend/app/models/print_queue.py#L140).
+#: A finished or skipped item is history and is not looked up.
+MARKED_STATUSES = frozenset({"pending", "printing"})
+
+
+class FarmQueueItem(QueueItem):
+    """A queue item, and whether ScadBuddy queued it (#3741)."""
+
+    #: The output or library file ScadBuddy queued this item for, found only by a record
+    #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
+    #: the item. Set only on a pending or printing item (`MARKED_STATUSES`).
+    #: ``None`` for a finished item, for an item queued from Bambuddy (its reprint of an
+    #: archive ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never
+    #: taken from Bambuddy's answer.
+    scadbuddy: ScadBuddyJob | None = None
+
+
+@router.get("/queue", response_model=list[FarmQueueItem], summary="Bambuddy's print queue")
 async def get_queue(
     store: SettingsStoreDep,
+    links: PrintLinksDep,
     printer_id: Annotated[
         int | None, Query(description="One printer's items; -1 for items not assigned to one")
     ] = None,
     status: Annotated[QueueStatus | None, Query(description="Only items in this state")] = None,
-) -> list[QueueItem]:
+) -> list[FarmQueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
-    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come."""
+    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
+    Each pending or printing item ScadBuddy queued carries ``scadbuddy`` (#3741); only
+    those items are looked up (#5833)."""
     async with client_for(store.load()) as client:
-        return await client.queue(printer_id=printer_id, status=status)
+        items = await client.queue(printer_id=printer_id, status=status)
+    matches = await _jobs(links, [item for item in items if item.status in MARKED_STATUSES])
+    return [
+        FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
+        for item in items
+    ]
+
+
+async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
+    """Which of ``items`` ScadBuddy queued, in one read; none when its records cannot be
+    read, so a database blip costs the marks, never the queue."""
+    if not items:
+        return JobMatches()
+    try:
+        return await links.jobs(queue_items=[item.id for item in items])
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the queue shows no ScadBuddy marks")
+        return JobMatches()
 
 
 @router.get("/stats", response_model=ArchiveStats, summary="The farm's print statistics")

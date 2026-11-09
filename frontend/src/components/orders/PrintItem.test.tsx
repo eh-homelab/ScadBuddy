@@ -8,6 +8,11 @@ import { resetMockState } from '../../mocks/handlers'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
+import { HttpResponse, http } from 'msw'
+import { choicesView } from '../../mocks/choices'
+import * as fixtures from '../../mocks/fixtures'
+import { HOT_PRINTER, setHotPath } from '../../mocks/features/hotPath'
+import { server } from '../../mocks/server'
 
 vi.mock('../print/PlateScene', () => ({ PlateScene: () => <div data-testid="plate-scene" /> }))
 
@@ -53,6 +58,109 @@ describe('PrintItem', () => {
     expect(state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status).toBe('in_production')
     // Printing already: no second print is offered.
     await waitFor(() => expect(screen.queryByTestId('print-item')).toBeNull())
+  })
+
+  // #4673 — the dialog opens on the accepted quote's print setup, so Print sends what was
+  // quoted (the backend refuses another setup with `requote_needed`).
+  it("opens on the accepted quote's print setup and sends it", async () => {
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: 'by object' },
+          // Not the dialog's own picks (21 then 27): the quote's spools, swapped.
+          filament_plan: { slots: [{ slot_id: 1, spool_id: 27 }, { slot_id: 2, spool_id: 21 }], force_colour_match: false },
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    const body = printed.mock.calls[0]![2]
+    expect(body.choices).toMatchObject({ tier: 'draft' })
+    expect(body.filament_plan?.slots).toEqual([
+      { slot_id: 1, spool_id: 27 },
+      { slot_id: 2, spool_id: 21 },
+    ])
+    // The tower, supports and sequence are left out: the backend takes the quote's.
+    expect(body).not.toHaveProperty('print_sequence')
+  })
+
+  // #5761 review — a quote with a setup but no spools seeds no plan: the dialog's own picks
+  // (21 then 27) are what Print sends.
+  it('keeps the dialog spools for a quote with choices and no filament plan', async () => {
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: null },
+          filament_plan: null,
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    const body = printed.mock.calls[0]![2]
+    expect(body.choices).toMatchObject({ tier: 'draft' })
+    expect(body.filament_plan?.slots).toEqual([
+      { slot_id: 1, spool_id: 21 },
+      { slot_id: 2, spool_id: 27 },
+    ])
+  })
+
+  // #5761 review — a quote on a LAN-only printer names it by its registry row alone; the
+  // dialog opens on that row and Print sends it.
+  it("opens on the quote's LAN-only printer", async () => {
+    setHotPath(true)
+    const lanOnly = { ...HOT_PRINTER, bambuddy_printer_id: null, bambuddy_active: false }
+    server.use(
+      http.get('/api/v1/printers', () => HttpResponse.json([lanOnly])),
+      // Opens on Bambuddy's printer; a read for the row is the row's, with no Bambuddy id.
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const row = new URL(request.url).searchParams.get('printer') === lanOnly.id
+        return HttpResponse.json({
+          ...choicesView,
+          ...(row
+            ? {
+                printer_id: null,
+                filaments: { ...fixtures.filamentOptions, printer_id: null },
+                model_choices: { printer_id: null, filament_plan: [] },
+              }
+            : {}),
+          lan_printers: [lanOnly.id],
+        })
+      }),
+    )
+    const quoted = { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'draft', process_name: null }
+    for (const quote of state.quotes) {
+      if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
+        Object.assign(quote, {
+          choices: { printer_id: null, printer: lanOnly.id, path: 'native', choices: quoted, prime_tower: null, supports: null, print_sequence: null },
+          filament_plan: null,
+        })
+      }
+    }
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await user.click(await screen.findByTestId('print-item'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print the line item' })
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Printer' })).toHaveTextContent(lanOnly.name))
+    const run = within(dialog).getByTestId('run-item-print')
+    await waitFor(() => expect(run).toBeEnabled())
+    await user.click(run)
+    await waitFor(() => expect(printed).toHaveBeenCalledTimes(1))
+    expect(printed.mock.calls[0]![2]).toMatchObject({ printer: lanOnly.id })
   })
 
   // #5544 — a library file item prints its file: the dialog opens on the file, not an output.

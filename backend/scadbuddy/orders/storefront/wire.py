@@ -1,5 +1,7 @@
 """The storefront listing's shapes (#5282, spec 2026-11-02 §5.3): the back office's body,
-the stored row, and what publish captures from the template's commit.
+the stored row, what publish captures from the template's commit, the public site's
+view of a published listing (`PublicListing`), a visitor's render and its draft order
+(`DraftView`).
 
 A listing offers one commit of a template. Each parameter a customer may change has a
 bound (``ParamBound``) inside the schema's own; every other parameter is fixed. Publish
@@ -18,7 +20,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.orders.models import ItemKind
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
+)
+from scadbuddy.storefront.wire import (
+    MAX_REQUEST_FILES as MAX_REQUEST_FILES,
+)
+from scadbuddy.storefront.wire import (
+    REQUEST_KINDS as REQUEST_KINDS,
+)
 
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
@@ -136,3 +150,160 @@ class ListingOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ids: list[str]
+
+
+# -- the public site's view (Task 6) --------------------------------------------------
+
+
+class _Shown(BaseModel):
+    """What the page shows beside a bound: the schema's label (its caption, else its
+    name) and group, and whether it is a ``// color`` parameter, whose choices are the
+    colours of the listing's filaments. The schema has no help text to show."""
+
+    label: str
+    group: str = ""
+    colour: bool = False
+
+
+class PublicNumber(NumberBound, _Shown):
+    pass
+
+
+class PublicChoice(ChoiceBound, _Shown):
+    #: A colour's choices are the listing filaments the price book still has, so none
+    #: may be left.
+    choices: list[ParamValue]
+
+
+class PublicText(TextBound, _Shown):
+    pass
+
+
+PublicParam = Annotated[PublicNumber | PublicChoice | PublicText, Field(discriminator="kind")]
+
+
+class PublicFilament(BaseModel):
+    """A filament a visitor may pick: never its price."""
+
+    id: str
+    colour: str
+    colour_name: str | None
+    material: str
+
+
+class PublicMedia(BaseModel):
+    """A media file as a presigned GET (`PUBLIC_MEDIA_TTL`)."""
+
+    url: str
+    kind: MediaKind
+    caption: str
+
+
+class PublicListing(BaseModel):
+    """A published listing as the public site shows it. Every text is the shop's, shown
+    as text, never as HTML (spec §5.8)."""
+
+    id: str
+    title: str
+    description: str
+    params: dict[str, PublicParam]
+    colours: list[PublicFilament]
+    media: list[PublicMedia]
+    updated_at: datetime
+
+
+class PublicListings(BaseModel):
+    listings: list[PublicListing]
+    #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
+    requests_enabled: bool
+
+
+# -- a visitor's renders (Task 7) ------------------------------------------------------
+
+
+#: A colour slot of a render: an index into its colours, never negative.
+ColourSlotIndex = Annotated[int, Field(ge=0)]
+
+
+class RenderBody(BaseModel):
+    """``POST …/storefront/renders``: the visitor's values for the listing as it read it.
+    The CRUD side checks every value against the listing (`inputs.py` `listing_values`),
+    never only against the schema."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    listing_id: str = Field(max_length=64)
+    #: The listing's ``updated_at`` as the page read it: another is 409 ``listing_changed``.
+    listing_updated_at: datetime
+    values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
+    #: The listing filament the visitor chose for each colour slot of the render.
+    colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+
+
+class StoreRender(BaseModel):
+    """A visitor's render: the fields of the back office's job that ``Preview.tsx`` reads.
+    ``error`` is a fixed text, never the render's log: the visitor never sees a path or a
+    stack."""
+
+    id: str
+    status: JobState
+    #: The step the render is in while it runs, as ``job.progress`` names it.
+    stage: str | None
+    plates: list[PlateInfo]
+    bbox_mm: BoundingBox | None
+    colors: list[str] | None
+    #: The edge's path of the preview, once the render is done.
+    preview_url: str | None
+    error: str | None
+
+
+# -- the visitor's draft (Task 8) ------------------------------------------------------
+
+
+class AddListingItem(RenderBody):
+    """``POST …/storefront/draft/items``: the listing at the visitor's values, as a render
+    of it takes them, and how many to make. The CRUD side checks every value against the
+    listing (`inputs.py` `listing_values`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: int = Field(1, ge=1, le=100, strict=True)
+
+
+#: What a visitor's file is, as its bytes say: one of `REQUEST_KINDS`, else ``other``.
+DraftFileKind = Literal["image", "video", "pdf", "other"]
+
+
+class DraftAttachment(BaseModel):
+    """A file of an item, as a presigned GET (`PUBLIC_MEDIA_TTL`) that downloads it, with
+    its sniffed media type."""
+
+    filename: str
+    kind: DraftFileKind
+    url: str
+
+
+class DraftItem(BaseModel):
+    """An item of the visitor's draft. ``inputs`` are a model item's parameter values
+    (``labels`` names each as the page shows it), ``notes`` a request's text; each is None
+    on the other kind."""
+
+    id: str
+    kind: ItemKind
+    title: str
+    quantity: int
+    inputs: dict[str, ParamValue] | None
+    #: What the page shows beside each of ``inputs``: the schema's caption at the item's
+    #: commit, else the parameter's name. Empty for an item with no inputs.
+    labels: dict[str, str] = Field(default_factory=dict)
+    notes: str | None
+    attachments: list[DraftAttachment]
+
+
+class DraftView(BaseModel):
+    """The visitor's draft order: no number and no customer until it is submitted."""
+
+    id: str
+    currency: str
+    minor_exponent: int
+    items: list[DraftItem]

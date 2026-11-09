@@ -366,7 +366,7 @@ function ItemStatus({ item, run }: { item: OrderItemDetail; run: SliceQuoteRun |
 const WRITES: ReadonlySet<ItemAction['key']> = new Set(['unfulfil', 'reopen', 'duplicate', 'delete', 'cancel'])
 
 /** The actions done in the drawer, at the section they open it at. */
-const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'quote', print: 'print', fulfil: 'fulfil' }
+const SECTIONS: Partial<Record<ItemAction['key'], ItemSection>> = { quote: 'slice', print: 'print', fulfil: 'fulfil' }
 
 /**
  * #4955 — a row's ⋯ menu: the actions allowed on the item now (`itemActions`), each refused

@@ -221,7 +221,9 @@ __marimo__/
 # (#492): `pnpm gen:api` in frontend/ and agent/ exports the spec and writes
 # each client.
 backend/openapi.json
+backend/storefront-openapi.json
 frontend/src/api/schema.d.ts
+frontend/src/storefront/api/schema.d.ts
 agent/src/api/schema.d.ts
 
 # Playwright MCP session output

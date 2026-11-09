@@ -324,6 +324,15 @@ describe('order tools (#4249)', () => {
     expect(new URL(url).search).toBe('')
   })
 
+  it('shows a Venmo-funded PayPal payment as venmo, and names the manual methods (#4960)', async () => {
+    const order = { id: ORDER, payments: [{ id: 'p1', amount_minor: 700, method: 'venmo', provider: 'paypal' }] }
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () => HttpResponse.json(order)))
+    const read = firstText(await tool('order_get').execute({ order_id: ORDER }, ctx())) as typeof order
+    expect(read.payments[0]!.method).toBe('venmo')
+    expect(tool('order_get').description).toContain('venmo')
+    expect(JSON.stringify(z.toJSONSchema(z.object(tool('order_update').shape)))).toContain('bank_transfer')
+  })
+
   it('edits, holds and records a payment through their own routes', async () => {
     const calls: string[] = []
     server.use(
@@ -943,6 +952,15 @@ describe('pricing tools (#4250)', () => {
     expect(title).toContain('with tree supports at 40°')
     expect(title).toContain('with a prime tower (no sparse layers)')
     expect(title).toContain('by object')
+    // #4673 PR 3: new inputs or a commit make a revision first; the quote is of it.
+    const design = { inputs: { params: { width: 14 } }, commit: 'a'.repeat(40) }
+    await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, ...design } }, ctx())
+    expect(body).toMatchObject(design)
+    expect(input.safeParse({ ...args, slice: { ...SLICE, commit: 'not a commit' } }).success).toBe(false)
+    expect(tool('order_item_quote').description).toContain('`revision_superseded`')
+    expect(tool('order_item_quote').title?.({ ...args, slice: { ...SLICE, ...design } } as never)).toContain(
+      'with new inputs at commit aaaaaaa',
+    )
   })
 
   it('answers a slice quote still running past the follow window', async () => {

@@ -256,6 +256,11 @@ import type {
   PaymentCreate,
   PaymentRequestCreate,
   PaymentRequestView,
+  BankKeys,
+  BankLinkCreate,
+  BankStatus,
+  BankUnlinked,
+  DepositSuggestion,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2445,6 +2450,18 @@ export const api = {
     request<ProviderStatus>(`/payments/providers/${seg(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
   disconnectPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}`, { method: 'DELETE' }),
   setDefaultPaymentProvider: (id: string) => request<void>(`/payments/providers/${seg(id)}/default`, { method: 'POST' }),
+  bankLink: () => request<BankStatus>('/payments/bank'),
+  saveBankKeys: (body: BankKeys) => request<BankStatus>('/payments/bank/keys', { method: 'PUT', body: JSON.stringify(body) }),
+  forgetBankKeys: () => request<void>('/payments/bank/keys', { method: 'DELETE' }),
+  bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
+  linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
+  unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
+  bankReconnected: () => request<void>('/payments/bank/reconnected', { method: 'POST' }),
+  orderBankDeposits: (orderId: string) => request<DepositSuggestion[]>(`/orders/${seg(orderId)}/bank-deposits`),
+  recordOrderBankDeposit: (orderId: string, transactionId: string) =>
+    request<Payment>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/record`, { method: 'POST' }),
+  dismissOrderBankDeposit: (orderId: string, transactionId: string) =>
+    request<void>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/dismiss`, { method: 'POST' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the
@@ -2708,6 +2725,9 @@ export const api = {
   orderParts: (orderId: string) => request<OrderParts>(`/orders/${seg(orderId)}/parts`),
   setItemParts: (orderId: string, itemId: string, parts: ItemPart[]) =>
     request<ItemPartRow[]>(`/orders/${seg(orderId)}/items/${seg(itemId)}/parts`, { method: 'PUT', body: JSON.stringify({ parts }) }),
+  /** #4673 — the image a slice quote's sliced file holds for `plate` (404 when it holds none). */
+  quotePlateThumbnailUrl: (orderId: string, itemId: string, quoteId: string, plate: number) =>
+    `${API_BASE}/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/plates/${plate}/thumbnail`,
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

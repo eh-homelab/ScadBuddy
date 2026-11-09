@@ -88,37 +88,37 @@ describe('Preview scene (#364)', () => {
   })
 
   it('refits the camera when a preset jumps the model to a much bigger size', () => {
-    const { rerender } = render(<Preview job={job('a', box([-40, -40, 0], [40, 40, 80]))} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job('a', box([-40, -40, 0], [40, 40, 80]))} rendering={false} />)
     const first = scene.camera.position.length()
     expect(first).toBeGreaterThan(0)
 
-    rerender(<Preview job={job('b', box([-129, -60, 0], [129, 60, 60]))} rendering={false} />)
+    rerender(<Preview unit="mm" job={job('b', box([-129, -60, 0], [129, 60, 60]))} rendering={false} />)
     expect(scene.camera.position.length()).toBeGreaterThan(first * 2)
   })
 
   it("keeps the viewer's orbit through an ordinary small edit", () => {
-    const { rerender } = render(<Preview job={job('a', box([-40, -40, 0], [40, 40, 80]))} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job('a', box([-40, -40, 0], [40, 40, 80]))} rendering={false} />)
     // The viewer orbits somewhere else.
     scene.camera.position.set(5, 300, 5)
 
-    rerender(<Preview job={job('b', box([-42, -40, 0], [42, 40, 82]))} rendering={false} />)
+    rerender(<Preview unit="mm" job={job('b', box([-42, -40, 0], [42, 40, 82]))} rendering={false} />)
     expect(scene.camera.position.toArray()).toEqual([5, 300, 5])
   })
 
   it('draws a model OpenSCAD placed off the origin inside its outline, on the plate centre', () => {
     // A swatch drawn from the origin out, as `cube([80, 40, 2])` is.
-    render(<Preview job={job('a', box([0, 0, 0], [80, 40, 2]))} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [80, 40, 2]))} rendering={false} />)
     // Scene X is model X, scene Z is −model Y: moved back by half of each.
     expect(modelPosition()).toBe('-40,0,20')
     expect(outline()?.getAttribute('position')).toBe('0,1,0')
   })
 
   it('takes the outline down with a failed render', () => {
-    const { rerender } = render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
     expect(outline()).not.toBeNull()
 
     rerender(
-      <Preview
+      <Preview unit="mm"
         job={job('b', box([-5, -5, 0], [5, 5, 5]), { status: 'failed', preview_url: null, log_tail: ['ERROR: boom'] })}
         rendering={false}
       />,
@@ -129,7 +129,7 @@ describe('Preview scene (#364)', () => {
 
   it('keeps the spinner until the GLB is drawn', async () => {
     const loaded = suspend('/api/v1/jobs/a/preview.glb')
-    render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
 
     expect(screen.getByText('Rendering')).toBeInTheDocument()
 
@@ -146,7 +146,7 @@ describe('Preview scene (#364)', () => {
     const url = '/api/v1/print/library/1630/preview.glb?plate=1'
     scene.meshes.set(url, placed)
 
-    render(<Preview job={job('a', box([0, 0, 0], [1, 1, 1]), { preview_url: url, bbox_mm: null })} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [1, 1, 1]), { preview_url: url, bbox_mm: null })} rendering={false} />)
 
     // Moved onto the plate centre, as a box from the render would have put it.
     expect(modelPosition()).toBe('-128,0,-128')
@@ -180,7 +180,7 @@ describe('Preview scene (#364)', () => {
     const url = '/api/v1/jobs/a/preview.glb?plate=2'
     scene.meshes.set(url, placed)
 
-    render(<Preview job={job('a', box([0, 0, 0], [1, 1, 1]), { preview_url: url, bbox_mm: null })} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [1, 1, 1]), { preview_url: url, bbox_mm: null })} rendering={false} />)
 
     expect(modelPosition()).toBe('-128,0,-128')
     expect(scene.controls.target.x).toBeCloseTo(0)
@@ -194,7 +194,7 @@ describe('Preview scene (#364)', () => {
       colors: ['#FF0000'],
     }))
     render(
-      <Preview
+      <Preview unit="mm"
         job={job('a', box([-850, -152, 0], [850, 152, 5]), { plates })}
         rendering={false}
         plate={{ name: 'H2C', model: 'H2C', size: [330, 320], height: 325, usable: { min_x: 0, min_y: 0, max_x: 330, max_y: 320 } }}
@@ -230,7 +230,7 @@ describe('Preview scene (#364)', () => {
     alone.add(new THREE.Mesh(new THREE.BoxGeometry(280, 5, 200)))
     scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
     const user = userEvent.setup()
-    const { rerender } = render(<Preview job={job('a', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={job('a', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
     const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
     expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     const all = scene.camera.position.length()
@@ -247,7 +247,7 @@ describe('Preview scene (#364)', () => {
 
     // A new render shows every plate again, whatever was chosen for the last one.
     await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
-    rerender(<Preview job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
+    rerender(<Preview unit="mm" job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
     expect(screen.getByRole('radio', { name: 'All plates' })).toHaveAttribute('aria-checked', 'true')
     expect(picker).toBeInTheDocument()
   })
@@ -262,7 +262,7 @@ describe('Preview scene (#364)', () => {
     alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
     scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=5', alone)
     const user = userEvent.setup()
-    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
     const picker = screen.getByRole('radiogroup', { name: 'Plates shown' })
     expect(within(picker).getAllByRole('radio').map((b) => b.textContent)).toEqual(['All', '2', '5'])
@@ -280,7 +280,7 @@ describe('Preview scene (#364)', () => {
     onTestFinished(() => scene.failing.clear())
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const user = userEvent.setup()
-    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
 
     await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
@@ -301,7 +301,7 @@ describe('Preview scene (#364)', () => {
     scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const user = userEvent.setup()
-    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
     // Every plate together fails just as plate 2 is picked: for that one render the
     // all-plates mesh is still the one on screen, so it is what broke, not plate 2.
     scene.failing.add('/api/v1/jobs/a/preview.glb')
@@ -327,15 +327,15 @@ describe('Preview scene (#364)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const user = userEvent.setup()
     const done = job('a', box([0, 0, 0], [10, 10, 5]), { plates })
-    const { rerender } = render(<Preview job={done} rendering={false} />)
+    const { rerender } = render(<Preview unit="mm" job={done} rendering={false} />)
     await user.click(screen.getByRole('radio', { name: 'Plate 2 alone' }))
 
     // The next render runs; the last one's plate 2 stays on screen until it is done.
     const next = job('b', box([0, 0, 0], [10, 10, 5]), { status: 'running', preview_url: null, plates })
-    rerender(<Preview job={next} rendering />)
+    rerender(<Preview unit="mm" job={next} rendering />)
     scene.failing.add('/api/v1/jobs/a/preview.glb?plate=2')
     onTestFinished(() => scene.failing.clear())
-    rerender(<Preview job={{ ...next }} rendering />)
+    rerender(<Preview unit="mm" job={{ ...next }} rendering />)
     await act(async () => {})
 
     // That mesh was job a's: job b never had a plate picked, so nothing says one failed.
@@ -343,7 +343,7 @@ describe('Preview scene (#364)', () => {
   })
 
   it('offers no plate picker for a one-plate render', () => {
-    render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
+    render(<Preview unit="mm" job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
     expect(screen.queryByRole('radiogroup', { name: 'Plates shown' })).not.toBeInTheDocument()
   })
 })
