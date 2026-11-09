@@ -9,8 +9,8 @@ sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's addr
 (`CLIENT_HEADER`); a write also sends its ``Idempotency-Key``, the same on each retry. A
 render's body, and a draft item's, goes as the visitor sent it, unread; a render's preview
 comes back as a stream (`CrudStream`), which the edge relays without holding it whole. A
-design request goes as multipart from the files the edge spooled, read a chunk at a time
-and from their start again on each retry.
+design request goes as multipart made from the files the edge spooled, read a chunk at a
+time in a thread, in one call that is never retried (its body cannot be sent twice).
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -19,13 +19,16 @@ checks it.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+import secrets
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, Final
 
+import anyio
+import httpx
 from starlette.datastructures import UploadFile
 
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
-from scadbuddy.crud.client import CrudClient, CrudStream, wait_for_areas
+from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 
@@ -33,6 +36,40 @@ from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
 #: task that adds an area to both sides adds it here.
 EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts", "requests"})
 BASE: Final = f"/api/v1{PREFIX}/storefront"
+#: A design request's one call: the CRUD side answers only once every file is checked
+#: and stored.
+UPLOAD_TIMEOUT: Final = httpx.Timeout(connect=5.0, read=300.0, write=300.0, pool=5.0)
+_CHUNK: Final = 1 << 20
+
+
+def _field(value: str) -> str:
+    """A multipart header parameter's value with ``"``, ``\\`` and control characters
+    percent-escaped. Browsers escape ``"``, CR and LF the same way (WHATWG HTML,
+    "multipart/form-data encoding algorithm")."""
+    return "".join(
+        f"%{ord(c):02X}" if c in '"\\' or ord(c) < 32 or ord(c) == 127 else c for c in value
+    )
+
+
+async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> AsyncIterator[bytes]:
+    """The request as multipart, each file read from its start in a thread."""
+    dash = f"--{boundary}\r\n".encode()
+    yield dash + b'Content-Disposition: form-data; name="text"\r\n\r\n'
+    yield text.encode() + b"\r\n"
+    for upload in files:
+        name = _field(upload.filename or "file")
+        yield (
+            dash
+            + (
+                f'Content-Disposition: form-data; name="files"; filename="{name}"\r\n'
+                "Content-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+        )
+        await anyio.to_thread.run_sync(upload.file.seek, 0)
+        while chunk := await anyio.to_thread.run_sync(upload.file.read, _CHUNK):
+            yield chunk
+        yield b"\r\n"
+    yield f"--{boundary}--\r\n".encode()
 
 
 class StorefrontCrud:
@@ -123,6 +160,11 @@ class StorefrontCrud:
             "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
 
+    async def requests_enabled(self, *, visitor_id: str, client: str) -> bool:
+        """``GET …/storefront/requests-enabled``: whether "Ask for a design" is on."""
+        answer = await self._call("GET", "/requests-enabled", visitor_id=visitor_id, client=client)
+        return bool(answer.get("enabled")) if isinstance(answer, dict) else False
+
     async def add_request(
         self,
         text: str,
@@ -133,16 +175,20 @@ class StorefrontCrud:
         client: str,
     ) -> Any:
         """``POST …/storefront/draft/requests``: ``text`` and each spooled file, as
-        multipart, with the request's ``Idempotency-Key``."""
+        multipart made as it is sent, each file read a chunk at a time in a thread. Its
+        body cannot be sent twice, so it is sent once (`UPLOAD_TIMEOUT`), never retried:
+        a failure raises `CrudUnavailableError` at once."""
+        boundary = secrets.token_hex(16)
         response = await self._crud.request(
             "POST",
             f"{BASE}/draft/requests",
             idempotency_key=key,
             headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
-            data={"text": text},
-            files=[
-                ("files", (f.filename or "file", f.file, "application/octet-stream")) for f in files
-            ],
+            timeout=UPLOAD_TIMEOUT,
+            upload=Upload(
+                f"multipart/form-data; boundary={boundary}",
+                _multipart(boundary, text, files),
+            ),
         )
         return response.json()
 

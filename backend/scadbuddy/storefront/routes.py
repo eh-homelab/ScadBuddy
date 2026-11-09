@@ -11,7 +11,10 @@ spooled, then sent on as multipart a chunk at a time."""
 
 from __future__ import annotations
 
+import hashlib
+import time
 import uuid
+from collections.abc import Callable
 from typing import Annotated, Any, Final
 
 import anyio
@@ -21,8 +24,9 @@ from starlette.types import Receive, Scope, Send
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
-from scadbuddy.crud.client import CrudStream
+from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.storefront.ratelimit import REQUEST_LIMITED
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
@@ -140,14 +144,81 @@ async def remove_item(item_id: str, crud: Crud, visitor_id: Visitor, client: Cli
     return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
 
 
+#: How long one replica trusts its read of `requests_enabled`.
+ENABLED_TTL: Final = 30.0
+#: What a visitor whose request did not reach the shop reads: it may have arrived.
+UPLOAD_LOST: Final = (
+    "Your request may not have reached the shop. Check your cart before you send it again."
+)
+
+
+class RequestsEnabled:
+    """The CRUD side's ``storefront_requests_enabled``, read at most once per
+    `ENABLED_TTL` per replica."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._read: tuple[float, bool] | None = None
+
+    async def get(self, crud: StorefrontCrud, *, visitor_id: str, client: str) -> bool:
+        now = self._clock()
+        if self._read is None or now - self._read[0] >= ENABLED_TTL:
+            enabled = await crud.requests_enabled(visitor_id=visitor_id, client=client)
+            self._read = (now, enabled)
+        return self._read[1]
+
+
+def _request_key(request: Request, visitor_id: str) -> str:
+    """The forwarded ``Idempotency-Key``: the browser's own (a UUID), so a visitor's
+    resend of one request is one request, else a new one. Bound to the visitor, so two
+    visitors' keys never meet."""
+    sent = request.headers.get("idempotency-key")
+    if sent is None:
+        return str(uuid.uuid4())
+    try:
+        browser = uuid.UUID(sent)
+    except ValueError:
+        raise ApiError(
+            422,
+            "Idempotency-Key must be a UUID.",
+            type_=f"{STOREFRONT_PROBLEMS}draft_body_invalid",
+        ) from None
+    return hashlib.sha256(f"{visitor_id}\x1f{browser}".encode()).hexdigest()
+
+
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """A design request. Refused before its body is read: 404 ``requests_disabled``,
+    429 ``request_limited`` (`UploadAllowance`), 503 ``uploads_busy`` (`uploads.py`
+    `UploadGate`). The body is then read whole with every cap (`read_request`) and
+    spooled before the CRUD call: a deliberate step from the spec's "streams each upload"
+    (spec §5.4), so that each cap is refused here before the CRUD side reads a byte. A
+    call that fails or times out is 503 ``upload_unavailable``: it may have committed,
+    and the same browser key sent again is the same request."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise ApiError(
+            404,
+            "This shop does not take design requests.",
+            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+        )
+    key = _request_key(request, visitor_id)
+    wait = state.upload_allowance.take(client)
+    if wait is not None:
+        raise ApiError(
+            429,
+            "You have sent a lot of design requests. Try again later.",
+            type_=REQUEST_LIMITED,
+            headers={"Retry-After": str(wait)},
+            retry_after=wait,
+        )
     upload = await read_request(request)
     try:
-        key = str(uuid.uuid4())
         return await crud.add_request(
             upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
         )
+    except CrudUnavailableError:
+        raise ApiError(503, UPLOAD_LOST, type_=f"{STOREFRONT_PROBLEMS}upload_unavailable") from None
     finally:
         await upload.close()
 

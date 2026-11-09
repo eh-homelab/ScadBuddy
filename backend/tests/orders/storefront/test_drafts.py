@@ -674,11 +674,33 @@ def test_the_crud_side_caps_uploads_itself(
     assert asks.get("/draft").json() is None
 
 
-@pytest.mark.parametrize("text", ["", "x" * 5001])
-def test_a_request_needs_its_text(asks: CrudCaller, text: str) -> None:
-    r = ask(asks, text=text, key="r4")
-    assert r.status_code == 422
-    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+def stored_objects(api: TestClient) -> int:
+    with _state(api).projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM store_blobs"
+            " WHERE key LIKE 'request-file-%%' OR key LIKE 'attachment-%%'"
+        ).fetchone()
+    assert row is not None
+    n: int = row["n"]
+    return n
+
+
+@pytest.mark.parametrize(
+    "text", ["", "x" * 5001, "   \n\t ", "a\x00b", "ring\x07", "esc\x1b[31m", "del\x7f"]
+)
+def test_a_request_needs_plain_text(asks: CrudCaller, s3_api: TestClient, text: str) -> None:
+    files = [("files", ("a.png", PNG, "image/png"))]
+    r = asks.post("/draft/requests", data={"text": text}, files=files, key="r4")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_text"
+    assert stored_objects(s3_api) == 0
+    assert asks.get("/draft").json() is None
+
+
+def test_a_requests_text_is_kept_as_plain_text(asks: CrudCaller) -> None:
+    r = ask(asks, text="  A hook\r\nwith\ttabs\r\n", key="r14")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["notes"] == "A hook\nwith\ttabs"
 
 
 def test_a_request_may_come_with_no_files(asks: CrudCaller) -> None:
@@ -693,13 +715,48 @@ def test_requests_are_off_by_default(requests_off: CrudCaller) -> None:
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
 
 
+def test_requests_off_are_refused_before_the_body_is_read(requests_off: CrudCaller) -> None:
+    # A body that is not a request at all: refused as off, not as malformed.
+    headers = requests_off._headers(TOKEN_A, "r15")
+    headers["Content-Type"] = "text/plain"
+    r = requests_off.api.post(CRUD + "/draft/requests", content=b"x" * 10, headers=headers)
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert requests_off.get("/requests-enabled").json() == {"enabled": False}
+
+
+def test_the_crud_side_takes_two_uploads_at_once(
+    asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 0)
+    r = ask(asks, [("files", ("a.png", PNG, "image/png"))], key="r16")
+    assert r.status_code == 503
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
+    assert r.headers["retry-after"] == "30"
+
+
+def test_the_crud_side_holds_a_spool_budget(
+    asks: CrudCaller, s3_api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_SPOOL_BYTES", 4096)
+    r = ask(asks, [("files", ("a.png", PNG + b"0" * 8192, "image/png"))], key="r17")
+    assert r.status_code == 503
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
+    assert (uploads.UPLOADS.running, uploads.UPLOADS.spooled) == (0, 0)
+    assert stored_objects(s3_api) == 0
+
+
 def test_a_retried_request_makes_one_item_whatever_changed_since(
-    asks: CrudCaller, s3_api: TestClient
+    asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     files = [("files", ("a.png", PNG, "image/png"))]
     first = ask(asks, files, key="r6")
-    off = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": False})
-    assert off.status_code == 200
+
+    async def stored_again(*_args: Any) -> str:
+        raise AssertionError("a replay stores its files again")
+
+    # A replay stores nothing: it answers the first request before any other work.
+    monkeypatch.setattr(drafts_module, "keep_file", stored_again)
     again = ask(asks, files, key="r6")
     assert (again.status_code, again.json()) == (200, first.json())
     assert len(asks.get("/draft").json()["items"]) == 1

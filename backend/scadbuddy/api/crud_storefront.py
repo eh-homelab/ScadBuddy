@@ -30,10 +30,13 @@ values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (ea
 ``Idempotency-Key``, 428 without). Another visitor's item is 404 ``item_not_found``. A body
 that is not an item is 422 ``draft_body_invalid``.
 
-Area ``requests``: ``POST …/draft/requests`` (multipart ``text`` and ``files``,
-``Idempotency-Key`` required) adds a design request with its files. The body is read with
-its caps as it arrives (`storefront/uploads.py`), then each file again
-(`orders/storefront/drafts.py` `add_request`): this side never trusts the edge's checks.
+Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
+the edge refuses a request before it reads the body. ``POST …/draft/requests`` (multipart
+``text`` and ``files``, ``Idempotency-Key`` required) adds a design request with its files.
+It refuses 404 ``requests_disabled`` before it reads the body; then the body is read with
+its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
+each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
+edge's checks.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ from scadbuddy.orders.storefront.drafts import (
     add_request,
     get_draft,
     remove_item,
+    requests_disabled,
 )
 from scadbuddy.orders.storefront.listings import (
     problem,
@@ -295,6 +299,22 @@ async def draft_remove(
     return await remove_item(state, visitor, key, item_id)
 
 
+def _requests_enabled(state: StateDep) -> bool:
+    return state.settings_store.snapshot().runtime.storefront_requests_enabled
+
+
+class RequestsEnabled(BaseModel):
+    enabled: bool
+
+
+@router.get("/requests-enabled", name="crud_storefront_requests_enabled")
+async def requests_enabled(
+    state: StateDep, _visitor: Visitor, _client: StoreClient
+) -> RequestsEnabled:
+    """Whether "Ask for a design" is on (``storefront_requests_enabled``)."""
+    return RequestsEnabled(enabled=await asyncio.to_thread(_requests_enabled, state))
+
+
 @router.post(
     "/draft/requests",
     name="crud_storefront_draft_request",
@@ -329,6 +349,8 @@ async def draft_request(
     """A design request added to the visitor's draft
     (`orders/storefront/drafts.py` `add_request`)."""
     key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state):
+        raise requests_disabled()
     upload = await read_request(request)
     try:
         return await add_request(state, visitor, key, text=upload.text, files=upload.files)

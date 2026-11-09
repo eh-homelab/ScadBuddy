@@ -715,13 +715,18 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 BIG = 25 * 1024 * 1024
 
 
-def _ask(edge: TestClient, files: Any = None, **kwargs: Any) -> Any:
+def _ask(edge: TestClient, files: Any = None, headers: dict[str, str] | None = None) -> Any:
+    sent = headers or {"Origin": PUBLIC_URL}
+    if files:
+        return edge.post(
+            "/api/store/v1/draft/requests", data={"text": "A hook"}, files=files, headers=sent
+        )
+    # A browser's form with no file is still multipart.
+    body = b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\nA hook\r\n--b--\r\n'
     return edge.post(
         "/api/store/v1/draft/requests",
-        data={"text": "A hook"},
-        files=files or [],
-        headers={"Origin": PUBLIC_URL},
-        **kwargs,
+        content=body,
+        headers={**sent, "Content-Type": "multipart/form-data; boundary=b"},
     )
 
 
@@ -814,3 +819,118 @@ def test_a_request_refusal_passes_through(
     crud_mock.post(REQUESTS).respond(415, json=refused, headers=CRUD)
     r = _ask(edge, [("files", ("x.svg", b"<svg/>", "image/svg+xml"))])
     assert r.status_code == 415 and r.json()["type"] == refused["type"]
+
+
+# -- design requests: the bounds (Task 9 fix round 1) ---------------------------------------
+
+
+def test_requests_off_are_refused_before_the_body_is_read(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    posted = crud_mock.post(REQUESTS)
+    for _ in range(2):
+        r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+        assert r.status_code == 404
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    # Read once, then from the replica's cache.
+    assert (crud_mock["requests_enabled"].call_count, posted.call_count) == (1, 0)
+
+
+def test_a_client_may_start_six_requests_an_hour(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    codes = [_ask(edge).status_code for _ in range(7)]
+    assert codes == [200] * 6 + [429]
+    r = _ask(edge)
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_limited"
+    assert 1 <= int(r.headers["retry-after"]) <= 3600
+
+
+def test_a_busy_edge_refuses_before_the_body_is_read(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 0)
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 503 and r.headers["retry-after"] == "30"
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
+    assert posted.call_count == 0
+
+
+def test_a_lost_upload_is_sent_once_and_names_the_cart(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).mock(side_effect=httpx.ReadTimeout("slow"))
+    browser_key = str(uuid.uuid4())
+    r = _ask(
+        edge,
+        [("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key},
+    )
+    assert r.status_code == 503
+    problem = r.json()
+    assert problem["type"] == f"{STOREFRONT_PROBLEMS}upload_unavailable"
+    assert "Check your cart before you send it again." in problem["detail"]
+    # Never retried: its body cannot be sent twice.
+    assert route.call_count == 1
+    first = route.calls.last.request
+    timeout = first.extensions["timeout"]
+    assert (timeout["connect"], timeout["read"], timeout["write"]) == (5.0, 300.0, 300.0)
+    # The visitor sends it again with the same key: the CRUD side sees the same key.
+    route.mock(return_value=httpx.Response(200, json=VIEW, headers=CRUD))
+    again = _ask(
+        edge,
+        [("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key},
+    )
+    assert again.status_code == 200
+    assert route.calls.last.request.headers["idempotency-key"] == first.headers["idempotency-key"]
+
+
+def test_a_browser_key_is_bound_to_its_visitor(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    browser_key = str(uuid.uuid4())
+    sent: list[str] = []
+    for _ in range(2):
+        # Each client is a new visitor, with a cookie of its own.
+        with TestClient(create_app(load()), base_url="https://testserver", client=CLIENT) as c:
+            r = _ask(c, headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key})
+            assert r.status_code == 200
+            sent.append(route.calls.last.request.headers["idempotency-key"])
+    assert sent[0] != sent[1] and browser_key not in sent
+
+
+def test_a_browser_key_that_is_not_a_uuid_is_422(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, headers={"Origin": PUBLIC_URL, "Idempotency-Key": "../../x"})
+    assert r.status_code == 422 and posted.call_count == 0
+
+
+def test_the_request_text_is_checked_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS)
+    for text in ("   ", "a\x00b", "bell\x07"):
+        r = edge.post(
+            "/api/store/v1/draft/requests",
+            data={"text": text},
+            files=[("files", ("a.png", PNG, "image/png"))],
+            headers={"Origin": PUBLIC_URL},
+        )
+        assert r.status_code == 422
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_text"
+    assert posted.call_count == 0

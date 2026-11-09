@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Sequence
@@ -205,3 +206,42 @@ class RequestLimit:
             await self.app(scope, receive, send)
             return
         await _limited(retry_after)(scope, receive, send)
+
+
+#: Design requests one client may start in `REQUEST_WINDOW` (beside `RequestLimit`).
+REQUEST_UPLOADS: Final = 6
+REQUEST_WINDOW: Final = 3600.0
+REQUEST_LIMITED: Final = f"{STOREFRONT_PROBLEMS}request_limited"
+
+
+class UploadAllowance:
+    """Each client's design request starts (`client_key`): at most `REQUEST_UPLOADS` in
+    `REQUEST_WINDOW`. One per edge replica. At most `MAX_CLIENTS` clients are held; past
+    them, new ones share the `OVERFLOW` entry."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._starts: dict[str, deque[float]] = {}
+
+    def take(self, address: str) -> int | None:
+        """Count one start for ``address``; None when it may start, else the seconds
+        until it may."""
+        now = self._clock()
+        with self._lock:
+            key = client_key(address)
+            if key not in self._starts and len(self._starts) >= MAX_CLIENTS:
+                self._forget(now)
+                if len(self._starts) >= MAX_CLIENTS:
+                    key = OVERFLOW
+            starts = self._starts.setdefault(key, deque())
+            while starts and starts[0] <= now - REQUEST_WINDOW:
+                starts.popleft()
+            if len(starts) >= REQUEST_UPLOADS:
+                return max(1, math.ceil(starts[0] + REQUEST_WINDOW - now))
+            starts.append(now)
+            return None
+
+    def _forget(self, now: float) -> None:
+        for key in [k for k, v in self._starts.items() if not v or v[-1] <= now - REQUEST_WINDOW]:
+            del self._starts[key]

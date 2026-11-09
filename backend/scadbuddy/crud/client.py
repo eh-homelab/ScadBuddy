@@ -45,8 +45,9 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from typing import Any, BinaryIO, Literal
+from collections.abc import AsyncIterable, Awaitable, Callable, Collection, Mapping
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import httpx
 from temporalio import activity
@@ -93,6 +94,15 @@ Failure = Literal[
 PASSING: frozenset[Failure] = frozenset(
     {"unreached", "route_missing", "reexchange", "database_unavailable"}
 )
+
+
+@dataclass(frozen=True)
+class Upload:
+    """A body sent once, as it is made (`CrudClient.request`): its ``Content-Type`` and
+    its bytes."""
+
+    content_type: str
+    body: AsyncIterable[bytes]
 
 
 class CrudUnavailableError(Exception):
@@ -242,18 +252,16 @@ class _Base:
     def _kwargs(
         json: Any,
         key: str | None,
-        timeout: float | None,
+        timeout: float | httpx.Timeout | None,
         headers: Mapping[str, str] | None,
         content: bytes | None = None,
-        data: Mapping[str, str] | None = None,
-        files: Sequence[tuple[str, tuple[str, BinaryIO, str]]] | None = None,
+        upload: Upload | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
-        if data is not None:
-            kwargs["data"] = data
-        if files is not None:
-            kwargs["files"] = files
         sent = dict(headers or {})
+        if upload is not None:
+            kwargs["content"] = upload.body
+            sent["Content-Type"] = upload.content_type
         if json is not None:
             kwargs["json"] = json
         if content is not None:
@@ -335,16 +343,16 @@ class CrudClient(_Base):
         *,
         json: Any = None,
         idempotency_key: str | None = None,
-        timeout: float | None = None,
+        timeout: float | httpx.Timeout | None = None,
         budget: float | None = None,
         headers: Mapping[str, str] | None = None,
         content: bytes | None = None,
-        data: Mapping[str, str] | None = None,
-        files: Sequence[tuple[str, tuple[str, BinaryIO, str]]] | None = None,
+        upload: Upload | None = None,
     ) -> httpx.Response:
-        """One call, retried as the module says. ``data`` and ``files`` send multipart;
-        httpx reads each file from its start on every try."""
-        call = _Call(self, path, budget)
+        """One call, retried as the module says. ``upload`` sends a body that cannot be
+        sent twice: the call is never retried (any failure raises at once), so pass it
+        with a ``timeout`` long enough for the route."""
+        call = _Call(self, path, 0.0 if upload is not None else budget)
         while True:
             started = time.perf_counter()
             fresh = self._build() if call.take_fresh_connection() else None
@@ -352,7 +360,7 @@ class CrudClient(_Base):
                 response = await (fresh or self._http).request(
                     method,
                     path,
-                    **self._kwargs(json, idempotency_key, timeout, headers, content, data, files),
+                    **self._kwargs(json, idempotency_key, timeout, headers, content, upload),
                 )
             except httpx.TransportError as error:
                 call.failed(error, started)

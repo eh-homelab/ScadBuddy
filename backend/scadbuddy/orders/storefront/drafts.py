@@ -64,8 +64,8 @@ from scadbuddy.orders.storefront.wire import (
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.uploads import file_too_large, not_a_request, too_many_files
-from scadbuddy.storefront.wire import ITEM_ID, MAX_REQUEST_TEXT
+from scadbuddy.storefront.uploads import checked_text, file_too_large, too_many_files
+from scadbuddy.storefront.wire import ITEM_ID
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -94,6 +94,13 @@ def _draft_changed() -> ApiError:
     """409 ``draft_changed``: the draft moved under the write (submitted, or swept)."""
     return problem(
         status.HTTP_409_CONFLICT, "draft_changed", "Your order has changed. Load it again."
+    )
+
+
+def requests_disabled() -> ApiError:
+    """404 ``requests_disabled``: "Ask for a design" is off."""
+    return problem(
+        status.HTTP_404_NOT_FOUND, "requests_disabled", "This shop does not take design requests."
     )
 
 
@@ -398,13 +405,13 @@ async def add_request(
     the visitor's presigned GET reads) before the rows; a refused row leaves unheld
     objects for the store's sweeps. A retry of a committed request (the same key)
     answers its order as it is now and does nothing else. Refusals: 404
-    ``requests_disabled`` unless ``storefront_requests_enabled``; 422
-    ``draft_body_invalid`` (no text, or past `MAX_REQUEST_TEXT` characters); 422
+    ``requests_disabled`` unless ``storefront_requests_enabled``; 422 ``request_text``
+    (`checked_text`: not 1 to `MAX_REQUEST_TEXT` characters of plain text); 422
     ``too_many_files`` past `MAX_REQUEST_FILES`; 413 ``file_too_large``; 415
     ``file_type``; 422 ``draft_full``; 409 ``draft_changed``; 503
     ``storefront_needs_s3``."""
-    if not 1 <= len(text) <= MAX_REQUEST_TEXT:
-        raise not_a_request()
+    # Before any file is read or stored.
+    text = checked_text(text)
     if len(files) > MAX_REQUEST_FILES:
         raise too_many_files()
     checked = [await asyncio.to_thread(_checked_file, upload) for upload in files]
@@ -418,11 +425,7 @@ async def add_request(
         return await _answer(state, visitor_id, reply)
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     if not snapshot.runtime.storefront_requests_enabled:
-        raise problem(
-            status.HTTP_404_NOT_FOUND,
-            "requests_disabled",
-            "This shop does not take design requests.",
-        )
+        raise requests_disabled()
     content = public_content(state)
     orders = _orders(state)
     kept: list[str] = []
