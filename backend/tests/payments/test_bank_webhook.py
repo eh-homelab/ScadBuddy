@@ -581,3 +581,13 @@ def test_the_webhook_route_names_both_its_503s() -> None:
     [hook] = [r for r in router.routes if getattr(r, "path", "") == "/payments/bank/webhook"]
     text = getattr(hook, "description", "")
     assert "`provider_unavailable`" in text and "`credential_unreadable`" in text
+
+
+def test_a_refused_source_keeps_its_place_among_the_buckets(clock: Clock) -> None:
+    """Only an admitted lookup moves its source to the end: a source refused again and
+    again is still the first forgotten once newer sources are admitted."""
+    lookups = bank_module.KeyLookups(clock=clock, burst=10_000, source_burst=1)
+    assert lookups.take("192.0.2.1") == 0
+    assert lookups.take("192.0.2.2") == 0
+    assert lookups.take("192.0.2.1") > 0  # refused: its own bucket is spent
+    assert list(lookups._sources) == ["192.0.2.1", "192.0.2.2"]
