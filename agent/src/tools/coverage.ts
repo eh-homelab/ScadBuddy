@@ -215,19 +215,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "The order page's (#4957): a person cancels a request or retries its link; the agent opens one with order_request_payment.",
   })),
-  ...(
-    [
-      'GET /api/v1/orders/{order_id}/messages',
-      'GET /api/v1/orders/{order_id}/messages/check',
-      'POST /api/v1/orders/{order_id}/messages',
-      'POST /api/v1/orders/{order_id}/messages/{message_id}/outcome',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "An order's customer messages (#5660): the record order_notify_customer_send writes around its plugin " +
-      'call; the tool follows in the next PR of the design (spec 2026-11-08 §10).',
-  })),
   {
     operation: 'POST /api/v1/orders/{order_id}/messages/{message_id}/mark-sent',
     reason: "Only a person says a message whose outcome is unknown reached the customer (#5660), on the order page.",

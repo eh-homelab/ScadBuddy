@@ -316,6 +316,18 @@ opens every one and seals it again byte for byte).
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+  - Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md`):
+    `src/orders/messaging.ts` `pluginMessaging` opens the backend setting
+    `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,
+    both through the forwarder) and calls its tool; an `McpError` is `failed`, a timeout, a
+    closed connection or another error is `unknown`. `order_notify_customer` (`read`) composes
+    and answers `channel` and `send_ready`; `order_notify_customer_send` (`outward`) parks the
+    exact message as `approved`, claims an `order_messages` row through the backend's
+    `POST /api/v1/orders/{id}/messages` (`Idempotency-Key`, the call's `idempotencyKey`),
+    sends, then posts the outcome. A replayed claim sends again only when the binding maps an
+    `idempotency_key` argument; otherwise it is `unknown`, never resent by itself.
+    `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
+    message (a person's session only, kept in the audit log as `messaging.test_send`).
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

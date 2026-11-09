@@ -101,6 +101,7 @@ import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { pluginMessaging } from './orders/messaging.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -825,6 +826,26 @@ const agentSecrets = toolSecrets({
   ...(pluginPackages ? { packages: { store: pluginPackages, installer: packageInstaller } } : {}),
 })
 toolServices.secrets = agentSecrets.secrets
+// The messaging plugin a customer notice goes through (#5660, orders/messaging.ts): the
+// bound remote MCP server through the loopback forwarder, as a turn reaches it, in the one
+// services object every path shares (an in-process turn, /mcp, a ToolCall, a flow's call).
+toolServices.messaging = pluginMessaging({
+  remote: durableRemotePlugins,
+  ...(pluginPackages
+    ? {
+        packages: async () => {
+          const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
+          try {
+            const forwarded = await forwardPackageServers(loaded.loaded, pluginForwarder, undefined, { access: accessResolver })
+            return { plugins: forwarded.plugins, servers: forwarded.servers, release: () => (forwarded.release(), loaded.release()) }
+          } catch (err) {
+            loaded.release()
+            throw err
+          }
+        },
+      }
+    : {}),
+})
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -1189,6 +1210,8 @@ const app = !role.http
   // Claude credential and every plugin secret, as a turn's upload tools search for them.
   // Read fresh, not through the 30 s cache: a pick is rare, and a secret stored a moment ago counts.
   workspaceSecrets: agentSecrets.fresh,
+  // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
+  orderMessaging: toolServices.messaging,
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
