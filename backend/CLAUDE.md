@@ -1024,6 +1024,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
   `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
   `failed`, or named twice, refuses all). Both refuse a visitor's cart (`order_not_submitted`).
+  Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md` §7): the agent
+  sends through a messaging plugin and the API keeps the record, `order_messages`
+  (`orders/messages.py` `OrderMessages`, shapes `orders/message_models.py`, routes
+  `api/order_messages.py`), each write under the order's lock with its `order_events` row
+  (`message.sending`, `.sent`, `.failed`, `.unknown`, `.marked_sent`). The agent claims a
+  `sending` row under its `Idempotency-Key` before it calls the plugin (a key seen before
+  answers its row, 200), then posts the outcome, taken from `sending` or `unknown` only. One
+  template is told once per status change (`episode`, the order's newest
+  `order_status_changes` row): a second claim is `already_notified` unless it names
+  `resend_of`; `GET …/messages/check` answers the same and writes nothing. A `sending` row
+  older than `STALE_SENDING_MINUTES` reads `unknown`, is never sent again by itself and has
+  no sweep; only a person marks it sent (`…/mark-sent`, `PERSON_ENDPOINTS`). The plugin
+  binding is the stored setting `orders_customer_messaging` (`MessagingBinding`; no secret,
+  a secret-looking `fixed_args` key is refused; an unreadable one loads as none).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for

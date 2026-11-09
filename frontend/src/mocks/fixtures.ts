@@ -1030,6 +1030,7 @@ export const settingsDefaults = {
   orders_deposit_policy: [],
   storefront_shipping_options: [],
   storefront_payment_instructions: null,
+  orders_customer_messaging: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',
@@ -1071,7 +1072,12 @@ export const settingsDeployment: Record<string, unknown> = {
 }
 
 /** #5281 — stored only, never env-seeded: no source badge and no reset. */
-const STORED_ONLY = new Set(['orders_deposit_policy', 'storefront_shipping_options', 'storefront_payment_instructions'])
+const STORED_ONLY = new Set([
+  'orders_deposit_policy',
+  'storefront_shipping_options',
+  'storefront_payment_instructions',
+  'orders_customer_messaging',
+])
 
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
 export const settingsApplies: NonNullable<Settings['applies']> = {

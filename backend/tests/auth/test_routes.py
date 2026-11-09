@@ -313,3 +313,16 @@ def test_only_a_person_confirms_or_dismisses_a_suggested_deposit() -> None:
         "scadbuddy.api.order_bank_deposits.record_order_bank_deposit": "person",
         "scadbuddy.api.order_bank_deposits.dismiss_order_bank_deposit": "person",
     }
+
+
+def test_only_a_person_marks_a_message_sent() -> None:
+    """#5660: the agent claims a message and records its outcome; only a person says an
+    unknown one reached the customer."""
+    classes = {endpoint_name(r): route_class(r) for r in ROUTES if "/messages" in r.path}
+    assert classes == {
+        "scadbuddy.api.order_messages.list_order_messages": "api",
+        "scadbuddy.api.order_messages.check_order_message": "api",
+        "scadbuddy.api.order_messages.claim_order_message": "api",
+        "scadbuddy.api.order_messages.record_order_message_outcome": "api",
+        "scadbuddy.api.order_messages.mark_order_message_sent": "person",
+    }
