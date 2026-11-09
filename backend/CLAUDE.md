@@ -1268,9 +1268,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
   `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
   `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
-  asked, `iat` at most 5 minutes old, the body's SHA-256 compared in constant time;
-  `BankLinks.handle_webhook`); a bad one is 400 and changes nothing, a key Plaid could not
-  give is 503 (Plaid sends it again). Only a key that verified a webhook is kept by `kid`
+  asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
+  the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`, which reads the
+  `bank_links` row only after the key caches and the bucket, so a forged `kid` costs no
+  database read or unseal); a bad one is 400 and changes nothing, a key Plaid could not
+  give, or a link whose keys or access token cannot be read, is 503 (Plaid sends it
+  again). Only a key that verified a webhook is kept by `kid`
   (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
   `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
   nothing and is kept with the unknown ones; a `kid` Plaid does not

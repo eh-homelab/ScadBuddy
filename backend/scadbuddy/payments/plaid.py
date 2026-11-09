@@ -98,6 +98,9 @@ SYNC_MUTATION: Final = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
 VERIFICATION_HEADER: Final = "plaid-verification"
 #: The oldest ``iat`` a webhook may carry.
 WEBHOOK_MAX_AGE_SECONDS: Final = 300
+#: How far ahead of this clock an ``iat`` may be: clock skew, not a token made later.
+#: Without it a token stamped in the future would stay usable past the five minutes.
+WEBHOOK_MAX_SKEW_SECONDS: Final = 60
 #: The bank needs the shop to sign in again (Link's update mode).
 LOGIN_REQUIRED: Final = "ITEM_LOGIN_REQUIRED"
 #: ``/webhook_verification_key/get``'s answer for a ``key_id`` Plaid does not have
@@ -312,14 +315,19 @@ async def verification_key(keys: PlaidKeys, key_id: str) -> dict[str, Any]:
 
 def verify_webhook(token: str, jwk: Mapping[str, Any], body: bytes, *, now: float) -> None:
     """A `BadSignatureError` unless ``token`` is signed by ``jwk``, at most
-    ``WEBHOOK_MAX_AGE_SECONDS`` old, and names ``body``'s SHA-256."""
+    ``WEBHOOK_MAX_AGE_SECONDS`` old (and at most ``WEBHOOK_MAX_SKEW_SECONDS`` ahead), and
+    names ``body``'s SHA-256."""
     try:
         key = ECKey.import_key({k: jwk[k] for k in ("kty", "crv", "x", "y")})
         claims = jwt.decode(token, key, algorithms=["ES256"]).claims
     except (jose_errors.JoseError, ValueError, TypeError, KeyError):
         raise BadSignatureError("the webhook signature does not match") from None
     iat = claims.get("iat")
-    if not isinstance(iat, int | float) or now - iat > WEBHOOK_MAX_AGE_SECONDS:
+    if (
+        not isinstance(iat, int | float)
+        or now - iat > WEBHOOK_MAX_AGE_SECONDS
+        or iat - now > WEBHOOK_MAX_SKEW_SECONDS
+    ):
         raise BadSignatureError("the webhook is too old")
     digest = claims.get("request_body_sha256")
     if not isinstance(digest, str) or not hmac.compare_digest(

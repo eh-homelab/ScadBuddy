@@ -290,3 +290,20 @@ def test_reconnecting_syncs_after_the_answer(client: TestClient, plaid: respx.Mo
     assert client.post(f"{BANK}/reconnected").status_code == 204
     assert synced.called
     assert client.get(BANK).json()["synced_at"] is not None
+
+
+def test_a_link_with_no_access_token_is_a_503_not_a_500(
+    client: TestClient, plaid: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A linked row whose token is gone cannot read a webhook: 503, so Plaid sends it
+    again, with no traceback per request."""
+    plaid_key(plaid)
+    linked(client)
+
+    def missing(self: bank_module.BankLinks) -> Any:
+        raise bank_module.AccessTokenMissingError("item")
+
+    monkeypatch.setattr(bank_module.BankLinks, "access", missing)
+    body = body_of("webhook.sync_updates_available.json")
+    hook = client.post(f"{BANK}/webhook", content=body, headers=signed(body))
+    assert (hook.status_code, hook.json()["type"]) == (503, PROBLEMS + "credential_unreadable")

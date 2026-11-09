@@ -265,7 +265,7 @@ async def receive_bank_webhook(
             "Plaid did not give the webhook's key",
             type_=PROBLEMS + "provider_unavailable",
         ) from None
-    except (CredentialUnreadableError, KekMissingError) as error:
+    except (CredentialUnreadableError, KekMissingError, AccessTokenMissingError) as error:
         logger.warning("a Plaid webhook was not read: %s", error)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,

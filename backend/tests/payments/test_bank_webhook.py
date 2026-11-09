@@ -10,6 +10,7 @@ https://plaid.com/docs/api/items/#error)."""
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
 import time
@@ -500,3 +501,63 @@ async def test_reconnect_needs_the_stored_access_token(bank: BankLinks) -> None:
         )
     with respx.mock, pytest.raises(bank_module.AccessTokenMissingError):  # nothing reaches Plaid
         await bank.link_token()
+
+
+async def test_a_refused_lookup_reads_no_keys(
+    bank: BankLinks, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A forged ``kid`` over the limit costs no database read and no unseal: the caches
+    and the bucket come before the keys."""
+    monkeypatch.setattr(bank_module, "_KEY_LOOKUPS", bank_module.KeyLookups(clock=clock, burst=0))
+    reads: list[int] = []
+    real = bank.access
+
+    def counted() -> Any:
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(bank, "access", counted)
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock, pytest.raises(WebhookKeyLookupLimitedError):
+        await bank.handle_webhook(signed(body, kid=kid_of(7)), body, source="192.0.2.7")
+    assert reads == []
+
+
+async def test_a_token_from_the_future_is_refused(bank: BankLinks) -> None:
+    """``iat`` more than a minute ahead is not a token Plaid just made: a captured one
+    cannot be replayed for longer than the five minutes."""
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        plaid_key(router)
+        with pytest.raises(BadSignatureError):
+            await bank.handle_webhook(signed(body, iat=time.time() + 120), body)
+        # A little skew is fine.
+        assert await bank.handle_webhook(signed(body, iat=time.time() + 30), body) == "sync"
+
+
+async def test_a_lookup_nobody_waits_for_any_more_logs_nothing(bank: BankLinks) -> None:
+    """A lookup that fails after its webhook's client went away keeps its error to itself."""
+    loop = asyncio.get_running_loop()
+    seen: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _, context: seen.append(context))
+    release = asyncio.Event()
+
+    async def failing(request: httpx.Request) -> httpx.Response:
+        await release.wait()
+        return httpx.Response(500, json={"error_code": "INTERNAL_SERVER_ERROR"})
+
+    body = body_of("webhook.sync_updates_available.json")
+    try:
+        with respx.mock as router:
+            router.post(VERIFY).mock(side_effect=failing)
+            waiter = asyncio.create_task(bank.handle_webhook(signed(body), body))
+            await asyncio.sleep(0.05)
+            waiter.cancel()
+            release.set()
+            await asyncio.sleep(0.05)
+        del waiter
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(None)
+    assert [c.get("message") for c in seen] == []

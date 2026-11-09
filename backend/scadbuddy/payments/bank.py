@@ -499,14 +499,14 @@ class BankLinks:
         after answering. A `BadSignatureError` reads nothing, including a ``kid`` Plaid
         does not have; a `PlaidError` is the key Plaid could not give, and
         `WebhookKeyLookupLimitedError` a lookup ``_KEY_LOOKUPS`` refused ``source`` (the
-        sender's address as the app trusts it)."""
+        sender's address as the app trusts it). The caches and the bucket come before
+        the row is read: a forged ``kid`` costs no database read and no unseal."""
         token, kid = plaid.webhook_key_id(headers)
+        jwk, given_at = await self._webhook_key(kid, source)
+        plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
         linked = await asyncio.to_thread(self.access)
         if linked is None:
-            # Nothing linked: no keys to ask Plaid with, and nothing to change.
             raise BadSignatureError("no bank account is linked")
-        jwk, given_at = await self._webhook_key(linked.keys, kid, source)
-        plaid.verify_webhook(token, jwk, body, now=time.time() if now is None else now)
         _keep(self._webhook_keys, kid, (jwk, given_at), MAX_WEBHOOK_KEYS)
         try:
             event = json.loads(body)
@@ -527,9 +527,7 @@ class BankLinks:
             return "login_repaired"
         return "ignored"
 
-    async def _webhook_key(
-        self, keys: PlaidKeys, kid: str, source: str
-    ) -> tuple[dict[str, Any], float]:
+    async def _webhook_key(self, kid: str, source: str) -> tuple[dict[str, Any], float]:
         """``kid``'s JWK and when Plaid gave it: one that verified before (for at most
         ``KEY_RECHECK_SECONDS``), the lookup already in flight, or a new lookup that
         ``_KEY_LOOKUPS`` lets ``source`` make."""
@@ -546,14 +544,20 @@ class BankLinks:
             wait = _KEY_LOOKUPS.take(source)
             if wait > 0:
                 raise WebhookKeyLookupLimitedError(wait)
-            pending = asyncio.ensure_future(self._lookup(keys, kid))
+            pending = asyncio.ensure_future(self._lookup(kid))
             self._lookups[kid] = pending
             pending.add_done_callback(lambda _: self._lookups.pop(kid, None))
+            # Every waiter may be gone (its client went away): the error is still read.
+            pending.add_done_callback(lambda done: done.cancelled() or done.exception())
         return await asyncio.shield(pending)
 
-    async def _lookup(self, keys: PlaidKeys, kid: str) -> tuple[dict[str, Any], float]:
+    async def _lookup(self, kid: str) -> tuple[dict[str, Any], float]:
+        linked = await asyncio.to_thread(self.access)
+        if linked is None:
+            # Nothing linked: no keys to ask Plaid with, and nothing to change.
+            raise BadSignatureError("no bank account is linked")
         try:
-            jwk = await plaid.verification_key(keys, kid)
+            jwk = await plaid.verification_key(linked.keys, kid)
         except PlaidError as error:
             if error.code != plaid.UNKNOWN_KEY_ID:
                 raise
