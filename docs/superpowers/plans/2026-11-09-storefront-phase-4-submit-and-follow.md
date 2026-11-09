@@ -17,13 +17,16 @@
   - the CRUD routes are the boundary, and they check ownership themselves;
   - migrations are new files only;
   - no generated API file is committed.
-- No token in a path. The order link token and the pay token travel in request bodies only. The page carries the order link in the URL fragment, `/o#<token>`, which the browser never sends. The CRUD side stores only sha256 (hex) of each token. Tokens are 32 random bytes, URL-safe base64.
+- No token in a path. The order link token and the pay token travel in request bodies only. The page carries the order link in the URL fragment, `/o#<token>`, which the browser never sends. The CRUD side looks each token up by its sha256 (hex). The order link token is also kept sealed under the CRUD service's KEK (`storefront_order_links.token_sealed`, cleared on revoke), so that every order mail can carry the link; the pay token is stored as sha256 only. Tokens are 32 random bytes, URL-safe base64.
 - Mail is sent only by the CRUD service. It writes an outbox row in the same transaction as the change that causes it, and sends after the commit. The SMTP password is sealed under the CRUD service's KEK (`core/secrets.py` `seal_secret`), as payment credentials are (`payments/credentials.py`). With no SMTP host set, the `order_link` and `sign_in_code` rows stay queued and the shop sees them as not sent. The four order events (`revision_ready`, `price_ready`, `payment_requested`, `shipped`) queue only when `storefront_mail_covers` is true, which needs a host; without one they leave no row and stay #5660's plugin's job. Nothing fails.
 - Mail templates are plain text. Each link they carry is built from the existing env-only `storefront_public_url` (`SCADBUDDY_STOREFRONT_PUBLIC_URL`, `https://michaels-workshop.nullreference.io` in prod). It is never a stored setting: a stored value could point customers' links anywhere (`core/settings.py`). Customer text in a mail is never HTML.
-- The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's row id, the account's row id, or `link:<link row id>` for a reader who holds only an order link (Task 5's body `token`, which comes with no visitor header). Only the CRUD side builds it.
+- The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's row id, the account's row id, or `link:<link row id>` for a reader who holds only an order link (Task 5's body `token`, which comes with no visitor header). Only the CRUD side builds it. A link reader's `session` changes when Task 4 re-issues the link, so audit readers see one customer (the same `principal`) under two sessions, not two people.
 - A submitted order stays `draft` in `OrderStatus`. "Submitted" is `orders.submitted_at` (§5.5).
 - After submit, the customer may only answer revisions, accept quotes, pay, and cancel while nothing is approved (§5.5). Every other customer write gets 409 `order_submitted`.
-- The bot check (§5.8): Cloudflare Turnstile on sign-up, submit and design requests, on only when both `SCADBUDDY_TURNSTILE_SITE_KEY` and the secret file are set. The edge verifies the token and holds the secret. The CRUD side never sees it.
+- The bot check (§5.8): Cloudflare Turnstile on sign-up, submit and design requests (Task 9).
+  - It is on when a site key is set.
+  - The secret is a stored setting sealed under the CRUD service's KEK (`SECRET_FIELDS`). The CRUD side calls Siteverify, and the edge only forwards `X-Turnstile-Token`.
+  - With no site key, everything passes. With a site key but a missing or unreadable secret, the check fails closed with 503 `bot_check_unavailable`.
 - Problem types stay under `https://scadbuddy.dev/problems/storefront/`.
 - PR titles are conventional commits with scope `storefront`. Each PR body says `Part of #5283`, and the last one says `Fixes #5283`.
 
@@ -87,19 +90,28 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 2: Mail, through an outbox (this session)
 
 **Files:**
-- Create: the migration `<ts>_storefront_mail.sql`, `backend/scadbuddy/orders/storefront/mail.py`, `backend/scadbuddy/orders/storefront/mail_templates.py`
-- Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_starttls` true; not `storefront_public_url`, which stays env-only), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
+- Create: the migration `<ts>_storefront_mail.sql`, `backend/scadbuddy/orders/storefront/mail.py`, `backend/scadbuddy/orders/storefront/mail_templates.py`, `backend/scadbuddy/orders/storefront/links.py`
+- Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_tls` (`starttls` by default, `implicit` or `none`; `none` only without a login); every connection field is person-only, like the password; not `storefront_public_url`, which stays env-only), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
 - Test: `backend/tests/orders/storefront/test_mail.py`, `backend/tests/test_housekeeping.py`, `backend/tests/test_housekeeping_replay.py`, the settings test
 
 **Interfaces:**
 - Produces:
-  - Table `storefront_mail`: `id`, `order_id` (null for a sign-in code), `to_address`, `template`, `context jsonb`, `created_at`, `sent_at`, `attempts`, `last_error`.
-  - Table `storefront_mail_secret` (one row): the sealed password envelope.
+  - Table `storefront_mail`: `id`, `order_id` (null for a sign-in code), `to_address`, `template`, `context jsonb` (an order mail holds `link_id`, never a token), `created_at`, `next_attempt_at`, `lease_until`, `sent_at`, `attempts`, `last_error`.
+  - Table `storefront_mail_secret` (one row): the sealed password envelope, bound to the host, port, user and TLS mode it was saved for.
+  - Table `storefront_mail_server` (one row): the last server-level error, which the shop sees.
+  - Table `storefront_order_links`: `id`, `order_id`, `token_sha256` (unique), `token_sealed` (cleared on revoke), `created_at`, `revoked_at`, `sent_to`, `opened_at`. `storefront_mail_covers` reads it, and Tasks 3–5 use it through `links.py` (`create_order_link`, `revoke_order_links`, `live_link`).
   - `MailEvent = Literal["sign_in_code", "order_link", "revision_ready", "price_ready", "payment_requested", "shipped"]`.
   - `queue_mail(conn, event: MailEvent, to: str, context: dict, order_id: str | None) -> str`.
-  - `send_queued(limit: int = 50) -> int`. It claims rows with `FOR UPDATE SKIP LOCKED`, sends each one with `smtplib.SMTP` and STARTTLS in a thread with a 20 s timeout, and stamps `sent_at` or `last_error`. It stops retrying a row after 8 attempts.
-  - `storefront_mail_covers(conn, order_id: str, event: MailEvent) -> bool`: true when the order has a live (unrevoked) order link and a mail host is set. #5660's plugin reads it.
-  - Routes that queue mail call `send_queued` after their commit, as a background task. The housekeeping step retries what is left.
+  - `queue_mail` accepts exactly one plain address; anything else raises `EmailInvalidError` (422 `email_invalid` at a route).
+  - `send_queued(limit: int = 50) -> int`.
+    - It leases rows (`lease_until`, claimed with `FOR UPDATE SKIP LOCKED` and committed at once), then sends each one with no transaction held, then stamps the result in a short transaction.
+    - It sends with `smtplib` in a thread with a 20 s timeout, and logs in only over TLS.
+    - A server-level failure (connect, TLS, login, sender, a binding mismatch) never counts against a row; it backs the process off from 1 min to 1 h.
+    - A recipient refusal counts against its row, with `next_attempt_at` backing off from 1 min to 1 h, and the row is given up after 8 attempts. A fixed failure fails at once.
+    - A `sign_in_code` row not sent within 10 minutes expires, and its code is cleared.
+    - One send pass runs at a time per process.
+  - `storefront_mail_covers(conn, order_id: str, event: MailEvent, *, host) -> bool`: true when the order has a live (unrevoked) order link and a mail host is set. #5660's plugin reads it.
+  - A transition that queued mail starts `send_queued` from the lifecycle's after-commit step (`_told`). The housekeeping step retries what is left.
   - Hooks:
     - `send_revision` queues `revision_ready`;
     - recording a quote that the customer can accept queues `price_ready`;
@@ -148,7 +160,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
   - A shipping option that ships, without an address, gets 422.
   - The deposit policy applies.
   - Another visitor's submit sees no draft (404 `draft_not_found`).
-  - On the edge: 428 without a key, and the stub is called.
+  - On the edge: 428 without a key, and a test that monkeypatches `require_turnstile` asserts it was awaited with `"submit"`.
   - On the page: the form shows the shipping options with their prices, asks for an address only when the option ships, and on success shows "We have your order. We sent a link to {email}."
 - [ ] **Step 2: Run them and confirm they fail.**
 - [ ] **Step 3: Implement.**
@@ -205,7 +217,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 6: The pay page (this session)
 
 **Files:**
-- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`, only after Step 0 below; `pay_link` returns `f"{storefront_url}/pay#{token}"`, not `/pay/{token}`, with its test in `tests/payments/test_venmo.py`; and every copy of the path form: `payments/venmo.py` (the module docstring, the `PAY_PAGE_READY` comment and `pay_link`), `crud/storefront.py`, `api/crud_storefront.py` (module and the checkout route), `api/crud_areas.py`, `backend/CLAUDE.md` ("once the storefront's `/pay/<token>` page ships"), `README.md` ("a pay page on the storefront, `/pay/<token>`"), the docstrings in `backend/tests/api/test_payment_providers.py` and `backend/tests/payments/test_venmo.py`, and the links `test_venmo.py` builds or strips with `f"{STOREFRONT}/pay/{token}"`; a final `git grep -n "/pay/<token>\|/pay/{token}\|/pay/{"` finds none outside merged migrations and dated plans), `payments/paypal.py` (`create_request`: only if Step 0 finds the SDK cannot fund a `payment_source.paypal` order with Venmo, a pay-page request's order is created without `payment_source`). The merged migration `20261108T0512Z_payment_requests_pay_token.sql` keeps its comment: a merged migration is never edited.
+- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP plus Task 9's Turnstile origins; `/pay` gets Task 9's origins too, when a site key is set, because the same document may show the widget nowhere but keeps one CSP builder), `payments/venmo.py` (`PAY_PAGE_READY = True`, only after Step 0 below; `pay_link` returns `f"{storefront_url}/pay#{token}"`, not `/pay/{token}`, with its test in `tests/payments/test_venmo.py`; and every copy of the path form: `payments/venmo.py` (the module docstring, the `PAY_PAGE_READY` comment and `pay_link`), `crud/storefront.py`, `api/crud_storefront.py` (module and the checkout route), `api/crud_areas.py`, `backend/CLAUDE.md` ("once the storefront's `/pay/<token>` page ships"), `README.md` ("a pay page on the storefront, `/pay/<token>`"), the docstrings in `backend/tests/api/test_payment_providers.py` and `backend/tests/payments/test_venmo.py`, and the links `test_venmo.py` builds or strips with `f"{STOREFRONT}/pay/{token}"`; a final `git grep -n "/pay/<token>\|/pay/{token}\|/pay/{"` finds none outside merged migrations and dated plans), `payments/paypal.py` (`create_request`: only if Step 0 finds the SDK cannot fund a `payment_source.paypal` order with Venmo, a pay-page request's order is created without `payment_source`). The merged migration `20261108T0512Z_payment_requests_pay_token.sql` keeps its comment: a merged migration is never edited.
 - Create: `frontend/src/storefront/pages/PayPage.tsx`
 - Test: `backend/tests/storefront/test_static.py` (the CSP for each path), `backend/tests/storefront/test_edge_routes.py` (an empty CRUD 404 maps to the edge's own 404), `backend/tests/payments/test_venmo.py`, `frontend/src/storefront/pages/PayPage.test.tsx`
 
