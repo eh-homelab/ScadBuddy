@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { api } from '../../api/client'
 import type { CustomizerSchema, ParamValue } from '../../api/types'
 import { defaultValues, type ParamValues } from '../../lib/params'
+import { inputsToSend } from './printSetups'
 import { useAsync } from '../../lib/useAsync'
 import { ParameterPanel } from '../ParameterPanel'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -16,12 +17,6 @@ export interface ItemDesign {
 
 /** Why a template with its own page takes no inputs here (#4673 PR 4). */
 export const OWN_UI_TEXT = 'This template has its own page: change its inputs there and add the output to the order.'
-
-/** Whether two parameter sets hold the same values, a vector compared by its items. */
-function sameParams(a: ParamValues, b: ParamValues): boolean {
-  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
-  return [...keys].every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key]))
-}
 
 /** The item's own parameter values: `inputs.params`, the ones a template's form edits. */
 function paramsOf(inputs: Record<string, unknown>): ParamValues {
@@ -41,14 +36,14 @@ export function DesignInputs({ design, onChange }: { design: ItemDesign; onChang
   const fonts = useAsync(() => api.listFonts(), [])
   const own = useMemo(() => paramsOf(design.inputs), [design.inputs])
   const [edits, setEdits] = useState<ParamValues>({})
-  const changed = !sameParams({ ...own, ...edits }, own)
   const form = schema.data as (CustomizerSchema & { ui?: unknown }) | undefined
-  const values = useMemo(() => ({ ...(form ? defaultValues(form) : {}), ...own, ...edits }), [form, own, edits])
+  const defaults = useMemo(() => (form ? defaultValues(form) : {}), [form])
+  const changed = inputsToSend(design.inputs, defaults, own, edits) !== null
+  const values = useMemo(() => ({ ...defaults, ...own, ...edits }), [defaults, own, edits])
 
   function publish(next: ParamValues) {
     setEdits(next)
-    const merged = { ...own, ...next }
-    onChange(sameParams(merged, own) ? null : { ...design.inputs, params: merged })
+    onChange(inputsToSend(design.inputs, defaults, own, next))
   }
 
   return (

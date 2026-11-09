@@ -78,7 +78,7 @@ function QuoteMachineRate({ rate }: { rate: MachineRateBreakdown }) {
 
 /** A print setups group's name: its revision's number, and whether it is the current one. */
 function groupName(group: SetupGroup): string {
-  if (!group.revision) return 'No revision'
+  if (!group.revision) return group.key ? `Revision ${group.key.slice(0, 8)}` : 'No revision'
   return `Revision ${group.revision.number}${group.current ? ' (current)' : ''}`
 }
 
@@ -147,6 +147,7 @@ export function QuoteEditor({
   slice,
   parts = '',
   startSlicing = 0,
+  onSliceOpened,
 }: {
   orderId: string
   itemId: string
@@ -168,11 +169,18 @@ export function QuoteEditor({
   parts?: string
   /** #4673 — the row's Slice… clicks, counted (0 for none): each new count opens the slice dialog. */
   startSlicing?: number
+  /** The dialog opened for `startSlicing`: the page drops the request, so a remount does not open it again. */
+  onSliceOpened?: () => void
 }) {
   const [slicing, setSlicing] = useState(startSlicing > 0)
   // Slice… again on the row while the drawer is open: the dialog opens again.
   useEffect(() => {
-    if (startSlicing > 0) setSlicing(true)
+    if (startSlicing > 0) {
+      setSlicing(true)
+      onSliceOpened?.()
+    }
+    // Only a new request opens it; the callback's identity is the page's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startSlicing])
   const [fromPrint, setFromPrint] = useState(false)
   // What a slice quote slices: the item's output, or a library file item's file (#5544).
@@ -245,7 +253,7 @@ export function QuoteEditor({
       <h3 className="text-xs text-muted-foreground">Price</h3>
       {quotes.length > 0 &&
         groups.map((group) => (
-          <div key={group.revision?.id ?? 'none'} role="group" aria-label={groupName(group)} className="flex flex-col gap-1">
+          <div key={group.key ?? 'none'} role="group" aria-label={groupName(group)} className="flex flex-col gap-1">
             {grouped && (
               <h4 className="text-xs text-muted-foreground" data-testid="setup-group">
                 {groupName(group)}

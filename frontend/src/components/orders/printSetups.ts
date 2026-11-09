@@ -1,4 +1,5 @@
 import type { Quote, Revision } from '../../api/types'
+import type { ParamValues } from '../../lib/params'
 import { byCreated } from './price'
 
 /**
@@ -10,7 +11,9 @@ import { byCreated } from './price'
 export const OLD_REVISION_TEXT = "Made for an older revision: slice the current one to accept a setup of it."
 
 export interface SetupGroup {
-  /** The revision the quotes were made of; null for quotes that name none. */
+  /** The revision id the quotes name, or null; unique per group, so it keys the group. */
+  key: string | null
+  /** The revision the quotes were made of; null for quotes that name none, or one not listed. */
   revision: Revision | null
   /** The item's current revision. */
   current: boolean
@@ -25,7 +28,12 @@ export function setupGroups(quotes: Quote[], revisions: Revision[], currentRevis
     const key = quote.revision_id ?? ''
     let group = groups.get(key)
     if (!group) {
-      group = { revision: quote.revision_id ? (byId.get(quote.revision_id) ?? null) : null, current: !!quote.revision_id && quote.revision_id === currentRevisionId, quotes: [] }
+      group = {
+        key: quote.revision_id ?? null,
+        revision: quote.revision_id ? (byId.get(quote.revision_id) ?? null) : null,
+        current: !!quote.revision_id && quote.revision_id === currentRevisionId,
+        quotes: [],
+      }
       groups.set(key, group)
     }
     group.quotes.push(quote)
@@ -106,4 +114,25 @@ export function setupChanges(quote: Quote, accepted: Quote | undefined, revision
     }
   }
   return changes
+}
+
+/** Whether two parameter sets hold the same values, a vector compared by its items. */
+function sameParams(a: ParamValues, b: ParamValues): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  return [...keys].every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key]))
+}
+
+/**
+ * The inputs a slice sends for `edits` over the item's `own` parameters, or null when they
+ * change nothing: compared against the item's values over the form's defaults, so a
+ * parameter the item never set, put back to its default, is no change (#5797 review).
+ */
+export function inputsToSend(
+  inputs: Record<string, unknown>,
+  defaults: ParamValues,
+  own: ParamValues,
+  edits: ParamValues,
+): Record<string, unknown> | null {
+  const base = { ...defaults, ...own }
+  return sameParams({ ...base, ...edits }, base) ? null : { ...inputs, params: { ...own, ...edits } }
 }
