@@ -901,9 +901,13 @@ async def test_a_capture_read_from_a_venmo_order_names_venmo(
     """The sweep's read names the funding source as the webhook's path does (#4960)."""
     order = captured_order("COMPLETED") | {"payment_source": {"venmo": {}}}
     pp.routes["order"].respond(json=order)
-    read = await paypal.read_capture(CRED, ORDER)
+    read = await paypal.read_capture(VENMO_CRED, ORDER)
     assert isinstance(read, ProviderEvent)
     assert (read.kind, read.method) == ("paid", "venmo")
+    # #5769 review: with Venmo off, the read names no method, as the webhook names none.
+    read = await paypal.read_capture(CRED, ORDER)
+    assert isinstance(read, ProviderEvent)
+    assert (read.kind, read.method) == ("paid", None)
 
 
 @pytest.mark.parametrize("status", ["DECLINED", "FAILED"])
