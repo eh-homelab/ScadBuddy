@@ -539,7 +539,7 @@ with the URL `https://<public host>/api/v1/payments/webhooks/paypal` and these e
 `PAYMENT.CAPTURE.DECLINED` and `PAYMENT.CAPTURE.REFUNDED`
 ([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)). Then, in
 Settings → Payments, connect PayPal with the environment (`sandbox` or `live`), the app's
-client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and that the
+client ID and secret, the webhook's ID, and Venmo `off` or `on` (below). ScadBuddy checks the credentials and that the
 webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
 "(live)". Each payment request is a PayPal order for the request's amount. The customer
 pays with a PayPal balance or a card on PayPal's page. When the customer approves the
@@ -619,6 +619,33 @@ when Square says it completed; one that is then rejected or fails gets a payment
 cancels it. A cancelled request's payment link is deleted, which cancels its Square
 order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
 Cash needs no provider: record it as a manual payment.
+
+#### Venmo (#4960)
+
+Venmo is a funding source of PayPal, for US buyers paying in USD. Only PayPal's
+JavaScript SDK offers it, and PayPal's own approval link never does
+([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Venmo
+needs a pay page on the storefront, `/pay/<token>`, that renders PayPal's buttons for the
+request's PayPal order. That page is the storefront's (#5283 phase 4) and is not built
+yet. Until it ships, PayPal's connect form shows Venmo `on` as unavailable, a connect
+with `on` is refused (409 `venmo_page_missing`), a connect that leaves Venmo out saves
+`off`, and every PayPal request keeps PayPal's own approval link. Once the page ships,
+the link rewrite and the toggle turn on: with Venmo `on` (which also needs
+`SCADBUDDY_STOREFRONT_PUBLIC_URL` on the API, the storefront edge's origin), each USD
+PayPal request will link to that page. Its token is 32 random bytes. ScadBuddy keeps
+only its sha256 and drops it as soon as the request leaves open (pending, which a
+PayPal approval moves it to, paid, cancelled, expired or failed), or is linked again
+without one, so a spent token never opens the page again, and turning Venmo off ends
+every pay link at once. Nothing links those requests again with PayPal's own approval
+link, so after turning Venmo off, cancel each open PayPal request whose link was a pay
+page and ask for the payment again. The new request gets PayPal's own link. The edge reads
+the request through the API's `POST /api/v1/internal/crud/storefront/pay/checkout`
+(storefront service credential; a bare 404 for a token that reads nothing). A payment
+funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
+PayPal"; when PayPal does not answer the read of its funding source, the capture is
+recorded without a method. A Venmo payment to the shop's own username has no merchant API, so record it
+by hand: the payment form's method list has Cash, Check, Bank transfer, Venmo, Zelle and
+Other.
 
 #### Bank account through Plaid (#4961)
 

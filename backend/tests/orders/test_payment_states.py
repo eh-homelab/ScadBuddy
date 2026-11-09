@@ -358,3 +358,26 @@ def test_a_refund_and_its_failure_at_once_cancel_out(shop: PayShop) -> None:
     assert len(outcomes) == 2
     assert sum(_provider_payments(shop, order)) == 700
     assert _provider_payments(shop, order) in ([700], [700, -200, 200])
+
+
+# -- the method a provider names (#4960) ---------------------------------------------------
+
+
+def test_a_paid_event_that_names_venmo_records_the_payment_as_venmo(shop: PayShop) -> None:
+    order, _ = shop.linked()
+    venmo = ProviderEvent.model_validate(SETTLED.model_dump() | {"method": "venmo"})
+    assert shop.lifecycle.record_provider_event("fake", venmo) == "recorded"
+    [paid] = [p for p in shop.rows.payments(order.id) if p.provider]
+    assert (paid.method, paid.provider) == ("venmo", "fake")
+
+
+def test_a_paid_event_that_names_no_method_records_the_provider(shop: PayShop) -> None:
+    order, _ = shop.linked()
+    assert shop.lifecycle.record_provider_event("fake", SETTLED) == "recorded"
+    [paid] = [p for p in shop.rows.payments(order.id) if p.provider]
+    assert (paid.method, paid.provider) == ("fake", "fake")
+
+
+def test_an_event_method_is_one_scadbuddy_knows() -> None:
+    with pytest.raises(ValueError):
+        ProviderEvent.model_validate({"event_id": "x", "kind": "paid", "method": "zelle"})

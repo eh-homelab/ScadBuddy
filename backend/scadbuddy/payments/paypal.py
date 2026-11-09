@@ -102,6 +102,7 @@ from scadbuddy.payments.models import (
     PaymentRequestView,
     ProviderEvent,
     ProviderEventKind,
+    ProviderEventMethod,
 )
 from scadbuddy.payments.provider import (
     BadSignatureError,
@@ -111,6 +112,8 @@ from scadbuddy.payments.provider import (
     ProviderUnavailableError,
     Verified,
 )
+from scadbuddy.payments.venmo import PAY_PAGE_MISSING, PAY_PAGE_READY
+from scadbuddy.payments.venmo import SETTING as VENMO_SETTING
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,10 @@ _CAPTURE_KINDS: Final[Mapping[str, ProviderEventKind]] = {
     "PAYMENT.CAPTURE.DECLINED": "failed",
     "PAYMENT.CAPTURE.DENIED": "failed",
 }
+#: The funding sources under an order's ``payment_source`` that a payment names as its
+#: method; any other (``paypal``, ``card``) is recorded as ``paypal``.
+_METHODS: Final[Mapping[str, ProviderEventMethod]] = {"venmo": "venmo"}
+
 #: A capture's status, read from its order, as the event it settles (``read_capture``).
 #: A refunded capture was captured first; the refund is its own event.
 _READ_KINDS: Final[Mapping[object, ProviderEventKind]] = {
@@ -219,9 +226,26 @@ class PayPalProvider:
     #: The wallet under ``payment_source``; Venmo (#4960) is the same order with ``venmo``.
     funding_source = "paypal"
     fields: Sequence[ProviderField] = (
-        ProviderField(name="environment", label="Environment (sandbox or live)", secret=False),
+        # The form opens on sandbox, the choice that moves no money (#5769 review).
+        ProviderField(
+            name="environment",
+            label="Environment",
+            secret=False,
+            choices=["sandbox", "live"],
+            default="sandbox",
+        ),
         ProviderField(name="client_id", label="Client ID", secret=False),
         ProviderField(name="webhook_id", label="Webhook ID", secret=False),
+        # #4960: Venmo on the storefront's pay page, for USD requests (`venmo.py`); off when
+        # left out, and refused on until that page exists.
+        ProviderField(
+            name="venmo",
+            label="Venmo (USD)",
+            secret=False,
+            choices=["off", "on"],
+            default="off",
+            unavailable=None if PAY_PAGE_READY else {"on": PAY_PAGE_MISSING},
+        ),
         ProviderField(name="client_secret", label="Secret", secret=True),
     )
 
@@ -547,7 +571,15 @@ class PayPalProvider:
         if kind == "CHECKOUT.ORDER.APPROVED":
             return await self._approved(credential, event_id, resource)
         if kind in _CAPTURE_KINDS:
-            return _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
+            found = _capture_event(event_id, _CAPTURE_KINDS[kind], resource)
+            # The funding source is read only while Venmo is on (#5769 review): a shop
+            # that never turns it on makes no extra call per capture.
+            venmo_on = credential.settings.get(VENMO_SETTING) == "on"
+            if found.kind == "paid" and found.provider_ref is not None and venmo_on:
+                found = found.model_copy(
+                    update={"method": await self._funding(credential, found.provider_ref)}
+                )
+            return found
         if kind == "PAYMENT.CAPTURE.REFUNDED":
             return await self._refund(credential, event_id, resource)
         return ProviderEvent(event_id=event_id, kind="other")
@@ -597,6 +629,17 @@ class PayPalProvider:
                 return "declined"
             raise _shown(refused) from None
 
+    async def _funding(self, credential: Credential, order_id: str) -> ProviderEventMethod | None:
+        """The method the order was paid with when it is one ScadBuddy names (#4960): the
+        capture does not say, the order's ``payment_source`` does. None when the order
+        cannot be read: the capture is still recorded, without its method."""
+        try:
+            order = await self._read(credential, "GET", f"/v2/checkout/orders/{order_id}")
+        except ProviderUnavailableError:
+            # The capture is recorded without its method rather than held back.
+            return None
+        return _method_of(order)
+
     async def read_capture(
         self, credential: Credential, provider_ref: str
     ) -> ProviderEvent | CaptureState:
@@ -635,7 +678,11 @@ class PayPalProvider:
                 if kind is not None:
                     capture_id = _path_id(capture.get("id"))
                     event_id = f"capture:{capture_id}:{kind}"
-                    return _capture_event(event_id, kind, capture, order_id)
+                    found = _capture_event(event_id, kind, capture, order_id)
+                    if kind == "paid":
+                        # The order read names the funding source (#4960), as `_funding`.
+                        found = found.model_copy(update={"method": _method_of(order)})
+                    return found
         except (KeyError, TypeError, AttributeError, ValueError, ValidationError, ProviderError):
             logger.warning("PayPal's order %s did not read as expected", order_id)
         return "unknown"
@@ -730,6 +777,14 @@ def _money(money: Mapping[str, Any]) -> tuple[int, str]:
 
 def _order_of(capture: Mapping[str, Any]) -> str:
     return _path_id(capture["supplementary_data"]["related_ids"]["order_id"])
+
+
+def _method_of(order: Mapping[str, Any]) -> ProviderEventMethod | None:
+    """The method an order's ``payment_source`` names, when ScadBuddy names it (#4960)."""
+    source = order.get("payment_source")
+    if not isinstance(source, dict):
+        return None
+    return next((_METHODS[key] for key in source if key in _METHODS), None)
 
 
 def _capture_event(

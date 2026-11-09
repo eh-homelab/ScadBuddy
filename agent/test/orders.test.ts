@@ -324,6 +324,15 @@ describe('order tools (#4249)', () => {
     expect(new URL(url).search).toBe('')
   })
 
+  it('shows a Venmo-funded PayPal payment as venmo, and names the manual methods (#4960)', async () => {
+    const order = { id: ORDER, payments: [{ id: 'p1', amount_minor: 700, method: 'venmo', provider: 'paypal' }] }
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}`, () => HttpResponse.json(order)))
+    const read = firstText(await tool('order_get').execute({ order_id: ORDER }, ctx())) as typeof order
+    expect(read.payments[0]!.method).toBe('venmo')
+    expect(tool('order_get').description).toContain('venmo')
+    expect(JSON.stringify(z.toJSONSchema(z.object(tool('order_update').shape)))).toContain('bank_transfer')
+  })
+
   it('edits, holds and records a payment through their own routes', async () => {
     const calls: string[] = []
     server.use(

@@ -6,8 +6,9 @@ The edge sends the visitor id it verified in the cookie (`VISITOR_HEADER`) and t
 browser's address (`CLIENT_HEADER`). This side cannot check the cookie's mac: it takes
 the id only as a 256-bit secret to look a visitor up by, and the address only to key the
 per-client render limit (plan "Trust model"). `visitor_id` and `store_client` are the
-dependencies that read them, and every route takes both: only a ``storefront`` credential
-reaches these routes (`crud_router`), so no other caller can send either header here.
+dependencies that read them, and every route takes both but ``pay/checkout``: only a
+``storefront`` credential reaches these routes (`crud_router`), so no other caller can
+send either header here.
 
 Area ``listings``: ``GET …/listings`` and ``GET …/listings/{id}``, the published listings
 as the public site shows them (`orders/storefront/listings.py` `public_listing`), with
@@ -23,6 +24,12 @@ the visitor's and the client's limits and renders it; ``GET …/renders/{job_id}
 the visitor who asked for that render, and 404 ``render_not_found`` for any other. A body
 that is not a render is 422 ``render_body_invalid``: every refusal a visitor can cause is a
 storefront problem, which the edge passes on.
+
+Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
+edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
+a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
+The token travels in the body, never the path, so no access log holds it. The token is
+the secret here, so it takes no visitor or client header.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ import re
 from typing import Annotated, Any, Final
 
 from fastapi import Depends, Query, Request, Response, status
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import PathsDep, ReadBudgetDep, StateDep
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
@@ -62,6 +69,7 @@ from scadbuddy.orders.storefront.wire import (
     RenderBody,
     StoreRender,
 )
+from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
     STORE_CLIENT_PROBLEM,
@@ -223,3 +231,31 @@ async def render_estimate_route(
     """The rough price of the visitor's done render: "about $X, confirmed after we check
     it", never a quote."""
     return await render_estimate(state, visitor, job_id)
+
+
+class PayCheckoutRead(BaseModel):
+    """The pay page's token, as the edge took it from ``/pay/{token}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(max_length=100)
+
+
+@router.post(
+    "/pay/checkout",
+    name="crud_storefront_pay_checkout",
+    response_model=VenmoCheckout,
+    responses={status.HTTP_404_NOT_FOUND: {"description": "No open Venmo request has it"}},
+)
+async def pay_checkout(body: PayCheckoutRead, orders: OrdersDep) -> VenmoCheckout | Response:
+    """#4960: the request a pay token names, for the edge's pay page; 404 with no body
+    for any token that reads nothing, so the edge learns no reason."""
+
+    def read() -> VenmoCheckout | None:
+        with orders.store.transaction() as conn:
+            return venmo_checkout(conn, body.token)
+
+    found = await asyncio.to_thread(read)
+    if found is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    return found

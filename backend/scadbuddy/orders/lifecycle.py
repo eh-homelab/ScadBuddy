@@ -1427,7 +1427,12 @@ class Lifecycle:
         return order
 
     def set_request_link(
-        self, request_id: str, *, hosted: HostedRequest | None, error: str | None
+        self,
+        request_id: str,
+        *,
+        hosted: HostedRequest | None,
+        error: str | None,
+        pay_token_hash: str | None = None,
     ) -> PaymentRequestView:
         """The provider's answer to a request's link, under the request's order lock: its
         hosted page, or why it failed (the link it had stays). A request no longer open
@@ -1476,6 +1481,10 @@ class Lifecycle:
                         hosted_url=found.hosted_url if hosted is None else str(hosted.hosted_url),
                         link_error=error,
                         close_pending=late_ref is not None,
+                        # #4960: a new link writes its pay token, or none, so a
+                        # link without one ends the old pay page.
+                        new_link=hosted is not None,
+                        pay_token_hash=pay_token_hash,
                     )
             except errors.UniqueViolation:
                 # ``payment_requests_ref``: the provider answered with another request's
@@ -1706,7 +1715,7 @@ class Lifecycle:
             conn,
             order.id,
             amount_minor=amount if event.kind == "paid" else -amount,
-            method=provider,
+            method=event.method or provider,
             reference=event.provider_ref,
             received_at=None,
             notes="",
