@@ -65,7 +65,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
 from scadbuddy.storefront.uploads import checked_text, file_too_large, too_many_files
-from scadbuddy.storefront.wire import ITEM_ID
+from scadbuddy.storefront.wire import ITEM_ID, unescape_filename
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -385,7 +385,8 @@ def _checked_file(upload: UploadFile) -> _File:
         digest.update(chunk)
         if len(head) < SNIFF_BYTES:
             head += chunk[: SNIFF_BYTES - len(head)]
-    filename = clean_filename(upload.filename or "file")
+    # The edge escapes the name it forwards, as a browser does (`escape_filename`).
+    filename = clean_filename(unescape_filename(upload.filename or "file"))
     kind, media_type = sniff(head, filename)
     if _label(kind, media_type) not in REQUEST_KINDS:
         raise problem(

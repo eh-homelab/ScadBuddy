@@ -6,12 +6,15 @@ draft it is."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import os
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -19,11 +22,13 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.events import Event, EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.storefront import _multipart as edge_multipart
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders import lifecycle as lifecycle_module
@@ -794,6 +799,40 @@ def test_a_committed_request_sent_again_after_requests_went_off_answers_its_repl
     assert r.status_code == 404
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
     assert len(asks.get("/draft").json()["items"]) == 1
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        # A name the edge's own parser read whole (a client that does not escape).
+        ('a"b.jpg', 'a"b.jpg'),
+        # What a browser sends for ``a"b.jpg`` (WHATWG HTML escapes ``"``, CR and LF).
+        ("a%22b.jpg", 'a"b.jpg'),
+        ("h\u00e9llo w\u00f6rld \u2713.jpg", "h\u00e9llo w\u00f6rld \u2713.jpg"),
+        ("a\\b.jpg", "b.jpg"),
+    ],
+)
+def test_a_files_name_survives_the_edges_multipart(asks: CrudCaller, sent: str, kept: str) -> None:
+    """Review of #5789: the edge percent-escapes ``"``, ``\\`` and control characters in
+    the name it forwards (`crud/storefront.py`), and the CRUD side decodes them. The
+    multipart parser ignores ``filename*`` (RFC 7578 §4.2), so the name goes as
+    ``filename``."""
+    upload = UploadFile(io.BytesIO(JPEG), filename=sent)
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [upload])])
+
+    headers = asks._headers(TOKEN_A, f"r-{sha256(sent.encode()).hexdigest()[:8]}")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    [attachment] = r.json()["items"][0]["attachments"]
+    assert attachment["filename"] == kept
+    got = httpx.get(attachment["url"])
+    assert got.status_code == 200 and got.content == JPEG
 
 
 def test_a_request_counts_against_the_draft_cap(
