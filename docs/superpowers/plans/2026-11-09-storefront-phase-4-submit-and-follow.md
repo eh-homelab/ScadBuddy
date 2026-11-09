@@ -27,7 +27,7 @@
 - Problem types stay under `https://scadbuddy.dev/problems/storefront/`.
 - PR titles are conventional commits with scope `storefront`. Each PR body says `Part of #5283`, and the last one says `Fixes #5283`.
 
-## Ownership (proposed on #5283; scadsy to confirm)
+## Ownership (agreed with scadsy on #5283, 2026-11-09)
 
 - **This session:** Tasks 1–7 (the customer actor, mail, submit, the order link, the customer's order page, the pay page, back-office link controls).
 - **scadsy:** Tasks 8–9 (accounts, Turnstile).
