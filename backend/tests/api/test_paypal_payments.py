@@ -34,7 +34,12 @@ pytestmark = pytest.mark.requires_postgres
 
 HOOK = "/api/v1/payments/webhooks/paypal"
 CONNECT = {
-    "settings": {"environment": "sandbox", "client_id": CLIENT_ID, "webhook_id": WEBHOOK_ID},
+    "settings": {
+        "environment": "sandbox",
+        "client_id": CLIENT_ID,
+        "webhook_id": WEBHOOK_ID,
+        "venmo": "off",
+    },
     "secrets": {"client_secret": SECRET},
 }
 

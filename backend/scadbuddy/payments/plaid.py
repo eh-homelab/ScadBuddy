@@ -25,6 +25,18 @@ Plaid's documented behaviour this relies on:
 - ``/accounts/get`` with ``options.account_ids`` gives each account's ``name``, ``type``,
   ``subtype`` and ``mask``, "the last 2-4 alphanumeric characters" of the account's
   displayed mask or number (https://plaid.com/docs/api/accounts/#accountsget).
+- ``/transactions/sync`` gives the Item's ``added``, ``modified`` and ``removed``
+  transactions since ``cursor`` (all of them with no cursor), ``count`` at most 500, with
+  ``next_cursor`` and ``has_more``; when a page fails with
+  ``TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`` "the entire pagination request loop must
+  be restarted beginning with the cursor for the first page of the update". A
+  transaction's ``amount`` is positive "when money moves out of the account" and negative
+  "when money moves in"; ``original_description`` is the bank's own text, sent only with
+  ``options.include_original_description``
+  (https://plaid.com/docs/api/products/transactions/#transactionssync,
+  https://plaid.com/docs/errors/transactions/). A pending transaction that posts is
+  removed, and the posted one is added with a new ``transaction_id``
+  (https://plaid.com/docs/transactions/transactions-data/).
 - ``/item/remove`` invalidates the access token (https://plaid.com/docs/api/items/#itemremove);
   ``ITEM_NOT_FOUND`` is an Item already removed, and ``INVALID_ACCESS_TOKEN`` a token
   Plaid no longer knows (https://plaid.com/docs/errors/invalid-input/).
@@ -54,6 +66,10 @@ ACCOUNT_SUBTYPES: Final[tuple[AccountSubtype, ...]] = ("checking", "savings")
 #: Error codes that mean Plaid refuses the keys themselves: a rotated secret, or keys
 #: of another environment (https://plaid.com/docs/errors/invalid-input/).
 KEYS_REFUSED: Final = frozenset({"INVALID_API_KEYS", "UNAUTHORIZED_ENVIRONMENT"})
+#: The most transactions one ``/transactions/sync`` page holds (Plaid's maximum).
+SYNC_COUNT: Final = 500
+#: A page whose data changed under it: the whole loop starts again from its first cursor.
+SYNC_MUTATION: Final = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
 #: Error codes that mean the Item is already gone at Plaid.
 GONE: Final = frozenset({"ITEM_NOT_FOUND", "INVALID_ACCESS_TOKEN"})
 
@@ -71,6 +87,17 @@ class PlaidKeys:
 class Exchanged:
     access_token: str = field(repr=False)
     item_id: str
+
+
+@dataclass(frozen=True)
+class SyncPage:
+    """One ``/transactions/sync`` page. A transaction is Plaid's own object, as sent."""
+
+    added: list[dict[str, Any]]
+    modified: list[dict[str, Any]]
+    removed: list[str]
+    next_cursor: str
+    has_more: bool
 
 
 class PlaidAccount(BaseModel):
@@ -178,3 +205,35 @@ async def remove_item(keys: PlaidKeys, access_token: str) -> None:
     except PlaidError as error:
         if error.code not in GONE:
             raise
+
+
+async def transactions_sync(keys: PlaidKeys, access_token: str, cursor: str | None) -> SyncPage:
+    """One page of the Item's transactions since ``cursor`` (from the start with None)."""
+    body: dict[str, Any] = {
+        "access_token": access_token,
+        "count": SYNC_COUNT,
+        "options": {"include_original_description": True},
+    }
+    if cursor is not None:
+        body["cursor"] = cursor
+    found = await _post(keys, "/transactions/sync", body)
+    added, modified = found.get("added"), found.get("modified")
+    removed, next_cursor = found.get("removed"), found.get("next_cursor")
+    if (
+        not isinstance(added, list)
+        or not isinstance(modified, list)
+        or not isinstance(removed, list)
+        or not isinstance(next_cursor, str)
+    ):
+        raise PlaidError("Plaid's answer held no transactions")
+    return SyncPage(
+        added=[t for t in added if isinstance(t, dict)],
+        modified=[t for t in modified if isinstance(t, dict)],
+        removed=[
+            str(t["transaction_id"])
+            for t in removed
+            if isinstance(t, dict) and isinstance(t.get("transaction_id"), str)
+        ],
+        next_cursor=next_cursor,
+        has_more=found.get("has_more") is True,
+    )

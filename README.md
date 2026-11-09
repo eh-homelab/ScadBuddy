@@ -539,7 +539,7 @@ with the URL `https://<public host>/api/v1/payments/webhooks/paypal` and these e
 `PAYMENT.CAPTURE.DECLINED` and `PAYMENT.CAPTURE.REFUNDED`
 ([event names](https://developer.paypal.com/api/rest/webhooks/event-names/)). Then, in
 Settings → Payments, connect PayPal with the environment (`sandbox` or `live`), the app's
-client ID and secret, and the webhook's ID. ScadBuddy checks the credentials and that the
+client ID and secret, the webhook's ID, and Venmo `off` or `on` (below). ScadBuddy checks the credentials and that the
 webhook sends those events. The page then shows "Connected as PayPal app … (sandbox)" or
 "(live)". Each payment request is a PayPal order for the request's amount. The customer
 pays with a PayPal balance or a card on PayPal's page. When the customer approves the
@@ -558,9 +558,11 @@ PayPal order, from an hour after the approval, then with a backoff: a capture it
 recorded as its event would be, an order still approved with no capture is captured again
 while the order takes money (else the request is failed), a capture still pending at
 PayPal is read once a day in case its completion event is lost too, and a voided order,
-or one never told after about five days of reads (the daily reads of a pending capture
-count too), leaves the request failed. So a pending request never blocks its order's
-cancel for good.
+one never told after about five days of reads, or a capture still pending at PayPal 30
+days after the approval (an eCheck usually clears in 4 to 7 business days,
+[PayPal](https://www.paypal.com/us/cshelp/article/what-is-an-echeck-help285); for a
+request approved before this sweep shipped, 30 days after the upgrade) leaves the
+request failed. So a pending request never blocks its order's cancel for good.
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. A refund that is
 still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal
@@ -619,6 +621,36 @@ cancels it. A cancelled request's payment link is deleted, which cancels its Squ
 order ([DeletePaymentLink](https://developer.squareup.com/reference/square/checkout-api/delete-payment-link)).
 Cash needs no provider: record it as a manual payment.
 
+#### Venmo (#4960)
+
+Venmo is a funding source of PayPal, for US buyers paying in USD. Only PayPal's
+JavaScript SDK offers it, and PayPal's own approval link never does
+([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Venmo
+needs a pay page on the storefront, `/pay/<token>`, that renders PayPal's buttons for the
+request's PayPal order. That page is the storefront's (#5283 phase 4) and is not built
+yet. Until it ships, PayPal's connect form shows Venmo `on` as unavailable, a connect
+with `on` is refused (409 `venmo_page_missing`), a connect that leaves Venmo out saves
+`off`, and every PayPal request keeps PayPal's own approval link. Once the page ships,
+the link rewrite and the toggle turn on: with Venmo `on` (which also needs
+`SCADBUDDY_STOREFRONT_PUBLIC_URL` on the API, the storefront edge's origin), each USD
+PayPal request will link to that page. Its token is 32 random bytes. ScadBuddy keeps
+only its sha256 and drops it as soon as the request is paid, cancelled or expired, or
+is linked again without one, so a spent token never opens the page again, and turning
+Venmo off ends every pay link at once. The page offers nothing while a capture is
+pending (a PayPal approval moves the request there), and works again if the capture
+fails, since a failed request can be approved again. While Venmo is on, a PayPal
+payment is recorded with its funding source; one approved by Venmo and captured after
+the shop turned Venmo off is recorded as PayPal's. Nothing links those requests again with PayPal's own approval
+link, so after turning Venmo off, cancel each open PayPal request whose link was a pay
+page and ask for the payment again. The new request gets PayPal's own link. The edge reads
+the request through the API's `POST /api/v1/internal/crud/storefront/pay/checkout`
+(storefront service credential; a bare 404 for a token that reads nothing). A payment
+funded by Venmo is recorded with method `venmo` and shows as "Paid by Venmo via
+PayPal"; when PayPal does not answer the read of its funding source, the capture is
+recorded without a method. A Venmo payment to the shop's own username has no merchant API, so record it
+by hand: the payment form's method list has Cash, Check, Bank transfer, Venmo, Zelle and
+Other.
+
 #### Bank account through Plaid (#4961)
 
 Plaid is not a payment provider: it takes no payment. It links the shop's checking or
@@ -639,7 +671,13 @@ Dashboard), "Unlink" drops the link here only, keeps the keys, and says to remov
 in the Plaid Dashboard. When the keys are sealed under another key file, "Unlink" cannot
 reseal them, so it forgets the keys too: remove the Item in the Plaid Dashboard, then save
 the keys again. Without `SCADBUDDY_SECRET_KEY_FILE`,
-"Unlink" is refused and the link stays, since the file may be mounted again. The page's Content-Security-Policy allows Link's one
+"Unlink" is refused and the link stays, since the file may be mounted again. With the sweeps on, each housekeeping
+run reads the account's new posted deposits
+([`/transactions/sync`](https://plaid.com/docs/api/products/transactions/#transactionssync))
+and suggests the orders each may pay: one whose number (`ORD-2026-12`) is in the deposit's
+text, or one whose balance equals the deposit. A suggestion records nothing. The bank's
+text is kept with every run of five or more digits masked, a run going on across single
+spaces or hyphens (so an IBAN printed in groups is masked); an order number is kept. The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

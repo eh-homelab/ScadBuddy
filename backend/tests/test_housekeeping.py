@@ -28,6 +28,8 @@ from scadbuddy.workflows.housekeeping import (
     ATTACHMENTS_TIMEOUT,
     AUTH_SESSIONS_SWEEP,
     AUTH_SESSIONS_TIMEOUT,
+    BANK_DEPOSITS_SWEEP,
+    BANK_DEPOSITS_TIMEOUT,
     CLAIMS_TIMEOUT,
     GIT_REMOTE_SWEEP,
     GIT_REMOTE_TIMEOUT,
@@ -155,6 +157,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         AUTH_SESSIONS_SWEEP: AUTH_SESSIONS_TIMEOUT,
         PAYMENT_CLOSES_SWEEP: PAYMENT_CLOSES_TIMEOUT,
         PAYMENT_CAPTURES_SWEEP: PAYMENT_CAPTURES_TIMEOUT,
+        BANK_DEPOSITS_SWEEP: BANK_DEPOSITS_TIMEOUT,
         STOREFRONT_DRAFTS_SWEEP: STOREFRONT_DRAFTS_TIMEOUT,
     }
     for sweep in SWEEPS:
@@ -321,6 +324,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
     ]
     # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps
+    # #4961: the deposit sync calls Plaid and suggests, so it obeys the switch.
+    assert BANK_DEPOSITS_SWEEP not in sweeps
     # #4337: the per-print copies' sweep trashes files, so it obeys the switch.
     assert NATIVE_COPIES_SWEEP not in sweeps
     # The native slices obey the switch, as the Bambuddy background slices do.

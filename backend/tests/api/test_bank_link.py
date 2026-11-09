@@ -51,6 +51,8 @@ def test_link_show_and_unlink(client: TestClient, plaid: respx.MockRouter) -> No
         "environment": None,
         "account": None,
         "linked_at": None,
+        "synced_at": None,
+        "sync_error": None,
     }
     saved = client.put(f"{BANK}/keys", json=KEYS)
     assert saved.status_code == 200, saved.text

@@ -1046,8 +1046,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   found is recorded through `record_provider_event` (keyed `capture:<id>:<kind>`, so a pending read and a later paid one are two events; a later webhook
   writes no second payment, matched by the order) and its closes run, and one that leaves
   the request `pending` (`currency_mismatch`, `ignored`, `unmatched`) counts as an
-  unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), each read
-  counted toward the give-up; a request whose settling raises is logged and counted, and
+  unknown read; a pending one is read once a day (`CAPTURE_DAILY_ATTEMPTS`), not
+  counted, and is `failed` (`capture_pending_unsettled`) once the approval is
+  `CAPTURE_PENDING_GIVE_UP_DAYS` (30) old; a request whose settling raises is logged and counted, and
   the batch (`CAPTURE_SETTLE_BATCH`, 4) goes on; an `APPROVED` order with no capture is captured again under the approval's
   key once `Lifecycle.recapture_key` says, under the order lock, that the order takes money
   (else `failed`, reason `order_not_taking_money`); a voided order, a refused capture, or
@@ -1065,6 +1066,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `FAILED` move the request, a declined card leaves it open, and a payment or refund
   with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
+  `venmo.py` (#4960: once the storefront's `/pay/<token>` page ships (#5283 phase 4,
+  `PAY_PAGE_READY`, false until then), a USD PayPal request from a shop with the `venmo`
+  setting on will link to it; until then no link is rewritten and a connect with `venmo`
+  `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
+  it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
+  show `on` disabled, with why). Only the token's sha256 is kept, in
+  `payment_requests.pay_token_hash`, read while the request is open or failed (not
+  pending), dropped when it is paid, cancelled or expired, or linked again
+  without one; `venmo_checkout` is what the edge's CRUD route reads,
+  `POST /api/v1/internal/crud/storefront/pay/checkout` (`api/crud_storefront.py`, area
+  `pay`, the token in the body, a bare 404 for None); a Venmo-funded capture is
+  `ProviderEvent.method` `venmo`, and one whose order PayPal does not answer is recorded
+  with no method),
   `credentials.py` (`PaymentCredentials`: the shop's account per provider, the secret
   sealed with `core/secrets.py` under AAD `payment_credentials:<id>:<provider>`; without
   a KEK `connect` raises `KekMissingError`, which `api/payments.py` answers 409
@@ -1196,3 +1210,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `lib/plaidLink.ts` (Link's script from `cdn.plaid.com`, which `api/static.py` `PAGE_CSP`
   allows with its frame and Plaid's two API hosts), mocks `src/mocks/features/bank.ts`.
   Tests replay `tests/payments/plaid_payloads/` (Plaid's sandbox examples) through respx.
+  The deposit sync (`payments/deposits.py` `sync_deposits`) is the housekeeping sweep
+  `housekeeping_sync_bank_deposits` (the sweep Schedule only, behind its patch, never a loop
+  in the API): `/transactions/sync` from `bank_links.sync_cursor`, at most `MAX_PAGES` pages,
+  the loop started again from its first cursor on a mutation during pagination (an update
+  `MAX_PAGES` cut short keeps that first cursor in `sync_loop_cursor` for the next run); each
+  open order's balance is read once per sync (`_Balances`); keys that will not open, or a
+  link with no access token, set `sync_error` instead of failing every run; the cursor
+  is stored only when the link and the cursor are still the ones it started from. Posted
+  deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
+  (`mask`: every run of five or more digits, a run going on across single spaces or
+  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
+  deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.

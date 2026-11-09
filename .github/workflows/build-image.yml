@@ -493,9 +493,12 @@ jobs:
 
       # The build runs `scadbuddy-slicer --check-cli` against the pinned CLI.
       #
-      # `type=gha` on a hosted runner only, as above. Its own scope, which
-      # ci.yml's `image` job only reads, written here at mode=min (the repo's
-      # Actions cache is at its ceiling, #743).
+      # A GHCR registry cache, not `type=gha` (#4059): mode=max keeps the
+      # `slicer-build` stage's cargo-chef dependency layer, which the full Actions
+      # cache cannot hold (#743). This job is the cache's only writer; ci.yml's
+      # `slicer-image` job and hot-path-e2e.yml only read it. The package is
+      # public, so a read needs no login. `ignore-error` keeps a failed cache
+      # write from failing the publish.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -510,8 +513,8 @@ jobs:
             SCADBUDDY_REVISION=${{ github.sha }}
             SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
-          cache-from: type=gha,scope=slicer
-          cache-to: type=gha,scope=slicer,mode=min
+          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache
+          cache-to: type=registry,ref=ghcr.io/eh-homelab/scadbuddy-slicer:buildcache,mode=max,ignore-error=true
 
       - name: Report the published digest
         env:

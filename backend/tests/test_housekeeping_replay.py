@@ -29,7 +29,9 @@ also runs ``GIT_REMOTE_SWEEP``, and ``auth_sessions`` with ``AUTH_SESSIONS_PATCH
 which also runs ``AUTH_SESSIONS_SWEEP``, and ``payment_closes`` with
 ``PAYMENT_CLOSES_PATCH`` (#5700), which also runs ``PAYMENT_CLOSES_SWEEP``, and
 ``payment_captures`` with ``PAYMENT_CAPTURES_PATCH`` (#4959), which also runs
-``PAYMENT_CAPTURES_SWEEP``, and ``storefront_drafts`` with ``STOREFRONT_DRAFTS_PATCH``
+``PAYMENT_CAPTURES_SWEEP``, and
+``bank_deposits`` with ``BANK_DEPOSITS_PATCH`` (#4961), which also runs
+``BANK_DEPOSITS_SWEEP``, and ``storefront_drafts`` with ``STOREFRONT_DRAFTS_PATCH``
 (#5282), which also runs ``STOREFRONT_DRAFTS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1``
 runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
@@ -74,6 +76,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "auth_sessions",
         "payment_closes",
         "payment_captures",
+        "bank_deposits",
         "storefront_drafts",
     ],
 )

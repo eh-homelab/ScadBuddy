@@ -330,6 +330,37 @@ describe('OrderPage payment requests (#4957)', () => {
     expect(within(await screen.findByRole('list', { name: 'Payments' })).getByText(/Paid by Fake/)).toBeInTheDocument()
   })
 
+  it('names the method a provider paid by, such as Venmo through PayPal (#4960)', async () => {
+    mockConnectProvider()
+    const opened = await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
+    mockPaymentEvent(ORDER_ACCEPTED, opened.id, 'paid', 'venmo')
+    render(ORDER_ACCEPTED)
+    expect(within(await screen.findByRole('list', { name: 'Payments' })).getByText(/Paid by Venmo via Fake/)).toBeInTheDocument()
+  })
+
+  it('offers the manual methods in a list and records the chosen one (#4960)', async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    const method = await screen.findByRole('combobox', { name: 'Method' })
+    await user.click(method)
+    const offered = screen.getAllByRole('option').map((o) => o.textContent)
+    expect(offered).toEqual(['Not given', 'Cash', 'Check', 'Bank transfer', 'Venmo', 'Zelle', 'Other'])
+    await user.click(screen.getByRole('option', { name: 'Venmo' }))
+    await user.type(screen.getByLabelText('Received (USD)'), '4.00')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+    const payments = await screen.findByRole('list', { name: 'Payments' })
+    await waitFor(() => expect(within(payments).getByText(/Venmo/)).toBeInTheDocument())
+    expect((await api.order(ORDER_ACCEPTED)).payments?.at(-1)?.method).toBe('venmo')
+  })
+
+  it('takes a method of its own under Other', async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    await choose(user, await screen.findByRole('combobox', { name: 'Method' }), 'Other')
+    await user.type(screen.getByLabelText('Other method'), 'Gift card')
+    await user.type(screen.getByLabelText('Received (USD)'), '2.00')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+    await waitFor(async () => expect((await api.order(ORDER_ACCEPTED)).payments?.at(-1)?.method).toBe('Gift card'))
+  })
+
   it('drops the chosen request from the form once it is no longer open', async () => {
     mockConnectProvider()
     await api.requestPayment(ORDER_ACCEPTED, { amount_minor: 1000 })
