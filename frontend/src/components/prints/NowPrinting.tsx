@@ -309,8 +309,9 @@ function JobLink({ printer }: { printer: PrinterNow }) {
   }
   if (printer.bambuddy_url) {
     // A Bambuddy before 1.3.0 has no page per archive: the server then links its
-    // archives page, and the archive to look for there is named in the link (#2930).
-    const archivePage = printer.archive_id != null && printer.bambuddy_url.endsWith(`/archives/${printer.archive_id}`)
+    // archives page, says so (`bambuddy_archive_page`, #5840), and the archive to look
+    // for there is named in the link (#2930).
+    const archivePage = printer.bambuddy_archive_page
     const label = name ?? 'This print'
     return (
       <p className="mt-1 truncate">

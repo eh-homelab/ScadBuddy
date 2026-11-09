@@ -208,17 +208,47 @@ def test_a_bambuddy_job_links_its_archive_only_where_bambuddy_has_that_page(
     cards = client.get(NOW).json()["printers"]
 
     assert [(card["archive_id"], card["bambuddy_url"]) for card in cards] == [(90, url)]
+    # #5840: the card says whether the link is the archive's own page.
+    assert cards[0]["bambuddy_archive_page"] is url.endswith("/archives/90")
 
 
+@pytest.mark.parametrize(
+    "body",
+    [["1.3.0"], "1.3.0", 130, None],
+    ids=["array", "string", "number", "null"],
+)
 @respx.mock
-def test_bambuddys_version_is_read_once_not_on_every_poll(client: TestClient) -> None:
-    version = configure(client, version="1.2.6b1")
+def test_a_version_body_that_is_not_an_object_gives_the_archives_page(
+    client: TestClient, body: Any
+) -> None:
+    """#5840: a 200 whose body is not an object is no version, never a failed strip."""
+    version = configure(client)
+    version.mock(return_value=httpx.Response(200, json=body))
+    _bambuddy_job()
+
+    response = client.get(NOW)
+
+    assert response.status_code == 200, response.text
+    [card] = response.json()["printers"]
+    assert (card["bambuddy_url"], card["bambuddy_archive_page"]) == (
+        "https://bambuddy.test/archives",
+        False,
+    )
+
+
+@pytest.mark.parametrize("version", ["1.2.6b1", None], ids=["read", "failed"])
+@respx.mock
+def test_bambuddys_version_is_read_once_not_on_every_poll(
+    client: TestClient, version: str | None
+) -> None:
+    """A failed read is kept too (#5840): it is not asked again on every poll."""
+    route = configure(client, version=version)
     _bambuddy_job()
 
     for _ in range(3):
         assert client.get(NOW).status_code == 200
 
-    assert version.call_count == 1
+    assert route.call_count == 1
 
 
 @respx.mock
