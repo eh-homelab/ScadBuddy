@@ -52,6 +52,10 @@ const NULLABLE = new Set([
   'git_remote_url',
   'git_remote_username',
   'git_remote_token',
+  // #5283 — the storefront's mail.
+  'storefront_mail_host',
+  'storefront_mail_user',
+  'storefront_mail_sender',
 ])
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
 const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])
@@ -185,6 +189,16 @@ function putSettings(body: Record<string, unknown>) {
     }
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")
+    }
+    // #5283 — `core/settings.py`'s checks of the storefront's mail.
+    if (name === 'storefront_mail_port' && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65535)) {
+      return refused(name, 'Input should be between 1 and 65535')
+    }
+    if (name === 'storefront_mail_sender' && typeof value === 'string' && !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is an address, such as shop@example.com`)
+    }
+    if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
     }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)

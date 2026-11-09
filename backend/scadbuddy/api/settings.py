@@ -133,6 +133,13 @@ class SettingsView(BaseModel):
     storefront_render_concurrency: int = 2
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
+    #: The storefront's mail (#5283): SMTP host, port, user, From and STARTTLS. The
+    #: password is sealed apart (`GET /storefront/mail/password` says whether it is set).
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int = 587
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_starttls: bool = True
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"

@@ -1043,6 +1043,12 @@ export const settingsDefaults = {
   storefront_render_concurrency: 2,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
+  storefront_mail_host: null,
+  storefront_mail_port: 587,
+  storefront_mail_user: null,
+  storefront_mail_sender: null,
+  storefront_mail_starttls: true,
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
   // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,

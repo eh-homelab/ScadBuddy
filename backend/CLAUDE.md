@@ -794,6 +794,24 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
+  The storefront's mail (#5283, spec 2026-11-02 §5.7, migration
+  `20261109T0751Z_storefront_mail.sql`): `orders/storefront/mail.py` and
+  `mail_templates.py` (plain text; the order link `{storefront_public_url}/o#{token}` is the
+  only link). A change writes a `storefront_mail` row in its own transaction
+  (`queue_mail`), so a rollback leaves none; `Lifecycle._told` then kicks
+  `StorefrontMail.send_queued` on the API's loop (`kick`, bound in the orders component's
+  run), which claims rows `FOR UPDATE SKIP LOCKED` and sends each with `smtplib` (STARTTLS
+  per `storefront_mail_starttls`, 20 s timeout), at most `MAX_ATTEMPTS` (8) times; a token
+  or code in a row's context is dropped once it is sent or given up. The
+  `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
+  is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
+  price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
+  (`shipped`) queue only when `storefront_mail_covers` (a live `storefront_order_links`
+  row and a `storefront_mail_host`); their mail goes to the link's `sent_to` and carries
+  no link, since only a token's sha256 is kept. The SMTP settings are env-seeded
+  `storefront_mail_*` (Settings → Storefront mail); the password is sealed under the KEK in
+  `storefront_mail_secret` (`GET`/`PUT`/`DELETE /storefront/mail/password`, a person's
+  writes only).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

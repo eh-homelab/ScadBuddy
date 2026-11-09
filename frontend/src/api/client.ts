@@ -259,6 +259,7 @@ import type {
   BankKeys,
   BankLinkCreate,
   BankStatus,
+  MailPasswordStatus,
   BankUnlinked,
   PolicyUpdate,
   PriceBook,
@@ -2456,6 +2457,11 @@ export const api = {
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
+  /** #5283 — whether the storefront's SMTP password is set; the password is never read back. */
+  storefrontMailPassword: () => request<MailPasswordStatus>('/storefront/mail/password'),
+  setStorefrontMailPassword: (password: string) =>
+    request<MailPasswordStatus>('/storefront/mail/password', { method: 'PUT', body: JSON.stringify({ password }) }),
+  forgetStorefrontMailPassword: () => request<MailPasswordStatus>('/storefront/mail/password', { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

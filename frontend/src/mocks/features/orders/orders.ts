@@ -1365,7 +1365,6 @@ export const handlers = [
       }
       if (body.approval != null && found.kind === 'custom' && resolved === undefined) throw new FieldRefused('approval', 'approval: a custom item has no design')
       const accept = body.accept ?? order.source !== 'storefront'
-      if (body.accept === true && body.unit_price_minor != null) customerAccepts(order)
       let price: number | null = null
       if (custom) {
         // The price it has: its accepted quote's, else its newest's.
@@ -1377,6 +1376,9 @@ export const handlers = [
         const unpinned = accept && !accepted && body.unit_price_minor != null
         if (wanted !== null && (body.quantity != null || wanted !== current || unpinned)) price = wanted
       }
+      // `Lifecycle._custom_price`: an explicit accept of any reprice (a quantity change
+      // too) on a storefront order is the customer's, before anything is written.
+      if (body.accept === true && price !== null) customerAccepts(order)
       const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
       // #5280: a different reference, or a slot's filament, is the item's next revision; the
       // item's own reference sent again changes nothing and makes none.

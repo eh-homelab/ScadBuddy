@@ -14,13 +14,28 @@ runtime (``api/components.py``).
 import asyncio
 
 from fastapi import APIRouter, Response, status
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import StateDep
+from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.storefront.listings import publish, unpublish
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingOrder, ListingUpdate
+from scadbuddy.payments.credentials import KekMissingError
 
 router = APIRouter(prefix="/storefront", tags=["storefront"])
+
+PROBLEMS = "https://scadbuddy.dev/problems/storefront/"
+
+
+class MailPasswordStatus(BaseModel):
+    """Whether the storefront's SMTP password is set; never the password."""
+
+    set: bool
+
+
+class MailPassword(BaseModel):
+    password: str = Field(min_length=1, max_length=1000, repr=False)
 
 
 @router.get("/listings", response_model=list[Listing], summary="The storefront's listings")
@@ -94,3 +109,46 @@ async def delete_listing(listing_id: str, orders: OrdersDep) -> Response:
     """Remove an unpublished listing (409 ``listing_published`` while it is published)."""
     await asyncio.to_thread(orders.listings.delete, listing_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Whether the storefront's SMTP password is set",
+)
+async def get_mail_password(orders: OrdersDep) -> MailPasswordStatus:
+    """The password itself is never read back (#5283)."""
+    return MailPasswordStatus(set=await asyncio.to_thread(orders.mail.has_password))
+
+
+@router.put(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Set the storefront's SMTP password",
+    description=(
+        "Sealed under the CRUD service's KEK (#5283, spec 2026-11-02 §5.7) and never read"
+        " back. 409 `kek_missing` without SCADBUDDY_SECRET_KEY_FILE."
+    ),
+)
+async def put_mail_password(body: MailPassword, orders: OrdersDep) -> MailPasswordStatus:
+    try:
+        await asyncio.to_thread(orders.mail.set_password, body.password)
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the storefront mail password needs SCADBUDDY_SECRET_KEY_FILE",
+            type_=PROBLEMS + "kek_missing",
+        ) from None
+    # Mail that waited for the login goes now.
+    orders.mail.kick()
+    return MailPasswordStatus(set=True)
+
+
+@router.delete(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Forget the storefront's SMTP password",
+)
+async def delete_mail_password(orders: OrdersDep) -> MailPasswordStatus:
+    await asyncio.to_thread(orders.mail.clear_password)
+    return MailPasswordStatus(set=False)

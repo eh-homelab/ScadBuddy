@@ -200,6 +200,7 @@ from scadbuddy.workflows.housekeeping import (
     QUOTE_HOLDS_SWEEP,
     REAP_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
+    STOREFRONT_MAIL_SWEEP,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
     ensure_schedules,
@@ -731,6 +732,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_storefront_drafts() -> None:
         await _heartbeating(_sweep_storefront_drafts_logged(state))
 
+    @activity.defn(name=STOREFRONT_MAIL_SWEEP)
+    async def send_storefront_mail() -> None:
+        await _heartbeating(_send_storefront_mail_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -759,6 +764,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         settle_payment_captures,
         sync_bank_deposits,
         sweep_storefront_drafts,
+        send_storefront_mail,
     ]
 
 
@@ -1285,6 +1291,18 @@ async def _sweep_storefront_drafts_logged(state: AppState) -> None:
             "swept idle storefront carts",
             extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
         )
+
+
+async def _send_storefront_mail_logged(state: AppState) -> None:
+    """#5283: the storefront mail its after-commit send left queued."""
+    mail = state.components.get(ORDERS).mail
+    try:
+        sent = await asyncio.to_thread(mail.send_queued)
+    except Exception:
+        logger.exception("could not send the queued storefront mail")
+        raise
+    if sent:
+        logger.info("sent queued storefront mail", extra={"count": sent})
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:

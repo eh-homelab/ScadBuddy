@@ -846,3 +846,53 @@ def test_the_storefront_settings_are_written_through_put(client: TestClient) -> 
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent
+
+
+def test_the_storefront_mail_settings_have_their_defaults(client: TestClient) -> None:
+    body = client.get("/api/v1/settings").json()
+    assert {name: body[name] for name in MAIL_FIELDS} == {
+        "storefront_mail_host": None,
+        "storefront_mail_port": 587,
+        "storefront_mail_user": None,
+        "storefront_mail_sender": None,
+        "storefront_mail_starttls": True,
+    }
+    assert all(body["applies"][name] == "live" for name in MAIL_FIELDS)
+    # Env-only: a stored value could point customers' links anywhere.
+    assert "storefront_public_url" not in body["applies"]
+
+
+MAIL_FIELDS = (
+    "storefront_mail_host",
+    "storefront_mail_port",
+    "storefront_mail_user",
+    "storefront_mail_sender",
+    "storefront_mail_starttls",
+)
+
+
+def test_the_storefront_mail_settings_are_written_through_put(client: TestClient) -> None:
+    sent = {
+        "storefront_mail_host": "smtp.example.com",
+        "storefront_mail_port": 465,
+        "storefront_mail_user": "shop",
+        "storefront_mail_sender": "shop@example.com",
+        "storefront_mail_starttls": False,
+    }
+    body = client.put("/api/v1/settings", json=sent).json()
+    assert {name: body[name] for name in sent} == sent
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("storefront_mail_port", 0),
+        ("storefront_mail_port", 65536),
+        ("storefront_mail_sender", "not an address"),
+        ("storefront_mail_host", "smtp://example.com"),
+    ],
+)
+def test_a_storefront_mail_setting_out_of_bounds_is_refused(
+    client: TestClient, name: str, value: object
+) -> None:
+    assert client.put("/api/v1/settings", json={name: value}).status_code == 422

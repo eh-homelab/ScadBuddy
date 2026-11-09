@@ -760,6 +760,12 @@ class SettingsPatch(BaseModel):
     storefront_render_concurrency: int | None = None
     storefront_draft_ttl_days: int | None = None
     storefront_requests_enabled: bool | None = None
+    #: The storefront's mail (#5283); the password is sealed apart, never a setting.
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int | None = None
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_starttls: bool | None = None
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None

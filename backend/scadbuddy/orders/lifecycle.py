@@ -103,6 +103,13 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
+from scadbuddy.orders.storefront.mail import (
+    QUEUED,
+    MailEvent,
+    mail_recipient,
+    queue_mail,
+    storefront_mail_covers,
+)
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
@@ -547,6 +554,11 @@ class Lifecycle:
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
+        #: The running ``storefront_mail_host`` (#5283), read when a transition would mail
+        #: the customer; None queues no order mail. Set by ``OrdersComponent``.
+        self.mail_host: Callable[[], str | None] = lambda: None
+        #: Called after a commit that queued mail (`StorefrontMail.kick`).
+        self.on_mail: Callable[[], None] = lambda: None
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -592,6 +604,9 @@ class Lifecycle:
             logger.exception("could not release an ended item's quotes; the reaper drops them")
 
     def _told(self, change: _Change) -> None:
+        if QUEUED.get(False):
+            QUEUED.set(False)
+            self.on_mail()
         if change.ended:
             self._release_ended(change.released)
         else:
@@ -620,6 +635,8 @@ class Lifecycle:
         self._told(_Change(order, [(item, None) for item in items]))
 
     def _lock(self, conn: Conn, order_id: str) -> Order:
+        # A transition starts here: mail a rolled-back one queued is not this one's.
+        QUEUED.set(False)
         try:
             return self.store.lock_order(conn, order_id)
         except OrderNotFoundError:
@@ -662,6 +679,17 @@ class Lifecycle:
             return
         if order.storefront_visitor_id != visitor_id or not order.unsubmitted:
             raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+
+    def _mail(self, conn: Conn, order: Order, event: MailEvent, **context: Any) -> None:
+        """Queue ``event``'s mail to the customer in the transition's transaction, only
+        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a mail
+        host, #5283); otherwise nothing, and it stays #5660's plugin's job. Sent after the
+        commit (``on_mail``)."""
+        # The link first: an order no customer follows reads no settings.
+        to = mail_recipient(conn, order.id)
+        if to is None or not storefront_mail_covers(conn, order.id, event, host=self.mail_host()):
+            return
+        queue_mail(conn, event, to, {"order": order.label, **context}, order.id)
 
     def _event(self, conn: Conn, order: Order, by: Actor, kind: str, **detail: Any) -> None:
         self.store.insert_event(conn, order.id, by, kind, detail)
@@ -1155,6 +1183,9 @@ class Lifecycle:
                 by,
                 "payment_request.opened",
                 {"request_id": opened.id, "kind": kind, "amount_minor": amount},
+            )
+            self._mail(
+                conn, order, "payment_requested", amount_minor=amount, currency=order.currency
             )
         self._told(_Change(order))
         return opened
@@ -3116,6 +3147,7 @@ class Lifecycle:
         )
         if not accept:
             self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+            self._mail(conn, order, "price_ready", item=item.title)
             return self.store.update_item(conn, item.id, status="quoted")
         self.store.accept_quote(conn, item.id, quote.id)
         self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
@@ -3552,6 +3584,7 @@ class Lifecycle:
             item = self.store.update_item(conn, item.id, status="quoted")
             changed.append((item, None))
         self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+        self._mail(conn, order, "price_ready", item=item.title)
         self._retax(conn, order, by)
         order = self._rederive(conn, order, by)
         released = [
@@ -3908,6 +3941,7 @@ class Lifecycle:
                 )
             revision = self.store.stamp_revision(conn, revision.id, sent_at=datetime.now(UTC))
             self._event(conn, order, by, "revision.sent", item_id=item.id, revision_id=revision.id)
+            self._mail(conn, order, "revision_ready", item=item.title, revision=revision.number)
         self._told(_Change(order, [(item, None)]))
         return revision
 
@@ -5013,6 +5047,7 @@ class Lifecycle:
                 items=[(line.order_item_id, line.quantity) for line in body.items],
             )
             self._event(conn, order, by, "shipment.added", shipment_id=shipment.id)
+            self._mail(conn, order, "shipped", carrier=shipment.carrier, tracking=shipment.tracking)
             order = self._rederive(conn, order, by)
         self._told(_Change(order))
         return shipment
