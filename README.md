@@ -549,10 +549,16 @@ then reads pending, and PayPal says whether the capture completed, is pending, o
 declined. A method PayPal declines at capture leaves the request failed, and the customer
 can approve the same page again with another method. A capture PayPal does not answer
 (an error, or no reply in time) may still have landed, so the request stays pending, and
-a cancel or a manual payment is refused, until PayPal's capture event or its retry of the
+a cancel or a manual payment on it is refused, until PayPal's capture event or its retry of the
 approval settles it. Every webhook is checked with
 PayPal's verify-webhook-signature call before ScadBuddy reads it
 ([verify](https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature_post)).
+When neither comes (PayPal retries an event for 3 days), the housekeeping sweep reads the
+PayPal order, from an hour after the approval, then with a backoff: a capture it finds is
+recorded as its event would be, an order still approved with no capture is captured again
+while the order takes money (else the request is failed), and a voided order, or one
+never told after about five days of reads, leaves the request failed. So a pending
+request never blocks its order's cancel for good.
 The PayPal fee comes from the capture and is recorded on the order's costs. Each refund
 is recorded once, for its own amount, when PayPal says it completed. A refund that is
 still pending when PayPal sends `PAYMENT.CAPTURE.REFUNDED` is read again once; PayPal

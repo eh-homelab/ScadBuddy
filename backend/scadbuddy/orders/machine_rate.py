@@ -503,6 +503,10 @@ class MachineRateView(BaseModel):
     bambuddy_printer_id: int | None = None
     inputs: MachineRateInputs | None = None
     breakdown: MachineRateBreakdown
+    #: The names of the tasks Bambuddy tracks for it, from a live read: also for a
+    #: printer with no profile yet, so its first tasks can be named as Bambuddy does.
+    #: Empty when it is not linked or Bambuddy did not answer.
+    bambuddy_tasks: list[str] = []
 
 
 class MachineRates:
@@ -539,28 +543,13 @@ class MachineRates:
         intervals: IntervalSource = "typed"
         if row.bambuddy_printer_id is not None:
             intervals = "stored"
-            if live and self.integrations.linked:
-                try:
-                    tasks = await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
-                except (
-                    ApiError,
-                    NotLinkedError,
-                    ValidationError,
-                    json.JSONDecodeError,
-                    UnicodeDecodeError,
-                ):
-                    # A reply that does not validate, is not JSON or is not text is
-                    # Bambuddy not answering usefully. Any other ValueError is a bug.
-                    logger.warning(
-                        "Bambuddy's maintenance tasks could not be read; the stored"
-                        " intervals price the machine rate",
-                        extra={"printer": row.id},
-                    )
-                else:
-                    intervals = "bambuddy"
-                    await asyncio.to_thread(
-                        self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
-                    )
+            if live:
+                tasks = await self._read_tasks(row)
+            if tasks is not None:
+                intervals = "bambuddy"
+                await asyncio.to_thread(
+                    self.store.remember_intervals, row.id, row.bambuddy_printer_id, tasks
+                )
         return compute(
             stored.profile,
             stored.wear,
@@ -574,6 +563,28 @@ class MachineRates:
             intervals_read_at=stored.read_at if intervals == "stored" else None,
             read_tasks=stored.read_tasks if intervals == "stored" else None,
         )
+
+    async def _read_tasks(self, row: PrinterRow) -> list[MaintenanceTask] | None:
+        """A linked printer's tasks read from Bambuddy now; None when it does not answer."""
+        if row.bambuddy_printer_id is None or not self.integrations.linked:
+            return None
+        try:
+            return await self.integrations.maintenance_tasks(row.bambuddy_printer_id)
+        except (
+            ApiError,
+            NotLinkedError,
+            ValidationError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+        ):
+            # A reply that does not validate, is not JSON or is not text is Bambuddy not
+            # answering usefully. Any other ValueError is a bug.
+            logger.warning(
+                "Bambuddy's maintenance tasks could not be read; the stored intervals price"
+                " the machine rate",
+                extra={"printer": row.id},
+            )
+            return None
 
     def stored_rates(self) -> dict[str, str]:
         """Every profiled printer's rate from its stored intervals, by registry id: no
@@ -680,14 +691,22 @@ class MachineRates:
         breakdown = await self.breakdown(row)
         stored = await asyncio.to_thread(self.store.stored, row.id)
         inputs = None
+        names: list[str] = []
         if stored.profile is not None:
             inputs = MachineRateInputs(
                 profile=stored.profile, wear_parts=stored.wear, maintenance=stored.costs
             )
+        # One Bambuddy read: the breakdown's when it priced a profile (even one deleted
+        # since), else one of its own for the book's rate.
+        if breakdown.intervals == "bambuddy":
+            names = [m.task for m in breakdown.maintenance if m.why != "not_in_bambuddy"]
+        elif breakdown.source == "price_book" and (tasks := await self._read_tasks(row)):
+            names = [task.task for task in tasks]
         return MachineRateView(
             printer=row.id,
             printer_name=row.name,
             bambuddy_printer_id=row.bambuddy_printer_id,
             inputs=inputs,
             breakdown=breakdown,
+            bambuddy_tasks=names,
         )

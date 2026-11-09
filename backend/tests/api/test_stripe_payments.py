@@ -175,6 +175,20 @@ def test_a_pending_request_keeps_stripe_connected(
     assert refused.status_code == 409
 
 
+def test_a_pending_bank_debit_refuses_its_orders_cancel(
+    client: TestClient, stripe: respx.MockRouter
+) -> None:
+    """#4959: any provider's pending request is money on its way, not only a PayPal
+    capture, so the order's cancel waits for it."""
+    order_id, _ = stripe_request(client)
+    send(client, "checkout.session.completed.ach.json")
+    refused = client.post(f"/api/v1/orders/{order_id}/cancel")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"].endswith("/payment_in_flight")
+    assert client.get(f"/api/v1/orders/{order_id}").json()["order"]["status"] != "cancelled"
+    assert request_status(client, order_id) == "pending"
+
+
 def test_cancelling_a_request_expires_its_session(
     client: TestClient, stripe: respx.MockRouter
 ) -> None:

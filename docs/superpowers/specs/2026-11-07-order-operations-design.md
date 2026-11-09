@@ -271,7 +271,10 @@ as typed.
   **As built (#5759):** the panel is under Settings → Orders, "Machine rate per printer"
   (`frontend/src/components/orders/MachineRates.tsx`): each physical registry printer, its
   inputs edited whole (a linked printer's intervals are Bambuddy's, so none is typed) and
-  the rate with each part. A slice quote shows the rate it was priced at
+  the rate with each part. The view's `bambuddy_tasks` lists the task names Bambuddy
+  tracks for a linked printer, read live even before it has a profile, so its first
+  tasks are named as Bambuddy names them (#5767). The form checks decimal places as the
+  API does: 1 for hours, watts and minutes, 4 for money. A slice quote shows the rate it was priced at
   (`QuoteEditor.tsx`), and the quote dialog takes a support slot's filament (§6.3,
   `QuoteFilaments.tsx`).
 

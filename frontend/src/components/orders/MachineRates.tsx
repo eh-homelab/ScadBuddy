@@ -8,7 +8,11 @@ import { Label } from '@/components/ui/label'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
 
-const DECIMAL = /^\d+(\.\d+)?$/
+// As `orders/machine_rate.py` takes them: hours, watts and minutes to 0.1, money to 0.0001.
+const TENTHS = 1
+const AMOUNT = 4
+const decimal = (text: string, places: number) => new RegExp(`^\\d+(\\.\\d{1,${places}})?$`).test(text.trim())
+const placesText = (places: number) => (places === TENTHS ? 'with at most 1 decimal place, such as 12.5' : 'with at most 4 decimal places, such as 0.1234')
 
 type Profile = { purchase_price: string; life_hours: string; watts: string; kwh_price: string; labour_rate_per_hour: string }
 type Wear = { name: string; cost: string; life_hours: string }
@@ -37,22 +41,24 @@ function draftOf(view: MachineRateView): Draft {
 /** The body a draft makes, or what to fix first. An empty optional field is left out (its default) or null. */
 function bodyOf(draft: Draft, linked: boolean): MachineRateInputs | string {
   const p = draft.profile
-  const number = (text: string, what: string) => (text.trim() && !DECIMAL.test(text.trim()) ? `Enter ${what} as a number, such as 12.5, or leave it empty.` : null)
+  const number = (text: string, what: string, places: number) => (text.trim() && !decimal(text, places) ? `Enter ${what} as a number ${placesText(places)}, or leave it empty.` : null)
   const problem =
-    number(p.purchase_price, 'the purchase price') ??
-    number(p.life_hours, 'the life in hours') ??
-    number(p.watts, 'the watts') ??
-    number(p.kwh_price, 'the price of a kWh') ??
-    number(p.labour_rate_per_hour, 'the labour rate')
+    number(p.purchase_price, 'the purchase price', AMOUNT) ??
+    number(p.life_hours, 'the life in hours', TENTHS) ??
+    number(p.watts, 'the watts', TENTHS) ??
+    number(p.kwh_price, 'the price of a kWh', AMOUNT) ??
+    number(p.labour_rate_per_hour, 'the labour rate', AMOUNT)
   if (problem) return problem
   const optional = (text: string) => (text.trim() ? text.trim() : undefined)
   for (const w of draft.wear) {
     if (!w.name.trim()) return 'Name each wear part, such as Nozzle.'
-    if (!DECIMAL.test(w.cost.trim()) || !DECIMAL.test(w.life_hours.trim()) || Number(w.life_hours) <= 0) return `Enter ${w.name}'s cost and its life in print-hours (more than 0).`
+    if (!decimal(w.cost, AMOUNT) || !decimal(w.life_hours, TENTHS) || Number(w.life_hours) <= 0)
+      return `Enter ${w.name}'s cost (at most 4 decimal places) and its life in print-hours (more than 0, at most 1 decimal place).`
   }
   for (const m of draft.maintenance) {
     if (!m.task.trim()) return 'Name each maintenance task, such as Lubricate rails.'
-    const bad = number(m.minutes, `${m.task}'s minutes`) ?? number(m.consumables, `${m.task}'s consumables`) ?? (linked ? null : number(m.interval_hours, `${m.task}'s interval`))
+    const bad =
+      number(m.minutes, `${m.task}'s minutes`, TENTHS) ?? number(m.consumables, `${m.task}'s consumables`, AMOUNT) ?? (linked ? null : number(m.interval_hours, `${m.task}'s interval`, TENTHS))
     if (bad) return bad
   }
   return {
@@ -139,9 +145,8 @@ function Editor({ printer, onClose }: { printer: PrinterRow; onClose: () => void
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const current = draft ?? (view.data ? draftOf(view.data) : null)
-  // Bambuddy's own task names, only from a read of Bambuddy itself: a stored read lists ours.
-  const breakdown = view.data?.breakdown
-  const bambuddyTasks = breakdown?.intervals === 'bambuddy' ? (breakdown.maintenance ?? []).filter((m) => m.why !== 'not_in_bambuddy').map((m) => m.task) : []
+  // Bambuddy's own task names, from a read of Bambuddy itself, also before the first save.
+  const bambuddyTasks = view.data?.bambuddy_tasks ?? []
 
   function edit(change: (was: Draft) => Draft) {
     if (current) setDraft(change(current))

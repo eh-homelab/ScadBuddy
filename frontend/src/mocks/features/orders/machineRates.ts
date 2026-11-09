@@ -139,6 +139,8 @@ function view(row: PrinterRow): MachineRateView {
     bambuddy_printer_id: row.bambuddy_printer_id ?? null,
     inputs: (inputs.get(row.id) ?? null) as MachineRateView['inputs'],
     breakdown: compute(row, inputs.get(row.id)),
+    // Read from the mock Bambuddy, which always answers: also before the first save.
+    bambuddy_tasks: row.bambuddy_printer_id != null ? BAMBUDDY_TASKS.map((t) => t.task) : [],
   }
 }
 

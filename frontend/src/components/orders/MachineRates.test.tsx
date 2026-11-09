@@ -75,6 +75,33 @@ describe('MachineRates (#4625)', () => {
     expect(offered).toEqual(['Lubricate rails', 'Clean build plate', 'Check belts'])
   })
 
+  it("offers Bambuddy's task names for a linked printer with no inputs yet", async () => {
+    const { user } = renderPage(<MachineRates />)
+    await user.click(await screen.findByRole('button', { name: 'Machine rate of 3DP-31B-598' }))
+    const panel = await screen.findByRole('region', { name: 'Machine rate of 3DP-31B-598' })
+    expect(await within(panel).findByTestId('machine-rate-book')).toBeInTheDocument()
+    const offered = [...document.querySelectorAll(`#bambuddy-tasks-${LINKED} option`)].map((o) => o.getAttribute('value'))
+    expect(offered).toEqual(['Lubricate rails', 'Clean build plate', 'Check belts'])
+  })
+
+  it('refuses more decimal places than a field keeps', async () => {
+    const { user } = renderPage(<MachineRates />)
+    await user.click(await screen.findByRole('button', { name: 'Machine rate of Garage' }))
+    const form = await screen.findByRole('form', { name: 'Machine rate inputs of Garage' })
+    await user.type(within(form).getByLabelText('Watts'), '200.25')
+    await user.click(within(form).getByRole('button', { name: 'Save machine rate' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter the watts as a number with at most 1 decimal place')
+    await user.clear(within(form).getByLabelText('Watts'))
+    await user.type(within(form).getByLabelText('Watts'), '200.5')
+    await user.type(within(form).getByLabelText('Price of a kWh'), '0.12345')
+    await user.click(within(form).getByRole('button', { name: 'Save machine rate' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter the price of a kWh as a number with at most 4 decimal places')
+    await user.clear(within(form).getByLabelText('Price of a kWh'))
+    await user.type(within(form).getByLabelText('Price of a kWh'), '0.1234')
+    await user.click(within(form).getByRole('button', { name: 'Save machine rate' }))
+    await waitFor(async () => expect((await api.machineRate(GARAGE)).inputs?.profile).toMatchObject({ watts: '200.5', kwh_price: '0.1234' }))
+  })
+
   it('says what to fix before it saves', async () => {
     const { user } = renderPage(<MachineRates />)
     await user.click(await screen.findByRole('button', { name: 'Machine rate of Garage' }))

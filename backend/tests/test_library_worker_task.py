@@ -282,7 +282,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 # #4975: the expired signed-in sessions.
                 sessions=SimpleNamespace(delete_expired=_broken(OSError("the database is gone"))),
                 # #5700: the payment pages whose close failed.
-                service=SimpleNamespace(retry_closes=_broken_async),
+                service=SimpleNamespace(retry_closes=_broken_async, settle_captures=_broken_async),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -437,7 +437,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             tokens=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             kek=None,  # no service credentials to rotate without the KEK
             # #5700: the payment pages whose close failed, a provider call per page.
-            service=SimpleNamespace(retry_closes=slow_closes),
+            # #4959: the pending captures, a provider read or two per request.
+            service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
             temporal=object,
             store=None,
             refs=None,
