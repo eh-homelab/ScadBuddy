@@ -219,22 +219,53 @@ def test_a_pending_capture_is_read_once_a_day(
     assert status_of(client, order_id, req["id"]) == "paid"
 
 
-def test_a_capture_pending_past_the_give_up_is_failed(
-    client: TestClient, captures: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+def approved(client: TestClient, request_id: str, ago: str) -> None:
+    """The approval that moved the request to ``pending`` was ``ago``."""
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_pending_at = clock_timestamp() - %s::interval"
+            " WHERE id = %s",
+            (ago, request_id),
+        )
+
+
+def test_pending_reads_are_not_counted_toward_the_give_up(
+    client: TestClient, captures: list[tuple[str, str]]
 ) -> None:
-    """Daily pending reads count toward the give-up, so the request never blocks its
-    order's cancel for good."""
-    monkeypatch.setattr(
-        payments_store, "CAPTURE_GIVE_UP_ATTEMPTS", payments_store.CAPTURE_DAILY_ATTEMPTS + 1
-    )
+    """#5780 review: a capture PayPal reports as pending (an eCheck can take more than a
+    week) is not failed by the read count, even after unknown reads: only by its own,
+    longer bound."""
+    order_id, req = stuck(client)
+    with _state(client).components.get(ORDERS).store.transaction() as conn:
+        conn.execute(
+            "UPDATE payment_requests SET capture_attempts = %s WHERE id = %s",
+            (payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1, req["id"]),
+        )
+    FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
+    for _ in range(payments_store.CAPTURE_GIVE_UP_ATTEMPTS + 2):
+        due(client, req["id"])
+        assert settle(client) == 0
+        assert status_of(client, order_id, req["id"]) == "pending"
+    assert marks(client, req["id"])[1] == payments_store.CAPTURE_GIVE_UP_ATTEMPTS - 1
+
+
+def test_a_capture_pending_past_its_bound_is_failed(
+    client: TestClient, captures: list[tuple[str, str]]
+) -> None:
+    """The request never blocks its order's cancel for good: once the approval is
+    `CAPTURE_PENDING_GIVE_UP_DAYS` old, a pending read marks it failed."""
     order_id, req = stuck(client)
     FAKE.capture_reads[req["provider_ref"]] = pending_read(req)
-    due(client, req["id"])
+    days = payments_store.CAPTURE_PENDING_GIVE_UP_DAYS
+    approved(client, req["id"], f"{days - 1} days")
     assert settle(client) == 0
+    assert status_of(client, order_id, req["id"]) == "pending"
+    approved(client, req["id"], f"{days} days 1 hour")
     tried(client, req["id"], "25 hours")
     assert settle(client) == 1
     assert status_of(client, order_id, req["id"]) == "failed"
-    assert audit(client, order_id, "payment_request.failed")[-1]["reason"] == "capture_unsettled"
+    failed = audit(client, order_id, "payment_request.failed")
+    assert failed[-1]["reason"] == "capture_pending_unsettled"
 
 
 def test_an_order_gone_with_no_capture_is_failed(

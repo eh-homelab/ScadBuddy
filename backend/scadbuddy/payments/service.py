@@ -376,7 +376,9 @@ class Payments:
           (the request still ``pending``: ``currency_mismatch``, ``ignored``,
           ``unmatched``) counts as one that could not tell; a ``pending`` one is left to
           the capture's own event, as a bank debit is, and read once a day in case that
-          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`);
+          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`), not counted; once the
+          approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old the request is marked
+          ``failed`` (``capture_pending_unsettled``);
         - an order approved with no capture is captured again, keyed on the approval,
           once the order lock says the order still takes money (`Lifecycle.recapture_key`;
           an order that does not marks the request ``failed``); a refused or declined
@@ -384,7 +386,8 @@ class Payments:
         - a voided or unknown order with no capture marks it ``failed``;
         - an outcome that cannot be told yet, or a request whose settling raised, is read
           again after the backoff; after `payments.CAPTURE_GIVE_UP_ATTEMPTS` such reads
-          (the daily pending reads among them) the request is marked ``failed``
+          (counted from at least `payments.CAPTURE_DAILY_ATTEMPTS` after a pending read)
+          the request is marked ``failed``
           (``capture_unsettled``), so it never blocks its order's cancel for good. One
           request that raises does not stop the batch.
 
@@ -431,7 +434,7 @@ class Payments:
                 r for r in now if r.close_pending_at is not None and r.id not in before
             )
             if read.kind == "pending":
-                return await self._unsettled(provider, request, daily=True)
+                return await self._pending_read(provider, request)
             if any(r.id == request.id and r.status == "pending" for r in now):
                 return await self._unsettled(provider, request)
             return True
@@ -459,13 +462,23 @@ class Payments:
             return False
         return await self._unsettled(provider, request)
 
-    async def _unsettled(
-        self, provider: str, request: PaymentRequestView, *, daily: bool = False
-    ) -> bool:
-        """One more read that could not tell (``daily``: the capture is pending at the
-        provider, read once a day); past the last, the request is ``failed``."""
-        count = self._read_daily if daily else self._count_read
-        reads = await asyncio.to_thread(count, request.id)
+    async def _pending_read(self, provider: str, request: PaymentRequestView) -> bool:
+        """The capture is pending at the provider: read once a day, not counted; once the
+        approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old, the request is
+        ``failed``."""
+        if not await asyncio.to_thread(self._read_daily, request.id):
+            return False
+        logger.warning("payment request %s: its capture stayed pending; marked failed", request.id)
+        await asyncio.to_thread(
+            partial(self._orders.lifecycle.capture_failed, reason="capture_pending_unsettled"),
+            provider,
+            request.id,
+        )
+        return True
+
+    async def _unsettled(self, provider: str, request: PaymentRequestView) -> bool:
+        """One more read that could not tell; past the last, the request is ``failed``."""
+        reads = await asyncio.to_thread(self._count_read, request.id)
         if reads < payments.CAPTURE_GIVE_UP_ATTEMPTS:
             return False
         logger.warning("payment request %s: its capture was never told; marked failed", request.id)
@@ -480,7 +493,7 @@ class Payments:
         with self._orders.store.transaction() as conn:
             return payments.capture_unsettled(conn, request_id)
 
-    def _read_daily(self, request_id: str) -> int:
+    def _read_daily(self, request_id: str) -> bool:
         with self._orders.store.transaction() as conn:
             return payments.capture_read_daily(conn, request_id)
 
