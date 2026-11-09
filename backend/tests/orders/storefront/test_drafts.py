@@ -725,14 +725,14 @@ def test_requests_off_are_refused_before_the_body_is_read(requests_off: CrudCall
     assert requests_off.get("/requests-enabled").json() == {"enabled": False}
 
 
-def test_the_crud_side_takes_two_uploads_at_once(
-    asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_full_crud_gate_is_busy(asks: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 0)
     r = ask(asks, [("files", ("a.png", PNG, "image/png"))], key="r16")
     assert r.status_code == 503
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
     assert r.headers["retry-after"] == "30"
+    # A CRUD route's own answer, so the edge reads its problem type (and shows it as busy).
+    assert r.headers["x-scadbuddy-crud"] == "1"
 
 
 def test_the_crud_side_holds_a_spool_budget(

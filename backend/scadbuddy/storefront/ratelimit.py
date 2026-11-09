@@ -212,21 +212,28 @@ class RequestLimit:
 REQUEST_UPLOADS: Final = 6
 REQUEST_WINDOW: Final = 3600.0
 REQUEST_LIMITED: Final = f"{STOREFRONT_PROBLEMS}request_limited"
+#: What a client whose one upload is still running waits before it asks again.
+RUNNING_RETRY: Final = 10
 
 
 class UploadAllowance:
-    """Each client's design request starts (`client_key`): at most `REQUEST_UPLOADS` in
-    `REQUEST_WINDOW`. One per edge replica. At most `MAX_CLIENTS` clients are held; past
-    them, new ones share the `OVERFLOW` entry."""
+    """Each client's design requests (`client_key`): at most `REQUEST_UPLOADS` spent in
+    `REQUEST_WINDOW`, and one upload at a time. One per edge replica. At most
+    `MAX_CLIENTS` clients are held; past them, new ones share the `OVERFLOW` entry.
+
+    A route `start`s an upload (spending nothing), then `spend`s it once the upload is
+    the client's doing, and `finish`es it once its body is read: so an upload turned away
+    as busy costs the client nothing, and an over-limit client never takes a slot."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._lock = threading.Lock()
         self._starts: dict[str, deque[float]] = {}
+        self._running: set[str] = set()
 
-    def take(self, address: str) -> int | None:
-        """Count one start for ``address``; None when it may start, else the seconds
-        until it may."""
+    def start(self, address: str) -> str | int:
+        """``address``'s key, now holding its one upload; or the whole seconds until it
+        may start one: its allowance is spent, or its one upload is still running."""
         now = self._clock()
         with self._lock:
             key = client_key(address)
@@ -239,9 +246,26 @@ class UploadAllowance:
                 starts.popleft()
             if len(starts) >= REQUEST_UPLOADS:
                 return max(1, math.ceil(starts[0] + REQUEST_WINDOW - now))
-            starts.append(now)
-            return None
+            if key in self._running:
+                return RUNNING_RETRY
+            self._running.add(key)
+            return key
+
+    def spend(self, key: str) -> None:
+        """Count one of ``key``'s uploads against its allowance."""
+        now = self._clock()
+        with self._lock:
+            self._starts.setdefault(key, deque()).append(now)
+
+    def finish(self, key: str) -> None:
+        """``key``'s upload no longer holds its turn."""
+        with self._lock:
+            self._running.discard(key)
 
     def _forget(self, now: float) -> None:
-        for key in [k for k, v in self._starts.items() if not v or v[-1] <= now - REQUEST_WINDOW]:
+        for key in [
+            k
+            for k, v in self._starts.items()
+            if k not in self._running and (not v or v[-1] <= now - REQUEST_WINDOW)
+        ]:
             del self._starts[key]

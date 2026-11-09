@@ -75,6 +75,61 @@ async def test_a_body_past_its_deadline_is_too_slow(monkeypatch: pytest.MonkeyPa
     assert (error.status, slug(error)) == (408, "upload_too_slow")
 
 
+def test_eight_uploads_at_once_per_process() -> None:
+    assert uploads.MAX_UPLOADS_AT_ONCE == 8
+
+
+async def test_a_sender_under_the_floor_is_too_slow(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each byte comes well inside the gap, but too few come in each window.
+    monkeypatch.setattr(uploads, "RATE_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(uploads, "RATE_WINDOW_SECONDS", 0.05)
+    monkeypatch.setattr(uploads, "MIN_WINDOW_BYTES", 1000)
+    trickle = [HEAD, FILE] + [b"x"] * 100 + [TAIL]
+    error = await refused(request(chunks(*trickle, pause=0.01)), UploadGate())
+    assert (error.status, slug(error)) == (408, "upload_too_slow")
+
+
+async def test_a_quiet_window_is_too_slow_at_its_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Enough at first, then nothing: refused as the window ends, before the gap does.
+    monkeypatch.setattr(uploads, "RATE_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(uploads, "RATE_WINDOW_SECONDS", 0.1)
+    monkeypatch.setattr(uploads, "MIN_WINDOW_BYTES", 10)
+    sent = [HEAD + FILE + b"x" * 100]
+
+    async def then_quiet() -> dict[str, Any]:
+        if sent:
+            return {"type": "http.request", "body": sent.pop(), "more_body": True}
+        await asyncio.sleep(10)
+        raise AssertionError("not refused")
+
+    started = asyncio.get_running_loop().time()
+    error = await refused(request(then_quiet), UploadGate())
+    assert (error.status, slug(error)) == (408, "upload_too_slow")
+    assert asyncio.get_running_loop().time() - started < 1.0
+
+
+async def test_a_sender_over_the_floor_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(uploads, "RATE_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(uploads, "RATE_WINDOW_SECONDS", 0.05)
+    monkeypatch.setattr(uploads, "MIN_WINDOW_BYTES", 1)
+    trickle = [HEAD, FILE] + [b"x" * 10] * 20 + [TAIL]
+    upload = await read_request(request(chunks(*trickle, pause=0.01)), UploadGate())
+    try:
+        assert upload.text == "A hook" and len(upload.files) == 1
+    finally:
+        await upload.close()
+
+
+async def test_releasing_frees_the_slot_and_keeps_the_files() -> None:
+    gate = UploadGate()
+    upload = await read_request(request(chunks(HEAD + FILE + b"x" * 100 + TAIL)), gate)
+    upload.release()
+    assert (gate.running, gate.spooled) == (0, 0)
+    assert await upload.files[0].read() == b"x" * 100
+    await upload.close()
+    assert (gate.running, gate.spooled) == (0, 0)
+
+
 async def test_a_full_gate_is_busy_before_any_byte(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 1)
     gate = UploadGate()

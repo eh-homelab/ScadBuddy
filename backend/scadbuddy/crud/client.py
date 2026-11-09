@@ -108,11 +108,15 @@ class Upload:
 class CrudUnavailableError(Exception):
     """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
     ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
-    passes (`PASSING`), unlike a route's 5xx or a read timeout."""
+    passes (`PASSING`), unlike a route's 5xx or a read timeout. ``problem`` is the last
+    try's 5xx problem document, empty when it had none or no answer came."""
 
-    def __init__(self, message: str, failure: Failure) -> None:
+    def __init__(
+        self, message: str, failure: Failure, problem: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.failure = failure
+        self.problem = problem or {}
 
     @property
     def passes(self) -> bool:
@@ -168,6 +172,7 @@ class _Call:
         self.fresh_connection = False
         self.last = "no attempt"
         self.failure: Failure = "unreached"
+        self.problem: dict[str, Any] = {}
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -179,6 +184,7 @@ class _Call:
     def judge(self, response: httpx.Response, started: float) -> Literal["done", "retry"]:
         """``done``: return it; ``retry``: send again after a backoff. A refusal raises."""
         status = response.status_code
+        self.problem = {}
         if CRUD_HEADER not in response.headers:
             self.last = f"{status} without {CRUD_HEADER}: the route is missing"
             self.failure = "route_missing"
@@ -190,7 +196,8 @@ class _Call:
             return "done"
         if status >= 500 and _problem(response).get("reason") != NOT_CONFIGURED:
             self.last = f"{status} from the API"
-            database = _problem(response).get("reason") == DATABASE_UNAVAILABLE
+            self.problem = _problem(response)
+            database = self.problem.get("reason") == DATABASE_UNAVAILABLE
             self.failure = "database_unavailable" if database else "unavailable"
             self.observe("unavailable", started)
             return "retry"
@@ -212,6 +219,7 @@ class _Call:
 
     def failed(self, error: Exception, started: float) -> None:
         self.last = f"{type(error).__name__}: {error}"
+        self.problem = {}
         unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
         self.failure = "unreached" if unreached else "transport"
         self.observe("transport", started)
@@ -220,7 +228,9 @@ class _Call:
         """The wait before the next try; raises once the budget is spent."""
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
-            raise CrudUnavailableError(f"CRUD route unavailable: {self.last}", self.failure)
+            raise CrudUnavailableError(
+                f"CRUD route unavailable: {self.last}", self.failure, self.problem
+            )
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1
         return wait

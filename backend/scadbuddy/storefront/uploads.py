@@ -12,9 +12,11 @@ refused before any byte is read. Each file is spooled to a temporary file past
 
 Each process bounds what all its uploads hold at once (`UploadGate`): at most
 `MAX_UPLOADS_AT_ONCE` bodies, and `MAX_SPOOL_BYTES` spooled across them; past either, 503
-``uploads_busy``. The whole body must come within `MAX_BODY_SECONDS`, with no gap past
-`MAX_GAP_SECONDS` between chunks, else 408 ``upload_too_slow``. It imports no database
-code: the edge imports it.
+``uploads_busy``. The byte budget is the main bound; the count keeps slow senders from
+holding every slot. The whole body must come within `MAX_BODY_SECONDS`, with no gap past
+`MAX_GAP_SECONDS` between chunks, and, after the first `RATE_GRACE_SECONDS`, at least
+`MIN_WINDOW_BYTES` in each `RATE_WINDOW_SECONDS`; else 408 ``upload_too_slow``. It
+imports no database code: the edge imports it.
 """
 
 from __future__ import annotations
@@ -49,12 +51,17 @@ MAX_TEXT_BYTES: Final = MAX_REQUEST_TEXT * 4
 #: Past this, a file goes to a temporary file on disk.
 SPOOL_BYTES: Final = 1024 * 1024
 #: The most request bodies one process reads or holds at once.
-MAX_UPLOADS_AT_ONCE = 2
+MAX_UPLOADS_AT_ONCE = 8
 #: The most body bytes one process holds across those bodies.
 MAX_SPOOL_BYTES = 600 * 1024 * 1024
 #: The longest a whole body may take, and the longest gap between two of its chunks.
 MAX_BODY_SECONDS = 300.0
 MAX_GAP_SECONDS = 30.0
+#: The least rate a body must keep: `MIN_WINDOW_BYTES` in each `RATE_WINDOW_SECONDS`,
+#: counted from `RATE_GRACE_SECONDS` after its start.
+RATE_GRACE_SECONDS = 10.0
+RATE_WINDOW_SECONDS = 10.0
+MIN_WINDOW_BYTES = 64 * 1024
 #: What a visitor turned away as busy waits before it asks again.
 BUSY_RETRY: Final = 30
 #: The control characters a request's text may hold (after line ends are made ``\n``).
@@ -98,11 +105,15 @@ def request_text_invalid() -> ApiError:
     )
 
 
+#: The problem type of `uploads_busy`.
+UPLOADS_BUSY: Final = STOREFRONT_PROBLEMS + "uploads_busy"
+
+
 def uploads_busy() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "The shop is taking other files right now. Try again in a moment.",
-        type_=STOREFRONT_PROBLEMS + "uploads_busy",
+        type_=UPLOADS_BUSY,
         headers={"Retry-After": str(BUSY_RETRY)},
         retry_after=BUSY_RETRY,
     )
@@ -178,19 +189,23 @@ UPLOADS = UploadGate()
 @dataclass
 class RequestUpload:
     """The text and the files, each spooled and at its start, and the gate's slot they
-    hold. `close` them."""
+    hold. `close` them; `release` frees the slot first, when the caller keeps the files
+    past what the gate should count."""
 
     text: str
     files: list[UploadFile] = field(default_factory=list)
     slot: UploadSlot | None = None
+
+    def release(self) -> None:
+        if self.slot is not None:
+            self.slot.release()
 
     async def close(self) -> None:
         try:
             for upload in self.files:
                 await upload.close()
         finally:
-            if self.slot is not None:
-                self.slot.release()
+            self.release()
 
 
 class _CappedParser(MultiPartParser):
@@ -264,22 +279,43 @@ class _CappedParser(MultiPartParser):
 async def _capped(request: Request, slot: UploadSlot) -> AsyncGenerator[bytes]:
     """The body as it arrives, each chunk held against the gate's budget: 413
     ``file_too_large`` past `MAX_REQUEST_BODY`, 503 ``uploads_busy`` past
-    `MAX_SPOOL_BYTES`, 408 ``upload_too_slow`` past `MAX_BODY_SECONDS` or a gap past
-    `MAX_GAP_SECONDS`."""
-    deadline = time.monotonic() + MAX_BODY_SECONDS
+    `MAX_SPOOL_BYTES`, 408 ``upload_too_slow`` past `MAX_BODY_SECONDS`, a gap past
+    `MAX_GAP_SECONDS`, or a window under `MIN_WINDOW_BYTES`.
+
+    Each wait ends at the first moment the body would be too slow, so a wait that times
+    out is always a refusal: the stream is never read again after a cancelled read."""
+    start = time.monotonic()
+    deadline = start + MAX_BODY_SECONDS
+    # The window being counted: [window_end - RATE_WINDOW_SECONDS, window_end).
+    window_end = start + RATE_GRACE_SECONDS + RATE_WINDOW_SECONDS
+    window_bytes = 0
     chunks = request.stream().__aiter__()
     seen = 0
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        now = time.monotonic()
+        # The window that must next hold `MIN_WINDOW_BYTES`: this one, or (already full)
+        # the next.
+        floor = window_end if window_bytes < MIN_WINDOW_BYTES else window_end + RATE_WINDOW_SECONDS
+        wait = min(MAX_GAP_SECONDS, deadline - now, floor - now)
+        if wait <= 0:
             raise upload_too_slow()
         try:
-            with anyio.fail_after(min(MAX_GAP_SECONDS, remaining)):
+            with anyio.fail_after(wait):
                 chunk = await chunks.__anext__()
         except StopAsyncIteration:
             return
         except TimeoutError:
             raise upload_too_slow() from None
+        now = time.monotonic()
+        # A chunk that comes as its window closes counts in it: the read could not be
+        # timed closer than that.
+        if now >= window_end - RATE_WINDOW_SECONDS:
+            window_bytes += len(chunk)
+        while now >= window_end:
+            if window_bytes < MIN_WINDOW_BYTES:
+                raise upload_too_slow()
+            window_end += RATE_WINDOW_SECONDS
+            window_bytes = 0
         seen += len(chunk)
         if seen > MAX_REQUEST_BODY:
             raise file_too_large()

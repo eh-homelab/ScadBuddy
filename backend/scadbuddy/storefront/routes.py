@@ -26,9 +26,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
-from scadbuddy.storefront.ratelimit import REQUEST_LIMITED
+from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
-from scadbuddy.storefront.uploads import read_request
+from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
 #: The largest render or draft item body the edge relays: far past any listing's values.
@@ -170,11 +170,16 @@ class RequestsEnabled:
 
 def _request_key(request: Request, visitor_id: str) -> str:
     """The forwarded ``Idempotency-Key``: the browser's own (a UUID), so a visitor's
-    resend of one request is one request, else a new one. Bound to the visitor, so two
-    visitors' keys never meet."""
+    resend of one request is one request; 428 ``idempotency_key_required`` without one,
+    since a request whose answer is lost could not be sent again safely. Bound to the
+    visitor, so two visitors' keys never meet."""
     sent = request.headers.get("idempotency-key")
     if sent is None:
-        return str(uuid.uuid4())
+        raise ApiError(
+            428,
+            "Send an Idempotency-Key with a design request.",
+            type_=f"{STOREFRONT_PROBLEMS}idempotency_key_required",
+        )
     try:
         browser = uuid.UUID(sent)
     except ValueError:
@@ -189,12 +194,16 @@ def _request_key(request: Request, visitor_id: str) -> str:
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
-    429 ``request_limited`` (`UploadAllowance`), 503 ``uploads_busy`` (`uploads.py`
-    `UploadGate`). The body is then read whole with every cap (`read_request`) and
-    spooled before the CRUD call: a deliberate step from the spec's "streams each upload"
-    (spec §5.4), so that each cap is refused here before the CRUD side reads a byte. A
-    call that fails or times out is 503 ``upload_unavailable``: it may have committed,
-    and the same browser key sent again is the same request."""
+    428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
+    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    (`uploads.py` `UploadGate`). The body is then read whole with every cap
+    (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
+    "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
+    side reads a byte. The client's turn and the gate's slot are freed once the body is
+    read, before the forward, which the CRUD side's own gate bounds. A CRUD side that is
+    busy is 503 ``uploads_busy`` (it read no byte); any other failed or timed-out call is
+    503 ``upload_unavailable``: it may have committed, and the same browser key sent
+    again is the same request."""
     state = request.app.state
     if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
         raise ApiError(
@@ -203,24 +212,46 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
         )
     key = _request_key(request, visitor_id)
-    wait = state.upload_allowance.take(client)
-    if wait is not None:
+    allowance: UploadAllowance = state.upload_allowance
+    held = allowance.start(client)
+    if isinstance(held, int):
         raise ApiError(
             429,
-            "You have sent a lot of design requests. Try again later.",
+            "You have sent a lot of design requests, or one is still sending. Try again later.",
             type_=REQUEST_LIMITED,
-            headers={"Retry-After": str(wait)},
-            retry_after=wait,
+            headers={"Retry-After": str(held)},
+            retry_after=held,
         )
-    upload = await read_request(request)
     try:
+        upload = await _read_spent(request, allowance, held)
+    finally:
+        allowance.finish(held)
+    try:
+        upload.release()
         return await crud.add_request(
             upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
         )
-    except CrudUnavailableError:
+    except CrudUnavailableError as error:
+        if error.problem.get("type") == UPLOADS_BUSY:
+            raise uploads_busy() from None
         raise ApiError(503, UPLOAD_LOST, type_=f"{STOREFRONT_PROBLEMS}upload_unavailable") from None
     finally:
         await upload.close()
+
+
+async def _read_spent(request: Request, allowance: UploadAllowance, key: str) -> RequestUpload:
+    """`read_request`, spending one of ``key``'s allowance unless the gate turned it away
+    as busy: every other refusal (413, 422, 408, a dropped body) is the visitor's
+    doing."""
+    spent = True
+    try:
+        return await read_request(request)
+    except ApiError as error:
+        spent = error.type != UPLOADS_BUSY
+        raise
+    finally:
+        if spent:
+            allowance.spend(key)
 
 
 class _Relayed(StreamingResponse):
