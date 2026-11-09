@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
@@ -61,22 +61,45 @@ MAX_RESTARTS: Final = 2
 ENDED: Final = ("cancelled", "closed")
 
 
-def _mask_runs(text: str) -> str:
-    return _DIGIT_RUN.sub(
-        lambda m: "•••" if sum(c.isdigit() for c in m.group()) >= MASKED_DIGITS else m.group(),
-        text,
-    )
+MASK: Final = "•••"
 
 
-def mask(text: str) -> str:
+def order_number(m: re.Match[str]) -> str:
+    """The order number an ``ORDER_NUMBER`` match names, as ScadBuddy writes it: upper
+    case, no leading zeros."""
+    return f"ORD-{m.group(1)}-{int(m.group(2))}"
+
+
+def order_numbers(text: str) -> list[str]:
+    """Every order number ``text`` names, as ``order_number`` writes it."""
+    return sorted({order_number(m) for m in ORDER_NUMBER.finditer(text)})
+
+
+def mask(text: str, known: Collection[str] = ()) -> str:
     """``text`` with every run of ``MASKED_DIGITS`` or more digits replaced, a run going on
-    across single spaces or hyphens. Order numbers (``ORDER_NUMBER``) are kept as they are."""
-    kept, last = [], 0
-    for m in ORDER_NUMBER.finditer(text):
-        kept += [_mask_runs(text[last : m.start()]), m.group()]
-        last = m.end()
-    kept.append(_mask_runs(text[last:]))
-    return "".join(kept)
+    across single spaces or hyphens. An order number is a run too, so it is masked first;
+    only the canonical number (``order_number``) of an order in ``known`` is put back, in
+    place of the digits it matched. Digits that run on after it stay masked. So an account
+    number written as an order number (leading zeros, digits run on) never survives."""
+    kept: dict[int, re.Match[str]] = {}
+    for named in ORDER_NUMBER.finditer(text):
+        if order_number(named) in known:
+            kept[named.start(1)] = named
+    out, last = [], 0
+    for run in _DIGIT_RUN.finditer(text):
+        before = text[last : run.start()]
+        m = kept.get(run.start())
+        if m is None:
+            digits = sum(c.isdigit() for c in run.group())
+            out += [before, MASK if digits >= MASKED_DIGITS else run.group()]
+        else:
+            # ``before`` ends with the match's "ORD-", which the canonical number replaces.
+            out += [before[: len(before) - (m.start(1) - m.start())], order_number(m)]
+            if run.end() > m.end():
+                out += [text[m.end()], MASK]
+        last = run.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -284,7 +307,7 @@ def _apply(
                 deposit.amount_minor,
                 deposit.currency,
                 deposit.posted_on,
-                mask(deposit.text)[:DESCRIPTION_CHARS],
+                mask(deposit.text, _existing(conn, deposit.text))[:DESCRIPTION_CHARS],
                 moved,
             ),
         )
@@ -380,11 +403,18 @@ class _Balances:
         return self._balances[order_id]
 
 
+def _existing(conn: Conn, text: str) -> set[str]:
+    """The order numbers ``text`` names that are orders here: only these are kept unmasked."""
+    numbers = order_numbers(text)
+    if not numbers:
+        return set()
+    rows = conn.execute("SELECT number FROM orders WHERE number = ANY(%s)", (numbers,))
+    return {str(row["number"]) for row in rows.fetchall()}
+
+
 def _matches(conn: Conn, balances: _Balances, deposit: Deposit) -> list[tuple[str, str]]:
     found: dict[str, str] = {}
-    numbers = sorted(
-        {f"ORD-{m.group(1)}-{int(m.group(2))}" for m in ORDER_NUMBER.finditer(deposit.text)}
-    )
+    numbers = order_numbers(deposit.text)
     if numbers:
         for row in conn.execute(
             "SELECT id FROM orders WHERE number = ANY(%s) AND status <> ALL(%s)",

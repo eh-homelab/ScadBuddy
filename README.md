@@ -692,7 +692,9 @@ was set gets none until it is linked again. Each webhook is checked by its
 sign in again (`ITEM_LOGIN_REQUIRED`), the card shows "Reconnect", which opens Link's
 update mode ([update mode](https://plaid.com/docs/link/update-mode/)). The bank's
 text is kept with every run of five or more digits masked, a run going on across single
-spaces or hyphens (so an IBAN printed in groups is masked); an order number is kept. The page's Content-Security-Policy allows Link's one
+spaces or hyphens (so an IBAN printed in groups is masked); an order number is masked
+too, and only the number of an order that exists is put back, written as ScadBuddy writes it
+(so an account number dressed as an order number never survives). The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

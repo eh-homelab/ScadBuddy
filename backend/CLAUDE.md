@@ -1235,7 +1235,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   is stored only when the link and the cursor are still the ones it started from. Posted
   deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
   (`mask`: every run of five or more digits, a run going on across single spaces or
-  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  hyphens; an order number is a run too, and only the canonical `ORD-yyyy-n` of an
+  order that exists is put back, `_existing`, with digits run on after it still masked) and suggested in `bank_deposit_matches`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
   `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
