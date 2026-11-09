@@ -882,3 +882,33 @@ def test_a_view_with_no_listing_item_reads_no_listing(
     r = ask(asks, key="r-nolisting")
     assert r.status_code == 200, r.text
     assert r.json()["items"][0]["labels"] == {}
+
+
+def test_an_item_added_before_a_new_commit_shows_raw_parameter_names(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    """Captions come from the listing at the item's own (slug, commit). Once the listing
+    is republished at another commit, an older item falls back to the parameter's name
+    (the `DraftItem.labels` docstring); it never borrows the new commit's captions."""
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="old1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "Width (mm)"}
+    store = _orders(api).listings
+    current = store.get(listing.id)
+    assert current is not None
+    moved = store.update(
+        listing.id,
+        ListingInput(
+            slug="demo",
+            commit="e" * 40,
+            title="A demo box",
+            params={"width": {"kind": "number", "min": 20, "max": 80, "step": 1}},  # type: ignore[dict-item]
+        ),
+        expected_updated_at=current.updated_at,
+    )
+    store.mark_published(
+        moved.id, snapshot=_snapshot(), media=[], expected_updated_at=moved.updated_at
+    )
+    [item] = crud.get("/draft").json()["items"]
+    assert item["inputs"] == {"width": 40}
+    assert item["labels"] == {"width": "width"}
