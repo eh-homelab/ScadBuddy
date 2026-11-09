@@ -787,16 +787,14 @@ class Lifecycle:
         with self.store.transaction() as conn:
             if not self.store.claim_idle_draft(conn, order_id, before=before):
                 return False
-            # `claim_idle_draft` holds the row lock already; this only reads the order
-            # (its status, for the event told after the commit).
-            order = self._lock(conn, order_id)
             for attachment in self.store.attachments(order_id, conn=conn):
                 self.store.delete_attachment(conn, attachment.id)
             if not self.store.delete_draft(conn, order_id):
                 raise RuntimeError(f"cart {order_id} was claimed but not deleted")
         emit(
             self.bus,
-            OrderChanged(order_id=order.id, status=order.status, cart=True, deleted=True),
+            # Only an unsubmitted cart is claimed, and that is always a `draft`.
+            OrderChanged(order_id=order_id, status="draft", cart=True, deleted=True),
         )
         return True
 
