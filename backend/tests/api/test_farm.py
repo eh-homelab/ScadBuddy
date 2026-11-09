@@ -96,13 +96,14 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
 def test_only_items_that_can_still_print_are_looked_up(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#5833: an unfiltered read is mostly history. Only the pending, printing and paused
-    items can carry the mark, so only they are looked up, and a finished item ScadBuddy
-    sent carries none."""
+    """#5833: an unfiltered read is mostly history. Only the pending and printing items
+    can carry the mark, so only they are looked up, and a finished or skipped item
+    ScadBuddy sent carries none."""
     configure(client)
     queue = [
         *recording("queue.json"),
-        {**recording("queue.json")[1], "id": 260, "status": "paused"},
+        {**recording("queue.json")[1], "id": 260, "status": "pending"},
+        {**recording("queue.json")[1], "id": 261, "status": "skipped"},
     ]
     respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
     links = _state(client).print_links

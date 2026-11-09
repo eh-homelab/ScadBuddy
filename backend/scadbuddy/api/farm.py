@@ -40,8 +40,12 @@ DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_
 
 
 #: The queue item states that can carry the "Queued from ScadBuddy" mark (#3741, #5833):
-#: a job still to print or printing. A finished item is history and is not looked up.
-MARKED_STATUSES = frozenset({"pending", "printing", "paused"})
+#: a job still to print or printing. Bambuddy's queue item states are pending, printing,
+#: completed, failed, skipped and cancelled; it has no "paused" state. Source:
+#: maziggy/bambuddy `backend/app/models/print_queue.py` line 140 at commit 918353a
+#: (https://github.com/maziggy/bambuddy/blob/918353a945d2993a475d5cf1ce135c52c9e11932/backend/app/models/print_queue.py#L140).
+#: A finished or skipped item is history and is not looked up.
+MARKED_STATUSES = frozenset({"pending", "printing"})
 
 
 class FarmQueueItem(QueueItem):
@@ -49,7 +53,7 @@ class FarmQueueItem(QueueItem):
 
     #: The output or library file ScadBuddy queued this item for, found only by a record
     #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
-    #: the item. Set only on a pending, printing or paused item (`MARKED_STATUSES`).
+    #: the item. Set only on a pending or printing item (`MARKED_STATUSES`).
     #: ``None`` for a finished item, for an item queued from Bambuddy (its reprint of an
     #: archive ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never
     #: taken from Bambuddy's answer.
@@ -67,8 +71,8 @@ async def get_queue(
 ) -> list[FarmQueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
     is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
-    Each pending, printing or paused item ScadBuddy queued carries ``scadbuddy``
-    (#3741); only those items are looked up (#5833)."""
+    Each pending or printing item ScadBuddy queued carries ``scadbuddy`` (#3741); only
+    those items are looked up (#5833)."""
     async with client_for(store.load()) as client:
         items = await client.queue(printer_id=printer_id, status=status)
     matches = await _jobs(links, [item for item in items if item.status in MARKED_STATUSES])
