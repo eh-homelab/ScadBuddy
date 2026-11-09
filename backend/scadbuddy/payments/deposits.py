@@ -258,7 +258,8 @@ def _apply(
             gone.add(tx_id)
             continue
         before = conn.execute(
-            "SELECT amount_minor, payment_id FROM bank_deposits WHERE transaction_id = %s"
+            "SELECT amount_minor, payment_id, removed_at FROM bank_deposits"
+            " WHERE transaction_id = %s"
             " FOR UPDATE",
             (deposit.transaction_id,),
         ).fetchone()
@@ -287,7 +288,12 @@ def _apply(
                 moved,
             ),
         )
-        if moved:
+        # Its page hears of a new amount, and of a removed deposit the bank brought back.
+        if moved or (
+            before is not None
+            and before["payment_id"] is not None
+            and before["removed_at"] is not None
+        ):
             told.update(_payment_orders(conn, [deposit.transaction_id]))
         # A changed deposit is matched again from nothing.
         conn.execute(

@@ -655,8 +655,14 @@ class BankLinks:
 
 
 def _drop_deposits(conn: Conn, item_id: str) -> None:
-    """The Item's deposits and their suggestions go with it, but a recorded one stays: its
-    order page still compares the payments with what the bank last said (#4961)."""
+    """The Item's deposits and every suggestion go with it, but a recorded deposit's row
+    stays: its order page still compares the payments with what the bank last said (#4961).
+    Nothing prunes such a row while its payment stands."""
+    conn.execute(
+        "DELETE FROM bank_deposit_matches WHERE transaction_id IN (SELECT transaction_id"
+        " FROM bank_deposits WHERE item_id = %s)",
+        (item_id,),
+    )
     conn.execute("DELETE FROM bank_deposits WHERE item_id = %s AND payment_id IS NULL", (item_id,))
 
 
