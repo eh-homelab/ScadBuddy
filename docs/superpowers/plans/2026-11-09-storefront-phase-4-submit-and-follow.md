@@ -20,7 +20,7 @@
 - No token in a path. The order link token and the pay token travel in request bodies only. The page carries the order link in the URL fragment, `/o#<token>`, which the browser never sends. The CRUD side stores only sha256 (hex) of each token. Tokens are 32 random bytes, URL-safe base64.
 - Mail is sent only by the CRUD service. It writes an outbox row in the same transaction as the change that causes it, and sends after the commit. The SMTP password is sealed under the CRUD service's KEK (`core/secrets.py` `seal_secret`), as payment credentials are (`payments/credentials.py`). With no SMTP host set, the `order_link` and `sign_in_code` rows stay queued and the shop sees them as not sent. The four order events (`revision_ready`, `price_ready`, `payment_requested`, `shipped`) queue only when `storefront_mail_covers` is true, which needs a host; without one they leave no row and stay #5660's plugin's job. Nothing fails.
 - Mail templates are plain text. Each link they carry is built from the existing env-only `storefront_public_url` (`SCADBUDDY_STOREFRONT_PUBLIC_URL`, `https://michaels-workshop.nullreference.io` in prod). It is never a stored setting: a stored value could point customers' links anywhere (`core/settings.py`). Customer text in a mail is never HTML.
-- The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's or account's row id. Only the CRUD side builds it.
+- The customer actor (§6.4): `Actor.kind` gains `customer`, with `principal` `customer:<customer id>` and `session` the visitor's row id, the account's row id, or `link:<link row id>` for a reader who holds only an order link (Task 5's body `token`, which comes with no visitor header). Only the CRUD side builds it.
 - A submitted order stays `draft` in `OrderStatus`. "Submitted" is `orders.submitted_at` (§5.5).
 - After submit, the customer may only answer revisions, accept quotes, pay, and cancel while nothing is approved (§5.5). Every other customer write gets 409 `order_submitted`.
 - The bot check (§5.8): Cloudflare Turnstile on sign-up, submit and design requests, on only when both `SCADBUDDY_TURNSTILE_SITE_KEY` and the secret file are set. The edge verifies the token and holds the secret. The CRUD side never sees it.
@@ -89,7 +89,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 **Files:**
 - Create: the migration `<ts>_storefront_mail.sql`, `backend/scadbuddy/orders/storefront/mail.py`, `backend/scadbuddy/orders/storefront/mail_templates.py`
 - Modify: `backend/scadbuddy/core/settings.py` and `api/settings.py` (`storefront_mail_host`, `_port` 587, `_user`, `_sender`, `_starttls` true; not `storefront_public_url`, which stays env-only), `backend/scadbuddy/workflows/housekeeping.py` (step `STOREFRONT_MAIL_SWEEP`, patch `housekeeping-send-storefront-mail`, appended last), `main.py`, `frontend/src/components/settings/` (a "Storefront mail" section with the sealed password, as the payment credential fields are)
-- Test: `backend/tests/orders/storefront/test_mail.py`, `test_housekeeping*.py`, the settings test
+- Test: `backend/tests/orders/storefront/test_mail.py`, `backend/tests/test_housekeeping.py`, `backend/tests/test_housekeeping_replay.py`, the settings test
 
 **Interfaces:**
 - Produces:
@@ -134,7 +134,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
     2. It takes the number from `order_numbers`.
     3. It runs `set_shipping_option`, which refuses 422 `address_required` for an option that ships with no address.
     4. It recomputes the auto tax.
-    5. It runs `apply_deposit_policy`.
+    5. It runs `apply_deposit_policy`. A deposit request opened here queues no `payment_requested` mail (no link exists yet, so `storefront_mail_covers` is false): this is intended, because the `order_link` mail of step 8 leads to the order page, which shows it.
     6. It stamps `submitted_at`.
     7. It creates the link.
     8. It queues `order_link` mail to the email.
@@ -205,7 +205,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 6: The pay page (this session)
 
 **Files:**
-- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`; `pay_link` returns `f"{storefront_url}/pay#{token}"`, not `/pay/{token}`, with its test in `tests/payments/test_venmo.py`; and the docstrings that describe the path form: `payments/venmo.py` (module and `pay_link`), `crud/storefront.py`, `api/crud_storefront.py` (module and the checkout route) and `api/crud_areas.py`). The merged migration `20261108T0512Z_payment_requests_pay_token.sql` keeps its comment: a merged migration is never edited.
+- Modify: `storefront/routes.py` (`POST /api/store/v1/pay/checkout`, which forwards `{token}` to #5769's CRUD route `…/pay/checkout`), `storefront/static.py` (the `/pay` path gets its own CSP, which allows PayPal's SDK origins, `https://www.paypal.com` and `https://www.sandbox.paypal.com`, for `script-src`, `frame-src` and `connect-src`; every other page keeps the phase 3 CSP), `payments/venmo.py` (`PAY_PAGE_READY = True`, only after Step 0 below; `pay_link` returns `f"{storefront_url}/pay#{token}"`, not `/pay/{token}`, with its test in `tests/payments/test_venmo.py`; and every copy of the path form: `payments/venmo.py` (the module docstring, the `PAY_PAGE_READY` comment and `pay_link`), `crud/storefront.py`, `api/crud_storefront.py` (module and the checkout route), `api/crud_areas.py`, `backend/CLAUDE.md` ("once the storefront's `/pay/<token>` page ships"), `README.md` ("a pay page on the storefront, `/pay/<token>`"), the docstrings in `backend/tests/api/test_payment_providers.py` and `backend/tests/payments/test_venmo.py`, and the links `test_venmo.py` builds or strips with `f"{STOREFRONT}/pay/{token}"`; a final `git grep -n "/pay/<token>\|/pay/{token}\|/pay/{"` finds none outside merged migrations and dated plans), `payments/paypal.py` (`create_request`: only if Step 0 finds the SDK cannot fund a `payment_source.paypal` order with Venmo, a pay-page request's order is created without `payment_source`). The merged migration `20261108T0512Z_payment_requests_pay_token.sql` keeps its comment: a merged migration is never edited.
 - Create: `frontend/src/storefront/pages/PayPage.tsx`
 - Test: `backend/tests/storefront/test_static.py` (the CSP for each path), `backend/tests/storefront/test_edge_routes.py` (an empty CRUD 404 maps to the edge's own 404), `backend/tests/payments/test_venmo.py`, `frontend/src/storefront/pages/PayPage.test.tsx`
 
@@ -215,6 +215,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 - It shows the amount and what it is for. On approval, it says "Thanks. We will confirm your payment shortly." and links to the order page. The webhook settles the payment, not the page.
 - With the fake provider (`SCADBUDDY_PAYMENTS_FAKE_PROVIDER`), a request's hosted URL is the fake's own page. "Pay" on the order page links there, and the pay page is not used.
 
+- [ ] **Step 0: Measure in PayPal's sandbox** (`payments/venmo.py` module docstring: "Phase 4 measures it in the sandbox before `PAY_PAGE_READY` flips"). With sandbox credentials, create an order as `create_request` does (`payment_source.paypal`), render the JS SDK buttons with `enable-funding=venmo`, and record whether the Venmo button appears and can approve that order. Record the result, how and where it was measured, and PayPal's documentation link in `payments/venmo.py`'s docstring (#259). If the SDK cannot fund it, change `create_request` to create a pay-page request's order without `payment_source`, with a test. If no sandbox credentials are available, ship the page with `PAY_PAGE_READY` left `False`, and the flag flips in its own PR once measured.
 - [ ] **Steps 1–5:** test first, implement, then commit and open PR 4: `feat(storefront): the pay page for Venmo through PayPal`.
 
 ### Task 7: The order link's state, and mail, in the back office (this session)
