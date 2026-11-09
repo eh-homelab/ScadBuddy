@@ -154,6 +154,8 @@ async def render_preview(
         _job(job_id), plate=plate, visitor_id=visitor_id, client=client
     )
     headers = {}
-    if "content-length" in stream.response.headers:
+    if "content-length" in stream.response.headers and (
+        "content-encoding" not in stream.response.headers
+    ):
         headers["Content-Length"] = stream.response.headers["content-length"]
     return _Relayed(stream, headers=headers)

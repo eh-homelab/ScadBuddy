@@ -393,8 +393,11 @@ class CrudClient(_Base):
             fresh = self._build() if call.take_fresh_connection() else None
             http = fresh or self._http
             try:
+                # Identity: a relay copies the upstream Content-Length, and httpx would
+                # decode a gzipped body to more bytes than that length declares.
+                plain = {"Accept-Encoding": "identity", **(headers or {})}
                 sent = http.build_request(
-                    method, path, params=params, **self._kwargs(None, None, None, headers)
+                    method, path, params=params, **self._kwargs(None, None, None, plain)
                 )
                 response = await http.send(sent, stream=True)
             except httpx.TransportError as error:

@@ -5,6 +5,7 @@ per-client request limit."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import uuid
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any
@@ -569,6 +570,30 @@ def test_the_preview_is_streamed(edge: TestClient, crud_mock: respx.Router) -> N
     assert route.calls.last.request.url.params["plate"] == "2"
     # The edge reads it as a stream and closes it, never as one body.
     assert closed == [True]
+
+
+def test_a_gzipped_preview_is_relayed_whole(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    # The API gzips a plate GLB (one message) and declares the compressed length; the
+    # edge asks for identity, and never declares a length it does not send.
+    body = b"glTF" + b"x" * 100_000
+    packed = gzip.compress(body)
+    route = crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(
+        return_value=httpx.Response(
+            200,
+            headers={
+                **CRUD,
+                "Content-Type": "model/gltf-binary",
+                "Content-Encoding": "gzip",
+                "Content-Length": str(len(packed)),
+            },
+            content=packed,
+        )
+    )
+    r = edge.get(f"/api/store/v1/renders/{JOB}/preview.glb?plate=2")
+    assert r.status_code == 200
+    assert r.content == body
+    assert r.headers.get("content-length") in (None, str(len(body)))
+    assert route.calls.last.request.headers["accept-encoding"] == "identity"
 
 
 def test_a_preview_refusal_passes_through(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
