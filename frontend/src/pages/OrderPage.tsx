@@ -564,7 +564,9 @@ export function OrderPage() {
           section={section?.item === current.id ? section.at : null}
           sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
           // Once its dialog opened, a slice request is the quote's section only (#5797 review); only
-          // this item's, so a late call never rewrites another item's request (#5832).
+          // this item's (#5832). The item match is defensive: the drawer is keyed by its item and
+          // calls this from its own dialog, so no sequence in the UI today makes a call for
+          // another item's request.
           onSliceOpened={() => setSection((was) => (was?.item === current.id && was.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
