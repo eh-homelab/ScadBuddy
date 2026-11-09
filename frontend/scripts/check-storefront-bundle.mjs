@@ -10,9 +10,13 @@
 // - a script naming a back-office API path (`/api/v1/`): the back office's `api/client`
 //   and anything else that calls it. The page's own client calls `/api/store/v1` only.
 //
+// - a file the entry's CSS names with `url(...)` (the fonts of @fontsource-variable/geist)
+//   that the closure does not list: the edge would answer 404 for it. Vite lists them
+//   under `assets` of the CSS's entry chunk.
+//
 // Usage: node scripts/check-storefront-bundle.mjs [dist]   (exits 1 and names each fault)
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import process from 'node:process'
 
 const ENTRY = 'storefront.html'
@@ -30,10 +34,32 @@ export function closure(manifest, key = ENTRY) {
   return [...seen]
 }
 
+// The files the edge serves for the entry: `static.py` `_closure` (the `file`, `css` and
+// `assets` of each chunk in `closure`), as paths relative to dist.
+export function served(manifest, key = ENTRY) {
+  const files = new Set()
+  for (const chunk of closure(manifest, key)) {
+    const { file, css = [], assets = [] } = manifest[chunk]
+    for (const path of [file, ...css, ...assets]) if (path) files.add(path)
+  }
+  return files
+}
+
 export function faults(dist) {
   const manifest = JSON.parse(readFileSync(join(dist, '.vite', 'manifest.json'), 'utf8'))
   if (!(ENTRY in manifest)) return [`${ENTRY} is not an entry of this build`]
   const found = []
+  const files = served(manifest)
+  for (const file of files) {
+    if (!file.endsWith('.css')) continue
+    const css = readFileSync(join(dist, file), 'utf8')
+    for (const [, ref] of css.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) {
+      if (ref.startsWith('data:')) continue
+      if (![...files].some((path) => basename(path) === basename(ref))) {
+        found.push(`${file}: names ${ref}, which the storefront.html closure does not serve`)
+      }
+    }
+  }
   for (const key of closure(manifest)) {
     const chunk = manifest[key]
     const source = chunk.src ?? key
@@ -50,5 +76,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const found = faults(dist)
   for (const fault of found) process.stderr.write(`storefront bundle: ${fault}\n`)
   if (found.length) process.exit(1)
-  process.stdout.write('storefront bundle: no back-office API and no mocks in the storefront.html closure\n')
+  process.stdout.write('storefront bundle: no back-office API, no mocks, and every file the CSS names is in the storefront.html closure\n')
 }

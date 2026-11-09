@@ -492,6 +492,13 @@ jobs:
       - name: Storefront bundle
         run: pnpm check:storefront-bundle
 
+      # The edge serves this build's closure, fonts included (no database needed).
+      - name: Storefront edge serves the build
+        env:
+          SCADBUDDY_STOREFRONT_DIST: ${{ github.workspace }}/frontend/dist
+        working-directory: backend
+        run: uv run --frozen pytest tests/storefront/test_real_build.py -p no:cacheprovider
+
   # ── Frontend e2e: the msw-backed Playwright suite, in shards ────────────────
   #
   # The MSW-BACKED half of the e2e suite lives here and NOT in the image
