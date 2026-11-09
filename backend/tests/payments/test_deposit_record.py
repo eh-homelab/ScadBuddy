@@ -422,3 +422,37 @@ async def test_a_sync_that_reads_a_recorded_deposit_unchanged_tells_no_page(bank
 
     await resynced(bank, -10, "c2", Bus())
     assert heard == []
+
+
+async def test_a_removed_deposit_read_again_tells_its_page(bank: Bank) -> None:
+    """The bank brings back a deposit it removed: the page drops its "removed" warning."""
+    owing = bank.owing()
+    await removed_after_recording(bank, owing)
+    heard: list[Any] = []
+
+    class Bus:
+        def publish(self, event: Any) -> None:
+            heard.append(event)
+
+    await resynced(bank, -10, "c3", Bus())
+    assert [e.order_id for e in heard] == [owing.id]
+    assert suggestions(bank.rows, owing.id) == []
+
+
+async def test_an_unlink_drops_a_recorded_deposit_s_suggestions(bank: Bank) -> None:
+    """The recorded row stays for its warning; the suggestions it had go with the Item."""
+    owing = bank.owing()
+    other = bank.owing()
+    await synced(bank, transaction("t1", -10, "ACH"))
+    record(bank, owing, "t1")
+    with respx.mock as router:
+        router.post(f"{SANDBOX}/item/remove").mock(
+            return_value=httpx.Response(200, json=payload("item.remove.json"))
+        )
+        await bank.bank.unlink()
+    with bank.pool.connection() as conn:
+        kept = conn.execute("SELECT count(*) AS n FROM bank_deposits").fetchone()
+        matched = conn.execute("SELECT count(*) AS n FROM bank_deposit_matches").fetchone()
+    assert kept is not None and kept["n"] == 1
+    assert matched is not None and matched["n"] == 0
+    assert other.id

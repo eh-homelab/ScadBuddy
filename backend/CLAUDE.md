@@ -1239,7 +1239,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
   `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
-  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below.
+  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below, and every
+  suggestion; nothing prunes a kept row while its payment stands.
   The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
   `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
   lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
@@ -1263,3 +1264,31 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
   topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
   deposit whose amount it changed or that it removed, so an open order page reloads.
+  Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
+  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
+  `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
+  asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
+  the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`, which reads the
+  `bank_links` row only after the key caches and the bucket, so a forged `kid` costs no
+  database read or unseal); a bad one is 400 and changes nothing, a key Plaid could not
+  give, or a link whose keys or access token cannot be read, is 503 (Plaid sends it
+  again). Only a key that verified a webhook is kept by `kid`
+  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
+  `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
+  nothing and is kept with the unknown ones; a `kid` Plaid does not
+  have (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and goes in a cache of its own for
+  `UNKNOWN_KEY_SECONDS`, so forged `kid`s never evict a verified key. A `kid` in neither
+  cache takes a token from `_KEY_LOOKUPS` (`KeyLookups`): the sender's bucket first (the
+  address `relay_client` trusts, never a raw `X-Forwarded-For`), then the process's
+  (a burst of `KEY_LOOKUP_BURST`); a refusal is 429 with `Retry-After`, which Plaid honours
+  ([webhook retries](https://plaid.com/docs/api/webhooks/#webhook-retries)). A webhook
+  whose `kid` is already being looked up waits for that lookup and takes no token.
+  `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
+  sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
+  `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
+  and Settings shows "Reconnect": the link token is then for Link's update mode (the
+  Item's `access_token`, no `products`; a linked row with no token is 409
+  `access_token_missing`, never a fresh Link), and `POST …/reconnected` (person) clears it,
+  with a `sync_error` that was `ITEM_LOGIN_REQUIRED`, and syncs after the answer;
+  `LOGIN_REPAIRED` clears both too, and any sync that reads Plaid clears it. A webhook for another Item is `ignored`.

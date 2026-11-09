@@ -79,6 +79,14 @@ export function BankAccount() {
     })
   }
 
+  /** Link's update mode: the bank signs the shop in again; the token needs no exchange. */
+  async function reconnect() {
+    await run(async () => {
+      const { link_token } = await api.bankLinkToken()
+      if (await openPlaidLink(link_token)) await api.bankReconnected()
+    })
+  }
+
   const form = shown && (!shown.configured || editing) && !shown.account
   return (
     <section aria-label="Bank account" className="space-y-2 rounded-md border p-3">
@@ -118,7 +126,15 @@ export function BankAccount() {
           )}
         </p>
       )}
-      {shown?.account && shown.sync_error && (
+      {shown?.account && shown.login_required && (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-warn">
+          <span>Plaid needs you to sign in to the bank again.</span>
+          <Button size="sm" disabled={busy} onClick={() => void reconnect()} {...USER_ONLY}>
+            Reconnect
+          </Button>
+        </div>
+      )}
+      {shown?.account && shown.sync_error && !shown.login_required && (
         <p role="status" className="text-[13px] text-warn">
           Plaid could not be read ({shown.sync_error}). ScadBuddy tries again at the next sweep.
         </p>

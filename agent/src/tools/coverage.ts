@@ -167,6 +167,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'POST /api/v1/payments/webhooks/{provider}',
     reason: "A payment provider's call, signed with its own secret (#4957); never an agent's.",
   },
+  {
+    operation: 'POST /api/v1/payments/bank/webhook',
+    reason: "Plaid's call for the linked bank account, signed with its own key (#4961); never an agent's.",
+  },
   ...(
     [
       'GET /api/v1/payments/providers',
@@ -186,6 +190,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'POST /api/v1/payments/bank/link-token',
       'POST /api/v1/payments/bank/link',
       'DELETE /api/v1/payments/bank/link',
+      'POST /api/v1/payments/bank/reconnected',
     ] as const
   ).map((operation) => ({
     operation,

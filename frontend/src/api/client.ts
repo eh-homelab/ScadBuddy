@@ -2456,6 +2456,7 @@ export const api = {
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
+  bankReconnected: () => request<void>('/payments/bank/reconnected', { method: 'POST' }),
   orderBankDeposits: (orderId: string) => request<DepositSuggestion[]>(`/orders/${seg(orderId)}/bank-deposits`),
   recordOrderBankDeposit: (orderId: string, transactionId: string) =>
     request<Payment>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/record`, { method: 'POST' }),

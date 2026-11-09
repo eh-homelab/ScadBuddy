@@ -1,0 +1,13 @@
+{
+  "webhook_type": "ITEM",
+  "webhook_code": "ERROR",
+  "item_id": "M5eVJqLnv3tbzdngLDp9FL5OlDNxlNhlE55op",
+  "error": {
+    "display_message": "the login details of this item have changed (credentials, MFA, or required user action) and a user login is required to update this information. use Link's update mode to restore the item to a good state",
+    "error_code": "ITEM_LOGIN_REQUIRED",
+    "error_message": "the login details of this item have changed (credentials, MFA, or required user action) and a user login is required to update this information. use Link's update mode to restore the item to a good state",
+    "error_type": "ITEM_ERROR",
+    "status": 400
+  },
+  "environment": "sandbox"
+}
