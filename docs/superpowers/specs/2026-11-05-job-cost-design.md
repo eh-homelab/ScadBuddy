@@ -159,7 +159,8 @@ replayed webhook, a retried flow) write once.
 - **Materials, other.** Added by hand from the order page (magnets, keyrings, paint).
   Agent tool `order_cost_add` (`write`).
 - **Late costs.** Time and cost entries can be added and deleted on an order in any
-  status, closed, cancelled and on hold included, because a fee or a label often arrives
+  status, closed, cancelled and on hold included (adding one to a storefront cart not yet
+  submitted is refused, `order_not_submitted`; storefront spec §5.4), because a fee or a label often arrives
   after the order moved on **(call)**. Each write still takes the order's row lock and
   writes an `order_events` row.
 

@@ -306,7 +306,8 @@ the customer's view.
   process produced is deleted): an unsubmitted cart is not yet a record of the shop's.
   A cart with a time or cost entry is never swept (the lifecycle refuses those on a cart,
   `order_not_submitted`). Once a delete commits, the bus is told `order.changed` with
-  `deleted: true`, so an open orders list or `order:<id>` page drops it.
+  `deleted: true`: an open orders list reads again without it, and an open `order:<id>`
+  page reads again and shows the order as not found.
 
 ### 5.5 Submit
 

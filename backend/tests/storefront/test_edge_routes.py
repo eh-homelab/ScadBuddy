@@ -930,6 +930,27 @@ def test_a_committed_request_is_sent_again_after_requests_went_off(
     assert asked == posted.calls.last.request.headers["idempotency-key"]
 
 
+def test_a_crud_side_that_does_not_answer_the_keyed_check_is_503(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5829: requests are off and the CRUD side does not answer the uncached
+    check of the request's own key. The visitor gets the edge's 503 problem, never a 500,
+    and the body is never sent."""
+
+    def enabled(request: httpx.Request) -> httpx.Response:
+        if "idempotency-key" in request.headers:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"enabled": False}, headers=CRUD)
+
+    crud_mock["requests_enabled"].side_effect = enabled
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 503
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert posted.call_count == 0
+
+
 def test_a_client_may_start_six_requests_an_hour(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

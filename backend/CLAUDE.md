@@ -839,7 +839,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
-  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  in every order status, ended and on hold included, except that adding one to a storefront cart not yet submitted is 409 `order_not_submitted` (`time.added`, `cost.removed`, … on the
   audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
   currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
   `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
