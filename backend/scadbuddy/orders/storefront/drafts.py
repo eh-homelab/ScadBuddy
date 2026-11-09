@@ -197,12 +197,19 @@ async def _view(state: AppState, order: Order) -> DraftView:
         list[OrderItem], dict[str, list[str] | None], list[Attachment], list[Listing]
     ]:
         offered = orders.store.storefront_offered(order.id)
+        items = orders.store.items(order.id)
+        # The captions of the listing items' values: the listings at those items' slug
+        # and commit only, in one query; none when the draft has no listing item.
+        pairs = {
+            (item.reference.slug, item.reference.commit)
+            for item in items
+            if offered.get(item.id) and item.reference is not None
+        }
         return (
-            orders.store.items(order.id),
+            items,
             offered,
             orders.store.attachments(order.id),
-            # The captions of a listing item's values: only when the draft has one.
-            orders.listings.all() if any(offered.values()) else [],
+            orders.listings.at_commits(pairs) if pairs else [],
         )
 
     rows, offered, files, listings = await asyncio.to_thread(read)

@@ -834,3 +834,41 @@ def test_removing_a_request_drops_its_files_holds(asks: CrudCaller, s3_api: Test
             "SELECT count(*) AS n FROM blob_refs WHERE holder_kind = 'attachment'"
         ).fetchone()
     assert held is not None and held["n"] == 0
+
+
+def test_the_view_reads_only_the_listings_its_items_name(
+    crud: CrudCaller, api: TestClient, listing: Listing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The labels come from the listings at the items' (slug, commit), read in one query:
+    never every listing of the shop on each draft read."""
+    store = _orders(api).listings
+    other = store.create(ListingInput(slug="other", commit="d" * 40, title="Another"))
+    store.mark_published(
+        other.id, snapshot=_snapshot(), media=[], expected_updated_at=other.updated_at
+    )
+    asked: list[set[tuple[str, str]]] = []
+    real = type(store).at_commits
+
+    def spy(self: Any, pairs: Any) -> Any:
+        asked.append(set(pairs))
+        found = real(self, pairs)
+        assert {(found_.slug, found_.commit) for found_ in found} <= set(pairs)
+        return found
+
+    monkeypatch.setattr(type(store), "at_commits", spy)
+    monkeypatch.setattr(type(store), "all", lambda self: pytest.fail("read every listing"))
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="lab1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "Width (mm)"}
+    assert asked and all(pairs == {("demo", COMMIT)} for pairs in asked)
+
+
+def test_a_view_with_no_listing_item_reads_no_listing(
+    asks: CrudCaller, api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _orders(api).listings
+    monkeypatch.setattr(type(store), "at_commits", lambda self, pairs: pytest.fail("read"))
+    monkeypatch.setattr(type(store), "all", lambda self: pytest.fail("read every listing"))
+    r = ask(asks, key="r-nolisting")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {}

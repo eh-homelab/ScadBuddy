@@ -130,6 +130,21 @@ export const store = {
 }
 
 /**
+ * A random UUID v4. `crypto.randomUUID` exists only in a secure context (https or
+ * localhost); over plain http (a LAN preview) the key is built from
+ * `crypto.getRandomValues`, which every context has, with the version 4 and variant bits
+ * set (https://www.rfc-editor.org/rfc/rfc9562#section-5.4).
+ */
+function newKey(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
  * One `Idempotency-Key` per visitor action: `for(what)` answers the same key while `what`
  * (the action and its inputs, as one string) stays the same and `done()` was not called,
  * so a retry of a failed or lost request is the same request to the shop. A different
@@ -139,7 +154,7 @@ export class ActionKey {
   private current: { what: string; key: string } | null = null
 
   for(what: string): string {
-    if (this.current?.what !== what) this.current = { what, key: crypto.randomUUID() }
+    if (this.current?.what !== what) this.current = { what, key: newKey() }
     return this.current.key
   }
 

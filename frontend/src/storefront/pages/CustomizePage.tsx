@@ -23,6 +23,9 @@ const Preview = lazy(async () => ({ default: (await import('../../components/Pre
 /** The most of one design a visitor may order (`AddListingItem.quantity`, `le=100`). */
 const MAX_QUANTITY = 100
 
+/** The longest a poll waits on a `Retry-After`: the limit is checked at least this often. */
+const RETRY_CAP_MS = 30_000
+
 const SLOW = 'This preview is taking longer than usual. Try Render again in a few minutes.'
 
 function wait(ms: number) {
@@ -140,13 +143,16 @@ export function CustomizePage({ id, timing = POLL }: { id: string; timing?: Poll
     let next = first
     let delay = timing.firstMs
     const started = Date.now()
+    const timedOut = () => {
+      if (Date.now() - started < timing.limitMs) return false
+      setRenderError(SLOW)
+      return true
+    }
     while (!terminal(next)) {
-      if (Date.now() - started >= timing.limitMs) {
-        setRenderError(SLOW)
-        return null
-      }
-      await wait(delay)
-      if (!alive.current) return null
+      if (timedOut()) return null
+      // Never past the time limit, however long the edge asked to wait.
+      await wait(Math.min(delay, Math.max(0, started + timing.limitMs - Date.now())))
+      if (!alive.current || timedOut()) return null
       try {
         next = await store.render(next.id)
         if (!alive.current) return null
@@ -154,8 +160,9 @@ export function CustomizePage({ id, timing = POLL }: { id: string; timing?: Poll
         delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
-        // The render runs on: wait as long as the edge asks, then read it again.
-        delay = Math.max(delay, (caught.retryAfter ?? 0) * 1000)
+        // The render runs on: wait as long as the edge asks (at most RETRY_CAP_MS), then
+        // read it again.
+        delay = Math.max(delay, Math.min((caught.retryAfter ?? 0) * 1000, RETRY_CAP_MS))
       }
     }
     return next

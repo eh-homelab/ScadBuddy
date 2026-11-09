@@ -197,6 +197,24 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
   })
 
+  it('stops at the time limit even when a poll is told to wait far longer', async () => {
+    let polls = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),
+      http.get('/api/store/v1/renders/:id', () => {
+        polls += 1
+        return HttpResponse.json({ type: `${PROBLEMS}rate_limited`, status: 429, detail: 'Slow down.' }, { status: 429, headers: { 'Retry-After': '99999' } })
+      }),
+    )
+    const started = performance.now()
+    const { user } = show('l1', { firstMs: 20, maxMs: 40, limitMs: 400 })
+    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
+    expect(performance.now() - started).toBeLessThan(2_500)
+    expect(polls).toBe(1)
+    expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
+  })
+
   it('stops reading a render once the page is gone', async () => {
     let polls = 0
     server.use(
