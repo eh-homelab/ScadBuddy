@@ -20,7 +20,10 @@ from scadbuddy.payments import plaid
 from scadbuddy.payments.bank import (
     KEYS_UNREADABLE,
     REMOVE_AT_PLAID,
+    TOKEN_MISSING,
+    AccessTokenMissingError,
     BankAccount,
+    BankChoiceError,
     BankKeys,
     BankKeysChangedError,
     BankLinkedError,
@@ -73,7 +76,7 @@ def raw_row(pool: PgPool) -> dict[str, Any] | None:
 async def linked(bank: BankLinks, router: respx.MockRouter) -> dict[str, respx.Route]:
     routes = plaid_answers(router)
     await bank.save_keys(KEYS)
-    await bank.link("public-sandbox-1", CHECKING)
+    await bank.link("public-sandbox-1", [CHECKING])
     return routes
 
 
@@ -133,6 +136,22 @@ async def test_a_link_keeps_the_name_type_and_mask_only(
     assert bank.access() is not None
 
 
+@pytest.mark.parametrize("chosen", [[], [CHECKING, "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vq"]])
+async def test_none_or_several_accounts_chosen_removes_the_item(
+    rows: OrderStore, chosen: list[str]
+) -> None:
+    """Link made the Item whatever the count: it is exchanged so it can be removed."""
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        routes = plaid_answers(router)
+        await bank.save_keys(KEYS)
+        with pytest.raises(BankChoiceError, match="Choose one checking or savings account"):
+            await bank.link("public-sandbox-1", chosen)
+    assert routes["/item/public_token/exchange"].called
+    assert json.loads(routes["/item/remove"].calls.last.request.content) == {"access_token": ACCESS}
+    assert bank.status().account is None
+
+
 async def test_an_account_that_is_not_checking_or_savings_is_removed_at_plaid(
     rows: OrderStore,
 ) -> None:
@@ -141,7 +160,7 @@ async def test_an_account_that_is_not_checking_or_savings_is_removed_at_plaid(
         routes = plaid_answers(router)
         await bank.save_keys(KEYS)
         with pytest.raises(PlaidError, match="checking or savings"):
-            await bank.link("public-sandbox-1", CREDIT)
+            await bank.link("public-sandbox-1", [CREDIT])
     assert json.loads(routes["/item/remove"].calls.last.request.content) == {"access_token": ACCESS}
     assert bank.status().account is None
 
@@ -151,7 +170,7 @@ async def test_a_second_link_is_refused_and_its_item_removed(rows: OrderStore) -
     with respx.mock as router:
         routes = await linked(bank, router)
         with pytest.raises(BankLinkedError):
-            await bank.link("public-sandbox-2", CHECKING)
+            await bank.link("public-sandbox-2", [CHECKING])
         # Refused before any exchange: no second Item exists to remove.
         assert routes["/item/public_token/exchange"].call_count == 1
         assert not routes["/item/remove"].called
@@ -173,7 +192,7 @@ async def test_a_link_needs_keys(rows: OrderStore) -> None:
         with pytest.raises(BankNotConfiguredError):
             await bank.link_token()
         with pytest.raises(BankNotConfiguredError):
-            await bank.link("public-sandbox-1", CHECKING)
+            await bank.link("public-sandbox-1", [CHECKING])
 
 
 async def test_a_link_token_names_the_row_not_the_shop(rows: OrderStore, pool: PgPool) -> None:
@@ -316,7 +335,7 @@ async def test_a_link_beaten_by_new_keys_says_so(
 
         monkeypatch.setattr(plaid, "exchange", replaced)
         with pytest.raises(BankKeysChangedError):
-            await bank.link("public-sandbox-1", CHECKING)
+            await bank.link("public-sandbox-1", [CHECKING])
         assert routes["/item/remove"].called
 
 
@@ -335,7 +354,7 @@ async def test_a_link_beaten_by_forgotten_keys_says_so(
 
         monkeypatch.setattr(plaid, "exchange", forgotten)
         with pytest.raises(BankKeysChangedError):
-            await bank.link("public-sandbox-1", CHECKING)
+            await bank.link("public-sandbox-1", [CHECKING])
 
 
 async def test_the_database_is_called_off_the_event_loop(
@@ -358,9 +377,37 @@ async def test_the_database_is_called_off_the_event_loop(
         plaid_answers(router)
         await bank.save_keys(KEYS)
         await bank.link_token()
-        await bank.link("public-sandbox-1", CHECKING)
+        await bank.link("public-sandbox-1", [CHECKING])
         await bank.unlink()
     assert on_loop == []
+
+
+async def test_unlink_of_a_link_with_no_token_says_so_and_keeps_the_keys(
+    rows: OrderStore, pool: PgPool
+) -> None:
+    """A linked row whose sealed secrets hold no access token: not a key file problem."""
+    bank = BankLinks(rows, KEK)
+    with respx.mock as router:
+        await linked(bank, router)
+    row = bank._read()
+    assert row is not None
+    sealed = bank._seal(str(row["id"]), {"client_id": "client-1", "secret": "plaid-s3cret"})
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s",
+            (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id),
+        )
+    with pytest.raises(AccessTokenMissingError):
+        bank.access()
+    with respx.mock:  # nothing may reach Plaid
+        unlinked = await bank.unlink()
+    assert unlinked.removed_at_plaid is False
+    assert unlinked.note == TOKEN_MISSING
+    assert "key file" not in unlinked.note
+    raw = raw_row(pool)
+    assert raw is not None and raw["item_id"] is None
+    status = bank.status()
+    assert (status.configured, status.account) == (True, None)
 
 
 async def test_a_link_whose_write_fails_removes_its_item(
@@ -376,7 +423,7 @@ async def test_a_link_whose_write_fails_removes_its_item(
 
         monkeypatch.setattr(bank, "_seal", broken)
         with pytest.raises(RuntimeError):
-            await bank.link("public-sandbox-1", CHECKING)
+            await bank.link("public-sandbox-1", [CHECKING])
     assert json.loads(routes["/item/remove"].calls.last.request.content) == {"access_token": ACCESS}
 
 

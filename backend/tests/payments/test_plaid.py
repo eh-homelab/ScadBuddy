@@ -17,7 +17,13 @@ import pytest
 import respx
 
 from scadbuddy.payments import plaid
-from scadbuddy.payments.plaid import AccountSubtype, PlaidAccount, PlaidError, PlaidKeys
+from scadbuddy.payments.plaid import (
+    AccountSubtype,
+    PlaidAccount,
+    PlaidError,
+    PlaidKeys,
+    PlaidUnavailableError,
+)
 
 PAYLOADS = Path(__file__).parent / "plaid_payloads"
 SANDBOX = "https://sandbox.plaid.com"
@@ -89,9 +95,11 @@ async def test_a_refusal_is_plaids_text_and_code_without_the_secret(
 @respx.mock
 async def test_no_answer_is_a_plaid_error_with_no_code() -> None:
     respx.post(f"{SANDBOX}/item/remove").mock(side_effect=httpx.ConnectError("down"))
-    with pytest.raises(PlaidError) as err:
+    with pytest.raises(PlaidUnavailableError) as err:
         await plaid.remove_item(KEYS, ACCESS)
     assert err.value.code is None and str(err.value) == "Plaid did not answer"
+    # Still a PlaidError, so every caller that handles one handles it.
+    assert isinstance(err.value, PlaidError)
 
 
 @respx.mock

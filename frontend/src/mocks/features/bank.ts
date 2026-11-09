@@ -75,7 +75,9 @@ export const handlers = [
     if (!bank.configured) return notConfigured(request)
     if (bank.account) return linkedRefusal(request)
     const body = (await request.json()) as BankLinkCreate
-    const account = ACCOUNTS[body.account_id]
+    // The API exchanges the token and removes the Item before refusing the count.
+    if (body.account_ids.length !== 1) return problem(request, 422, 'Choose one checking or savings account in Plaid.')
+    const account = ACCOUNTS[body.account_ids[0]!]
     if (!account) return problem(request, 422, 'the chosen account is not a checking or savings account')
     bank = { ...bank, account, linked_at: now() }
     return HttpResponse.json(bank)

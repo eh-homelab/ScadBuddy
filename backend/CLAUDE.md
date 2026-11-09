@@ -1157,7 +1157,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and the access token sealed under AAD `bank_links:<id>`, and in the clear only Plaid's
   ids and the account's name, type and mask; Plaid is called outside every transaction, and
   a link that lost a race, chose an account that is not checking or savings, or failed to
-  store removes its Item at Plaid (`bank_keys_changed` when the keys were replaced or
+  store removes its Item at Plaid (the page sends Link's token with every chosen id, and
+  `link` exchanges it before refusing none or several, `BankChoiceError`, so no Item Link
+  made is left behind; Plaid not answering is `PlaidUnavailableError`, 503
+  `plaid_unavailable`; a linked row with no access token is `AccessTokenMissingError`,
+  whose unlink drops the link and keeps the keys, `TOKEN_MISSING`) (`bank_keys_changed` when the keys were replaced or
   forgotten meanwhile); new keys are refused while linked, `bank_linked`; two first saves
   at once meet on the `singleton` column and the second updates the first's row; every
   Postgres call of an async method runs in `asyncio.to_thread`; an unlink Plaid does not

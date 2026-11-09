@@ -91,6 +91,14 @@ class PlaidError(Exception):
         self.code = code
 
 
+class PlaidUnavailableError(PlaidError):
+    """Plaid did not answer (a timeout, a network failure, or no JSON): not the input's
+    fault, so the API answers 503 rather than 422."""
+
+    def __init__(self) -> None:
+        super().__init__("Plaid did not answer")
+
+
 async def _post(keys: PlaidKeys, path: str, body: dict[str, Any]) -> dict[str, Any]:
     headers = {"PLAID-CLIENT-ID": keys.client_id, "PLAID-SECRET": keys.secret}
     try:
@@ -99,9 +107,9 @@ async def _post(keys: PlaidKeys, path: str, body: dict[str, Any]) -> dict[str, A
         found = answer.json()
     except (httpx.HTTPError, ValueError):
         logger.warning("Plaid did not answer POST %s", path)
-        raise PlaidError("Plaid did not answer") from None
+        raise PlaidUnavailableError() from None
     if not isinstance(found, dict):
-        raise PlaidError("Plaid did not answer")
+        raise PlaidUnavailableError()
     if answer.is_success and "error_code" not in found:
         return found
     code = found.get("error_code")

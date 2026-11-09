@@ -1,17 +1,24 @@
 import { screen } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../../mocks/handlers'
+import { server } from '../../mocks/server'
 import { MOCK_CHECKING, MOCK_LINK_TOKEN, mockBankLink, setMockKeysRefused, setMockKeysUnreadable } from '../../mocks/features/bank'
-import type { PlaidGlobal } from '../../lib/plaidLink'
+import type { PlaidGlobal, PlaidLinkError } from '../../lib/plaidLink'
 import { enter, renderSettingsSection } from '../../pages/settings/testing'
 import { BankAccount } from './BankAccount'
 
 const route = '/settings/system'
 
 /** Plaid Link as `Plaid.create` gives it, answering with `accounts` or closing. */
-function stubLink(answer: { accounts: { id: string }[] } | 'exit') {
+function stubLink(answer: { accounts: { id: string }[] } | 'exit' | { error: PlaidLinkError }) {
   const create = vi.fn<PlaidGlobal['create']>((config) => ({
-    open: () => (answer === 'exit' ? config.onExit(null) : config.onSuccess('public-sandbox-1', answer)),
+    open: () =>
+      answer === 'exit'
+        ? config.onExit(null)
+        : 'error' in answer
+          ? config.onExit(answer.error)
+          : config.onSuccess('public-sandbox-1', answer),
     destroy: () => {},
   }))
   window.Plaid = { create }
@@ -62,14 +69,6 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
     expect(await screen.findByRole('button', { name: 'Link a bank account' })).toBeEnabled()
     expect(screen.queryByText('Plaid Checking')).not.toBeInTheDocument()
-  })
-
-  it('says to choose one account when Link gives several', async () => {
-    mockBankLink({ linked: false })
-    stubLink({ accounts: [{ id: MOCK_CHECKING }, { id: 'mock-savings' }] })
-    const { user } = renderSettingsSection(<BankAccount />, { route })
-    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Choose one checking or savings account')
   })
 
   it('unlinks the account and keeps the keys', async () => {
@@ -126,6 +125,51 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     await user.click(await screen.findByRole('button', { name: 'Unlink' }))
     expect(await screen.findByRole('button', { name: 'Replace keys' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Client ID')).not.toBeInTheDocument()
+  })
+
+  it('sends the token even when Link gives several accounts, so the Item is removed', async () => {
+    mockBankLink({ linked: false })
+    stubLink({ accounts: [{ id: MOCK_CHECKING }, { id: 'mock-savings' }] })
+    let sent: unknown = null
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/v1/payments/bank/link') sent = await request.clone().json()
+    })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Choose one checking or savings account in Plaid.')
+    expect(sent).toEqual({ public_token: 'public-sandbox-1', account_ids: [MOCK_CHECKING, 'mock-savings'] })
+    server.events.removeAllListeners()
+  })
+
+  it("shows Link's own error when Link fails", async () => {
+    mockBankLink({ linked: false })
+    stubLink({ error: { display_message: 'The bank is down.', error_message: 'institution down' } })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The bank is down.')
+  })
+
+  it("falls back to Link's error_message when there is no display_message", async () => {
+    mockBankLink({ linked: false })
+    stubLink({ error: { display_message: null, error_message: 'link token expired' } })
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('link token expired')
+  })
+
+  it('says Plaid is unavailable when it did not answer', async () => {
+    mockBankLink({ linked: false })
+    server.use(
+      http.post('/api/v1/payments/bank/link-token', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/payments/plaid_unavailable', title: 'Service Unavailable', status: 503, detail: 'Plaid did not answer' },
+          { status: 503, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderSettingsSection(<BankAccount />, { route })
+    await user.click(await screen.findByRole('button', { name: 'Link a bank account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Plaid is unavailable right now')
   })
 
   it('forgets the keys', async () => {

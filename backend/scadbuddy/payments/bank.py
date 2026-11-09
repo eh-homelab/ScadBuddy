@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Any
@@ -57,6 +58,23 @@ class BankKeysChangedError(Exception):
         )
 
 
+class BankChoiceError(ValueError):
+    """Link gave no account, or several: Plaid's Account Select lets the shop pick more
+    than one when the Dashboard allows it."""
+
+    def __init__(self) -> None:
+        super().__init__("Choose one checking or savings account in Plaid.")
+
+
+class AccessTokenMissingError(Exception):
+    """A linked row whose sealed secrets hold no access token: the keys open, but the
+    Item cannot be called."""
+
+    def __init__(self, item_id: str) -> None:
+        super().__init__("the linked bank account has no stored access token")
+        self.item_id = item_id
+
+
 class BankNotLinkedError(LookupError):
     def __init__(self) -> None:
         super().__init__("no bank account is linked")
@@ -72,14 +90,20 @@ class BankKeys(BaseModel):
     secret: Short = Field(repr=False)
 
 
+#: The most account ids a link body takes; one is kept, any other count is refused.
+MAX_CHOSEN = 32
+
+
 class BankLinkCreate(BaseModel):
-    """What Link's ``onSuccess`` gives the page: the public token and the chosen
-    account's id (https://plaid.com/docs/link/web/#onsuccess)."""
+    """What Link's ``onSuccess`` gives the page: the public token and the ids of
+    ``metadata.accounts`` (https://plaid.com/docs/link/web/#onsuccess). The page sends the
+    token whatever the count, so an Item made with no account or several is exchanged and
+    removed rather than left at Plaid."""
 
     model_config = ConfigDict(extra="forbid")
 
     public_token: Short = Field(repr=False)
-    account_id: Short
+    account_ids: list[Short] = Field(max_length=MAX_CHOSEN)
 
 
 class BankAccount(BaseModel):
@@ -107,6 +131,11 @@ class LinkToken(BaseModel):
 REMOVE_AT_PLAID = (
     "Unlinked here, but Plaid refused the stored keys, so the Item is still at Plaid."
     " Remove it in the Plaid Dashboard."
+)
+#: What the shop is told when the link held no access token: the keys stay.
+TOKEN_MISSING = (
+    "Unlinked here, but the link had no stored access token, so the Item may still be at"
+    " Plaid. Remove it in the Plaid Dashboard."
 )
 #: What the shop is told when the keys would not open with this key file: Plaid was never
 #: asked, and the keys went with the row.
@@ -212,7 +241,7 @@ class BankLinks:
         _, secrets, keys = self._keys(row)
         token = secrets.get("access_token")
         if token is None:
-            raise CredentialUnreadableError("plaid")
+            raise AccessTokenMissingError(row["item_id"])
         return LinkedAccess(
             keys=keys, access_token=token, item_id=row["item_id"], account_id=row["account_id"]
         )
@@ -288,15 +317,20 @@ class BankLinks:
             raise BankLinkedError()
         return await plaid.link_token(keys, user_id=str(row["id"]), webhook=None)
 
-    async def link(self, public_token: str, account_id: str) -> BankStatus:
-        """Exchange Link's public token and keep the chosen account. An account that is
-        not checking or savings, or a link that lost a race, removes its Item at Plaid."""
+    async def link(self, public_token: str, account_ids: Sequence[str]) -> BankStatus:
+        """Exchange Link's public token and keep the one chosen account. No account or
+        several (`BankChoiceError`), an account that is not checking or savings, or a link
+        that lost a race removes its Item at Plaid: the token is exchanged first, so no
+        Item Link made is left behind."""
         row, secrets, keys = self._keys(await asyncio.to_thread(self._read))
         if row["item_id"] is not None:
             raise BankLinkedError()
         exchanged = await plaid.exchange(keys, public_token)
+        if len(account_ids) != 1:
+            await _remove_quietly(keys, exchanged.access_token)
+            raise BankChoiceError()
         try:
-            account = await plaid.account(keys, exchanged.access_token, account_id)
+            account = await plaid.account(keys, exchanged.access_token, account_ids[0])
         except PlaidError:
             await _remove_quietly(keys, exchanged.access_token)
             raise
@@ -358,6 +392,10 @@ class BankLinks:
         except CredentialUnreadableError:
             await asyncio.to_thread(self._drop_unreadable)
             return BankUnlinked(removed_at_plaid=False, note=KEYS_UNREADABLE)
+        except AccessTokenMissingError as missing:
+            # The keys open, so they stay; only the link that cannot be called goes.
+            await asyncio.to_thread(self._drop_link, missing.item_id)
+            return BankUnlinked(removed_at_plaid=False, note=TOKEN_MISSING)
         if linked is None:
             raise BankNotLinkedError()
         try:

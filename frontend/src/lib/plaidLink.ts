@@ -10,11 +10,14 @@ export const PLAID_LINK_SCRIPT = 'https://cdn.plaid.com/link/v2/stable/link-init
 
 type LinkAccount = { id: string }
 type LinkHandler = { open: () => void; destroy: () => void }
+/** The `error` `onExit` gets when Link failed; null when the shop closed it
+ * (https://plaid.com/docs/link/web/#onexit). */
+export type PlaidLinkError = { display_message?: string | null; error_message?: string | null }
 export type PlaidGlobal = {
   create: (config: {
     token: string
     onSuccess: (publicToken: string, metadata: { accounts: LinkAccount[] }) => void
-    onExit: (error: unknown) => void
+    onExit: (error: PlaidLinkError | null) => void
   }) => LinkHandler
 }
 
@@ -45,8 +48,9 @@ function load(): Promise<PlaidGlobal> {
   return loading
 }
 
-/** What the shop chose in Link; null when they closed it. */
-export type LinkChoice = { public_token: string; account_id: string }
+/** What the shop chose in Link; null when they closed it. Every chosen id is sent, even
+ * none or several: the API exchanges the token and removes the Item it will not keep. */
+export type LinkChoice = { public_token: string; account_ids: string[] }
 
 export async function openPlaidLink(token: string): Promise<LinkChoice | null> {
   const plaid = await load()
@@ -55,13 +59,13 @@ export async function openPlaidLink(token: string): Promise<LinkChoice | null> {
       token,
       onSuccess: (publicToken, metadata) => {
         handler.destroy()
-        const [account, ...more] = metadata.accounts
-        if (!account || more.length > 0) reject(new Error('Choose one checking or savings account in Plaid.'))
-        else resolve({ public_token: publicToken, account_id: account.id })
+        resolve({ public_token: publicToken, account_ids: metadata.accounts.map((a) => a.id) })
       },
-      onExit: () => {
+      onExit: (error) => {
         handler.destroy()
-        resolve(null)
+        const message = error?.display_message || error?.error_message
+        if (message) reject(new Error(message))
+        else resolve(null)
       },
     })
     handler.open()

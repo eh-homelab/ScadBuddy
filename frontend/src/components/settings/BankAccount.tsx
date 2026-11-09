@@ -11,10 +11,14 @@ import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 
 const KEK_MISSING = 'https://scadbuddy.dev/problems/payments/kek_missing'
+const PLAID_UNAVAILABLE = 'https://scadbuddy.dev/problems/payments/plaid_unavailable'
 
 function failure(error: unknown): string {
   if (error instanceof ApiError && error.problem.type === KEK_MISSING) {
     return 'The key file is missing, so the Plaid keys cannot be kept safe. Set SCADBUDDY_SECRET_KEY_FILE for the API and restart it.'
+  }
+  if (error instanceof ApiError && error.problem.type === PLAID_UNAVAILABLE) {
+    return 'Plaid is unavailable right now. Try again in a few minutes.'
   }
   return refusalText(error)
 }

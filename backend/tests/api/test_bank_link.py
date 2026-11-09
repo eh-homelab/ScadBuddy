@@ -28,7 +28,7 @@ pytestmark = pytest.mark.requires_postgres
 PROBLEMS = "https://scadbuddy.dev/problems/payments/"
 BANK = "/api/v1/payments/bank"
 KEYS = {"environment": "sandbox", "client_id": "client-1", "secret": "plaid-s3cret"}
-LINK = {"public_token": "public-sandbox-1", "account_id": CHECKING}
+LINK = {"public_token": "public-sandbox-1", "account_ids": [CHECKING]}
 
 
 @pytest.fixture
@@ -87,9 +87,28 @@ def test_plaid_refusing_the_keys_is_422_with_its_text(
 
 def test_a_credit_card_is_refused(client: TestClient, plaid: respx.MockRouter) -> None:
     client.put(f"{BANK}/keys", json=KEYS)
-    refused = client.post(f"{BANK}/link", json={**LINK, "account_id": CREDIT})
+    refused = client.post(f"{BANK}/link", json={**LINK, "account_ids": [CREDIT]})
     assert refused.status_code == 422
     assert "checking or savings" in refused.json()["detail"]
+
+
+def test_two_accounts_chosen_is_422_and_the_item_is_removed(
+    client: TestClient, plaid: respx.MockRouter
+) -> None:
+    client.put(f"{BANK}/keys", json=KEYS)
+    refused = client.post(f"{BANK}/link", json={**LINK, "account_ids": [CHECKING, CREDIT]})
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "Choose one checking or savings account in Plaid."
+    assert any(call.request.url.path == "/item/remove" for call in plaid.calls)
+
+
+def test_plaid_not_answering_is_503_plaid_unavailable(
+    client: TestClient, plaid: respx.MockRouter
+) -> None:
+    plaid.post(f"{SANDBOX}/link/token/create").mock(side_effect=httpx.ConnectError("down"))
+    down = client.put(f"{BANK}/keys", json=KEYS)
+    assert down.status_code == 503, down.text
+    assert down.json()["type"] == PROBLEMS + "plaid_unavailable"
 
 
 def test_the_order_of_steps_is_409(client: TestClient, plaid: respx.MockRouter) -> None:

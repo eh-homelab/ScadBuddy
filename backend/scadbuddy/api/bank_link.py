@@ -14,6 +14,8 @@ from fastapi import APIRouter, Response, status
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.payments.bank import (
+    AccessTokenMissingError,
+    BankChoiceError,
     BankKeys,
     BankKeysChangedError,
     BankLinkCreate,
@@ -26,7 +28,7 @@ from scadbuddy.payments.bank import (
 )
 from scadbuddy.payments.component import PaymentsDep
 from scadbuddy.payments.credentials import CredentialUnreadableError, KekMissingError
-from scadbuddy.payments.plaid import PlaidError
+from scadbuddy.payments.plaid import PlaidError, PlaidUnavailableError
 
 PROBLEMS = "https://scadbuddy.dev/problems/payments/"
 
@@ -34,6 +36,16 @@ router = APIRouter(prefix="/payments/bank", tags=["payments"])
 
 
 def _problem(error: Exception) -> ApiError:
+    if isinstance(error, PlaidUnavailableError):
+        return ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), type_=PROBLEMS + "plaid_unavailable"
+        )
+    if isinstance(error, BankChoiceError):
+        return ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            errors=[{"loc": ["body", "account_ids"], "msg": str(error)}],
+        )
     if isinstance(error, PlaidError):
         return ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -47,12 +59,15 @@ def _problem(error: Exception) -> ApiError:
         BankKeysChangedError: "bank_keys_changed",
         BankNotLinkedError: "bank_not_linked",
         CredentialUnreadableError: "credential_unreadable",
+        AccessTokenMissingError: "access_token_missing",
     }[type(error)]
     return ApiError(status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + slug)
 
 
 _REFUSALS = (
     PlaidError,
+    BankChoiceError,
+    AccessTokenMissingError,
     KekMissingError,
     BankNotConfiguredError,
     BankLinkedError,
@@ -74,7 +89,8 @@ async def get_bank_link(payments: PaymentsDep) -> BankStatus:
     description=(
         "Plaid checks the keys first (a link token). 409 `kek_missing` without"
         " SCADBUDDY_SECRET_KEY_FILE; 409 `bank_linked` while an account is linked; 422 with"
-        " Plaid's own text when it refuses."
+        " Plaid's own text when it refuses; 503 `plaid_unavailable` when Plaid does not"
+        " answer."
     ),
 )
 async def put_bank_keys(body: BankKeys, payments: PaymentsDep) -> BankStatus:
@@ -118,14 +134,15 @@ async def create_bank_link_token(payments: PaymentsDep) -> LinkToken:
     summary="Link the account the shop chose in Plaid Link",
     description=(
         "Exchanges Link's public token and keeps the account's name, type and mask. 422"
-        " for an account that is not checking or savings (its Item is removed at Plaid);"
+        " for no account or several chosen, or an account that is not checking or savings"
+        " (the token is exchanged first, so its Item is removed at Plaid);"
         " 409 `bank_linked` when another link came first, `bank_keys_changed` when the keys"
         " were replaced or forgotten while Link was open (its Item is removed either way)."
     ),
 )
 async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankStatus:
     try:
-        return await payments.bank.link(body.public_token, body.account_id)
+        return await payments.bank.link(body.public_token, body.account_ids)
     except _REFUSALS as error:
         raise _problem(error) from None
 
@@ -136,8 +153,9 @@ async def create_bank_link(body: BankLinkCreate, payments: PaymentsDep) -> BankS
     summary="Unlink the bank account",
     description=(
         "Removes the Item at Plaid, then drops the access token; the keys stay. When"
-        " Plaid does not answer, 422 and the link stays. 409 `kek_missing` without"
-        " SCADBUDDY_SECRET_KEY_FILE, and the link stays: the file may be mounted again."
+        " Plaid does not answer, 503 `plaid_unavailable` and the link stays. 409"
+        " `kek_missing` without SCADBUDDY_SECRET_KEY_FILE, and the link stays: the file may"
+        " be mounted again."
         " When Plaid refuses the keys themselves, only the link is dropped here and the"
         " keys stay. When the keys are sealed under another key file, the row is deleted"
         " with its keys. In both cases `removed_at_plaid` is false and `note` tells the"
