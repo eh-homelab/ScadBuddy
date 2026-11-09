@@ -363,11 +363,17 @@ export class CoreTurn {
         await flushErrors()
         await show(message)
       }
+      // A move whose next credential showed nothing (it was refused at once, or its init was
+      // the turn's first): written here, before the turn's end says anything.
+      if (fallbacks.length) await log(fallbacks.splice(0))
       await flushErrors()
     } catch (err) {
       // An assembly that failed released what it held, and says which secrets it had read.
       if (err instanceof TurnAssemblyError) secrets = err.secrets
       const cause = err instanceof TurnAssemblyError ? err.cause : err
+      // The same for a turn that ends by throwing (the last credential refused, or an attempt
+      // that did not start): the move is written before its error.
+      if (fallbacks.length) await log(fallbacks.splice(0)).catch(() => {})
       if (!refused) await flushErrors().catch(() => {})
       // For an error result the SDK yields the result and then throws
       // ("Claude Code returned an error result", test/run.test.ts); the

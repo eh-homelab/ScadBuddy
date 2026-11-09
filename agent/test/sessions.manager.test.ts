@@ -567,6 +567,82 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       }
     })
 
+    describe('the panel event of a fallback (#5772)', () => {
+      const pooled = (id: string, secret: string, name: string) => ({
+        id,
+        epoch: 0,
+        label: `credential ${id}`,
+        displayLabel: `credential ${id} "${name}"`,
+        credential: { kind: 'anthropic_api_key' as const, secret },
+      })
+      /**
+       * The first credential is refused after its init; the second does what `second` says:
+       * `refused` is refused at once, with nothing the turn would show; `answers` replies.
+       */
+      function fallbackRunner(second: 'refused' | 'answers') {
+        let attempts = 0
+        return (run: HarnessRun): AsyncIterable<SDKMessage> => {
+          const attempt = ++attempts
+          const session_id = run.sessionId ?? run.resume ?? 'unknown'
+          return (async function* () {
+            for await (const _message of run.prompt as AsyncIterable<SDKUserMessage>) {
+              const refusal = { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+              if (attempt === 1) {
+                yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+                yield refusal
+                return
+              }
+              if (second === 'refused') {
+                yield refusal
+                return
+              }
+              yield { type: 'assistant', message: { content: [{ type: 'text', text: 'second reply' }] }, parent_tool_use_id: null, session_id } as unknown as SDKMessage
+              yield { type: 'result', subtype: 'success', is_error: false, result: 'second reply', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
+            }
+          })()
+        }
+      }
+      async function runTurn(second: 'refused' | 'answers') {
+        const paths = await tempPaths()
+        const m = manager({
+          sql: db.sql,
+          paths,
+          run: fallbackRunner(second),
+          credentials: {
+            candidates: () => Promise.resolve([pooled('a', 'sk-ant-key-aaaa', 'Personal'), pooled('b', 'sk-ant-key-bbbb', 'Work')]),
+            reporter: () => () => Promise.resolve(),
+          },
+          probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+        })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+        const done = await turn!.done
+        const events = (await m.events.read(session.id)).map((e) => e.event)
+        return { done, events }
+      }
+
+      it('is written even when the last credential is refused before it shows anything, before the error', async () => {
+        const { done, events } = await runTurn('refused')
+        expect(done).toMatchObject({ kind: 'failed' })
+        const fallback = events.findIndex((e) => e.type === 'credential.fallback')
+        const error = events.findIndex((e) => e.type === 'error')
+        expect(events[fallback]).toMatchObject({ from: 'credential a "Personal"', to: 'credential b "Work"', outcome: 'refused' })
+        expect(fallback).toBeGreaterThanOrEqual(0)
+        expect(fallback).toBeLessThan(error)
+        // The person reads the name; logs and the outcome do not.
+        expect(events[error]).toMatchObject({ code: 'turn_failed', shown: expect.stringContaining('credential b "Work"') })
+        expect((events[error] as { message: string }).message).not.toContain('Work')
+      })
+
+      it('is written before the next credential’s first message', async () => {
+        const { done, events } = await runTurn('answers')
+        expect(done).toMatchObject({ kind: 'result', subtype: 'success' })
+        const fallback = events.findIndex((e) => e.type === 'credential.fallback')
+        const reply = events.findIndex((e) => e.type === 'assistant.text.delta' && e.delta.includes('second reply'))
+        expect(fallback).toBeGreaterThanOrEqual(0)
+        expect(reply).toBeGreaterThan(fallback)
+      })
+    })
+
     it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
       const fake = await startFakeHindsight()
       try {
