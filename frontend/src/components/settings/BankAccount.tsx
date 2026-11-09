@@ -3,6 +3,7 @@ import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type { BankKeys, BankStatus } from '../../api/types'
 import { refusalText } from '../orders/refusal'
+import { When } from '../orders/When'
 import { openPlaidLink } from '../../lib/plaidLink'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -83,7 +84,7 @@ export function BankAccount() {
     <section aria-label="Bank account" className="space-y-2 rounded-md border p-3">
       <h4 className="text-sm font-medium">Bank account (Plaid)</h4>
       <p className="text-[13px] text-muted-foreground">
-        Link the shop&apos;s checking or savings account. Matching its deposits to orders comes in a later step of #4961.
+        Link the shop&apos;s checking or savings account. With the housekeeping sweeps on, each sweep reads its new deposits and suggests the orders they may pay; nothing is recorded by itself. With the sweeps off, deposits are not read.
       </p>
       <p className="text-[13px] text-muted-foreground">Stripe payouts go to the bank set in your Stripe dashboard.</p>
       {listed.error && !shown && (
@@ -105,6 +106,22 @@ export function BankAccount() {
             Unlink
           </Button>
         </div>
+      )}
+      {shown?.account && (
+        <p className="text-[13px] text-muted-foreground">
+          {shown.synced_at ? (
+            <span>
+              Deposits last read <When at={shown.synced_at} />
+            </span>
+          ) : (
+            <span>Deposits not read yet: the housekeeping sweeps must be on.</span>
+          )}
+        </p>
+      )}
+      {shown?.account && shown.sync_error && (
+        <p role="status" className="text-[13px] text-warn">
+          Plaid could not be read ({shown.sync_error}). ScadBuddy tries again at the next sweep.
+        </p>
       )}
       {shown?.configured && !shown.account && (
         <div className="flex flex-wrap items-center justify-between gap-2">

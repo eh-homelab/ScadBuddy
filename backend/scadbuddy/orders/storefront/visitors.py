@@ -15,10 +15,14 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.orders.models import Actor
+from scadbuddy.orders.store import Conn
 
 _VISITOR = "id, created_at, last_seen_at"
 #: The edge's visitor id: 32 random bytes as URL-safe base64, unpadded.
 VISITOR_ID = re.compile(r"[A-Za-z0-9_-]{43}")
+#: The most visitors, and the most render rows, one `VisitorStore.sweep` deletes: the
+#: draft sweep's batch (`Lifecycle.sweep_drafts`).
+SWEEP_BATCH = 200
 
 
 @dataclass(frozen=True)
@@ -28,7 +32,7 @@ class Visitor:
     last_seen_at: datetime
 
 
-def _hash(visitor_id: str) -> str:
+def token_sha256(visitor_id: str) -> str:
     """The id's sha256 (hex); ``ValueError`` for an id not of the edge's shape."""
     if not VISITOR_ID.fullmatch(visitor_id):
         raise ValueError("a visitor id is 43 URL-safe base64 characters")
@@ -51,7 +55,7 @@ class VisitorStore:
                 "INSERT INTO storefront_visitors (token_sha256) VALUES (%s)"
                 " ON CONFLICT (token_sha256) DO UPDATE SET last_seen_at = now()"
                 f" RETURNING {_VISITOR}",
-                (_hash(visitor_id),),
+                (token_sha256(visitor_id),),
             ).fetchone()
         assert row is not None
         return Visitor(**row)
@@ -67,6 +71,34 @@ class VisitorStore:
                 " SELECT * FROM touched UNION ALL"
                 f" SELECT {_VISITOR} FROM storefront_visitors WHERE token_sha256 = %(hash)s"
                 " AND NOT EXISTS (SELECT 1 FROM touched)",
-                {"hash": _hash(visitor_id)},
+                {"hash": token_sha256(visitor_id)},
             ).fetchone()
         return None if row is None else Visitor(**row)
+
+    @staticmethod
+    def sweep(
+        conn: Conn,
+        *,
+        visitors_before: datetime,
+        renders_before: datetime,
+        limit: int = SWEEP_BATCH,
+    ) -> tuple[int, int]:
+        """The housekeeping pass (#5282), on the caller's connection: up to ``limit``
+        `storefront_renders` rows made before ``renders_before``, oldest first, then up
+        to ``limit`` visitors last seen before ``visitors_before`` that no order names
+        (their newer renders cascade). A visitor with a cart keeps it until the draft
+        sweep takes the cart. A larger backlog drains over later runs. The counts
+        deleted: (visitors, renders)."""
+        renders = conn.execute(
+            "DELETE FROM storefront_renders WHERE id IN (SELECT id FROM storefront_renders"
+            " WHERE created_at < %s ORDER BY created_at LIMIT %s)",
+            (renders_before, limit),
+        ).rowcount
+        visitors = conn.execute(
+            "DELETE FROM storefront_visitors WHERE id IN (SELECT v.id FROM storefront_visitors v"
+            " WHERE v.last_seen_at < %s"
+            " AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.storefront_visitor_id = v.id)"
+            " ORDER BY v.last_seen_at LIMIT %s)",
+            (visitors_before, limit),
+        ).rowcount
+        return visitors, renders

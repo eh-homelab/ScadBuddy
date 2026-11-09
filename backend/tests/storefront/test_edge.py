@@ -61,14 +61,14 @@ def edge_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def crud_mock() -> Iterator[respx.Router]:
-    """The CRUD service: the exchange, the storefront's areas, its listings and its
-    renders."""
+    """The CRUD service: the exchange, the storefront's areas, its listings, its renders
+    and whether design requests are on."""
     with respx.mock(base_url=API, assert_all_called=False) as router:
         router.post("/api/v1/auth/service-token", name="exchange").respond(
             200, json={"access_token": TOKEN, "expires_in": 900}
         )
         router.get("/api/v1/internal/crud/storefront/areas", name="areas").respond(
-            200, json={"areas": ["listings", "renders"]}, headers=CRUD
+            200, json={"areas": ["listings", "renders", "drafts", "requests", "pay"]}, headers=CRUD
         )
         router.get("/api/v1/internal/crud/storefront/listings", name="listings").respond(
             200, json=LISTINGS, headers=CRUD
@@ -76,6 +76,9 @@ def crud_mock() -> Iterator[respx.Router]:
         router.post("/api/v1/internal/crud/storefront/renders", name="renders").respond(
             202, json={}, headers=CRUD
         )
+        router.get(
+            "/api/v1/internal/crud/storefront/requests-enabled", name="requests_enabled"
+        ).respond(200, json={"enabled": True}, headers=CRUD)
         yield router
 
 

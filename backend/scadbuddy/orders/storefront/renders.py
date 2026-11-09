@@ -52,6 +52,7 @@ from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, rough_estimate
 from scadbuddy.orders.estimate import part_volumes as part_volumes  # tests count its calls
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
     listing_reference,
@@ -204,20 +205,13 @@ def _shared(state: AppState, conn: Any, render_key: str) -> bool:
     return row is not None or state.projection.reuse_done(render_key) is not None
 
 
-async def start_render(
-    state: AppState, visitor_id: str, client: str, key: str, body: RenderBody
-) -> StoreRender:
-    """The visitor's render of the listing at ``body``'s values. Refusals: 404
-    ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``), 429
-    ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
-    that `never_started` costs nothing), each with ``Retry-After``. The edge's client
-    sends a 503 again with the same key for its budget, so a visitor sees the edge's own
-    503 when the start keeps failing. A key seen before replays its row: the job the
-    row names (410 ``render_expired`` when that job is gone; it is never submitted
-    again), else the submit sent again, counted as a fresh one is when it runs on its own
-    and the row is free."""
-    orders = _orders(state)
+async def checked_choice(
+    orders: OrdersComponent, body: RenderBody
+) -> tuple[Listing, ResolvedReference]:
+    """The published listing ``body`` names and the reference of ``body``'s values and
+    colours on it. Refusals: 404 ``listing_not_found``, 409 ``listing_changed`` (the
+    listing moved since the page read it), 422 ``input_outside_listing`` (with ``name``
+    and ``reason``)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -237,6 +231,24 @@ async def start_render(
             name=error.name,
             reason=error.reason,
         ) from None
+    return listing, resolved
+
+
+async def start_render(
+    state: AppState, visitor_id: str, client: str, key: str, body: RenderBody
+) -> StoreRender:
+    """The visitor's render of the listing at ``body``'s values. Refusals: 404
+    ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
+    ``name`` and ``reason``), 429 ``render_limited`` (with ``limit``), 429
+    ``render_queue_full`` and 503 ``render_unavailable`` (any other failed start; one
+    that `never_started` costs nothing), each with ``Retry-After``. The edge's client
+    sends a 503 again with the same key for its budget, so a visitor sees the edge's own
+    503 when the start keeps failing. A key seen before replays its row: the job the
+    row names (410 ``render_expired`` when that job is gone; it is never submitted
+    again), else the submit sent again, counted as a fresh one is when it runs on its own
+    and the row is free."""
+    orders = _orders(state)
+    listing, resolved = await checked_choice(orders, body)
     reference = resolved.reference
     assert listing.snapshot is not None
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)

@@ -83,6 +83,7 @@ from scadbuddy.orders.lifecycle import (
     OrderEdit,
     ShipmentEdit,
     ShipmentInput,
+    check_submitted,
     stale_attempt,
 )
 from scadbuddy.orders.models import (
@@ -117,12 +118,18 @@ from scadbuddy.orders.models import (
     TimeEntry,
     TimeEntryInput,
 )
-from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import (
+    BODY_ONLY,
+    CARRIED,
+    ORDER_ATTEMPT_COPY,
+    ORDER_ITEM_PRINT,
+    ORDER_ITEM_QUOTE,
+)
 from scadbuddy.orders.past_prints import NativeArchiveCopies, copied_file, quote_from_archive
 from scadbuddy.orders.printing import ItemPrintRequest, print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
-from scadbuddy.orders.quote import ArchiveQuoteRequest, SliceQuoteRequest, subject_of
+from scadbuddy.orders.quote import ArchiveQuoteRequest, ItemSliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
@@ -2230,9 +2237,17 @@ async def quote_item_from_archive(
 async def quote_item(
     order_id: str,
     item_id: str,
-    body: SliceQuoteRequest,
+    body: ItemSliceQuoteRequest,
     response: Response,
     ops: OperationsDep,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    service: PaymentsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Quote | JSONResponse:
     """The ``order_item_quote`` operation (#4250, §5.2): render the item if it has no
@@ -2241,23 +2256,132 @@ async def quote_item(
     quote. Answered 202 once recorded; follow ``GET /operations/{id}`` to the quote.
     Refused before anything is written: 404 for an unknown order or item, 409
     ``order_not_open`` and ``item_not_open``, 422 ``filaments`` (a slot with no
-    filament, or one archived) and ``price_book`` (a book that prices nothing)."""
+    filament, or one archived) and ``price_book`` (a book that prices nothing).
+
+    With ``inputs`` or ``commit`` that differ from the item's (#4673, order operations
+    spec §5.1) it first makes a revision of them, as ``POST …/revisions`` does, or as
+    ``…/revisions/after-acceptance`` does for an item with an accepted quote on an
+    accepted order: that path's refusals apply unchanged (``item_locked``,
+    ``order_on_hold``, ``print_in_flight``, ``deposit_unpaid``, …), and 422 on
+    ``inputs`` or ``commit`` as a revision's. The quote is of that revision; one made
+    after it refuses the quote (409 ``revision_superseded``: slice again). The body's
+    own checks above run before the revision, so their refusals write nothing; a
+    storefront cart is refused first (``order_not_submitted``). A replayed key is
+    answered from its operation with no revision made, and the same design again makes
+    none, so two first sends of one key racing make one. The new revision's slots are
+    known only once it renders: each takes the filament the item had on that slot
+    before, unless the body names one. A slot the new design adds that neither names
+    is refused by the quote's run (422 ``filaments``) after the revision is written:
+    the revision stays, and a slice that names its filament quotes it."""
     check_path(order_id, item_id)
+    kind = ops.kinds[ORDER_ITEM_QUOTE]
+    subject = subject_of(item_id)
+    request: dict[str, Any] = {
+        "order_id": order_id,
+        "item_id": item_id,
+        "request": body.model_dump(mode="json", exclude={"inputs", "commit"}),
+        # Ruling 12: who it is for comes from the author header, never the body.
+        "by": current_actor().model_dump(mode="json"),
+        "revision_id": None,
+    }
+    before_start = None
+    if body.inputs is not None or body.commit is not None:
+        # #4673: the design keys the request; the revision it makes does not (`unkeyed`).
+        request["design"] = body.model_dump(mode="json", include={"inputs", "commit"})
+
+        async def revise() -> None:
+            # Only when no record answers the key and its operation is not running
+            # (#5761 review): the body's own checks first, so a refusal writes nothing.
+            await kind.check({**request, BODY_ONLY: True})
+            request["revision_id"], request[CARRIED] = await _slice_revision(
+                order_id,
+                item_id,
+                body,
+                orders,
+                catalogue=catalogue,
+                history=history,
+                outputs=outputs,
+                paths=paths,
+                config=config,
+                fetcher=fetcher,
+                payments=service,
+            )
+
+        before_start = revise
     result = await run_operation(
         ops,
         response,
-        kind=ops.kinds[ORDER_ITEM_QUOTE],
-        subject=subject_of(item_id),
-        request={
-            "order_id": order_id,
-            "item_id": item_id,
-            "request": body.model_dump(mode="json"),
-            # Ruling 12: who it is for comes from the author header, never the body.
-            "by": current_actor().model_dump(mode="json"),
-        },
+        kind=kind,
+        subject=subject,
+        request=request,
         idempotency_key=idempotency_key,
+        before_start=before_start,
     )
     return operation_answer(result, Quote)
+
+
+async def _slice_revision(
+    order_id: str,
+    item_id: str,
+    body: ItemSliceQuoteRequest,
+    orders: OrdersComponent,
+    *,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+    payments: PaymentsComponent,
+) -> tuple[str | None, dict[str, str]]:
+    """The revision a slice with new ``inputs`` or ``commit`` quotes (#4673): made
+    through the revise path, or the item's current one when the design is unchanged;
+    and the filaments the item had pinned, by slot, for the new revision's render."""
+    store = orders.store
+    order = await asyncio.to_thread(store.order, order_id)
+    if order is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    try:
+        # A visitor's cart first: a visitor-facing path never reads a revision.
+        check_submitted(order)
+    except LifecycleError as error:
+        raise refused(error) from None
+    item = await asyncio.to_thread(store.item, item_id)
+    if item is None or item.order_id != order.id:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
+    current = item.reference
+    if current is None:
+        # Only a model item's design takes new inputs; the revise path names why not.
+        slug = {"custom": "item_custom", "library_file": "item_library_file"}.get(
+            item.kind, "item_has_no_design"
+        )
+        raise refused(
+            LifecycleError(slug, f"item {item_id} has no design to slice with new inputs")
+        )
+    resolved = await _resolved(
+        ReferenceBody(
+            slug=current.slug,
+            commit=body.commit if body.commit is not None else current.commit,
+            inputs=body.inputs if body.inputs is not None else current.inputs,
+        ),
+        None,
+        catalogue=catalogue,
+        history=history,
+        outputs=outputs,
+        paths=paths,
+        config=config,
+        fetcher=fetcher,
+    )
+    pinned = {str(slot.slot): slot.filament_id for slot in item.colours if slot.filament_id}
+    if (resolved.reference.commit, resolved.reference.inputs) == (current.commit, current.inputs):
+        return item.current_revision_id, pinned
+    by = current_actor()
+    revision = await _run_linked(
+        lambda: orders.lifecycle.add_revision(order_id, item_id, by, resolved, reuse_current=True),
+        order_id,
+        payments,
+    )
+    return revision.id, pinned
 
 
 @router.post(

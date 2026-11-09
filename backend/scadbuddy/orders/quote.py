@@ -33,7 +33,7 @@ import hashlib
 import logging
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -136,6 +136,18 @@ class SliceQuoteRequest(BaseModel):
     prime_tower: PrimeTowerChoice | None = None
     supports: SupportsChoice | None = None
     print_sequence: PrintSequence | None = None
+
+
+class ItemSliceQuoteRequest(SliceQuoteRequest):
+    """The quote route's body (#4673 PR 3, order operations spec §5.1): a slice quote's,
+    and the design to quote. With ``inputs`` or ``commit`` (each left out is the item's
+    current one) that differ from the item's, the route first makes a revision of them
+    through the revise path, then quotes under it. Not part of the operation's request:
+    the revision is, as ``revision_id``."""
+
+    inputs: dict[str, Any] | None = None
+    #: A commit id, as a revision's reference takes it (7 to 40 hex characters).
+    commit: str | None = Field(default=None, pattern=r"^[0-9a-f]{7,40}$")
 
 
 #: The fields of a slice quote's request that are its print setup (#4673): what the print
@@ -277,8 +289,19 @@ def quote_check(
     order_id: str,
     item_id: str,
     request: SliceQuoteRequest | ArchiveQuoteRequest,
+    *,
+    expected_revision_id: str | None = None,
+    body_only: bool = False,
 ) -> dict[int, str | None]:
-    """Ruling 8's refusals, from the rows: 404 for an unknown order or item, 409
+    """Ruling 8's refusals, from the rows (with ``expected_revision_id``, the revision a
+    slice's new inputs made, 409 ``revision_superseded`` once another is current, #4673):
+    With ``body_only`` (a slice whose new design the route revises first, #5761
+    review) the item's state is the revise path's to refuse, and so are the new design's
+    slots, known only once it renders (the run's): this checks the cart, that the item
+    has a design (``check_design``), the filaments the body names, each in the book and
+    not archived, and the price book. The item's pinned filaments go with the revision,
+    so the run judges those it still uses.
+    404 for an unknown order or item, 409
     ``order_not_open`` unless the order is `draft` or `quoted` (or the item has no
     accepted quote on an order that takes items after acceptance, #5349, or was revised after
     acceptance, #5350), 409 ``item_not_open``
@@ -297,7 +320,7 @@ def quote_check(
     item = store.item(item_id)
     if item is None or item.order_id != order.id:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.label}")
-    if not requote_open(order, item, store.quotes(item.id)):
+    if not body_only and not requote_open(order, item, store.quotes(item.id)):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"order {order.label} is {order.status}: an item is quoted while the order is"
@@ -305,26 +328,35 @@ def quote_check(
             " revised after acceptance",
             type_=PROBLEMS + "order_not_open",
         )
-    if item.status in SETTLED:
+    if not body_only and item.status in SETTLED:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"item {item_id} is {item.status}",
             type_=PROBLEMS + "item_not_open",
         )
     check_design(item)
+    if expected_revision_id is not None and item.current_revision_id != expected_revision_id:
+        raise refused(_superseded(item_id))
     known = {slot.slot for slot in item.colours}
-    unknown = sorted(set(request.filaments) - known) if item.colours else []
+    # Before a new design's revision its slots are not known yet: only the filaments
+    # named are judged here, the slots by the run once it renders (#5761 review).
+    unknown = sorted(set(request.filaments) - known) if item.colours and not body_only else []
     if unknown:
         raise _unprocessable(
             "filaments", f"the item has no colour slot {', '.join(map(str, unknown))}"
         )
     slots = merged_slots(item, request.filaments)
     empty = sorted(slot for slot, filament_id in slots.items() if filament_id is None)
-    if empty:
+    if empty and not body_only:
         raise _unprocessable(
             "filaments", f"colour slot {empty[0]} has no filament to price it with"
         )
-    named = check_filaments(store, {slot: f for slot, f in slots.items() if f is not None})
+    judged = dict(request.filaments) if body_only else slots
+    named = check_filaments(store, {slot: f for slot, f in judged.items() if f is not None})
+    if body_only:
+        # The pins the revision carries price it too, when they still stand.
+        pinned = (store.filament(f) for slot, f in slots.items() if f and slot not in judged)
+        named = [*named, *(record for record in pinned if record is not None)]
     if prices_nothing(policy, named):
         raise _unprocessable(
             "price_book",
@@ -334,14 +366,32 @@ def quote_check(
     return slots
 
 
-def support_check(store: OrderStore, item_id: str, request: SliceQuoteRequest) -> None:
+def _superseded(item_id: str) -> LifecycleError:
+    """409 ``revision_superseded`` (#4673): the slice was made for a revision (its new
+    inputs') that is no longer the item's current one."""
+    return LifecycleError(
+        "revision_superseded",
+        f"item {item_id} has a newer revision than the one this slice was made for: slice it again",
+        items=[item_id],
+    )
+
+
+def support_check(
+    store: OrderStore,
+    item_id: str,
+    request: SliceQuoteRequest,
+    *,
+    colours: Collection[int] | None = None,
+) -> None:
     """422 ``support_filaments`` for a support slot that is a colour slot of the item (its
     filament is the slot's own), or below 0, or a support filament unknown or archived
-    (§6.3). Blocking; writes nothing."""
+    (§6.3). Blocking; writes nothing. ``colours`` stands in for the item's slots: before a
+    slice's new design renders, the slots its body names (#5761 review)."""
     item = store.item(item_id)
     if item is None:
         return
-    colours = {slot.slot for slot in item.colours}
+    if colours is None:
+        colours = {slot.slot for slot in item.colours}
     for slot, filament_id in sorted(request.support_filaments.items()):
         if slot < 0 or slot in colours:
             raise _unprocessable(
@@ -483,6 +533,7 @@ async def ensure_output(
     schema: CustomizerSchema | None = None,
     revision_id: str | None = None,
     saved_as: str | None = None,
+    carried: Mapping[int, str] | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
@@ -496,7 +547,10 @@ async def ensure_output(
     operation saved before it stopped, and is set on the item without a second render
     or save. The save claims the id first (``OutputStore.claim``): a directory already
     there (another attempt's save still writing, or an output that does not match) is
-    left alone, and the new output gets an id of its own."""
+    left alone, and the new output gets an id of its own. ``carried`` (#4673, a slice's
+    new design) are the filaments the item had pinned before that revision: the fill
+    puts each on the rendered slot of its number, under ``filaments``, and drops the
+    rest."""
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
@@ -504,7 +558,15 @@ async def ensure_output(
         earlier = await asyncio.to_thread(_matching, outputs, saved_as, item, schema)
         if earlier is not None:
             return await _set_output(
-                lifecycle, order, item, saved_as, list(earlier.colors), filaments, by, revision_id
+                lifecycle,
+                order,
+                item,
+                saved_as,
+                list(earlier.colors),
+                filaments,
+                by,
+                revision_id,
+                carried,
             )
     reference = reference_of(item)
     params = reference.inputs.get("params", {})
@@ -547,6 +609,7 @@ async def ensure_output(
         filaments,
         by,
         revision_id,
+        carried,
     )
 
 
@@ -559,9 +622,14 @@ async def _set_output(
     filaments: Mapping[int, str],
     by: Actor,
     revision_id: str | None,
+    carried: Mapping[int, str] | None = None,
 ) -> str:
     """The item's ``output_id`` set to the saved output, with its colour slots when the
-    item has none."""
+    item has none: ``filaments`` on them, over the ``carried`` ones the render has."""
+    slots = colours_of(colours)
+    rendered = {slot.slot for slot in slots}
+    fill = {slot: f for slot, f in (carried or {}).items() if slot in rendered}
+    fill.update(filaments)
     try:
         await asyncio.to_thread(
             lambda: lifecycle.update_item(
@@ -569,8 +637,8 @@ async def _set_output(
                 item.id,
                 by,
                 output_id=output_id,
-                colours=colours_of(colours) if not item.colours else None,
-                filaments=None if item.colours else dict(filaments) or None,
+                colours=slots if not item.colours else None,
+                filaments=None if item.colours else fill or None,
                 expected_revision_id=revision_id,
             )
         )
@@ -872,10 +940,17 @@ async def quote_run(
     by: Actor,
     *,
     quote_id: str | None = None,
+    expected_revision_id: str | None = None,
+    carried_filaments: Mapping[int, str] | None = None,
 ) -> Quote:
     """The whole run, in the order the module docstring gives. ``quote_id`` is the id
     every attempt of one operation records under (:func:`operation_quote_id`): an
-    attempt that finds it recorded answers with it and does nothing (#5353)."""
+    attempt that finds it recorded answers with it and does nothing (#5353). With
+    ``expected_revision_id`` (#4673) it quotes that revision or, once another is
+    current, nothing (``revision_superseded``): checked when it reads the item, and again
+    by the record under the order's lock (its ``revision_not_newest``, named so here).
+    ``carried_filaments`` are the item's filaments before that revision, which the
+    render's slots take where the body names none (:func:`ensure_output`)."""
     lifecycle = run.lifecycle
     store = lifecycle.store
     quote_id = quote_id or uuid.uuid4().hex
@@ -902,6 +977,8 @@ async def quote_run(
     revision_id = item.current_revision_id
     if revision_id is None:
         raise refused(LifecycleError("item_has_no_design", f"item {item_id} has no design yet"))
+    if expected_revision_id is not None and revision_id != expected_revision_id:
+        raise refused(_superseded(item_id))
     schema = await run.schema_of(reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
@@ -916,24 +993,34 @@ async def quote_run(
         schema=schema,
         revision_id=revision_id,
         saved_as=operation_output_id(quote_id),
+        carried=carried_filaments,
     )
+    if expected_revision_id is not None:
+        # A slice's new design has its colour slots only now: its support slots are
+        # judged against them here (#5761 review).
+        await asyncio.to_thread(support_check, store, item_id, request)
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
     scope = BlobScope(slug=reference.slug, title=reference.template_name)
-    return await _priced(
-        run,
-        order,
-        item_id,
-        sliced,
-        scope,
-        by,
-        quote_id,
-        revision_id,
-        part_settings=dumped(request.part_settings),
-        request=request,
-    )
+    try:
+        return await _priced(
+            run,
+            order,
+            item_id,
+            sliced,
+            scope,
+            by,
+            quote_id,
+            revision_id,
+            part_settings=dumped(request.part_settings),
+            request=request,
+        )
+    except ApiError as error:
+        if expected_revision_id is not None and error.type == PROBLEMS + "revision_not_newest":
+            raise refused(_superseded(item_id)) from None
+        raise
 
 
 async def _library_quote(

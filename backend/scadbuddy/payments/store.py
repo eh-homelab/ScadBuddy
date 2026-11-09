@@ -54,11 +54,14 @@ CAPTURE_DAILY_ATTEMPTS = 5
 #: order's cancel and the disconnect for good. A read is counted when it found the
 #: outcome unknown, when the lifecycle did not take its event, or when its settling
 #: raised (about five days with the backoff: 1 + 2 + ... + 16 hours, then a day each).
-#: After a pending read the count is at least `CAPTURE_DAILY_ATTEMPTS`, so four more
-#: counted reads, a day apart, give up.
+#: After a pending read the count is at least `CAPTURE_DAILY_ATTEMPTS`, so at most four
+#: more counted reads, a day apart, give up.
 CAPTURE_GIVE_UP_ATTEMPTS = 9
 #: A capture still pending at the provider this many days after the approval marks the
-#: request `failed` (`capture_pending_unsettled`). PayPal says an eCheck usually clears
+#: request `failed` (`capture_pending_unsettled`). It is counted from
+#: `capture_pending_at`: for a request the backfill
+#: (`20261109T0026Z_payment_capture_backfill.sql`) marked, that is when the migration ran,
+#: so its bound comes later than the approval's would. PayPal says an eCheck usually clears
 #: in 4 to 7 business days and can take longer
 #: (https://www.paypal.com/us/cshelp/article/what-is-an-echeck-help285); 30 days is more
 #: than twice that with weekends and holidays, so a capture that is only slow is not
@@ -137,11 +140,17 @@ def set_request_status(
     A request with a page that is cancelled, or paid by a payment that is not its own
     provider's (by hand, or a payment on another request that cleared the balance), is
     marked. Its own provider's payment clears the mark: the page was paid. A new mark, or
-    a cleared one, starts the close over: no tries and no give-up (#5728 review)."""
+    a cleared one, starts the close over: no tries and no give-up (#5728 review). A
+    request that ends (paid, cancelled or expired) drops its pay token (#4960) in the
+    same write: a spent token never reads again. A ``pending`` or ``failed`` one keeps it:
+    a capture PayPal refused leaves the request ``failed``, and its page can be approved
+    again (#4959), so its link must still work (#5769 review)."""
     row = conn.execute(
         "UPDATE payment_requests r SET status = %(status)s,"
         " paid_at = CASE WHEN %(status)s = 'paid' THEN clock_timestamp() END,"
         " payment_id = COALESCE(%(payment)s, r.payment_id),"
+        " pay_token_hash = CASE WHEN %(status)s IN ('open', 'pending', 'failed')"
+        "  THEN r.pay_token_hash END,"
         " close_pending_at = CASE WHEN m.mark THEN clock_timestamp()"
         "  WHEN %(status)s = 'paid' THEN NULL ELSE r.close_pending_at END,"
         " close_abandoned_at = CASE WHEN m.mark OR %(status)s = 'paid' THEN NULL"
@@ -243,8 +252,9 @@ def capture_read_daily(conn: Conn, request_id: str) -> bool:
     """The capture was made and is pending at the provider (#4959): its own event
     settles it, as a bank debit's does, and the sweep reads it once a day in case that
     event is lost (`CAPTURE_DAILY_ATTEMPTS`). The read is not counted toward
-    `CAPTURE_GIVE_UP_ATTEMPTS`: True once the approval is `CAPTURE_PENDING_GIVE_UP_DAYS`
-    old. A request no longer marked is left as it is (False)."""
+    `CAPTURE_GIVE_UP_ATTEMPTS`: True once ``capture_pending_at`` (the latest approval, or
+    the backfill's run) is `CAPTURE_PENDING_GIVE_UP_DAYS` old. A request no longer marked
+    is left as it is (False)."""
     row = conn.execute(
         "UPDATE payment_requests SET capture_attempts = GREATEST(capture_attempts, %s),"
         " capture_tried_at = clock_timestamp()"
@@ -300,14 +310,19 @@ def set_request_link(
     hosted_url: str | None,
     link_error: str | None,
     close_pending: bool = False,
+    new_link: bool = False,
+    pay_token_hash: str | None = None,
 ) -> PaymentRequestView:
     """``close_pending`` (#5700): the page was made after the request closed, so it is
-    kept only as a page to close, marked as `set_request_status` marks one."""
+    kept only as a page to close, marked as `set_request_status` marks one. A ``new_link``
+    writes ``pay_token_hash`` (#4960) as given, so a link with no token drops the old one
+    and its pay page; any other write keeps the token it had."""
     row = conn.execute(
         "UPDATE payment_requests SET provider_ref = %s, hosted_url = %s, link_error = %s,"
-        " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END"
+        " close_pending_at = CASE WHEN %s THEN clock_timestamp() ELSE close_pending_at END,"
+        " pay_token_hash = CASE WHEN %s THEN %s ELSE pay_token_hash END"
         f" WHERE id = %s RETURNING {_VIEW}",
-        (provider_ref, hosted_url, link_error, close_pending, request_id),
+        (provider_ref, hosted_url, link_error, close_pending, new_link, pay_token_hash, request_id),
     ).fetchone()
     assert row is not None
     return PaymentRequestView.model_validate(row)

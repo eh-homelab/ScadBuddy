@@ -1,0 +1,114 @@
+{
+  "accounts": [
+    {
+      "account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp",
+      "balances": {
+        "available": 100,
+        "current": 110,
+        "iso_currency_code": "USD",
+        "limit": null,
+        "unofficial_currency_code": null
+      },
+      "mask": "0000",
+      "name": "Plaid Checking",
+      "official_name": "Plaid Gold Standard 0% Interest Checking",
+      "subtype": "checking",
+      "type": "depository"
+    }
+  ],
+  "added": [
+    {
+      "account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp",
+      "account_owner": null,
+      "amount": -25,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "check_number": null,
+      "date": "2026-11-06",
+      "datetime": null,
+      "authorized_date": "2026-11-05",
+      "authorized_datetime": null,
+      "location": {
+        "address": null,
+        "city": null,
+        "country": null,
+        "lat": null,
+        "lon": null,
+        "postal_code": null,
+        "region": null,
+        "store_number": null
+      },
+      "name": "ZELLE FROM JANE ORD-2026-7",
+      "merchant_name": null,
+      "original_description": "ZELLE PAYMENT FROM JANE DOE ACCT 123456789 ORD-2026-7",
+      "payment_meta": {
+        "by_order_of": null,
+        "payee": null,
+        "payer": "JANE DOE",
+        "payment_method": null,
+        "payment_processor": null,
+        "ppd_id": null,
+        "reason": null,
+        "reference_number": "12345678901"
+      },
+      "payment_channel": "other",
+      "pending": false,
+      "pending_transaction_id": null,
+      "transaction_code": null,
+      "transaction_id": "lPNjeW1nR6CDn5okmGQ6hEpMo4lLNoSrzqDje",
+      "transaction_type": "special"
+    },
+    {
+      "account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp",
+      "account_owner": null,
+      "amount": 72.1,
+      "iso_currency_code": "USD",
+      "unofficial_currency_code": null,
+      "check_number": null,
+      "date": "2026-11-06",
+      "datetime": "2026-11-06T11:01:01Z",
+      "authorized_date": "2026-11-05",
+      "authorized_datetime": "2026-11-05T10:34:50Z",
+      "location": {
+        "address": "13425 Community Rd",
+        "city": "Poway",
+        "country": "US",
+        "lat": 32.959068,
+        "lon": -117.037666,
+        "postal_code": "92064",
+        "region": "CA",
+        "store_number": "1700"
+      },
+      "name": "PURCHASE WM SUPERCENTER #1700",
+      "merchant_name": "Walmart",
+      "original_description": null,
+      "payment_meta": {
+        "by_order_of": null,
+        "payee": null,
+        "payer": null,
+        "payment_method": null,
+        "payment_processor": null,
+        "ppd_id": null,
+        "reason": null,
+        "reference_number": null
+      },
+      "payment_channel": "in store",
+      "pending": false,
+      "pending_transaction_id": "no86Eox18VHMvaOVL7gPUM9ap3aR1LsAVZ5nc",
+      "transaction_code": null,
+      "transaction_id": "yhnUVvtcGGcCKU0bcz8PDQr5ZUxUXebUvbKC0",
+      "transaction_type": "in store"
+    }
+  ],
+  "modified": [],
+  "removed": [
+    {
+      "account_id": "BxBXxLj1m4HMXBm9WZZmCWVbPjX16EHwv99vp",
+      "transaction_id": "CmdQTNgems8BT1B7ibkoUXVPyAeehT3Tmzk0l"
+    }
+  ],
+  "next_cursor": "tVUUL15lYQN5rBnfDIc1I8xudpGdIlw9nsgeXWvhOfkECvUeR663i3Dt1uf/94S8ASkitgLcIiOSqNwzzp+bh89kirazha5vuZHBb2ZA5NtCDkkV",
+  "has_more": false,
+  "transactions_update_status": "HISTORICAL_UPDATE_COMPLETE",
+  "request_id": "Wvhy9PZHQLV8njG"
+}

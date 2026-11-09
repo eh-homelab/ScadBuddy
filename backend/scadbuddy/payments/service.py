@@ -45,6 +45,12 @@ from scadbuddy.payments.provider import (
     ProviderField,
     ProviderUnavailableError,
 )
+from scadbuddy.payments.venmo import (
+    pay_link,
+    pay_token,
+    venmo_eligible,
+    venmo_setting_error,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.orders.component import OrdersComponent
@@ -169,11 +175,14 @@ class Payments:
         credentials: PaymentCredentials,
         registry: Mapping[str, PaymentProvider],
         public_url: Callable[[], str | None],
+        storefront_url: Callable[[], str | None] = lambda: None,
     ) -> None:
         self._orders = orders
         self._credentials = credentials
         self._registry = registry
         self._public_url = public_url
+        #: The storefront's origin (#4960): a Venmo-eligible request's link is its pay page.
+        self._storefront_url = storefront_url
 
     # -- requests ---------------------------------------------------------------------
 
@@ -223,6 +232,7 @@ class Payments:
         assert order is not None and order.number is not None
         hosted: HostedRequest | None = None
         error: str | None = None
+        token_digest: str | None = None
         try:
             adapter, credential = await asyncio.to_thread(self._connected, found.provider)
             hosted = await adapter.create_request(
@@ -232,6 +242,16 @@ class Payments:
                 idempotency_key=found.id,
                 order_number=order.number,
             )
+            storefront = self._storefront_url()
+            if storefront and venmo_eligible(
+                found.provider, credential.settings, found.currency, storefront
+            ):
+                # #4960: once the storefront's pay page exists (`PAY_PAGE_READY`), it
+                # offers Venmo for the same order.
+                token, token_digest = pay_token()
+                hosted = HostedRequest.model_validate(
+                    {"provider_ref": hosted.provider_ref, "hosted_url": pay_link(storefront, token)}
+                )
         except (
             ProviderNotFoundError,
             ProviderError,
@@ -242,7 +262,9 @@ class Payments:
             error = str(failed)
             logger.warning("payment request %s was not linked: %s", found.id, error)
         linked = await asyncio.to_thread(
-            lambda: self._orders.lifecycle.set_request_link(found.id, hosted=hosted, error=error)
+            lambda: self._orders.lifecycle.set_request_link(
+                found.id, hosted=hosted, error=error, pay_token_hash=token_digest
+            )
         )
         if (
             hosted is not None
@@ -376,9 +398,10 @@ class Payments:
           (the request still ``pending``: ``currency_mismatch``, ``ignored``,
           ``unmatched``) counts as one that could not tell; a ``pending`` one is left to
           the capture's own event, as a bank debit is, and read once a day in case that
-          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`), not counted; once the
-          approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old the request is marked
-          ``failed`` (``capture_pending_unsettled``);
+          event is lost (`payments.CAPTURE_DAILY_ATTEMPTS`), not counted; once its
+          ``capture_pending_at`` (the latest approval, or the backfill's run) is
+          `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old the request is marked ``failed``
+          (``capture_pending_unsettled``);
         - an order approved with no capture is captured again, keyed on the approval,
           once the order lock says the order still takes money (`Lifecycle.recapture_key`;
           an order that does not marks the request ``failed``); a refused or declined
@@ -463,9 +486,9 @@ class Payments:
         return await self._unsettled(provider, request)
 
     async def _pending_read(self, provider: str, request: PaymentRequestView) -> bool:
-        """The capture is pending at the provider: read once a day, not counted; once the
-        approval is `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old, the request is
-        ``failed``."""
+        """The capture is pending at the provider: read once a day, not counted; once
+        ``capture_pending_at`` (the latest approval, or the backfill's run) is
+        `payments.CAPTURE_PENDING_GIVE_UP_DAYS` old, the request is ``failed``."""
         if not await asyncio.to_thread(self._read_daily, request.id):
             return False
         logger.warning("payment request %s: its capture stayed pending; marked failed", request.id)
@@ -698,6 +721,13 @@ class Payments:
         adapter = self._registry.get(provider)
         if adapter is None:
             raise ProviderNotFoundError(provider)
+        defaults = {
+            f.name: f.default
+            for f in adapter.fields
+            if f.default is not None and f.name not in body.settings
+        }
+        if defaults:
+            body = body.model_copy(update={"settings": {**body.settings, **defaults}})
         for part, given in (("settings", body.settings), ("secrets", body.secrets)):
             declared = {f.name for f in adapter.fields if f.secret == (part == "secrets")}
             if extra := sorted(set(given) - declared):
@@ -706,6 +736,15 @@ class Payments:
                 raise FieldError(
                     (part, missing[0]), f"{provider} needs the {part} field {missing[0]!r}"
                 )
+        for field in adapter.fields:
+            value = body.settings.get(field.name)
+            if field.choices is not None and value not in field.choices:
+                raise FieldError(
+                    ("settings", field.name),
+                    f"{provider}'s {field.name} is one of {', '.join(field.choices)}",
+                )
+        if venmo := venmo_setting_error(provider, body.settings, self._storefront_url()):
+            raise FieldError(("settings", "venmo"), venmo)
         if not self._credentials.can_seal:
             raise KekMissingError()
         verified = await adapter.verify(

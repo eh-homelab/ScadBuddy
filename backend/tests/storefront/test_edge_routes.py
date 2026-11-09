@@ -21,15 +21,18 @@ from starlette.routing import Route
 
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudUnavailableError
+from scadbuddy.storefront import uploads
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
     MAX_CLIENTS,
     MAX_PER_PREFIX,
     OVERFLOW,
     READ_LIMIT,
+    REQUEST_UPLOADS,
     WINDOW,
     WRITE_LIMIT,
     RequestLimit,
+    UploadAllowance,
     client_key,
 )
 from scadbuddy.storefront.routes import MAX_RENDER_BODY
@@ -654,3 +657,496 @@ def test_a_dropped_preview_closes_its_stream_at_once(
         assert closed == [True]
 
     asyncio.run(drive())
+
+
+# -- the draft (Task 8) -------------------------------------------------------------------
+
+DRAFT = "/api/v1/internal/crud/storefront/draft"
+ITEM = "6c1f9d0f-5d0c-4d43-9d33-0b6f0f1e6a11"
+VIEW: dict[str, Any] = {
+    "id": "0d0c0b0a-5d0c-4d43-9d33-6c1f9d0f6a11",
+    "currency": "USD",
+    "minor_exponent": 2,
+    "items": [],
+}
+
+
+def test_the_draft_is_forwarded(edge: TestClient, crud_mock: respx.Router) -> None:  # noqa: F811
+    route = crud_mock.get(DRAFT).respond(
+        200, content=b"null", headers={**CRUD, "Content-Type": "application/json"}
+    )
+    r = edge.get("/api/store/v1/draft")
+    assert r.status_code == 200 and r.json() is None
+    assert len(route.calls.last.request.headers[VISITOR_HEADER]) == 43
+
+
+def test_an_item_is_forwarded_as_sent_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{DRAFT}/items").respond(200, json=VIEW, headers=CRUD)
+    raw = '{"listing_id": "x", "values": {"width": 1' + "0" * 400 + "}}"
+    r = edge.post(
+        "/api/store/v1/draft/items",
+        content=raw,
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert sent.content == raw.encode()
+    assert uuid.UUID(sent.headers["idempotency-key"]).version == 4
+
+
+def test_an_item_body_too_large_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{DRAFT}/items")
+    r = edge.post(
+        "/api/store/v1/draft/items",
+        content=b"{" + b" " * (MAX_RENDER_BODY + 1) + b"}",
+        headers={"Origin": PUBLIC_URL, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+    assert route.call_count == 0
+
+
+def test_an_item_from_another_origin_is_refused_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    add = crud_mock.post(f"{DRAFT}/items")
+    remove = crud_mock.delete(f"{DRAFT}/items/{ITEM}")
+    evil = {"Origin": "https://evil.example"}
+    assert edge.post("/api/store/v1/draft/items", json={}, headers=evil).status_code == 403
+    assert edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers=evil).status_code == 403
+    assert (add.call_count, remove.call_count) == (0, 0)
+
+
+def test_a_removal_is_forwarded_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(200, json=VIEW, headers=CRUD)
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 200 and r.json() == VIEW
+    assert uuid.UUID(route.calls.last.request.headers["idempotency-key"]).version == 4
+
+
+def test_another_visitors_item_passes_through_as_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    missing = {
+        "type": f"{STOREFRONT_PROBLEMS}item_not_found",
+        "title": "Not Found",
+        "status": 404,
+        "detail": "There is no such item.",
+    }
+    crud_mock.delete(f"{DRAFT}/items/{ITEM}").respond(404, json=missing, headers=CRUD)
+    r = edge.delete(f"/api/store/v1/draft/items/{ITEM}", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 404 and r.json()["type"] == missing["type"]
+
+
+@pytest.mark.parametrize("item_id", ["..", "not-an-item", "%2E%2E", "A" * 36])
+def test_an_item_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    item_id: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.delete(f"/api/store/v1/draft/items/{item_id}", headers={"Origin": PUBLIC_URL})
+    # ".." leaves the path whole: ``DELETE /draft`` is no route.
+    assert r.status_code == (405 if item_id == ".." else 404)
+    assert len(crud_mock.calls) == before
+
+
+# -- design requests (Task 9) ---------------------------------------------------------------
+
+REQUESTS = "/api/v1/internal/crud/storefront/draft/requests"
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+BIG = 25 * 1024 * 1024
+
+
+def _ask(edge: TestClient, files: Any = None, headers: dict[str, str] | None = None) -> Any:
+    sent = headers or {"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())}
+    if files:
+        return edge.post(
+            "/api/store/v1/draft/requests", data={"text": "A hook"}, files=files, headers=sent
+        )
+    # A browser's form with no file is still multipart.
+    body = b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\nA hook\r\n--b--\r\n'
+    return edge.post(
+        "/api/store/v1/draft/requests",
+        content=body,
+        headers={**sent, "Content-Type": "multipart/form-data; boundary=b"},
+    )
+
+
+def test_a_request_is_streamed_on_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert sent.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert len(sent.headers["idempotency-key"]) == 64
+    assert b'name="text"' in sent.content and b"A hook" in sent.content
+    assert b'filename="a.png"' in sent.content and PNG in sent.content
+
+
+def test_the_edge_refuses_an_oversized_file_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    files = [("files", ("big.png", PNG + b"0" * BIG, "image/png"))]
+    r = _ask(edge, files)
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}file_too_large"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_the_edge_refuses_too_many_files_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    files = [("files", (f"{n}.png", PNG, "image/png")) for n in range(11)]
+    r = _ask(edge, files)
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_files"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_the_edge_caps_the_whole_body(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_REQUEST_BODY", 1024)
+    r = _ask(edge, [("files", ("a.png", PNG + b"0" * 2048, "image/png"))])
+    assert r.status_code == 413
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}file_too_large"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\nX-Pad: '
+        + b"p" * 20000
+        + b"\r\n\r\nhi\r\n--b--\r\n",
+        b'--b\r\nContent-Disposition: form-data; name="other"\r\n\r\nhi\r\n--b--\r\n',
+        b"".join(
+            b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\nhi\r\n' for _ in range(3)
+        )
+        + b"--b--\r\n",
+    ],
+)
+def test_the_edge_refuses_a_body_that_is_not_a_request(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    body: bytes,
+) -> None:
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        content=body,
+        headers={
+            "Origin": PUBLIC_URL,
+            "Content-Type": "multipart/form-data; boundary=b",
+            "Idempotency-Key": str(uuid.uuid4()),
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_body_invalid"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+def test_a_request_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    refused = {
+        "type": f"{STOREFRONT_PROBLEMS}file_type",
+        "title": "Unsupported Media Type",
+        "status": 415,
+        "detail": "Send photos, videos or PDFs.",
+    }
+    crud_mock.post(REQUESTS).respond(415, json=refused, headers=CRUD)
+    r = _ask(edge, [("files", ("x.svg", b"<svg/>", "image/svg+xml"))])
+    assert r.status_code == 415 and r.json()["type"] == refused["type"]
+
+
+# -- design requests: the bounds (Task 9 fix round 1) ---------------------------------------
+
+
+def test_requests_off_are_refused_before_the_body_is_read(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    posted = crud_mock.post(REQUESTS)
+    for _ in range(2):
+        r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+        assert r.status_code == 404
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    # Read once, then from the replica's cache.
+    assert (crud_mock["requests_enabled"].call_count, posted.call_count) == (1, 0)
+
+
+def test_a_client_may_start_six_requests_an_hour(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    codes = [_ask(edge).status_code for _ in range(7)]
+    assert codes == [200] * 6 + [429]
+    r = _ask(edge)
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_limited"
+    assert 1 <= int(r.headers["retry-after"]) <= 3600
+
+
+def test_a_busy_edge_refuses_before_the_body_is_read(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 0)
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 503 and r.headers["retry-after"] == "30"
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
+    assert posted.call_count == 0
+
+
+def test_a_lost_upload_is_sent_once_and_names_the_cart(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).mock(side_effect=httpx.ReadTimeout("slow"))
+    browser_key = str(uuid.uuid4())
+    r = _ask(
+        edge,
+        [("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key},
+    )
+    assert r.status_code == 503
+    problem = r.json()
+    assert problem["type"] == f"{STOREFRONT_PROBLEMS}upload_unavailable"
+    assert "Check your cart before you send it again." in problem["detail"]
+    # Never retried: its body cannot be sent twice.
+    assert route.call_count == 1
+    first = route.calls.last.request
+    timeout = first.extensions["timeout"]
+    assert (timeout["connect"], timeout["read"], timeout["write"]) == (5.0, 300.0, 300.0)
+    # The visitor sends it again with the same key: the CRUD side sees the same key.
+    route.mock(return_value=httpx.Response(200, json=VIEW, headers=CRUD))
+    again = _ask(
+        edge,
+        [("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key},
+    )
+    assert again.status_code == 200
+    assert route.calls.last.request.headers["idempotency-key"] == first.headers["idempotency-key"]
+
+
+def test_a_browser_key_is_bound_to_its_visitor(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    browser_key = str(uuid.uuid4())
+    sent: list[str] = []
+    for _ in range(2):
+        # Each client is a new visitor, with a cookie of its own.
+        with TestClient(create_app(load()), base_url="https://testserver", client=CLIENT) as c:
+            r = _ask(c, headers={"Origin": PUBLIC_URL, "Idempotency-Key": browser_key})
+            assert r.status_code == 200
+            sent.append(route.calls.last.request.headers["idempotency-key"])
+    assert sent[0] != sent[1] and browser_key not in sent
+
+
+def test_a_browser_key_that_is_not_a_uuid_is_422(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, headers={"Origin": PUBLIC_URL, "Idempotency-Key": "../../x"})
+    assert r.status_code == 422 and posted.call_count == 0
+
+
+def test_the_request_text_is_checked_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS)
+    for text in ("   ", "a\x00b", "bell\x07"):
+        r = edge.post(
+            "/api/store/v1/draft/requests",
+            data={"text": text},
+            files=[("files", ("a.png", PNG, "image/png"))],
+            headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert r.status_code == 422
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_text"
+    assert posted.call_count == 0
+
+
+# -- design requests: keys, slots and the allowance (Task 9 fix round 2) --------------------
+
+
+def test_a_request_with_no_browser_key_is_428(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))], headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 428
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}idempotency_key_required"
+    assert posted.call_count == 0
+    # Refused before the allowance: the visitor still has every start.
+    assert [_ask(edge).status_code for _ in range(REQUEST_UPLOADS)] == [200] * REQUEST_UPLOADS
+
+
+def test_one_client_holds_one_upload_at_a_time() -> None:
+    allowance = UploadAllowance(clock=lambda: 0.0)
+    held = allowance.start("2001:db8::1")
+    assert isinstance(held, str)
+    # The same /64: the same client, so its second upload waits.
+    second = allowance.start("2001:db8::2")
+    assert isinstance(second, int) and second >= 1
+    assert isinstance(allowance.start("203.0.113.7"), str)
+    allowance.finish(held)
+    assert isinstance(allowance.start("2001:db8::2"), str)
+
+
+def test_starting_spends_nothing_until_spent() -> None:
+    allowance = UploadAllowance(clock=lambda: 0.0)
+    for _ in range(REQUEST_UPLOADS * 3):
+        held = allowance.start("203.0.113.7")
+        assert isinstance(held, str)
+        allowance.finish(held)
+    for _ in range(REQUEST_UPLOADS):
+        held = allowance.start("203.0.113.7")
+        assert isinstance(held, str)
+        allowance.spend(held)
+        allowance.finish(held)
+    wait = allowance.start("203.0.113.7")
+    assert isinstance(wait, int) and 1 <= wait <= 3600
+
+
+def test_a_second_upload_from_a_client_is_429(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    posted = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    allowance = edge.app.state.upload_allowance  # type: ignore[attr-defined]
+    held = allowance.start(CLIENT[0])
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 429
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}request_limited"
+    assert int(r.headers["retry-after"]) >= 1
+    assert posted.call_count == 0
+    allowance.finish(held)
+    assert _ask(edge).status_code == 200
+
+
+def test_a_busy_refusal_spends_no_start(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 0)
+    assert {_ask(edge).status_code for _ in range(REQUEST_UPLOADS + 2)} == {503}
+    monkeypatch.setattr(uploads, "MAX_UPLOADS_AT_ONCE", 8)
+    assert [_ask(edge).status_code for _ in range(REQUEST_UPLOADS)] == [200] * REQUEST_UPLOADS
+
+
+def test_a_refusal_the_visitor_causes_spends_a_start(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    bad = b'--b\r\nContent-Disposition: form-data; name="other"\r\n\r\nhi\r\n--b--\r\n'
+    for _ in range(REQUEST_UPLOADS):
+        r = edge.post(
+            "/api/store/v1/draft/requests",
+            content=bad,
+            headers={
+                "Origin": PUBLIC_URL,
+                "Content-Type": "multipart/form-data; boundary=b",
+                "Idempotency-Key": str(uuid.uuid4()),
+            },
+        )
+        assert r.status_code == 422
+    assert _ask(edge).status_code == 429
+
+
+def test_an_over_limit_client_never_takes_a_slot(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    assert [_ask(edge).status_code for _ in range(REQUEST_UPLOADS)] == [200] * REQUEST_UPLOADS
+    entered: list[None] = []
+    enter = uploads.UploadGate.enter
+
+    def counted(gate: uploads.UploadGate) -> uploads.UploadSlot:
+        entered.append(None)
+        return enter(gate)
+
+    monkeypatch.setattr(uploads.UploadGate, "enter", counted)
+    assert _ask(edge).status_code == 429
+    assert entered == []
+
+
+def test_the_edge_frees_its_slot_before_the_forward(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    allowance = edge.app.state.upload_allowance  # type: ignore[attr-defined]
+    seen: list[tuple[int, int, bool]] = []
+
+    def forward(request: httpx.Request) -> httpx.Response:
+        held = allowance.start(CLIENT[0])
+        seen.append((uploads.UPLOADS.running, uploads.UPLOADS.spooled, isinstance(held, str)))
+        if isinstance(held, str):
+            allowance.finish(held)
+        return httpx.Response(200, json=VIEW, headers=CRUD)
+
+    crud_mock.post(REQUESTS).mock(side_effect=forward)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 200
+    assert seen == [(0, 0, True)]
+
+
+def test_a_busy_crud_side_is_busy_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    busy = {
+        "type": f"{STOREFRONT_PROBLEMS}uploads_busy",
+        "title": "Service Unavailable",
+        "status": 503,
+        "detail": "The shop is taking other files right now. Try again in a moment.",
+        "retry_after": 30,
+    }
+    route = crud_mock.post(REQUESTS).respond(503, json=busy, headers={**CRUD, "Retry-After": "30"})
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 503 and r.headers["retry-after"] == "30"
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}uploads_busy"
+    assert route.call_count == 1
+
+
+def test_a_crud_side_5xx_that_is_not_busy_is_still_lost(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(REQUESTS).respond(503, json={"type": "about:blank"}, headers=CRUD)
+    r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
+    assert r.status_code == 503
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_unavailable"

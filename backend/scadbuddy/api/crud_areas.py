@@ -16,12 +16,13 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``runs`` area also covers ``…/print/outcomes``, added with it (#5298 Task 24). The print
 #: ``printer-ensure`` area is Task 29's ``…/print/printers/ensure-bambuddy`` alone, taken
 #: early by #4625 so a merge never runs on the worker's role. The print ``sends`` area is
-#: ``…/print/sends``, the queue item a reprint queued (#3741).
+#: ``…/print/sends``, the queue item a reprint queued (#3741). The storefront ``pay`` area
+#: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay/{token}`` page reads.
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
     "print": ["settings", "runs", "operations", "events", "printer-ensure", "sends"],
-    "storefront": ["listings", "renders"],
+    "storefront": ["listings", "renders", "drafts", "requests", "pay"],
     "agent": ["order-costs"],
 }
 

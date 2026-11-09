@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +35,7 @@ from scadbuddy.orders.builtin_flow import (
     move_after_approval,
     move_triggers,
     script_calls,
+    unread_tool_calls,
 )
 from scadbuddy.render.projection import JobProjection
 from tests.test_flow_trigger_events import _Client, new_cart
@@ -251,9 +251,72 @@ async def test_a_trigger_on_the_older_built_in_runs_the_new_one(
 def test_every_call_of_the_script_is_seen_by_the_widening_check() -> None:
     """#5732 review: `script_calls` reads `tool("<literal>", ...)` only, so a built-in
     that named a tool by a variable would slip past it. Each `tool(` call is a literal."""
-    tool_calls = len(re.findall(r"\btool\(", SCRIPT))
-    assert tool_calls == len(re.findall(r"""\btool\(\s*["'][A-Za-z0-9_]+["']""", SCRIPT))
+    assert unread_tool_calls(SCRIPT) == 0
     assert {fn for fn, _ in script_calls(SCRIPT)} >= {"queue_print", "tool", "agent"}
+
+
+def test_a_tool_mention_in_a_comment_or_a_string_is_no_call() -> None:
+    """#5761 review: only a real call counts, so a mention never blocks the built-in."""
+    mentioned = '# call tool(name) here\nx = "tool(name)"\ntool("order_get", {})\n'
+    assert unread_tool_calls(mentioned) == 0
+    assert unread_tool_calls('name = "order_get"\ntool(name, {})\n') == 1
+    assert unread_tool_calls('tool(str("order_get"), {})\n') == 1
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_a_script_that_names_a_tool_by_a_variable_is_never_registered(
+    definitions: FlowDefinitions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5732 review: the widening check reads `tool("<literal>", ...)` only, so a built-in
+    whose script names a tool any other way writes no version: neither a first one nor
+    an upgrade."""
+    hidden = SCRIPT.replace('tool("order_get", ', 'tool(str("order_get"), ', 1)
+    assert hidden != SCRIPT
+    monkeypatch.setattr(builtin_flow, "SCRIPT", hidden)
+    await definitions.start()
+    assert await ensure_builtin_flow(definitions) is False
+    assert definitions.history.versions(NAME) == []
+
+    await _registered_old(definitions)
+    assert await ensure_builtin_flow(definitions) is False
+    assert len(definitions.history.versions(NAME)) == 1
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
+async def test_a_trigger_on_a_persons_older_version_is_left_with_the_notice(
+    definitions: FlowDefinitions, triggers: TriggerStore
+) -> None:
+    """#5732 review: a trigger of a person's version is never moved, even below a newer
+    built-in one; it shows the notice, and a person moves it."""
+    await _registered_old(definitions)
+    persons = await definitions.register(
+        NAME,
+        OLD_SCRIPT + "\n# the shop's edit\n",
+        {"kind": "browser"},
+        approval_timeout_s=None,
+        inputs_schema=INPUTS_SCHEMA,
+    )
+    [mine, _] = definitions.history.versions(NAME)
+    assert mine.version_id == persons.id and mine.builtin is None
+    trigger = await _approved_trigger(triggers, mine.version_id)
+    # A built-in version above it (as a restore of the built-in's would leave).
+    made = await definitions.upgrade_builtin(
+        NAME,
+        SCRIPT,
+        builtin_flow.AUTHOR,
+        head=mine.commit,
+        inputs_schema=INPUTS_SCHEMA,
+        message="Update the built-in order-fulfilment flow",
+    )
+    assert made is not None
+
+    assert await move_triggers(definitions, triggers) == 0
+    left = await triggers.get(trigger.id)
+    assert left is not None
+    assert left.definition_id == mine.version_id
+    assert left.notice == NEWER_NOTICE
 
 
 @pytest.mark.requires_postgres

@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,6 +21,7 @@ from scadbuddy import main
 from scadbuddy.batches.store import Pruned
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.workflows.housekeeping import (
     GIT_SWEEP,
     LIBRARY_SWEEP,
@@ -256,6 +257,10 @@ async def test_a_failing_sweep_fails_its_activity(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
     monkeypatch.setattr(main, "sync_printers", _broken_async)
+    # #4961: the deposit sync, which calls Plaid.
+    monkeypatch.setattr(main, "sync_deposits", _broken_async)
+    # #5282: the idle storefront carts.
+    monkeypatch.setattr(main, "_sweep_storefront", _broken(OSError("the database is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -283,6 +288,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 sessions=SimpleNamespace(delete_expired=_broken(OSError("the database is gone"))),
                 # #5700: the payment pages whose close failed.
                 service=SimpleNamespace(retry_closes=_broken_async, settle_captures=_broken_async),
+                bank=None,  # #4961: the linked account, read by the stubbed sync
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -402,6 +408,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     # #5298: the CRUD routes' idempotency replies past their 24 h, one delete.
     monkeypatch.setattr(main, "_prune_crud_requests", lambda state: time.sleep(0.1))
 
+    # #5282: the idle storefront carts, a short transaction per cart.
+    def slow_storefront(state: object) -> tuple[list[str], int, int]:
+        time.sleep(0.1)
+        return [], 0, 0
+
+    monkeypatch.setattr(main, "_sweep_storefront", slow_storefront)
+
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:
         await asyncio.sleep(0.1)
@@ -417,6 +430,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     async def slow_closes() -> int:
         await asyncio.sleep(0.1)
         return 0
+
+    # #4961: the deposit sync, Plaid pages and the matches.
+    async def slow_deposits(bank: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sync_deposits", slow_deposits)
 
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
@@ -439,6 +459,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             # #5700: the payment pages whose close failed, a provider call per page.
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
+            bank=None,  # #4961: the linked account, read by the stubbed sync
             temporal=object,
             store=None,
             refs=None,
@@ -744,3 +765,44 @@ async def test_a_failing_slice_sweep_is_logged_once_and_fails(
         await ActivityEnvironment().run(activities[sweep])
 
     assert [record.getMessage() for record in caplog.records] == [message]
+
+
+def test_the_storefront_sweep_reads_the_stored_ttl_and_both_cutoffs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review Minor 3: carts and visitors idle past the stored
+    ``storefront_draft_ttl_days``, renders past a day."""
+    now = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    calls: dict[str, object] = {}
+
+    def sweep_drafts(before: datetime) -> list[str]:
+        calls["drafts"] = before
+        return ["o1"]
+
+    def sweep_visitors(
+        conn: object, *, visitors_before: datetime, renders_before: datetime
+    ) -> tuple[int, int]:
+        calls["visitors"] = visitors_before
+        calls["renders"] = renders_before
+        return 2, 3
+
+    @contextlib.contextmanager
+    def connection() -> Any:
+        yield object()
+
+    monkeypatch.setattr(VisitorStore, "sweep", staticmethod(sweep_visitors))
+    state = SimpleNamespace(
+        settings_store=SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(runtime=SimpleNamespace(storefront_draft_ttl_days=7))
+        ),
+        components=SimpleNamespace(
+            get=lambda key: SimpleNamespace(lifecycle=SimpleNamespace(sweep_drafts=sweep_drafts))
+        ),
+        projection=SimpleNamespace(pool=SimpleNamespace(connection=connection)),
+    )
+    assert main._sweep_storefront(state, now=now) == (["o1"], 2, 3)  # type: ignore[arg-type]
+    assert calls == {
+        "drafts": now - timedelta(days=7),
+        "visitors": now - timedelta(days=7),
+        "renders": now - timedelta(days=1),
+    }

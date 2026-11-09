@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _ROW = (
     "id, environment, secret_sealed, dek_sealed, kek_id, saved_at, item_id, account_id,"
-    " account_name, account_type, account_mask, linked_at"
+    " account_name, account_type, account_mask, linked_at, sync_cursor, synced_at, sync_error"
 )
 
 #: The longest key, token or id a body takes.
@@ -121,6 +121,10 @@ class BankStatus(BaseModel):
     environment: Environment | None
     account: BankAccount | None
     linked_at: datetime | None
+    #: When the deposit sync last read Plaid (#4961), and Plaid's ``error_code`` when the
+    #: last read failed (a fixed code, never Plaid's text).
+    synced_at: datetime | None = None
+    sync_error: str | None = None
 
 
 class LinkToken(BaseModel):
@@ -168,6 +172,10 @@ class BankLinks:
     def __init__(self, store: OrderStore, kek: Kek | None) -> None:
         self._store = store
         self._kek = kek
+
+    @property
+    def store(self) -> OrderStore:
+        return self._store
 
     # -- rows -------------------------------------------------------------------------
 
@@ -231,6 +239,8 @@ class BankLinks:
             environment=row["environment"],
             account=account,
             linked_at=row["linked_at"],
+            synced_at=row["synced_at"],
+            sync_error=row["sync_error"],
         )
 
     def access(self) -> LinkedAccess | None:
@@ -416,9 +426,10 @@ class BankLinks:
                 raise BankNotLinkedError()
             logger.warning("unlinked the bank account here: its stored keys will not open")
             conn.execute("DELETE FROM bank_links WHERE id = %s", (row["id"],))
+            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (row["item_id"],))
 
     def _drop_link(self, item_id: str) -> None:
-        """Forget ``item_id``'s token and account; the keys stay."""
+        """Forget ``item_id``'s token, account, sync cursor and deposits; the keys stay."""
         with self._store.transaction() as conn:
             row = self._row(conn, lock=True)
             if row is None or row["item_id"] != item_id:
@@ -428,9 +439,12 @@ class BankLinks:
             conn.execute(
                 "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s,"
                 " item_id = NULL, account_id = NULL, account_name = NULL, account_type ="
-                " NULL, account_mask = NULL, linked_at = NULL WHERE id = %s",
+                " NULL, account_mask = NULL, linked_at = NULL, sync_cursor = NULL,"
+                " sync_loop_cursor = NULL, synced_at = NULL, sync_error = NULL WHERE id = %s",
                 (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id, row["id"]),
             )
+            # The Item's deposits and their suggestions go with it.
+            conn.execute("DELETE FROM bank_deposits WHERE item_id = %s", (item_id,))
 
 
 async def _remove_quietly(keys: PlaidKeys, access_token: str) -> None:
