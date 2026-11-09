@@ -279,3 +279,14 @@ def test_the_lookup_limit_counts_the_peer_not_a_raw_forwarded_for(
     assert client.post(f"{BANK}/webhook", content=body, headers=headers).status_code == 200
     # The test client is no trusted proxy, so its X-Forwarded-For is not believed.
     assert sources == ["testclient"]
+
+
+def test_reconnecting_syncs_after_the_answer(client: TestClient, plaid: respx.MockRouter) -> None:
+    """The deposits the bank held back while signed out show up at once."""
+    synced = plaid.post(f"{SANDBOX}/transactions/sync").mock(
+        return_value=httpx.Response(200, json=payload("transactions.sync.json"))
+    )
+    linked(client)
+    assert client.post(f"{BANK}/reconnected").status_code == 204
+    assert synced.called
+    assert client.get(BANK).json()["synced_at"] is not None

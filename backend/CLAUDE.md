@@ -1271,7 +1271,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   asked, `iat` at most 5 minutes old, the body's SHA-256 compared in constant time;
   `BankLinks.handle_webhook`); a bad one is 400 and changes nothing, a key Plaid could not
   give is 503 (Plaid sends it again). Only a key that verified a webhook is kept by `kid`
-  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first); a `kid` Plaid does not
+  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
+  `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
+  nothing and is kept with the unknown ones; a `kid` Plaid does not
   have (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and goes in a cache of its own for
   `UNKNOWN_KEY_SECONDS`, so forged `kid`s never evict a verified key. A `kid` in neither
   cache takes a token from `_KEY_LOOKUPS` (`KeyLookups`): the sender's bucket first (the
@@ -1283,5 +1285,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
   `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
   and Settings shows "Reconnect": the link token is then for Link's update mode (the
-  Item's `access_token`, no `products`), and `POST …/reconnected` (person) clears it, as do
-  `LOGIN_REPAIRED` and any sync that reads Plaid. A webhook for another Item is `ignored`.
+  Item's `access_token`, no `products`; a linked row with no token is 409
+  `access_token_missing`, never a fresh Link), and `POST …/reconnected` (person) clears it,
+  with a `sync_error` that was `ITEM_LOGIN_REQUIRED`, and syncs after the answer;
+  `LOGIN_REPAIRED` clears both too, and any sync that reads Plaid clears it. A webhook for another Item is `ignored`.

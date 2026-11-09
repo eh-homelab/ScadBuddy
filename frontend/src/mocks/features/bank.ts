@@ -94,7 +94,8 @@ export const handlers = [
   }),
   http.post('/api/v1/payments/bank/reconnected', ({ request }) => {
     if (!bank.account) return problem(request, 409, 'no bank account is linked', PROBLEMS + 'bank_not_linked')
-    bank = { ...bank, login_required: false }
+    // As the backend: the sign-in's sync failure goes with "Reconnect".
+    bank = { ...bank, login_required: false, sync_error: bank.sync_error === 'ITEM_LOGIN_REQUIRED' ? null : bank.sync_error }
     return new HttpResponse(null, { status: 204 })
   }),
   http.post('/api/v1/payments/bank/link', async ({ request }) => {

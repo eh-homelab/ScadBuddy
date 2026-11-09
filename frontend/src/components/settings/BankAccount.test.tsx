@@ -91,6 +91,8 @@ describe('Settings → Payments → Bank account (#4961)', () => {
     expect(create).toHaveBeenCalledOnce()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Reconnect' })).not.toBeInTheDocument())
     expect(screen.getByText('Plaid Checking')).toBeInTheDocument()
+    // The sync failure was the sign-in: it goes with "Reconnect".
+    expect(screen.queryByText(/could not be read/)).not.toBeInTheDocument()
   })
 
   it('keeps Reconnect when the shop closes update mode', async () => {

@@ -427,3 +427,76 @@ async def test_the_webhook_s_sync_tells_the_order_pages(monkeypatch: pytest.Monk
     payments = types.SimpleNamespace(bank=object())
     await bank_link._sync_logged(payments, bus)  # type: ignore[arg-type]
     assert heard == [bus]
+
+
+def _sync_error(bank: BankLinks) -> str | None:
+    with bank.store.transaction() as conn:
+        row = conn.execute("SELECT sync_error FROM bank_links").fetchone()
+    assert row is not None
+    found: str | None = row["sync_error"]
+    return found
+
+
+def _failed_on_login(bank: BankLinks, code: str = plaid.LOGIN_REQUIRED) -> str:
+    with bank.store.transaction() as conn:
+        conn.execute("UPDATE bank_links SET sync_error = %s", (code,))
+        row = conn.execute("SELECT item_id FROM bank_links").fetchone()
+    assert row is not None
+    bank.mark_login(str(row["item_id"]), required=True)
+    return str(row["item_id"])
+
+
+async def test_reconnecting_clears_the_sign_in_failure(bank: BankLinks) -> None:
+    """The card's "could not be read (ITEM_LOGIN_REQUIRED)" goes with "Reconnect"."""
+    _failed_on_login(bank)
+    bank.reconnected()
+    assert _sync_error(bank) is None
+
+
+async def test_login_repaired_clears_the_sign_in_failure_only(bank: BankLinks) -> None:
+    item_id = _failed_on_login(bank)
+    bank.mark_login(item_id, required=False)
+    assert _sync_error(bank) is None
+    _failed_on_login(bank, "INSTITUTION_DOWN")
+    bank.mark_login(item_id, required=False)
+    # Another failure is not the sign-in's: it stays until a sync reads Plaid.
+    assert _sync_error(bank) == "INSTITUTION_DOWN"
+
+
+async def test_a_key_plaid_says_expired_is_refused(bank: BankLinks) -> None:
+    """``expired_at`` is "the timestamp when the key expired"
+    (https://plaid.com/docs/api/webhooks/webhook-verification/): such a key verifies
+    nothing."""
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        route = plaid_key(router)
+        jwk = json.loads(route.return_value.content)  # type: ignore[union-attr]
+        jwk["key"]["expired_at"] = 1700000000
+        route.mock(return_value=httpx.Response(200, json=jwk))
+        with pytest.raises(BadSignatureError):
+            await bank.handle_webhook(signed(body), body)
+
+
+async def test_a_kept_key_is_asked_for_again_after_a_day(bank: BankLinks, clock: Clock) -> None:
+    """A key Plaid expires later is noticed: a kept key is read again once a day."""
+    body = body_of("webhook.sync_updates_available.json")
+    with respx.mock as router:
+        key = plaid_key(router)
+        assert await bank.handle_webhook(signed(body), body) == "sync"
+        clock.now += bank_module.KEY_RECHECK_SECONDS + 1
+        assert await bank.handle_webhook(signed(body), body) == "sync"
+        assert key.call_count == 2
+
+
+async def test_reconnect_needs_the_stored_access_token(bank: BankLinks) -> None:
+    """Update mode needs the Item's token; without it, Link would make a new Item."""
+    row = bank._read()
+    assert row is not None
+    sealed = bank._seal(str(row["id"]), {"client_id": "client-1", "secret": "plaid-s3cret"})
+    with bank.store.transaction() as conn:
+        conn.execute(
+            "UPDATE bank_links SET secret_sealed = %s, dek_sealed = %s, kek_id = %s",
+            (sealed.secret_sealed, sealed.dek_sealed, sealed.kek_id),
+        )
+    with respx.mock, pytest.raises(bank_module.AccessTokenMissingError):  # nothing reaches Plaid
+        await bank.link_token()

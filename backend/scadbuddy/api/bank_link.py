@@ -134,7 +134,8 @@ async def delete_bank_keys(payments: PaymentsDep) -> Response:
     summary="A token that opens Plaid Link",
     description=(
         'Once an account is linked, the token is for Link\'s update mode ("Reconnect").'
-        " 409 `bank_not_configured` before the keys are saved."
+        " 409 `bank_not_configured` before the keys are saved; 409 `access_token_missing`"
+        " when the linked account's stored access token is gone (update mode needs it)."
     ),
 )
 async def create_bank_link_token(payments: PaymentsDep) -> LinkToken:
@@ -191,13 +192,20 @@ async def delete_bank_link(payments: PaymentsDep) -> BankUnlinked:
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
     summary="Link's update mode finished: the bank is signed in again",
-    description='Clears "Reconnect". 409 `bank_not_linked` with nothing linked.',
+    description=(
+        'Clears "Reconnect", and the sync failure that was the sign-in, then syncs the'
+        " deposits once the answer is sent. 409 `bank_not_linked` with nothing linked."
+    ),
 )
-async def reconnect_bank_link(payments: PaymentsDep) -> Response:
+async def reconnect_bank_link(
+    payments: PaymentsDep, state: StateDep, later: BackgroundTasks
+) -> Response:
     try:
         await asyncio.to_thread(payments.bank.reconnected)
     except _REFUSALS as error:
         raise _problem(error) from None
+    # The deposits the bank held back while signed out show up at once.
+    later.add_task(_sync_logged, payments, state.events)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -205,7 +213,7 @@ async def _sync_logged(payments: PaymentsDep, bus: EventBus) -> None:
     try:
         await sync_deposits(payments.bank, bus)
     except Exception:
-        logger.exception("the deposit sync a Plaid webhook asked for failed")
+        logger.exception("the deposit sync a Plaid webhook or a reconnect asked for failed")
 
 
 @router.post(
