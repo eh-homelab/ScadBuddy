@@ -19,7 +19,7 @@ describe('ActionKey', () => {
 
   it('makes a UUID v4 from random bytes where randomUUID is missing (an insecure context)', () => {
     const real = globalThis.crypto
-    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => real.getRandomValues(bytes) })
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array<ArrayBuffer>) => real.getRandomValues(bytes) })
     const keys = new ActionKey()
     const one = keys.for('a')
     keys.done()
