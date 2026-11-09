@@ -18,7 +18,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
-from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
+from scadbuddy.bambuddy.printers_now import PrintersNow, has_archive_page, printers_now
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.lan_models import LanStarted
@@ -34,12 +34,26 @@ SERIAL = "01P00A000000001"
 NOW = "/api/v1/print/printers/now"
 
 
-def configure(client: TestClient) -> None:
+def configure(client: TestClient, *, version: str | None = "1.3.0") -> respx.Route:
     """Bambuddy configured, with nothing on its queue printing: the strip reads that
-    queue once for its marks (#3741). Only inside ``respx.mock``."""
+    queue once for its marks (#3741). Bambuddy reports ``version``, which says whether
+    it has a page per archive (#3743); ``None`` is a version it does not answer. Only
+    inside ``respx.mock``. Returns the version's route."""
     configure_bambuddy(client)
     respx.get(f"{API}/queue/", params={"status": "printing"}).mock(
         return_value=httpx.Response(200, json=[])
+    )
+    return answer_version(version)
+
+
+def answer_version(version: str | None = "1.3.0") -> respx.Route:
+    """Bambuddy reports ``version`` (#3743); ``None`` is a version it does not answer."""
+    return respx.get(f"{API}/updates/version").mock(
+        return_value=(
+            httpx.Response(500)
+            if version is None
+            else httpx.Response(200, json={"version": version, "repo": "maziggy/bambuddy"})
+        )
     )
 
 
@@ -126,8 +140,8 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
     paused = cards[2]
     assert paused["activity"] == "paused"
     assert (paused["archive_id"], paused["linked"]) == (90, False)
-    # #3743: Bambuddy's own page for the archive (`archives/:id`, maziggy/bambuddy v1.3.0).
-    assert paused["bambuddy_url"].endswith("/archives/90")
+    # #3743: Bambuddy 1.3.0 has a page per archive (`archives/:id`).
+    assert paused["bambuddy_url"] == "https://bambuddy.test/archives/90"
     assert [(hms["code"], hms["description"]) for hms in paused["hms"]] == [
         ("0C008042", "Spaghetti detected"),
         ("0700220000020025", None),
@@ -137,6 +151,86 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
     assert cards[3]["error"]
     # #3632: a failed read does not know the plate is clear, so it never says so.
     assert cards[3]["awaiting_plate_clear"] is None
+
+
+@pytest.mark.parametrize(
+    ("version", "has_page"),
+    [
+        ("1.2.5.7", False),
+        ("1.2.6b1", False),  # prod on 2026-11-09
+        ("1.3.0b1", False),  # ed72611, before the route
+        # 2be2b26 set it before the route and 666f78f replaced it after: either.
+        ("1.3.1b1", False),
+        ("1.3.0", True),  # 666f78f, after the route
+        ("v1.3.0", True),
+        ("1.3.1", True),
+        ("1.3.2b1", True),
+        ("1.3.2b1-daily.20261201", True),
+        ("1.2.6b1-daily.20261001", False),
+        ("1.4", True),
+        ("unknown", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_which_bambuddy_has_a_page_per_archive(version: str | None, has_page: bool) -> None:
+    assert has_archive_page(version) is has_page
+
+
+def _bambuddy_job(archive_id: int = 90) -> None:
+    """One printer, printing archive ``archive_id``, which ScadBuddy did not link."""
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(2)]))
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(
+            200, json=status(2, subtask_name="Bracket", current_archive_id=archive_id)
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("version", "url"),
+    [
+        # Before `archives/:id` (maziggy/bambuddy d43bf57): the archives page.
+        ("1.2.6b1", "https://bambuddy.test/archives"),
+        ("1.2.5.7", "https://bambuddy.test/archives"),
+        # Not answered: the page every Bambuddy has.
+        (None, "https://bambuddy.test/archives"),
+        ("1.3.0", "https://bambuddy.test/archives/90"),
+    ],
+)
+@respx.mock
+def test_a_bambuddy_job_links_its_archive_only_where_bambuddy_has_that_page(
+    client: TestClient, version: str | None, url: str
+) -> None:
+    configure(client, version=version)
+    _bambuddy_job()
+
+    cards = client.get(NOW).json()["printers"]
+
+    assert [(card["archive_id"], card["bambuddy_url"]) for card in cards] == [(90, url)]
+
+
+@respx.mock
+def test_bambuddys_version_is_read_once_not_on_every_poll(client: TestClient) -> None:
+    version = configure(client, version="1.2.6b1")
+    _bambuddy_job()
+
+    for _ in range(3):
+        assert client.get(NOW).status_code == 200
+
+    assert version.call_count == 1
+
+
+@respx.mock
+def test_a_strip_with_no_bambuddy_archive_does_not_ask_the_version(client: TestClient) -> None:
+    version = configure(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, state="IDLE"))
+    )
+
+    assert client.get(NOW).status_code == 200
+    assert not version.called
 
 
 @respx.mock
@@ -584,6 +678,7 @@ def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> 
     reprint of it prints the same archive (printer 2, its item not ScadBuddy's), and a
     job with no printing item may be one too (printer 3)."""
     configure_bambuddy(client)
+    answer_version()
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(200, json=[printer(1), printer(2), printer(3)])
     )
@@ -639,6 +734,7 @@ def test_an_unreadable_queue_costs_only_the_marks(client: TestClient) -> None:
     is then not matched by a LAN start either (#3741 review): its job may be a queue item
     Bambuddy could not name, its reprint of that print for one."""
     configure_bambuddy(client)
+    answer_version()
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
     respx.get(f"{API}/printers/1/status").mock(
         return_value=httpx.Response(200, json=status(1, subtask_name="scadbuddy-blip-p1"))
@@ -765,6 +861,7 @@ def test_a_bambuddy_item_decides_alone_never_the_lan_start(client: TestClient) -
     no end (a run's last start never records one). A LAN start has no queue item, so
     Bambuddy's item is a job of its own: its reprint of that print, for one."""
     configure_bambuddy(client)
+    answer_version()
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(2)]))
     respx.get(f"{API}/printers/2/status").mock(
         return_value=httpx.Response(
@@ -792,6 +889,7 @@ def test_a_bambuddy_card_uses_a_lan_start_only_when_its_queue_names_nothing(
     the card cannot take (its archive is not the card's, printer 2) still means
     Bambuddy runs a job of its own, so the card gets no badge."""
     configure_bambuddy(client)
+    answer_version()
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(200, json=[printer(2), printer(3)])
     )
@@ -832,6 +930,7 @@ def test_two_printing_items_on_one_printer_take_none(client: TestClient) -> None
     With two, the queue still decides the card (no LAN start matches it), it takes
     neither item, and it gets no badge, even when ScadBuddy sent one of them."""
     configure_bambuddy(client)
+    answer_version()
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(2)]))
     respx.get(f"{API}/printers/2/status").mock(
         return_value=httpx.Response(

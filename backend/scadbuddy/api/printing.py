@@ -77,6 +77,7 @@ from scadbuddy.bambuddy.choices import (
     with_lan_printers,
 )
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for, maybe_client
+from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -110,8 +111,10 @@ from scadbuddy.bambuddy.printers_now import (
     PrintersNow,
     PrintingItems,
     job_keys,
+    needs_archive_pages,
     printers_now,
     printing_items,
+    with_archive_pages,
     with_lan_runs,
     with_scadbuddy_jobs,
 )
@@ -708,8 +711,10 @@ async def post_tray_spool(
         "time left and its HMS errors, whoever started the job, from Bambuddy's status or "
         "the printer's own LAN report (`path`). A job whose archive "
         "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
-        "links its archive in Bambuddy (`bambuddy_url`, `/archives/{id}`). A printing or "
-        "paused job ScadBuddy queued or "
+        "links its archive in Bambuddy (`bambuddy_url`): that archive's page, "
+        "`/archives/{id}`, on a Bambuddy of version 1.3.0 or later but 1.3.1b1, else the "
+        "archives page "
+        "(#3743). A printing or paused job ScadBuddy queued or "
         "started carries `scadbuddy` (#3741): the output or library file. On a printer "
         "linked to Bambuddy, when Bambuddy's queue has a printing item on it, only "
         "ScadBuddy's record of that item matches, and when the queue cannot be read, "
@@ -720,7 +725,11 @@ async def post_tray_spool(
     ),
 )
 async def get_printers_now(
-    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep, runs: PrintRunsDep
+    store: SettingsStoreDep,
+    links: PrintLinksDep,
+    printers: PrintersDep,
+    runs: PrintRunsDep,
+    cache: ArchiveCacheDep,
 ) -> PrintersNow:
     now = datetime.now(UTC)
     settings = await asyncio.to_thread(store.load)
@@ -743,6 +752,10 @@ async def get_printers_now(
             )
             # #3741: the queue item each working card prints, in one read of Bambuddy's.
             printing = await printing_items(client, cards)
+            # #3743: an archive's own page, where this Bambuddy has one; its version is
+            # kept, so the polled strip asks it once in `VERSION_TTL`.
+            if needs_archive_pages(cards):
+                cards = with_archive_pages(cards, client, await cache.version(client))
     cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, printing), printing)
     return with_lan_runs(cards, await _lan_controls(runs, cards))
 

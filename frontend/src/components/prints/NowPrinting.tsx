@@ -285,8 +285,9 @@ const JOB_LINK = 'font-medium text-primary underline-offset-4 hover:underline'
 /**
  * #3743 — the job's name, as a link to where the job is: ScadBuddy's print of an
  * archive ScadBuddy linked; for ScadBuddy's own job (`scadbuddy`), its ScadBuddy page
- * ({@link scadbuddyJobPath}); for any other, its archive in Bambuddy (`/archives/{id}`,
- * on the hostname framing ScadBuddy, in a new tab, which escapes the frame's sandbox).
+ * ({@link scadbuddyJobPath}); for any other, its archive in Bambuddy (`/archives/{id}`
+ * where Bambuddy has that page, else its archives page with the archive's number, on
+ * the hostname framing ScadBuddy, in a new tab, which escapes the frame's sandbox).
  * A job with none of these is its name only.
  */
 function JobLink({ printer }: { printer: PrinterNow }) {
@@ -307,11 +308,21 @@ function JobLink({ printer }: { printer: PrinterNow }) {
     )
   }
   if (printer.bambuddy_url) {
+    // A Bambuddy before 1.3.0 has no page per archive: the server then links its
+    // archives page, and the archive to look for there is named in the link (#2930).
+    const archivePage = printer.archive_id != null && printer.bambuddy_url.endsWith(`/archives/${printer.archive_id}`)
+    const label = name ?? 'This print'
     return (
       <p className="mt-1 truncate">
-        <a href={bambuddyLink(printer.bambuddy_url)} {...NEW_TAB} className={JOB_LINK}>
-          {name ?? 'This print'}
-          <span className="sr-only">, in Bambuddy</span>
+        <a
+          href={bambuddyLink(printer.bambuddy_url)}
+          {...NEW_TAB}
+          className={JOB_LINK}
+          aria-label={
+            archivePage ? `${label}, in Bambuddy` : `${label}, archive ${printer.archive_id} in Bambuddy's archives`
+          }
+        >
+          {archivePage ? label : `${label} · archive ${printer.archive_id}`}
           <ExternalLinkIcon aria-hidden="true" className="ml-1 inline size-3 align-baseline" />
         </a>
       </p>
