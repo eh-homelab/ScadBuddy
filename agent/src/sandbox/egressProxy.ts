@@ -15,6 +15,8 @@ import { plainAddress } from '../http/origins.js'
 export const ALLOWED_PORTS: ReadonlySet<number> = new Set([80, 443])
 /** Tunnels at once; past it a CONNECT is answered 503. */
 export const MAX_TUNNELS = 256
+/** Tunnels at once from one source address (one sandbox pod): no session holds every tunnel. */
+export const MAX_TUNNELS_PER_SOURCE = 32
 /** A tunnel with no traffic for this long is closed. */
 export const TUNNEL_IDLE_MS = 5 * 60_000
 const CONNECT_TIMEOUT_MS = 15_000
@@ -73,6 +75,7 @@ export function connectTarget(authority: string | undefined): { host: string; po
 export function egressProxy(options: EgressProxyOptions): Server {
   const resolve = options.resolve ?? systemResolver
   let tunnels = 0
+  const bySource = new Map<string, number>()
   const server = createServer((_req, res) => {
     // Absolute-form requests (plain http through a proxy) and anything else: refused.
     res.writeHead(405, { 'content-type': 'text/plain', connection: 'close' })
@@ -90,12 +93,20 @@ export function egressProxy(options: EgressProxyOptions): Server {
     const { host, port } = target
     if (!ALLOWED_PORTS.has(port)) return refuse('403 Forbidden', host, port, `port ${port} is not allowed: only 80 and 443`)
     if (tunnels >= MAX_TUNNELS) return refuse('503 Service Unavailable', host, port, 'too many tunnels at once')
+    const mine = bySource.get(source) ?? 0
+    if (mine >= MAX_TUNNELS_PER_SOURCE) {
+      return refuse('429 Too Many Requests', host, port, `too many tunnels at once from this sandbox (at most ${MAX_TUNNELS_PER_SOURCE})`)
+    }
     tunnels++
+    bySource.set(source, mine + 1)
     let released = false
     const release = () => {
       if (!released) {
         released = true
         tunnels--
+        const left = (bySource.get(source) ?? 1) - 1
+        if (left > 0) bySource.set(source, left)
+        else bySource.delete(source)
       }
     }
     void (async () => {

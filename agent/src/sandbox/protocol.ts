@@ -39,8 +39,14 @@ export function syncPath(rel: string): boolean {
 }
 
 export type ManifestEntry = { path: string; sha256: string; size: number }
-/** GET /v1/manifest: every regular file at a sync path under the work directory. */
-export type Manifest = { files: ManifestEntry[]; truncated: boolean }
+/** How many paths that never sync a manifest names (`unsynced`). */
+export const UNSYNCED_MAX = 50
+/**
+ * GET /v1/manifest: every regular file at a sync path under the work directory, and up to
+ * UNSYNCED_MAX paths that hold files but never sync (a name a workspace path cannot take, or
+ * deeper than MAX_SEGMENTS; a directory ends in `/`). Scratch trees are not named.
+ */
+export type Manifest = { files: ManifestEntry[]; truncated: boolean; unsynced?: string[] }
 
 /** POST /v1/exec. */
 export type ExecRequest = { shell: Shell; command: string; timeout_ms: number }

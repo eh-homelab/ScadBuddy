@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import { connect, createServer as netServer, type AddressInfo, type Server as NetServer, type Socket } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { connectTarget, type EgressLog, egressProxy, notPublic } from '../src/sandbox/egressProxy.js'
+import { connectTarget, type EgressLog, egressProxy, MAX_TUNNELS_PER_SOURCE, notPublic } from '../src/sandbox/egressProxy.js'
 
 /** Sends one CONNECT through the proxy and returns its status line, and the socket. */
 function tunnel(port: number, target: string): Promise<{ status: string; socket: Socket }> {
@@ -88,6 +88,34 @@ describe('the sandbox egress proxy', () => {
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({ outcome: 'refused' })
     expect(logs[0]!.reason).toMatch(reason)
+  })
+
+  it('holds one source to its own share of the tunnels', async () => {
+    const echo = netServer((sock) => sock.pipe(sock))
+    const echoPort = await listen(echo)
+    const logs: EgressLog[] = []
+    const proxy = egressProxy({ resolve: async () => ['93.184.216.34'], log: (e) => logs.push(e), connect: () => connect(echoPort, '127.0.0.1') })
+    const port = await listen(proxy)
+    const open: Socket[] = []
+    try {
+      for (let i = 0; i < MAX_TUNNELS_PER_SOURCE; i++) {
+        const { status, socket } = await tunnel(port, 'example.com:443')
+        open.push(socket)
+        expect(status).toBe('HTTP/1.1 200 Connection Established')
+      }
+      const over = await tunnel(port, 'example.com:443')
+      over.socket.destroy()
+      expect(over.status).toContain('429')
+      // One closed frees one.
+      open.shift()!.destroy()
+      await expect.poll(async () => {
+        const again = await tunnel(port, 'example.com:443')
+        open.push(again.socket)
+        return again.status
+      }).toBe('HTTP/1.1 200 Connection Established')
+    } finally {
+      for (const socket of open) socket.destroy()
+    }
   })
 
   it('refuses plain absolute-form http requests', async () => {

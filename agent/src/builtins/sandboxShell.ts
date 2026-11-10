@@ -55,11 +55,13 @@ export type ShellInputArgs = z.infer<typeof ShellInput>
 
 const where =
   'It runs in this session\'s sandbox, an isolated container with no secrets, in a directory that holds this session\'s files ' +
-  '(the same files Read, Write and Edit see). Files it creates or changes there come back to the session after the command, ' +
-  'except under node_modules, __pycache__ or a directory whose name starts with "."; those stay in the sandbox until it is ' +
-  'recycled. The network reaches only public hosts on ports 80 and 443, through an HTTPS proxy (HTTPS_PROXY is set; plain ' +
-  `http:// and other protocols are refused). The timeout is ${DEFAULT_TIMEOUT_MS / 1000} s by default, at most ${MAX_TIMEOUT_MS / 1000} s. ` +
-  `Output past ${OUTPUT_MAX_CHARS} characters is cut. Every call asks the user first.`
+  '(the same files Read, Write and Edit see). Files it creates, changes or deletes there come back to the session after the ' +
+  'command only at a path whose every name is letters, digits, "_", "." and "-", does not start with ".", and is at most 4 ' +
+  'levels deep, outside node_modules and __pycache__, and only within the workspace caps. Any other file stays in the sandbox ' +
+  'while it lasts, and the result lists it under files_left_in_sandbox (node_modules and __pycache__ are not listed). The ' +
+  'network reaches only public hosts on ports 80 and 443, through an HTTPS proxy (HTTPS_PROXY is set; plain http:// and other ' +
+  `protocols are refused). The timeout is ${DEFAULT_TIMEOUT_MS / 1000} s by default, at most ${MAX_TIMEOUT_MS / 1000} s. ` +
+  `Output past ${OUTPUT_MAX_CHARS} characters is cut.`
 
 export const SHELL_DESCRIPTIONS: Record<string, string> = {
   Bash: `Claude Code's Bash: runs a bash command and returns its output and exit code. ${where}`,
@@ -75,7 +77,7 @@ function cut(text: string, room: number): { text: string; cut: number } {
 export async function runShell(ctx: ShellContext, shell: Shell, input: ShellInputArgs): Promise<BuiltinResult> {
   if (input.run_in_background) {
     return {
-      text: 'run_in_background is not available in this session: run the command in the foreground, or use Monitor to watch for an event.',
+      text: `run_in_background is not available in this session: run the command in the foreground, with a timeout of up to ${MAX_TIMEOUT_MS / 1000} s.`,
       isError: true,
     }
   }

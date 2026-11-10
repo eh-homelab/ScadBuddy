@@ -13,6 +13,7 @@ import { writeDirFile } from '../src/workspace/directory.js'
 // server answers. These tests stand in for a sandbox that lies.
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex')
+const none = () => ({ files: new Map<string, string>(), unsynced: new Set<string>() })
 
 type Fake = { manifest: unknown; files: Record<string, Buffer>; deleted: string[]; got: string[] }
 
@@ -68,7 +69,7 @@ describe('a sandbox that lies', () => {
     const evil = Buffer.from('pwned')
     const fake: Fake = { manifest: { files: [{ path: '../outside/victim.txt', sha256: sha(evil), size: 5 }], truncated: false }, files: { '../outside/victim.txt': evil }, deleted: [], got: [] }
     box = await hostile(fake)
-    const back = await syncBack(client(box.url), dir, new Map(), limits)
+    const back = await syncBack(client(box.url), dir, none(), limits)
     expect(await readFile(path.join(outside, 'victim.txt'), 'utf8')).toBe('keep me')
     expect(fake.got).toEqual([])
     expect(back.written).toEqual([])
@@ -81,10 +82,10 @@ describe('a sandbox that lies', () => {
     // syncIn: the sandbox "has" a file the session does not, which would be deleted there; a bad path is ignored.
     const before = await syncIn(client(box.url), dir, limits)
     expect(fake.deleted).toEqual([])
-    expect([...before.keys()]).toEqual([])
+    expect([...before.files.keys()]).toEqual([])
     // syncBack: a bad path in `before` that the sandbox no longer lists is never removed here.
     fake.manifest = { files: [], truncated: false }
-    const back = await syncBack(client(box.url), dir, new Map([['../outside/victim.txt', 'a'.repeat(64)]]), limits)
+    const back = await syncBack(client(box.url), dir, { files: new Map([['../outside/victim.txt', 'a'.repeat(64)]]), unsynced: new Set<string>() }, limits)
     expect(back.removed).toEqual([])
     expect(await readFile(path.join(outside, 'victim.txt'), 'utf8')).toBe('keep me')
   })
@@ -105,7 +106,7 @@ describe('a sandbox that lies', () => {
     const big = Buffer.alloc(50_000, 'a')
     const fake: Fake = { manifest: { files: [{ path: 'big.txt', sha256: sha(big), size: 10 }], truncated: false }, files: { 'big.txt': big }, deleted: [], got: [] }
     box = await hostile(fake)
-    const back = await syncBack(client(box.url), dir, new Map(), limits)
+    const back = await syncBack(client(box.url), dir, none(), limits)
     expect(back.written).toEqual([])
     expect(back.left[0]).toMatchObject({ path: 'big.txt', reason: expect.stringContaining('cap') })
     await expect(readFile(path.join(dir, 'big.txt'))).rejects.toThrow()
@@ -116,7 +117,7 @@ describe('a sandbox that lies', () => {
     const body = Buffer.alloc(900, 'b')
     const fake: Fake = { manifest: { files: [{ path: 'new.txt', sha256: sha(body), size: 1 }], truncated: false }, files: { 'new.txt': body }, deleted: [], got: [] }
     box = await hostile(fake)
-    const back = await syncBack(client(box.url), dir, new Map(), limits)
+    const back = await syncBack(client(box.url), dir, none(), limits)
     expect(back.written).toEqual([])
     expect(back.left[0]).toMatchObject({ path: 'new.txt', reason: expect.stringContaining('cap') })
   })

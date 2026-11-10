@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { dirBytes, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
-import { type ExecResult, type Manifest, SHA_HEADER, type Shell, syncPath } from './protocol.js'
+import { type ExecResult, type Manifest, SHA_HEADER, type Shell, syncPath, UNSYNCED_MAX } from './protocol.js'
 
 // The agent's side of a session's sandbox (#5864, issue comment "Design" §2-§3): the client of the
 // exec server (server.ts) and the sync between the session's directory on this worker (its cwd,
@@ -27,18 +27,30 @@ export class SandboxTooLarge extends Error {
   override name = 'SandboxTooLarge'
 }
 
-/** The sandbox's manifest, its entries at sync paths only: a command controls what it says (`bad` lists the rest). */
-async function checkedManifest(client: SandboxClient): Promise<{ files: Manifest['files']; truncated: boolean; bad: string[] }> {
+/** A path the sandbox named, only ever shown to the model (in the untrusted-data envelope): cut to 200 characters. */
+const shown = (value: unknown): string => (typeof value === 'string' ? value : (JSON.stringify(value) ?? '')).slice(0, 200)
+
+/**
+ * The sandbox's manifest, its entries at sync paths only: a command controls what it says. `bad`
+ * names the entries that are not (shown, never used), `unsynced` the paths it says hold files
+ * that never sync.
+ */
+async function checkedManifest(client: SandboxClient): Promise<{ files: Manifest['files']; truncated: boolean; bad: string[]; unsynced: string[] }> {
   const raw = await client.manifest()
   const files: Manifest['files'] = []
   const bad: string[] = []
+  let anyBad = false
   for (const f of Array.isArray(raw?.files) ? raw.files : []) {
     const ok =
       typeof f?.path === 'string' && syncPath(f.path) && typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.size)
     if (ok) files.push(f)
-    else bad.push(typeof f?.path === 'string' ? f.path : JSON.stringify(f).slice(0, 200))
+    else {
+      anyBad = true
+      if (bad.length < UNSYNCED_MAX) bad.push(shown(f?.path ?? f))
+    }
   }
-  return { files, truncated: raw?.truncated === true || bad.length > 0, bad }
+  const unsynced = (Array.isArray(raw?.unsynced) ? raw.unsynced : []).slice(0, UNSYNCED_MAX).map(shown)
+  return { files, truncated: raw?.truncated === true || anyBad, bad, unsynced }
 }
 
 const REQUEST_MS = 60_000
@@ -130,6 +142,19 @@ export type SyncLimits = { fileMaxBytes: number; workspaceMaxBytes: number }
 /** What one sync back did. */
 export type SyncBack = { written: string[]; removed: string[]; left: { path: string; reason: string }[] }
 
+/**
+ * The files a sync back left in the pod (past a cap), by path: what the session directory held
+ * at that path then (its sha256, `large` past the per-file cap, or undefined for none). Until
+ * the session directory's copy changes, a sync in neither sends nor deletes such a path, so
+ * the file stays in the pod for the next command (the pod's own lifetime allowing).
+ */
+export type Kept = Map<string, string | undefined>
+
+/** What a sync in saw: the pod's files after it, and the paths it named that never sync. */
+export type SyncedIn = { files: Map<string, string>; unsynced: Set<string> }
+
+const LARGE = 'large'
+
 /** Each worker file's sha256, by path: the session directory's files that sync. */
 async function localManifest(dir: string, limits: SyncLimits): Promise<Map<string, { sha256: string; bytes: Buffer } | { tooLarge: true }>> {
   const out = new Map<string, { sha256: string; bytes: Buffer } | { tooLarge: true }>()
@@ -147,45 +172,65 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
 
 /**
  * Makes the pod's files match the session directory's: each changed file sent, each one the
- * directory no longer has deleted there. Returns the pod's manifest as it is then.
+ * directory no longer has deleted there, except the `kept` ones (see Kept). Returns the pod's
+ * manifest as it is then.
  */
-export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits): Promise<Map<string, string>> {
+export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncedIn> {
   const local = await localManifest(dir, limits)
   const remote = await checkedManifest(client)
   const there = new Map(remote.files.map((f) => [f.path, f.sha256]))
+  const stays = new Set<string>()
+  for (const [rel, was] of kept) {
+    const entry = local.get(rel)
+    const now = entry === undefined ? undefined : 'tooLarge' in entry ? LARGE : entry.sha256
+    // Gone from the pod (a new pod), or changed in the session since: the session's copy counts again.
+    if (!there.has(rel) || now !== was) kept.delete(rel)
+    else stays.add(rel)
+  }
   for (const [rel, entry] of local) {
-    if ('tooLarge' in entry) continue
+    if ('tooLarge' in entry || stays.has(rel)) continue
     if (there.get(rel) !== entry.sha256) {
       await client.put(rel, entry.bytes)
       there.set(rel, entry.sha256)
     }
   }
   for (const rel of [...there.keys()]) {
-    if (!syncPath(rel)) continue
-    const here = local.get(rel)
-    if (here === undefined) {
+    if (!syncPath(rel) || stays.has(rel)) continue
+    if (local.get(rel) === undefined) {
       await client.delete(rel)
       there.delete(rel)
     }
   }
-  return there
+  return { files: there, unsynced: new Set(remote.unsynced) }
+}
+
+/** The session directory's copy at `rel` as Kept records it. */
+async function localState(dir: string, rel: string, limits: SyncLimits): Promise<string | undefined> {
+  if (!(await dirFiles(dir)).has(rel)) return undefined
+  const bytes = await readDirFile(dir, rel, limits.fileMaxBytes)
+  return bytes ? createHash('sha256').update(bytes).digest('hex') : LARGE
 }
 
 /**
  * Brings back what the command changed: each file new or changed in the pod since `before` is
  * written into the session directory (never through a link), each one it deleted is removed. A
- * file past `fileMaxBytes`, or past what `workspaceMaxBytes` leaves for this call, stays in the pod.
+ * file past `fileMaxBytes`, or past what `workspaceMaxBytes` leaves for this call, stays in the
+ * pod and is recorded in `kept`. A path the command made that never syncs is named in `left` too.
  * A truncated manifest removes nothing.
  */
-export async function syncBack(client: SandboxClient, dir: string, before: Map<string, string>, limits: SyncLimits): Promise<SyncBack> {
+export async function syncBack(client: SandboxClient, dir: string, before: SyncedIn, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncBack> {
   const after = await checkedManifest(client)
   const out: SyncBack = { written: [], removed: [], left: [] }
   for (const path of after.bad) out.left.push({ path, reason: 'it is not a workspace path that syncs' })
+  for (const path of after.unsynced) {
+    if (before.unsynced.has(path)) continue
+    out.left.push({ path, reason: UNSYNCED_REASON })
+  }
   // What the directory may still take: the cap less what it holds now. A file brought back over an
   // older copy is counted whole, so the budget only errs on the small side.
   let budget = Math.max(limits.workspaceMaxBytes - (await dirBytes(dir)), 0)
   for (const file of after.files) {
-    if (before.get(file.path) === file.sha256) continue
+    if (before.files.get(file.path) === file.sha256) continue
     const max = Math.min(limits.fileMaxBytes, budget)
     let bytes: Buffer
     try {
@@ -199,29 +244,39 @@ export async function syncBack(client: SandboxClient, dir: string, before: Map<s
           : err instanceof Error
             ? err.message
             : String(err)
-      out.left.push({ path: file.path, reason })
+      out.left.push({ path: file.path, reason: `${reason}; it stays in the sandbox for the next commands while the sandbox lasts` })
+      kept.set(file.path, await localState(dir, file.path, limits))
       continue
     }
     budget -= bytes.length
     await writeDirFile(dir, file.path, bytes)
+    kept.delete(file.path)
     out.written.push(file.path)
   }
   if (!after.truncated) {
     const now = new Set(after.files.map((f) => f.path))
-    for (const rel of before.keys()) {
+    for (const rel of before.files.keys()) {
       if (now.has(rel) || !syncPath(rel)) continue
       await removeDirFile(dir, rel)
+      kept.delete(rel)
       out.removed.push(rel)
     }
   }
   return out
 }
 
+/** Why a path the sandbox names in `unsynced` is not in the session. */
+export const UNSYNCED_REASON =
+  'its path never comes back to the session: only names of letters, digits, "_", "." and "-" that do not start with ".", ' +
+  'at most 4 levels deep and outside node_modules and __pycache__, sync; it stays in the sandbox while the sandbox lasts'
+
 /** One command's run, with its sync. */
 export type ShellRun = { result: ExecResult; back: SyncBack }
 
 /** Each session's calls, one at a time on this worker: a sync never runs into another. */
 const chains = new Map<string, Promise<unknown>>()
+/** Each session's Kept on this worker, for the pod (its URL) it was recorded against. */
+const keptBySession = new Map<string, { url: string; kept: Kept }>()
 
 function serial<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
   const run = (chains.get(sessionId) ?? Promise.resolve()).then(work, work)
@@ -246,9 +301,14 @@ export function runInSandbox(
     for (let attempt = 0; ; attempt++) {
       const endpoint = await options.sandboxes.acquire(options.sessionId, options.signal)
       const client = new SandboxClient(endpoint, options.signal)
-      let before: Map<string, string>
+      let state = keptBySession.get(options.sessionId)
+      if (state?.url !== endpoint.url) {
+        state = { url: endpoint.url, kept: new Map() }
+        keptBySession.set(options.sessionId, state)
+      }
+      let before: SyncedIn
       try {
-        before = await syncIn(client, options.dir, options.limits)
+        before = await syncIn(client, options.dir, options.limits, state.kept)
       } catch (err) {
         if (!(err instanceof SandboxError)) throw err
         options.sandboxes.release?.(options.sessionId, endpoint)
@@ -257,7 +317,8 @@ export function runInSandbox(
       }
       try {
         const result = await client.exec(shell, command, timeoutMs)
-        const back = await syncBack(client, options.dir, before, options.limits)
+        const back = await syncBack(client, options.dir, before, options.limits, state.kept)
+        if (state.kept.size === 0) keptBySession.delete(options.sessionId)
         return { result, back }
       } catch (err) {
         if (err instanceof SandboxError) options.sandboxes.release?.(options.sessionId, endpoint)

@@ -80,6 +80,36 @@ describe('Bash in the session sandbox', () => {
     await expect(readFile(path.join(dir, 'big.bin'))).rejects.toThrow()
   })
 
+  it('keeps a file it left in the sandbox for the next commands, until the session changes its copy', async () => {
+    ctx.limits = async () => ({ fileMaxBytes: 10, workspaceMaxBytes: 1000 })
+    await writeFile(path.join(dir, 'grown.txt'), 'small')
+    const first = content((await runShell(ctx, 'bash', { command: 'head -c 100 /dev/zero > big.bin; head -c 100 /dev/zero > grown.txt' })).text)
+    const left = first.files_left_in_sandbox as { path: string; reason: string }[]
+    expect(left.map((l) => l.path).sort()).toEqual(['big.bin', 'grown.txt'])
+    expect(left[0]!.reason).toContain('stays in the sandbox')
+    // Neither deleted nor reverted by the next command's sync in.
+    const next = content((await runShell(ctx, 'bash', { command: 'wc -c < big.bin; wc -c < grown.txt' })).text)
+    expect(next.stdout).toBe('100\n100\n')
+    expect(next.files_removed).toBeUndefined()
+    expect(await readFile(path.join(dir, 'grown.txt'), 'utf8')).toBe('small')
+    // Once the session writes its own copy, that copy counts again.
+    await writeFile(path.join(dir, 'grown.txt'), 'mine')
+    const after = content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text)
+    expect(after.stdout).toBe('mine')
+  })
+
+  it('names the paths a command made that never come back', async () => {
+    const body = content(
+      (await runShell(ctx, 'bash', { command: "echo x > 'my notes.txt'; mkdir -p a/b/c/d && echo y > a/b/c/d/e.txt; echo z > .hidden" })).text,
+    )
+    const left = body.files_left_in_sandbox as { path: string; reason: string }[]
+    expect(left.map((l) => l.path).sort()).toEqual(['.hidden', 'a/b/c/d/', 'my notes.txt'])
+    expect(left[0]!.reason).toContain('never comes back')
+    // Named once: the next command's result does not repeat them.
+    const again = content((await runShell(ctx, 'bash', { command: 'true' })).text)
+    expect(again.files_left_in_sandbox).toBeUndefined()
+  })
+
   it('reports a failing command as an error with its exit code and cuts long output', async () => {
     const failed = await runShell(ctx, 'bash', { command: 'echo no >&2; exit 2' })
     expect(failed.isError).toBe(true)
@@ -96,7 +126,7 @@ describe('Bash in the session sandbox', () => {
 
   it('refuses run_in_background', async () => {
     const result = await runShell(ctx, 'bash', { command: 'sleep 1', run_in_background: true })
-    expect(result).toMatchObject({ isError: true, text: expect.stringContaining('Monitor') })
+    expect(result).toMatchObject({ isError: true, text: expect.stringContaining('in the foreground') })
     expect(sandboxes.acquires).toBe(0)
   })
 

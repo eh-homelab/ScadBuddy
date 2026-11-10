@@ -97,13 +97,16 @@ function send(
 }
 
 type Pod = {
-  metadata: { name: string; labels?: Record<string, string>; deletionTimestamp?: string }
+  metadata: { name: string; labels?: Record<string, string>; deletionTimestamp?: string; creationTimestamp?: string }
   spec: { containers: { name: string; env?: { name: string; value?: string }[] }[] }
   status?: { phase?: string; podIP?: string; conditions?: { type: string; status: string }[] }
 }
 
 const ready = (pod: Pod) => pod.status?.phase === 'Running' && !!pod.status.podIP && !!pod.status.conditions?.some((c) => c.type === 'Ready' && c.status === 'True')
 const ended = (pod: Pod) => pod.status?.phase === 'Succeeded' || pod.status?.phase === 'Failed'
+/** The oldest first, then by name: every replica orders a session's pods the same way. */
+const oldestFirst = (a: Pod, b: Pod) =>
+  (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? '') || a.metadata.name.localeCompare(b.metadata.name)
 const tokenOf = (pod: Pod) => pod.spec.containers.find((c) => c.name === 'sandbox')?.env?.find((e) => e.name === 'SCADBUDDY_SANDBOX_TOKEN')?.value
 
 /** The pod a session's sandbox runs in. Every field the cluster's admission policy checks is set here. */
@@ -240,20 +243,27 @@ export class KubernetesSandboxes implements Sandboxes {
   async acquire(sessionId: string, signal: AbortSignal): Promise<SandboxEndpoint> {
     const known = this.#known.get(sessionId)
     if (known) return known
-    const pods = (await this.#list(`${APP_LABEL}=${APP},${SESSION_LABEL}=${sessionId}`)).filter((p) => !p.metadata.deletionTimestamp && !ended(p))
-    // One pod per session; a second (two replicas raced) is deleted.
-    const [first, ...extra] = pods
-    for (const pod of extra) await this.#delete(pod.metadata.name).catch(() => {})
-    let endpoint: SandboxEndpoint & { pod: string }
-    if (first) endpoint = await this.#waitReady(first.metadata.name, signal)
-    else {
+    let pod = await this.#oldest(sessionId)
+    if (!pod) {
       const token = randomBytes(32).toString('hex')
       const res = await this.#api('POST', this.#pods(), sandboxPod(this.#config, sessionId, token, await this.#resolveProxy()))
       if (res.status !== 201 && res.status !== 200) throw new Error(`creating the sandbox pod answered ${res.status}: ${JSON.stringify(res.body).slice(0, 500)}`)
-      endpoint = await this.#waitReady((res.body as Pod).metadata.name, signal)
+      // Another replica may have made one at the same time: both keep the older, so they settle on one.
+      pod = (await this.#oldest(sessionId)) ?? (res.body as Pod)
     }
+    const endpoint = await this.#waitReady(pod.metadata.name, signal)
     this.#known.set(sessionId, endpoint)
     return endpoint
+  }
+
+  /** The session's oldest live pod; any younger one (two replicas raced) is deleted, never the one another replica uses. */
+  async #oldest(sessionId: string): Promise<Pod | undefined> {
+    const pods = (await this.#list(`${APP_LABEL}=${APP},${SESSION_LABEL}=${sessionId}`))
+      .filter((p) => !p.metadata.deletionTimestamp && !ended(p))
+      .sort(oldestFirst)
+    const [first, ...younger] = pods
+    for (const pod of younger) await this.#delete(pod.metadata.name).catch(() => {})
+    return first
   }
 
   release(sessionId: string, endpoint: SandboxEndpoint): void {

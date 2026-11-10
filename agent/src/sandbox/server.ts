@@ -18,6 +18,7 @@ import {
   SHELLS,
   STREAM_MAX_BYTES,
   syncPath,
+  UNSYNCED_MAX,
 } from './protocol.js'
 
 // The exec server in a session's sandbox pod (#5864, issue comment "Design"). It holds no secret:
@@ -50,6 +51,8 @@ export type SandboxServerOptions = {
    * the pod (main.ts); never in a test on a shared machine, where it would kill the user's own.
    */
   reapUid?: number
+  /** The largest file a PUT may write (BODY_MAX_BYTES by default). */
+  fileMaxBytes?: number
 }
 
 /**
@@ -208,6 +211,10 @@ async function fileSha(abs: string): Promise<string | undefined> {
 /** Every regular file at a sync path under `work`, never following a link. */
 export async function manifestOf(work: string, cache: ShaCache = new Map()): Promise<Manifest> {
   const files: ManifestEntry[] = []
+  const unsynced: string[] = []
+  const skip = (rel: string) => {
+    if (unsynced.length < UNSYNCED_MAX) unsynced.push(rel)
+  }
   let visited = 0
   let truncated = false
   const seen = new Set<string>()
@@ -223,11 +230,16 @@ export async function manifestOf(work: string, cache: ShaCache = new Map()): Pro
         truncated = true
         return
       }
-      if (!SEGMENT_RE.test(entry.name)) continue
       const parts = [...rel, entry.name]
+      if (!SEGMENT_RE.test(entry.name)) {
+        skip(parts.join('/') + (entry.isDirectory() ? '/' : ''))
+        continue
+      }
       const at = path.join(abs, entry.name)
       if (entry.isDirectory()) {
-        if (parts.length < MAX_SEGMENTS && !SCRATCH_DIRS.has(entry.name)) await visit(at, parts)
+        if (SCRATCH_DIRS.has(entry.name)) continue
+        if (parts.length < MAX_SEGMENTS) await visit(at, parts)
+        else skip(`${parts.join('/')}/`)
         continue
       }
       const relPath = parts.join('/')
@@ -247,11 +259,21 @@ export async function manifestOf(work: string, cache: ShaCache = new Map()): Pro
   }
   await visit(work, [])
   for (const key of cache.keys()) if (!seen.has(key)) cache.delete(key)
-  return { files, truncated }
+  return { files, truncated, unsynced }
 }
 
-/** Writes `rel` under `work` through a temporary file, replacing whatever is in its way. */
-async function writeFileAt(work: string, rel: string, bytes: Buffer): Promise<void> {
+/**
+ * Writes `rel` under `work` from `body`, a stream, through a temporary file, replacing whatever is
+ * in its way. Never more than `max` bytes are held or written, and the file is put in place only
+ * when its bytes hash to `sha256`; otherwise the temporary file is removed and the answer says why.
+ */
+async function writeFileAt(
+  work: string,
+  rel: string,
+  body: AsyncIterable<Buffer>,
+  max: number,
+  sha256: unknown,
+): Promise<{ ok: true; size: number } | { ok: false; why: 'large' | 'sha' }> {
   const parts = rel.split('/')
   let at = work
   for (const part of parts.slice(0, -1)) {
@@ -263,14 +285,31 @@ async function writeFileAt(work: string, rel: string, bytes: Buffer): Promise<vo
   const target = path.join(at, parts.at(-1)!)
   const temp = path.join(at, `.sandbox-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644)
+  const hash = createHash('sha256')
+  let size = 0
+  let failed: 'large' | 'sha' | undefined
   try {
-    await handle.writeFile(bytes)
+    for await (const chunk of body) {
+      size += chunk.length
+      if (size > max) {
+        failed = 'large'
+        break
+      }
+      hash.update(chunk)
+      await handle.write(chunk)
+    }
   } finally {
     await handle.close()
+  }
+  if (!failed && hash.digest('hex') !== sha256) failed = 'sha'
+  if (failed) {
+    await unlink(temp).catch(() => {})
+    return { ok: false, why: failed }
   }
   const st = await lstat(target).catch(() => undefined)
   if (st?.isDirectory()) await rm(target, { recursive: true, force: true })
   await rename(temp, target)
+  return { ok: true, size }
 }
 
 function readBody(req: IncomingMessage, max: number): Promise<Buffer | undefined> {
@@ -341,12 +380,14 @@ export function sandboxServer(options: SandboxServerOptions): Server {
         if (!syncPath(rel)) return json(res, 400, { error: `${JSON.stringify(rel)} is not a path that syncs` })
         const abs = path.join(options.work, rel)
         if (req.method === 'PUT') {
-          const bytes = await readBody(req, BODY_MAX_BYTES)
-          if (!bytes) return json(res, 413, { error: 'the file is too large' })
-          const sha = createHash('sha256').update(bytes).digest('hex')
-          if (req.headers[SHA_HEADER] !== sha) return json(res, 400, { error: 'the sha256 does not match the bytes' })
-          await writeFileAt(options.work, rel, bytes)
-          return json(res, 200, { path: rel, sha256: sha, size: bytes.length })
+          // Streamed to disk: a large file is never held whole in the pod's memory.
+          const sha = req.headers[SHA_HEADER]
+          const wrote = await writeFileAt(options.work, rel, req, options.fileMaxBytes ?? BODY_MAX_BYTES, sha)
+          if (!wrote.ok) {
+            req.destroy()
+            return wrote.why === 'large' ? json(res, 413, { error: 'the file is too large' }) : json(res, 400, { error: 'the sha256 does not match the bytes' })
+          }
+          return json(res, 200, { path: rel, sha256: sha, size: wrote.size })
         }
         if (req.method === 'DELETE') {
           const st = await lstat(abs).catch(() => undefined)

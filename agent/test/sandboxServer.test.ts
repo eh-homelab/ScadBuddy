@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SandboxClient, SandboxError } from '../src/sandbox/client.js'
@@ -14,8 +14,8 @@ describe('the sandbox exec server', () => {
   afterEach(async () => {
     for (const box of boxes.splice(0)) await box.close()
   })
-  const start = async () => {
-    const box = await startLocalSandbox()
+  const start = async (options: Parameters<typeof startLocalSandbox>[0] = {}) => {
+    const box = await startLocalSandbox(options)
     boxes.push(box)
     return { box, client: new SandboxClient(box.endpoint, AbortSignal.timeout(30_000)) }
   }
@@ -86,12 +86,28 @@ describe('the sandbox exec server', () => {
     await writeFile(path.join(box.work, '.git', 'HEAD'), 'ref')
     await symlink('/etc/passwd', path.join(box.work, 'link'))
     const manifest = await client.manifest()
-    expect(manifest).toEqual({ files: [{ path: 'a/b.txt', sha256: sha('hello'), size: 5 }], truncated: false })
+    expect(manifest).toEqual({ files: [{ path: 'a/b.txt', sha256: sha('hello'), size: 5 }], truncated: false, unsynced: ['.git/'] })
     expect((await client.get('a/b.txt', 1000)).toString()).toBe('hello')
     await expect(client.get('link', 1000)).rejects.toThrow(/404/)
     await expect(client.put('.git/config', Buffer.from('x'))).rejects.toThrow(/400/)
     await client.delete('a/b.txt')
     expect((await client.manifest()).files).toEqual([])
+  })
+
+  it('streams a file to disk and refuses one past its cap, leaving nothing behind', async () => {
+    const { box, client } = await start({ fileMaxBytes: 1000 })
+    const fits = Buffer.alloc(1000, 'a')
+    await client.put('fits.bin', fits)
+    expect((await readFile(path.join(box.work, 'fits.bin'))).equals(fits)).toBe(true)
+    const big = Buffer.alloc(5000, 'b')
+    const res = await fetch(`${box.endpoint.url}/v1/files/big.bin`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${box.endpoint.token}`, 'x-sandbox-sha256': sha(big) },
+      body: big,
+    }).catch(() => undefined)
+    // The server answers 413 and drops the rest of the body; either way nothing is written.
+    if (res) expect(res.status).toBe(413)
+    expect((await readdir(box.work)).sort()).toEqual(['fits.bin'])
   })
 
   it('refuses a file whose sha256 does not match', async () => {
@@ -102,6 +118,7 @@ describe('the sandbox exec server', () => {
       body: 'mine',
     })
     expect(res.status).toBe(400)
+    expect(await readdir(box.work)).toEqual([])
   })
 
   it('names the paths that sync', () => {

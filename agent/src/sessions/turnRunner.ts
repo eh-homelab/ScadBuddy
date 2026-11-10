@@ -751,8 +751,9 @@ export class TurnRunner {
                                 owner: session.owner,
                                 tz: this.deps.background.tz,
                                 now: () => new Date(),
-                                // A Monitor's command runs where this turn's Bash runs: this replica.
-                                commandQueue: this.deps.background.commandQueue,
+                                // A Monitor's command runs on this replica, where Claude Code's own Bash would; with a
+                                // sandbox (#5864) the session's Bash runs in its pod instead, so a command is refused.
+                                ...(this.deps.sandbox ? {} : { commandQueue: this.deps.background.commandQueue }),
                                 workspace: this.deps.files,
                                 // Where Claude Code's file tools work: a Workflow's script is kept there (#5162).
                                 dir: cwd,

@@ -5,7 +5,7 @@ import { APP, APP_LABEL, KubernetesSandboxes, plainApi, resolvedProxy, sandboxPo
 import { ConfigError, loadConfig } from '../src/config.js'
 
 type FakePod = {
-  metadata: { name: string; labels: Record<string, string>; deletionTimestamp?: string }
+  metadata: { name: string; labels: Record<string, string>; deletionTimestamp?: string; creationTimestamp?: string }
   spec: { containers: { name: string; env?: { name: string; value?: string }[] }[] } & Record<string, unknown>
   status: { phase: string; podIP?: string; conditions?: { type: string; status: string }[] }
 }
@@ -19,6 +19,10 @@ class FakeKube {
   /** A new pod is ready after this many reads. */
   readyAfter = 1
   reads = new Map<string, number>()
+  /** Runs as a pod is created (another replica's create, say). */
+  onCreate?: () => void
+  /** Each pod's creation time: one second apart, in order. */
+  stamp = () => new Date(Date.UTC(2026, 10, 9, 0, 0, ++this.next)).toISOString()
   server: Server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => chunks.push(c))
@@ -35,7 +39,13 @@ class FakeKube {
       if (req.method === 'POST' && !name) {
         const pod = JSON.parse(Buffer.concat(chunks).toString()) as FakePod & { metadata: { generateName: string } }
         this.created.push(pod as unknown as Record<string, unknown>)
-        const made: FakePod = { ...pod, metadata: { name: `${pod.metadata.generateName}${++this.next}`, labels: pod.metadata.labels }, status: { phase: 'Pending' } }
+        this.onCreate?.()
+        const creationTimestamp = this.stamp()
+        const made: FakePod = {
+          ...pod,
+          metadata: { name: `${pod.metadata.generateName}${this.next}`, labels: pod.metadata.labels, creationTimestamp },
+          status: { phase: 'Pending' },
+        }
         this.pods.set(made.metadata.name, made)
         return send(201, made)
       }
@@ -95,6 +105,28 @@ describe('sandbox pods on Kubernetes', () => {
     const replica = new KubernetesSandboxes(config, plainApi(base), { resolveProxy: async () => 'http://10.43.0.20:3128', pollMs: 10 })
     expect(await replica.acquire(SESSION, AbortSignal.timeout(5_000))).toEqual(other)
     expect(kube.created).toHaveLength(1)
+  })
+
+  it('keeps the oldest of two pods a race made, on every replica', async () => {
+    const other = (name: string, creationTimestamp: string): FakePod => ({
+      metadata: { name, labels: { [APP_LABEL]: APP, [SESSION_LABEL]: SESSION }, creationTimestamp },
+      spec: { containers: [{ name: 'sandbox', env: [{ name: 'SCADBUDDY_SANDBOX_TOKEN', value: name }] }] },
+      status: { phase: 'Running', podIP: '10.42.0.7', conditions: [{ type: 'Ready', status: 'True' }] },
+    })
+    // Another replica's pod appears while this one makes its own, and is older.
+    kube.onCreate = () => kube.pods.set('theirs', other('theirs', '2026-11-08T00:00:00.000Z'))
+    const endpoint = await sandboxes.acquire(SESSION, AbortSignal.timeout(5_000))
+    expect(endpoint.token).toBe('theirs')
+    expect([...kube.pods.keys()]).toEqual(['theirs'])
+    // A replica that finds both keeps the older one too, whichever the listing names first.
+    kube.onCreate = undefined
+    kube.pods.set('younger', other('younger', '2026-11-10T00:00:00.000Z'))
+    const fresh = new KubernetesSandboxes(config, plainApi(new URL(`http://127.0.0.1:${(kube.server.address() as AddressInfo).port}`)), {
+      resolveProxy: async () => 'http://10.43.0.20:3128',
+      pollMs: 10,
+    })
+    expect((await fresh.acquire(SESSION, AbortSignal.timeout(5_000))).token).toBe('theirs')
+    expect([...kube.pods.keys()]).toEqual(['theirs'])
   })
 
   it('looks again after a release, and sweeps every pod that has ended', async () => {

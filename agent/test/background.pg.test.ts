@@ -486,6 +486,36 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     classic.abortAll()
   })
 
+  it("refuses a Monitor's command where the session's Bash runs in a sandbox pod (#5864)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'bg-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'watch' }))
+    const pkg = { name: 'watch', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['Monitor'] }
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const sandboxed = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+      sandbox: { acquire: () => Promise.reject(new Error('not called')) },
+    })
+    const { session } = await sandboxed.start(browser, { origin: 'chat' })
+    await sandboxed.send(session.id, browser, 'watch it')
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const run = scripted.runs[0]!
+    // A command would run on this replica, beside the database secret and the KEK: refused; a ws source still works.
+    const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+    const watch = (await turnClient.callTool({ name: 'Monitor', arguments: { description: 'log', command: 'tail -f x.log', timeout_ms: 60_000 } })) as {
+      content: { text: string }[]
+      isError?: boolean
+    }
+    expect(watch.isError).toBe(true)
+    expect(watch.content[0]!.text).toContain('cannot run monitor commands')
+    await turnClient.close()
+    sandboxed.abortAll()
+  })
+
   it("gives a classic turn the session's pinned WebFetch in place of Claude Code's (#2684)", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))

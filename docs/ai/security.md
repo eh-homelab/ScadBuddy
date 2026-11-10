@@ -815,8 +815,9 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   `_IMAGE`, `_EGRESS_PROXY`, `_KUBE_TOKEN_FILE` and `_KUBE_CA_FILE`, all set or none
   (`agent/src/config.ts`). With none, nothing changes. With all five, the native tools never
   reach the turn, and the items `Bash` and `PowerShell` of `builtin:claude-code` govern the
-  sandboxed ones, `outward` by default. Each call parks for a person's approval, bound to the
-  exact command.
+  sandboxed ones, `outward` by default. At `outward`, each call parks for a person's approval,
+  bound to the exact command; a person who sets the item to `read` or `write` lets calls run
+  without asking.
 - **A pod per session.** The worker that runs the turn creates the pod
   ([`agent/src/sandbox/pods.ts`](../../agent/src/sandbox/pods.ts)) in the sandbox namespace,
   with its own ServiceAccount token (a Role there: pods only). The pod has no Secret, no
@@ -848,22 +849,30 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   pod's manifest is untrusted: an entry that is not a workspace path is never read, written,
   sent or removed, and the write refuses any path part that is not a workspace segment and
   any parent that resolves outside the directory, before it makes or removes anything. Only
-  workspace paths sync, never through a link, never a scratch tree (`node_modules`,
-  `__pycache__`) or a dot path. Each file is read as a stream and stopped past
-  `workspace_file_max_bytes` or past what `workspace_max_bytes` leaves after the directory's
-  own bytes, whatever size the pod claims; such a file stays in the pod and the result says so. The
-  turn's write-back then records the directory in `SessionFiles`, as it does for `Write`.
+  workspace paths sync (each name letters, digits, `_`, `.` and `-`, not starting with `.`, at
+  most 4 levels), never through a link, never a scratch tree (`node_modules`, `__pycache__`).
+  The result names up to 50 other paths a command made (`files_left_in_sandbox`). Each file
+  is read as a stream and stopped past `workspace_file_max_bytes` or past what
+  `workspace_max_bytes` leaves after the directory's own bytes, whatever size the pod claims.
+  Such a file stays in the pod and the result says so: until the session's own copy at that
+  path changes, the sync before the next command neither deletes nor overwrites it. That
+  record is the worker's, for that pod: a new pod, or the session's next turn on another
+  worker, makes the pod match the session directory again. The exec server streams each file
+  it is sent to disk, at most 256 MiB, and keeps it only when its sha256 matches. The turn's
+  write-back then records the directory in `SessionFiles`, as it does for `Write`.
 - **Egress.** The pod reaches only the egress proxy
   ([`agent/src/sandbox/egressProxy.ts`](../../agent/src/sandbox/egressProxy.ts)), a Deployment
   of the same image. It takes `CONNECT` to ports 80 and 443 only. It runs WebFetch's check on
   each target (`assertHostAllowed`: link-local and cloud metadata refused; loopback refused),
   refuses every private and shared address too, and connects to the address it checked. Plain
-  `http://` through the proxy and every other protocol are refused. It logs one JSON line per
-  tunnel. Its own NetworkPolicy allows only public addresses on 80 and 443.
+  `http://` through the proxy and every other protocol are refused. It holds at most 256
+  tunnels at once, 32 from one pod. It logs one JSON line per tunnel. Its own NetworkPolicy
+  allows only public addresses on 80 and 443.
 - **Results** are untrusted data (`untrusted_data`, tool `Bash` or `PowerShell`, source "the
   session sandbox").
-- **Not covered.** `run_in_background` is refused. `Monitor`'s `command` still runs where
-  Claude Code's native Bash runs, so with the sandbox it is not offered. The cluster has no
+- **Not covered.** `run_in_background` is refused. `Monitor`'s `command` would run on the
+  worker, where Claude Code's native Bash runs, so with the sandbox the turn's `Monitor` refuses
+  a command (`turnRunner.ts` gives it no command queue); a `ws` source still works. The cluster has no
   gVisor or Kata RuntimeClass (`kubectl get runtimeclass` on `primary`, 2026-11-09: `crun`,
   `nvidia`, `nvidia-experimental`); the pod shares the node's kernel.
 

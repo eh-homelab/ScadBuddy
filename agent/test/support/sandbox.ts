@@ -8,7 +8,7 @@ import type { SandboxEndpoint, Sandboxes } from '../../src/sandbox/client.js'
 import { sandboxServer } from '../../src/sandbox/server.js'
 
 /** A local exec server (sandbox/server.ts) on a temporary work directory. */
-export async function startLocalSandbox(options: { idleMs?: number; onIdle?: () => void } = {}): Promise<{
+export async function startLocalSandbox(options: { idleMs?: number; onIdle?: () => void; fileMaxBytes?: number } = {}): Promise<{
   endpoint: SandboxEndpoint
   work: string
   server: Server
@@ -21,7 +21,7 @@ export async function startLocalSandbox(options: { idleMs?: number; onIdle?: () 
   await mkdir(work)
   await mkdir(home)
   const token = randomBytes(32).toString('hex')
-  const server = sandboxServer({ work, home, token, idleMs: options.idleMs ?? 60_000, onIdle: options.onIdle ?? (() => {}), pathEnv: process.env.PATH ?? '/usr/bin:/bin' })
+  const server = sandboxServer({ work, home, token, idleMs: options.idleMs ?? 60_000, onIdle: options.onIdle ?? (() => {}), pathEnv: process.env.PATH ?? '/usr/bin:/bin', ...(options.fileMaxBytes ? { fileMaxBytes: options.fileMaxBytes } : {}) })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = (server.address() as AddressInfo).port
   return {
