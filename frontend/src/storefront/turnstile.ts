@@ -21,7 +21,8 @@ export interface TurnstileOptions {
   action: TurnstileAction
   callback: (token: string) => void
   'expired-callback': () => void
-  'error-callback': () => void
+  /** Returns true when the page handled the error, so Turnstile logs no warning. */
+  'error-callback': () => boolean
 }
 
 export interface TurnstileApi {

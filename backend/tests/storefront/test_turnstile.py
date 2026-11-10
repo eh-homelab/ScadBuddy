@@ -4,6 +4,7 @@ CSP names Cloudflare only while the check is on."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -33,6 +34,7 @@ from scadbuddy.storefront.turnstile import (
 )
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    MAX_TURNSTILE_TOKEN_CHARS,
     TURNSTILE_HEADER,
     TURNSTILE_VERIFY_SECONDS,
     VISITOR_HEADER,
@@ -309,6 +311,47 @@ def test_an_expired_block_behind_a_later_one_is_swept() -> None:
     assert failures.blocked("203.0.113.1")
 
 
+async def test_loads_at_once_after_the_ttl_share_one_read() -> None:
+    now = [0.0]
+    reads = 0
+    gate = asyncio.Event()
+
+    class Crud:
+        async def turnstile_site_key(self) -> str | None:
+            nonlocal reads
+            reads += 1
+            await gate.wait()
+            return f"key-{reads}"
+
+    site_key = SiteKey(clock=lambda: now[0])
+    crud = Crud()
+    gate.set()
+    assert await site_key.get(crud) == "key-1"  # type: ignore[arg-type]
+    now[0] += SITE_KEY_TTL
+    gate.clear()
+    loads = [asyncio.create_task(site_key.get(crud)) for _ in range(10)]  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    gate.set()
+    assert await asyncio.gather(*loads) == ["key-2"] * 10
+    assert reads == 2
+
+
+def test_a_send_with_no_token_is_refused_but_not_counted(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
+    for _ in range(FAILED_CHECKS + 1):
+        r = ask(edge, token=None)
+        assert r.status_code == 403  # type: ignore[attr-defined]
+        assert r.json()["type"] == BOT_CHECK_FAILED  # type: ignore[attr-defined]
+    # Never counted: every one still reached the CRUD side, which makes no Siteverify call
+    # for a missing token, and a send with a token is still judged.
+    assert crud_mock["turnstile"].call_count == FAILED_CHECKS + 1
+    assert ask(edge).status_code == 403  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == FAILED_CHECKS + 2
+
+
 def test_an_unavailable_check_spends_no_allowance(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
@@ -366,6 +409,29 @@ async def test_the_site_key_is_read_once_per_ttl_and_kept_through_a_failed_read(
     now[0] += SITE_KEY_RETRY
     assert await site_key.get(crud) == "key-2"  # type: ignore[arg-type]
     assert crud.reads == 3
+
+
+def test_with_the_check_known_off_an_oversized_token_is_not_refused(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["site_key"].respond(200, json={"site_key": None}, headers=CRUD)
+    assert edge.get("/api/store/v1/turnstile").json() == {"site_key": None}
+    r = ask(edge, token="x" * (MAX_TURNSTILE_TOKEN_CHARS + 1))
+    assert r.status_code == 200, r.text  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == 0
+
+
+def test_the_csp_allows_cloudflare_until_a_read_succeeds(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+    dist: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_FRONTEND_DIR", str(dist))
+    crud_mock["site_key"].respond(503, json={"detail": "down"})
+    with TestClient(create_app(load()), base_url="https://testserver", client=CLIENT) as page:
+        assert page.get("/l/x").headers["content-security-policy"] == TURNSTILE_CSP
 
 
 def test_the_csp_names_cloudflare_only_while_the_check_is_on(

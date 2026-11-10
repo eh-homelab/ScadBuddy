@@ -28,6 +28,7 @@ CRUD side.
 
 from __future__ import annotations
 
+import asyncio
 import heapq
 import ipaddress
 import logging
@@ -222,12 +223,13 @@ async def require_turnstile(request: Request, action: TurnstileAction) -> None:
     `BOT_CHECK_FAILED` or 503 `BOT_CHECK_UNAVAILABLE` otherwise (module docstring). A
     client past `FAILED_CHECKS` (`FailedChecks`) is refused 403 with no call, and while
     `SiteKey` found no key within `SITE_KEY_TTL` it passes with no call at all."""
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    if site_key.known_off():
+        # Off: nothing is refused, whatever the browser sent.
+        return
     token = request.headers.get(TURNSTILE_HEADER) or None
     if token is not None and len(token) > MAX_TURNSTILE_TOKEN_CHARS:
         raise bot_check_failed()
-    site_key: SiteKey = request.app.state.turnstile_site_key
-    if site_key.known_off():
-        return
     client = _client(request)
     failures: FailedChecks = request.app.state.turnstile_failures
     if failures.blocked(client):
@@ -243,7 +245,9 @@ async def require_turnstile(request: Request, action: TurnstileAction) -> None:
     if verdict in ("off", "pass"):
         return
     if verdict == "fail":
-        failures.failed(client)
+        # A send with no token cost no Siteverify call, so it is not counted.
+        if token is not None:
+            failures.failed(client)
         raise bot_check_failed()
     if verdict != "unavailable":
         logger.error("the CRUD service gave an unknown bot check verdict")
@@ -262,16 +266,32 @@ class SiteKey:
         self._clock = clock
         self._read: tuple[float, str | None] | None = None
         self._failed_at: float | None = None
+        # Page loads at once after the TTL lapses share one read.
+        self._reading = asyncio.Lock()
 
     def _last(self) -> str | None:
         return None if self._read is None else self._read[1]
 
-    async def get(self, crud: StorefrontCrud) -> str | None:
-        now = self._clock()
+    def _cached(self, now: float) -> tuple[bool, str | None]:
         if self._read is not None and now - self._read[0] < SITE_KEY_TTL:
-            return self._read[1]
+            return True, self._read[1]
         if self._failed_at is not None and now - self._failed_at < SITE_KEY_RETRY:
-            return self._last()
+            return True, self._last()
+        return False, None
+
+    async def get(self, crud: StorefrontCrud) -> str | None:
+        hit, key = self._cached(self._clock())
+        if hit:
+            return key
+        async with self._reading:
+            # Another load may have read it while this one waited.
+            now = self._clock()
+            hit, key = self._cached(now)
+            if hit:
+                return key
+            return await self._fetch(crud, now)
+
+    async def _fetch(self, crud: StorefrontCrud, now: float) -> str | None:
         try:
             key = await crud.turnstile_site_key()
         except (CrudUnavailableError, CrudRefusedError) as error:
@@ -281,6 +301,11 @@ class SiteKey:
         self._read = (now, key)
         self._failed_at = None
         return key
+
+    @property
+    def ever_read(self) -> bool:
+        """Whether any read has succeeded since the edge started."""
+        return self._read is not None
 
     def known_off(self) -> bool:
         """Whether a read within `SITE_KEY_TTL` found no site key: the check is off."""
