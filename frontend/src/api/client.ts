@@ -113,6 +113,9 @@ import type {
   PrintAgain,
   PrintAttachment,
   PrintDetail,
+  PrintSources,
+  PrintImportRequest,
+  ImportedPrint,
   TimelapseFrames,
   PrintPage,
   ActivityDetail,
@@ -1941,6 +1944,29 @@ export const api = {
    * Bambuddy makes them with ffmpeg, which can take tens of seconds.
    */
   getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
+
+  /**
+   * #4698 — where an unlinked print's 3MF can be. `printer` also lists the printer's own
+   * storage, which asks the printer, so the page does it only when told to.
+   */
+  getPrintSources: (archiveId: number, { printer = false } = {}) =>
+    request<PrintSources>(`/print-imports/${archiveId}/sources${printer ? '?printer=true' : ''}`),
+
+  /**
+   * #4698 — links an unlinked print to a model. A new model is made first, as an
+   * operation; its result is the model, not the import, so the same request goes again
+   * with the same key, which links the print to the model the key made.
+   */
+  importPrint: async (archiveId: number, body: PrintImportRequest): Promise<ImportedPrint> => {
+    const key = newRequestId()
+    const send = () =>
+      command<ImportedPrint | ModelSummary>(`/print-imports/${archiveId}`, { method: 'POST', body: JSON.stringify(body) }, '/operations', key)
+    const first = await send()
+    if ('archive_id' in first) return first
+    const again = await send()
+    if ('archive_id' in again) return again
+    throw new Error('The model was made, but the print was not linked to it: import it onto the model again.')
+  },
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),

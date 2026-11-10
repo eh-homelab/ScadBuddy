@@ -444,10 +444,11 @@ own instructions text (cash, Venmo handle, …) and the shop records the payment
 - **Shipping options**, `storefront_shipping_options` setting: a list of `{id, label,
   amount_minor, ships}`; `ships=false` is pickup and needs no address. Submit writes one
   `shipping` charge from the chosen option. The shop can edit it while the order is open.
-  The amounts are in the shop's currency (`orders_currency`) and are never converted: an
-  order in another currency (a cart made before the shop changed it) takes no option (409
-  `shipping_currency_mismatch`, in submit and in the back office alike), and its draft
-  view lists none. Carrier rates are a later story.
+  The amounts are in the shop's currency (`orders_currency`) and are never converted: in
+  the back office, an order in another currency (one made before the shop changed it)
+  takes no option (409 `shipping_currency_mismatch`). A cart holds no amount, so a
+  storefront submit first gives the cart the shop's currency, and its draft view shows
+  that currency and its options. Carrier rates are a later story.
 - **Tax**, settings `orders_tax_percent` (default 0, off) and `orders_tax_shipping`
   (bool). The lifecycle keeps one `tax` charge marked `auto` (`order_charges.auto`),
   recomputed in every transaction that changes items, quotes or charges while the order is

@@ -969,16 +969,17 @@ class OrderStore:
         *,
         customer_id: str,
         shipping_address_id: str | None,
+        currency: str,
     ) -> Order:
-        """The cart's customer, shipping address and the year's next number (#5283), in
-        the submit's transaction: a rolled-back submit gives the number back
+        """The cart's customer, shipping address, currency and the year's next number
+        (#5283), in the submit's transaction: a rolled-back submit gives the number back
         (`next_number`). ``submitted_at`` stays unset until `stamp_submitted`."""
         number = next_number(conn, datetime.now(UTC).year)
         row = conn.execute(
             "UPDATE orders SET customer_id = %s, number = %s, shipping_address_id = %s,"
-            " updated_at = now() WHERE id = %s AND source = 'storefront'"
+            " currency = %s, updated_at = now() WHERE id = %s AND source = 'storefront'"
             f" AND submitted_at IS NULL RETURNING {_ORDER}",
-            (customer_id, number, shipping_address_id, order_id),
+            (customer_id, number, shipping_address_id, currency, order_id),
         ).fetchone()
         if row is None:
             raise OrderNotFoundError(order_id)

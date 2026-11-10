@@ -37,11 +37,14 @@ export function PastPrintsPicker({
   picked,
   onPick,
   disabled,
+  unlinkedOnly = false,
 }: {
   open: boolean
   picked: ArchiveOutcome | null
   onPick: (next: ArchiveOutcome | null) => void
   disabled?: boolean
+  /** #4698 — lists only the archives no print link names (`scadbuddy_print` not true). */
+  unlinkedOnly?: boolean
 }) {
   const [fromDay, setFromDay] = useState('')
   const [toDay, setToDay] = useState('')
@@ -76,8 +79,13 @@ export function PastPrintsPicker({
   const page = listed.data ?? (listed.loading ? lastPage : undefined)
   const rows = useMemo(() => {
     const q = text.trim().toLocaleLowerCase()
-    return (page ?? []).filter((a) => (state === ANY || a.status === state) && (!q || (a.print_name ?? '').toLocaleLowerCase().includes(q)))
-  }, [page, state, text])
+    return (page ?? []).filter(
+      (a) =>
+        (!unlinkedOnly || a.scadbuddy_print !== true) &&
+        (state === ANY || a.status === state) &&
+        (!q || (a.print_name ?? '').toLocaleLowerCase().includes(q)),
+    )
+  }, [page, state, text, unlinkedOnly])
   const printerName = (id: number | null | undefined) => printerChoices.find((p) => p.id === id)?.name ?? (id ? `Printer ${id}` : 'No printer')
 
   return (
