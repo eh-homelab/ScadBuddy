@@ -536,15 +536,20 @@ class OrderStore:
             return None if row is None else self._customer_of(c, row)
 
     def customer(
-        self, customer_id: str, *, conn: Conn | None = None, share: bool = False
+        self,
+        customer_id: str,
+        *,
+        conn: Conn | None = None,
+        share: bool = False,
+        lock: bool = False,
     ) -> Customer | None:
         """``share`` takes the row's share lock (``FOR SHARE``, so ``conn`` must be in
-        a transaction): a writer that would archive it waits for this transaction."""
+        a transaction): a writer that would archive it waits for this transaction.
+        ``lock`` takes its update lock (``FOR UPDATE``), which writes nothing."""
+        mode = " FOR UPDATE" if lock else " FOR SHARE" if share else ""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_CUSTOMER} FROM customers WHERE id = %s"
-                + (" FOR SHARE" if share else ""),
-                (customer_id,),
+                f"SELECT {_CUSTOMER} FROM customers WHERE id = %s" + mode, (customer_id,)
             ).fetchone()
             return None if row is None else self._customer_of(c, row)
 
