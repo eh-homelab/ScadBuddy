@@ -86,6 +86,9 @@ export function PayPage() {
   useEffect(() => {
     if (!token) return
     let live = true
+    setCheckout(undefined)
+    setError(null)
+    setApproved(false)
     store.payCheckout(token).then(
       (found) => live && setCheckout(found),
       (caught: unknown) => {

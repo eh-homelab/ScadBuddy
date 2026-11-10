@@ -13,6 +13,7 @@ import { renderPage } from '../../test/utils'
 import { OrderPage } from './OrderPage'
 import { PayPage } from './PayPage'
 import userEvent from '@testing-library/user-event'
+import { Link } from 'react-router'
 
 const TOKEN = 'T'.repeat(43)
 
@@ -151,6 +152,52 @@ describe('PayPage', () => {
     expect(navigate).toHaveBeenCalledWith(-1)
     expect(screen.queryByText(/Open your order from the link in your mail/)).not.toBeInTheDocument()
     expect(sessionStorage.getItem('sb_pay_from_order')).toBeNull()
+  })
+
+  it('does not mark the order page\'s pay link when a modifier key or another button is used', async () => {
+    serveOrder()
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    const link = await screen.findByRole('link', { name: 'Pay $12.50' })
+    link.addEventListener('click', (event) => event.preventDefault())
+    const user = userEvent.setup()
+    for (const key of ['Control', 'Meta', 'Shift', 'Alt']) {
+      await user.keyboard(`{${key}>}`)
+      await user.click(link)
+      await user.keyboard(`{/${key}}`)
+      expect(sessionStorage.getItem('sb_pay_from_order')).toBeNull()
+    }
+    await user.pointer({ keys: '[MouseMiddle]', target: link })
+    expect(sessionStorage.getItem('sb_pay_from_order')).toBeNull()
+    await user.click(link)
+    expect(sessionStorage.getItem('sb_pay_from_order')).toBe('1')
+  })
+
+  it('starts over when a second pay link changes only the fragment', async () => {
+    const OTHER = 'O'.repeat(43)
+    server.use(
+      http.post('/api/store/v1/pay/checkout', async ({ request }) => {
+        const { token } = (await request.json()) as { token: string }
+        return token === TOKEN ? HttpResponse.json(CHECKOUT) : new HttpResponse(null, { status: 404 })
+      }),
+    )
+    const paypal = fakePayPal()
+    const { user } = renderPage(
+      <>
+        <PayPage />
+        <Link to={`/pay#${OTHER}`}>other link</Link>
+      </>,
+      { route: `/pay#${TOKEN}` },
+    )
+    const script = await sdk()
+    act(() => {
+      script.dispatchEvent(new Event('load'))
+    })
+    await waitFor(() => expect(paypal.render).toHaveBeenCalledTimes(1))
+    await act(async () => paypal.rendered[0]!.onApprove({ orderID: CHECKOUT.paypal_order_id }))
+    expect(await screen.findByText(/Thanks/)).toBeInTheDocument()
+    await user.click(screen.getByRole('link', { name: 'other link' }))
+    expect(await screen.findByText(/This link does not open a payment/)).toBeInTheDocument()
+    expect(screen.queryByText(/Thanks/)).not.toBeInTheDocument()
   })
 
   it('offers no way back when the pay link opened in a tab of its own', async () => {

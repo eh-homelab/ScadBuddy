@@ -328,7 +328,7 @@ function Payments({ order }: { order: CustomerOrder }) {
                 (payment.pay_url ? (
                   <a className="sf-button" href={payment.pay_url}
                     rel="noreferrer"
-                    onClick={() => markPayFromOrder(payment.pay_url!)}
+                    onClick={(event) => markPayFromOrder(payment.pay_url!, event.nativeEvent)}
                   >
                     {payment.kind === 'deposit' ? `Pay deposit ${amount}` : `Pay ${amount}`}
                   </a>

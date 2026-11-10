@@ -7,7 +7,8 @@
 const KEY = "sb_pay_from_order";
 
 /** Mark a click on a pay link that stays on this site. */
-export function markPayFromOrder(payUrl: string): void {
+export function markPayFromOrder(payUrl: string, event?: MouseEvent): void {
+  if (event && (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) return;
   try {
     if (
       new URL(payUrl, window.location.href).origin === window.location.origin
