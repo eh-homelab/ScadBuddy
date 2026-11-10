@@ -267,7 +267,8 @@ export type SyncBack = { written: string[]; removed: string[]; left: { path: str
 
 /**
  * The files a sync back left in the pod past a cap, by path: what the session directory held
- * at that path then (its sha256, past the per-file cap too, or undefined for none). Until
+ * at that path then (its sha256, past the per-file cap too; `large` when it could not be hashed;
+ * or undefined for none). Until
  * the session directory's copy changes, a sync in neither sends nor deletes such a path, so
  * the file stays in the pod for as long as the pod lasts. The pod itself keeps the record
  * (GET and PUT /v1/kept), so a sync in on any worker sees it; a new pod starts with none.
@@ -283,11 +284,11 @@ export type SyncedIn = { files: Map<string, string>; unsynced: Set<string>; notS
 /** What Kept records for a session file it could not hash (it went away while read). */
 const LARGE = 'large'
 
-type LocalFile = { sha256: string; bytes: Buffer } | { sha256: string; tooLarge: true }
+type LocalFile = { sha256: string; bytes: Buffer } | { tooLarge: true }
 
 /**
  * Each worker file's sha256, by path: the session directory's files that sync. A file past the
- * per-file cap is hashed as a stream, never held, so Kept sees when it changes.
+ * per-file cap is neither held nor hashed here: only a kept path needs its sha256 (syncIn).
  */
 async function localManifest(dir: string, limits: SyncLimits): Promise<Map<string, LocalFile>> {
   const out = new Map<string, LocalFile>()
@@ -295,7 +296,7 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
     if (!syncPath(rel)) continue
     const bytes = await readDirFile(dir, rel, limits.fileMaxBytes)
     if (!bytes) {
-      out.set(rel, { sha256: (await dirFileSha256(dir, rel)) ?? LARGE, tooLarge: true })
+      out.set(rel, { tooLarge: true })
       continue
     }
     out.set(rel, { sha256: createHash('sha256').update(bytes).digest('hex'), bytes })
@@ -318,7 +319,8 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
   const stays = new Set<string>()
   for (const [rel, was] of kept) {
     const entry = local.get(rel)
-    const now = entry?.sha256
+    // A file past the cap is hashed as a stream, and only here, so Kept sees when it changes.
+    const now = entry === undefined ? undefined : 'tooLarge' in entry ? ((await dirFileSha256(dir, rel)) ?? LARGE) : entry.sha256
     // Gone from the pod (a new pod), or changed in the session since: the session's copy counts again.
     if (!there.has(rel) || now !== was) kept.delete(rel)
     else stays.add(rel)

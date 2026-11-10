@@ -381,8 +381,8 @@ export async function readDirFile(dir: string, rel: string, max: number): Promis
 
 /**
  * The sha256 of a regular file at `rel` in a session's directory, read as a stream whatever its
- * size (never through a link); undefined when there is none. The sandbox's sync uses it for a
- * file past the per-file cap, so a change to such a file is seen (#5942).
+ * size (never through a link); undefined when there is none or it cannot be opened. The
+ * sandbox's sync uses it for a kept file past the per-file cap, so a change to it is seen (#5942).
  */
 export async function dirFileSha256(dir: string, rel: string): Promise<string | undefined> {
   const abs = path.join(dir, rel)
@@ -391,7 +391,8 @@ export async function dirFileSha256(dir: string, rel: string): Promise<string | 
   try {
     handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
   } catch (err) {
-    if (missing(err) || (err as NodeJS.ErrnoException).code === 'ELOOP') return undefined
+    const code = (err as NodeJS.ErrnoException).code
+    if (missing(err) || code === 'ELOOP' || code === 'EACCES') return undefined
     throw err
   }
   try {
