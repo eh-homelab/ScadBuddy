@@ -5,8 +5,10 @@ only and refuse another site's page; a cookie the edge did not sign is never sen
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -143,6 +145,31 @@ def test_sign_out_ends_the_session_clears_the_cookie_and_starts_a_new_visitor(
     calls = crud_mock["account"].call_count
     assert edge.get(STORE).json() is None
     assert crud_mock["account"].call_count == calls
+
+
+def test_sign_out_signs_the_browser_out_when_the_crud_side_does_not_answer(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5936: the session's row expires anyway, so a sign-out the CRUD side
+    did not answer still clears the cookie and gives the browser a new visitor."""
+    sign_in(edge)
+    before = edge.cookies.get(VISITOR_COOKIE)
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    crud_mock["sign_out"].side_effect = refused
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.routes"):
+        r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 204
+    cookies = set_cookies(r)
+    (cleared,) = [c for c in cookies if c.startswith(f"{SESSION_COOKIE}=")]
+    assert "max-age=0" in cleared.lower()
+    assert len([c for c in cookies if c.startswith(f"{VISITOR_COOKIE}=")]) == 1
+    assert edge.cookies.get(VISITOR_COOKIE) != before
+    assert any("sign-out" in record.getMessage() for record in caplog.records)
 
 
 def test_sign_out_with_no_visitor_cookie_sets_one_visitor(

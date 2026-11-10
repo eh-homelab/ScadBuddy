@@ -1112,7 +1112,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     never from a body.
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
-    deletes the session, and the edge also gives the browser a new visitor. `GET
+    deletes the session, and the edge also gives the browser a new visitor; when the CRUD
+    side does not answer, the edge logs it and still signs the browser out (the row
+    expires). A code is single-use: a sign-in whose answer is lost spends it. `GET
     …/account` answers the account's email or null, and `…/account/orders` lists
     submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec

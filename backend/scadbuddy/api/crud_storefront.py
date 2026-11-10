@@ -502,7 +502,9 @@ StoreSession = Annotated[str | None, Depends(store_session)]
 
 async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
     """The account of the request's session, or None. Submit and the order page are to take
-    the account from here (a later PR), never from a body."""
+    the account from here (a later PR), never from a body. `account_for_session` runs in a
+    transaction of its own; if a route that takes it becomes hot, read it in the route's
+    transaction instead."""
     if session is None:
         return None
 

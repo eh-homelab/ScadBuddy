@@ -408,10 +408,14 @@ async def account_sign_out(
 ) -> Response:
     """Sign-out: the session ends on the CRUD side and its cookie is cleared. The browser
     also gets a new visitor: the old one belongs to the account, so a cart made next on a
-    shared browser is not the account's."""
+    shared browser is not the account's. When the CRUD side does not answer, the browser
+    is still signed out: the session's row expires on its own."""
     session = session_of(request)
     if session is not None:
-        await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
+        try:
+            await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
+        except CrudUnavailableError as error:
+            logger.warning("account sign-out: the CRUD side did not answer (%s)", error)
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     clear_session(response)
     response.set_cookie(

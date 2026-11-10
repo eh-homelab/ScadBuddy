@@ -315,7 +315,7 @@ class SignInBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: str = Field(max_length=320)
-    #: Eight characters; spaces, hyphens and lower case are taken too.
+    #: Sixteen characters (`XXXX-XXXX-XXXX-XXXX`); spaces, hyphens and lower case are taken too.
     code: str = Field(max_length=32)
 
 
