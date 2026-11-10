@@ -8,6 +8,8 @@
 -- within 10 minutes of `created_at`). `order_id` is null for a sign-in code. A sender
 -- leases a row (`lease_until`) and sends with no transaction open.
 -- `attempts` counts the recipient's refusals only; `next_attempt_at` backs them off;
+-- `server_failures` counts the server failures in a row that answered this row's mail,
+-- and at 3 the row is charged an attempt, so one row cannot hold the head of the queue;
 -- `failed_at` is a row given up (its attempts spent, or a failure no retry mends).
 CREATE TABLE storefront_mail (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -20,6 +22,7 @@ CREATE TABLE storefront_mail (
   sent_at timestamptz,
   failed_at timestamptz,
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  server_failures integer NOT NULL DEFAULT 0 CHECK (server_failures >= 0),
   next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   lease_until timestamptz,
   last_error text,
