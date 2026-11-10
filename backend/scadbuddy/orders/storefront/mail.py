@@ -16,9 +16,13 @@ Failures (review I2):
 - of the server or its setup (anything the SMTP session raises that is not the
   recipient's: connect, TLS and its certificate, login and a password smtplib cannot
   encode, sender refused, a timeout; and a password saved for another connection, no
-  password or no key): never charged to a row. The row is let go, the process waits
+  password or no key): not charged to a row. The row is let go, the process waits
   (`SERVER_BACKOFF_FIRST`, doubling to `SERVER_BACKOFF_MAX`) and the error is kept in
-  `storefront_mail_server` for the shop;
+  `storefront_mail_server` for the shop. Only a server failure the server answered to
+  the row's own mail (an ``SMTPResponseException`` from the send, not the sender
+  refused) counts on the row (``server_failures``): at `SERVER_FAILURES_MAX` in a row
+  the row is charged an attempt, so a crafted address or message cannot hold the head
+  of the queue for good;
 - of the recipient or this message (``SMTPRecipientsRefused``, or an ``SMTPDataError``
   `_recipients_fault` reads as about them): charged to the row, which waits 1, 2, 4 ...
   minutes (at most an hour) and is given up after `MAX_ATTEMPTS`;
@@ -98,6 +102,8 @@ CODE_TTL = "10 minutes"
 #: The process's wait after a server failure: a minute, doubling to an hour.
 SERVER_BACKOFF_FIRST = 60.0
 SERVER_BACKOFF_MAX = 3600.0
+#: Server failures in a row answered to one row's mail before that row is charged.
+SERVER_FAILURES_MAX = 3
 #: How long one pass may run, below the sweep's `STOREFRONT_MAIL_TIMEOUT` (10 min).
 PASS_BUDGET = 480.0
 #: The longest ``last_error`` kept.
@@ -194,46 +200,74 @@ def _text(error: BaseException) -> str:
 
 
 #: An RFC 3463 enhanced status code in a reply: ``5.<subject>.<detail>``.
-_ENHANCED = re.compile(rb"\b5\.(\d{1,3})\.(\d{1,3})\b")
-#: Words in a reply with no telling status code that point at the sender or the setup.
-_SETUP_WORDS = re.compile(rb"sender|\bfrom\b|verif|authori[sz]|authenticat|relay", re.I)
+_ENHANCED = re.compile(r"\b5\.(\d{1,3})\.(\d{1,3})\b")
+#: Words in a reply that point at the sender or the setup.
+_SETUP_WORDS = re.compile(r"sender|\bfrom\b|verif|authori[sz]|authenticat|relay")
+#: What may stand on each side of an address named in a reply.
+_BEFORE = r"(?<![^\s<>:,;'\"()\[\]])"
+_AFTER = r"(?=$|[\s<>:,;'\"()\[\]]|\.(?:$|\s))"
 
 
-def _recipients_fault(error: Exception, sender: str | None) -> bool:
+def _address(address: str) -> re.Pattern[str]:
+    """``address`` as a whole address in a lower-cased reply, never inside another."""
+    return re.compile(_BEFORE + re.escape(address.lower()) + _AFTER)
+
+
+def _recipients_fault(error: Exception, sender: str | None, to: str) -> bool:
     """Whether the server refused this mail's recipient or content for good, so the row
     is charged; anything else is a server failure.
 
     ``SMTPRecipientsRefused`` (the answer to RCPT TO) is the recipient's. An
     ``SMTPDataError`` (the answer to DATA, which smtplib reaches only after RCPT TO was
-    accepted) is the row's only when it is a 5xx and says it is about the recipient or
-    the message:
-    - a reply that names the sender address is the setup's (an unverified sender);
+    accepted) is the row's only when it is a 5xx about the recipient or the message. The
+    reply is read case-insensitively, in this order:
+    - a reply that names the recipient ``to`` as a whole address is the row's. The
+      recipient is the customer's to choose, so nothing in it may make a server failure;
+    - a reply that names the sender as a whole address (bounded by the reply's ends,
+      whitespace, ``<>:,;'"()[]``, or a closing full stop) is the setup's: an unverified
+      sender. An address that only contains the sender is not it;
     - with an RFC 3463 code ``5.S.D`` (S not 0): ``5.1.D`` (addressing) is the row's
       except 5.1.7 and 5.1.8 (the sender's address); ``5.2.D`` (the mailbox), 5.3.4 (too
-      big) and ``5.6.D`` (the content) are the row's; the rest (5.3 the mail system, 5.4
-      routing, 5.5 the protocol, 5.7 security and policy) are the setup's;
-    - with no such code: a reply that names the sender, a login, a verification or a
-      relay is the setup's; 550 to 554 (RFC 5321's mailbox and transaction refusals) are
-      the row's, any other 5xx the setup's.
-    ``SMTPSenderRefused`` (the answer to MAIL FROM) is always the setup's."""
+      big) and ``5.6.D`` (the content) are the row's; ``5.7.D`` (security and policy) is
+      the row's unless the reply has a setup word (sender, from, verif, authoris,
+      authenticat, relay); the rest (5.3 the mail system, 5.4 routing, 5.5 the protocol)
+      are the setup's;
+    - with no such code: a reply with a setup word is the setup's; 550 to 554 (RFC 5321's
+      mailbox and transaction refusals) are the row's, any other 5xx the setup's.
+    The setup words are looked for only in the reply with the recipient's address taken
+    out. ``SMTPSenderRefused`` (the answer to MAIL FROM) is always the setup's."""
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         return True
     if not isinstance(error, smtplib.SMTPDataError) or error.smtp_code < 500:
         return False
     reply = error.smtp_error
-    if isinstance(reply, str):
-        reply = reply.encode(errors="replace")
-    if sender and sender.lower().encode(errors="replace") in reply.lower():
+    if isinstance(reply, bytes):
+        reply = reply.decode(errors="replace")
+    reply = reply.lower()
+    if _address(to).search(reply):
+        return True
+    if sender and _address(sender).search(reply):
         return False
+    setup = _SETUP_WORDS.search(reply.replace(to.lower(), " ")) is not None
     code = _ENHANCED.search(reply)
     if code is not None and int(code[1]) != 0:
         subject, detail = int(code[1]), int(code[2])
         if subject == 1:
             return detail not in (7, 8)
+        if subject == 7:
+            return not setup
         return subject in (2, 6) or (subject, detail) == (3, 4)
-    if _SETUP_WORDS.search(reply):
+    if setup:
         return False
     return 550 <= error.smtp_code <= 554
+
+
+class _AnsweredError(Exception):
+    """The server's refusal of this row's own mail, which counts on the row."""
+
+    def __init__(self, error: smtplib.SMTPResponseException) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 @dataclass(frozen=True)
@@ -444,14 +478,19 @@ class StorefrontMail:
                 continue
             try:
                 self._deliver(config, password, message)
-            except Exception as error:
+            except Exception as caught:
                 # Never a fixed failure: a certificate error and a password smtplib cannot
                 # encode are ValueErrors too, and are the setup's.
-                if _recipients_fault(error, config.sender):
-                    self._refused(claimed.id, _text(error))
+                answered = isinstance(caught, _AnsweredError)
+                refusal = caught.error if isinstance(caught, _AnsweredError) else caught
+                if _recipients_fault(refusal, config.sender, claimed.to):
+                    self._refused(claimed.id, _text(refusal))
                     continue
-                self._release(claimed.id)
-                self._server_failed(_text(error))
+                if answered:
+                    self._answered_failure(claimed.id, _text(refusal))
+                else:
+                    self._release(claimed.id)
+                self._server_failed(_text(refusal))
                 break
             self._sent(claimed.id)
             sent += 1
@@ -533,7 +572,12 @@ class StorefrontMail:
                 # `_login_password` refused a login without TLS before connecting.
                 assert config.tls != "none" and password is not None
                 smtp.login(config.user, password)
-            smtp.send_message(message)
+            try:
+                smtp.send_message(message)
+            except smtplib.SMTPSenderRefused:
+                raise
+            except smtplib.SMTPResponseException as error:
+                raise _AnsweredError(error) from error
 
     # -- the stamps -----------------------------------------------------------------------
 
@@ -554,7 +598,8 @@ class StorefrontMail:
         with self._store.transaction() as conn:
             conn.execute(
                 "UPDATE storefront_mail SET sent_at = clock_timestamp(), lease_until = NULL,"
-                " last_error = NULL, context = context - %s::text[] WHERE id = %s",
+                " last_error = NULL, server_failures = 0, context = context - %s::text[]"
+                " WHERE id = %s",
                 (_SECRETS, row_id),
             )
 
@@ -571,18 +616,34 @@ class StorefrontMail:
                 (text, _SECRETS, row_id),
             )
 
-    def _refused(self, row_id: str, text: str) -> None:
-        logger.warning("storefront mail refused", extra={"mail_id": row_id, "error": text})
+    def _answered_failure(self, row_id: str, text: str) -> None:
+        """Count a server failure answered to the row's mail; at `SERVER_FAILURES_MAX` in
+        a row, charge the row an attempt instead of letting it go."""
         with self._store.transaction() as conn:
-            conn.execute(
-                "UPDATE storefront_mail SET attempts = attempts + 1, last_error = %s,"
-                " lease_until = NULL, next_attempt_at = clock_timestamp()"
-                " + least(interval '1 minute' * power(2, attempts), interval '1 hour'),"
-                " failed_at = CASE WHEN attempts + 1 >= %s THEN clock_timestamp() END,"
-                " context = CASE WHEN attempts + 1 >= %s THEN context - %s::text[]"
-                " ELSE context END WHERE id = %s",
-                (text, MAX_ATTEMPTS, MAX_ATTEMPTS, _SECRETS, row_id),
-            )
+            row = conn.execute(
+                "UPDATE storefront_mail SET server_failures = server_failures + 1,"
+                " lease_until = NULL WHERE id = %s RETURNING server_failures",
+                (row_id,),
+            ).fetchone()
+            if row is not None and row["server_failures"] >= SERVER_FAILURES_MAX:
+                self._charge(conn, row_id, text)
+
+    def _refused(self, row_id: str, text: str) -> None:
+        with self._store.transaction() as conn:
+            self._charge(conn, row_id, text)
+
+    def _charge(self, conn: Conn, row_id: str, text: str) -> None:
+        logger.warning("storefront mail refused", extra={"mail_id": row_id, "error": text})
+        conn.execute(
+            "UPDATE storefront_mail SET attempts = attempts + 1, last_error = %s,"
+            " server_failures = 0,"
+            " lease_until = NULL, next_attempt_at = clock_timestamp()"
+            " + least(interval '1 minute' * power(2, attempts), interval '1 hour'),"
+            " failed_at = CASE WHEN attempts + 1 >= %s THEN clock_timestamp() END,"
+            " context = CASE WHEN attempts + 1 >= %s THEN context - %s::text[]"
+            " ELSE context END WHERE id = %s",
+            (text, MAX_ATTEMPTS, MAX_ATTEMPTS, _SECRETS, row_id),
+        )
 
     def _server_failed(self, text: str) -> None:
         logger.warning("storefront mail server failed", extra={"error": text})

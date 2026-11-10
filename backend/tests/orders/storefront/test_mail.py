@@ -529,6 +529,97 @@ def test_a_data_refusal_of_the_sender_or_setup_is_a_server_failure(
     the_server_failed(rows, mail, log, clock, "SMTPDataError")
 
 
+def charged_and_passed(
+    rows: OrderStore, log: list[Any], failures: list[Exception], to: str, error: Exception
+) -> StorefrontMail:
+    """``to``'s row refused with ``error``: charged to it, and the next row sent in the
+    same pass with no server failure."""
+    code(rows, to, "1")
+    code(rows, "b@example.com", "2")
+    failures.append(error)
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    assert mail.send_queued() == 1
+    first, second = mail_rows(rows)
+    assert first["attempts"] == 1 and first["failed_at"] is None
+    assert second["sent_at"] is not None
+    assert mail.status().server_error is None
+    return mail
+
+
+@pytest.mark.parametrize("to", ["relay-verify@example.com", "Verified.Relay@example.com"])
+def test_a_refusal_naming_a_recipient_with_setup_words_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], to: str
+) -> None:
+    """The recipient is the customer's to choose: words in it never stall the sender."""
+    error = smtplib.SMTPDataError(550, f"{to.lower()}: no such user".encode())
+    charged_and_passed(rows, log, failures, to, error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"5.1.1 <workshop@example.com>: no such user",
+        b"workshop@example.com: mailbox name not allowed",
+        b"mailbox unavailable for xshop@example.com.invalid",
+    ],
+)
+def test_a_recipient_that_contains_the_sender_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], reply: bytes
+) -> None:
+    """The sender (shop@example.com) is matched as a whole address, never inside one."""
+    error = smtplib.SMTPDataError(553, reply)
+    charged_and_passed(rows, log, failures, "workshop@example.com", error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"5.7.1 <ada@example.com>: Recipient address rejected: Access denied",
+        b"5.7.1 Message rejected as spam",
+    ],
+)
+def test_a_policy_refusal_that_does_not_name_the_sender_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], reply: bytes
+) -> None:
+    charged_and_passed(rows, log, failures, "ada@example.com", smtplib.SMTPDataError(554, reply))
+
+
+def test_a_row_in_three_server_failures_in_a_row_is_charged_and_backed_off(
+    rows: OrderStore, log: list[Any], failures: list[Exception], clock: Clock
+) -> None:
+    """A server failure the server answered to this row's mail counts on the row: at the
+    third in a row the row is charged one attempt and backed off, so it no longer holds
+    the head of the queue."""
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    mail = outbox(rows, HOST, log, failures, clock)
+    mail.set_password("pw")
+    for failure in range(1, 4):
+        failures.append(smtplib.SMTPDataError(554, b"5.3.0 mail system misconfigured"))
+        assert mail.send_queued() == 0
+        first, second = mail_rows(rows)
+        assert second["sent_at"] is None and second["attempts"] == 0
+        assert "SMTPDataError" in (mail.status().server_error or "")
+        if failure < 3:
+            assert (first["attempts"], first["server_failures"]) == (0, failure)
+            assert first["failed_at"] is None and first["lease_until"] is None
+        clock.now += 3600
+    first, second = mail_rows(rows)
+    assert (first["attempts"], first["server_failures"]) == (1, 0)
+    assert first["failed_at"] is None and "SMTPDataError" in first["last_error"]
+    with rows.transaction() as conn:
+        wait = conn.execute(
+            "SELECT extract(epoch FROM next_attempt_at - clock_timestamp()) AS s"
+            " FROM storefront_mail WHERE id = %s",
+            (first["id"],),
+        ).fetchone()
+    assert wait is not None and round(float(wait["s"]) / 60) == 1
+    # The next row is sent while the first waits.
+    assert mail.send_queued() == 1
+    assert [m["To"] for m in sends(log)] == ["b@example.com"]
+
+
 def test_a_fixed_failure_fails_at_once(
     rows: OrderStore, shop: Shop, log: list[Any], failures: list[Exception]
 ) -> None:

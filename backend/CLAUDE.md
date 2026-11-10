@@ -835,10 +835,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   failure (anything the SMTP session raises that is not the recipient's: connect, TLS and
   a certificate error, login and a non-ASCII password, sender, timeout; or a password
   bound to another connection) charges no row: the process backs off (1 min, doubling to
-  1 h) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). A
+  1 h) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). One the
+  server answered to the row's own mail counts on the row (`server_failures`): at 3 in a
+  row it charges the row an attempt, so one crafted row cannot hold the queue's head. A
   recipient refusal (`SMTPRecipientsRefused`, or a 5xx `SMTPDataError` about the
-  recipient or the message, by `_recipients_fault`'s rule; one that names the sender or
-  the setup is the server's) charges the row (`next_attempt_at` 1, 2, 4 ... min, at most
+  recipient or the message, by `_recipients_fault`'s rule: a reply naming the row's
+  `to_address` as a whole address is the row's; one naming the sender as a whole
+  address, or with a setup word outside the recipient's address, is the server's)
+  charges the row (`next_attempt_at` 1, 2, 4 ... min, at most
   1 h; given up after 8); a message that cannot be built (a template or header error, a
   revoked link, `link_revoked`) fails it at once. Every order mail names its link (`link_id`, never the token) and
   carries `{storefront_public_url}/o#{token}`. The
