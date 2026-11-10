@@ -285,8 +285,9 @@ class Settings(BaseSettings):
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
     # SCADBUDDY_STOREFRONT_PUBLIC_URL (#4960): the storefront edge's origin, the same
-    # variable the edge reads. Once the storefront's pay page ships (`payments.venmo`
-    # `PAY_PAGE_READY`), a Venmo-eligible PayPal request's link is that page.
+    # variable the edge reads. Once the pay page is switched on (`payments.venmo`
+    # `PAY_PAGE_READY`, after its sandbox measurement), a Venmo-eligible PayPal
+    # request's link is that page.
     storefront_public_url: str | None = None
     # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
     # besides the public URL's — the LAN hostname when the public URL is an SSO

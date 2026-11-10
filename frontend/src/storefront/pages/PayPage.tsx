@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { StoreError, errorText, store, type PayCheckout } from '../api/client'
 import { formatMoney } from '../../lib/money'
 
@@ -27,9 +27,14 @@ declare global {
   }
 }
 
-/** The decimals a currency has, from the browser's own table. */
-function exponent(currency: string): number {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2
+/** Whether the payer came from this site's order page (`/o`; a referrer holds no fragment). */
+function cameFromOrderPage(): boolean {
+  try {
+    const from = new URL(document.referrer)
+    return from.origin === window.location.origin && from.pathname === '/o'
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -52,7 +57,13 @@ function loadSdk(checkout: PayCheckout): { loaded: Promise<PayPalSdk>; cancel: (
     script.addEventListener('error', () => reject(new Error('no sdk')))
   })
   document.head.appendChild(script)
-  return { loaded, cancel: () => script.remove() }
+  return {
+    loaded,
+    cancel: () => {
+      script.remove()
+      delete window.paypal
+    },
+  }
 }
 
 /**
@@ -63,6 +74,7 @@ function loadSdk(checkout: PayCheckout): { loaded: Promise<PayPalSdk>; cancel: (
  * order page shows it paid.
  */
 export function PayPage() {
+  const navigate = useNavigate()
   const token = useLocation().hash.replace(/^#/, '')
   const [checkout, setCheckout] = useState<PayCheckout | null | undefined>(token ? undefined : null)
   const [error, setError] = useState<string | null>(null)
@@ -134,14 +146,18 @@ export function PayPage() {
       {checkout === undefined && !error && <p className="sf-hint">Loading your payment…</p>}
       {checkout && (
         <div className="sf-panel">
-          <p className="sf-lead">{formatMoney(checkout.amount_minor, checkout.currency, exponent(checkout.currency))}</p>
+          <p className="sf-lead">{formatMoney(checkout.amount_minor, checkout.currency, checkout.minor_exponent)}</p>
           <p className="sf-hint">{`For order ${checkout.order_number}`}</p>
           {approved ? (
             <>
               <p role="status">Thanks. We will confirm your payment shortly.</p>
-              <a className="sf-button" href="/o">
-                Open your order
-              </a>
+              {cameFromOrderPage() ? (
+                <button type="button" className="sf-button" onClick={() => navigate(-1)}>
+                  Back to your order
+                </button>
+              ) : (
+                <p className="sf-hint">Open your order from the link in your mail.</p>
+              )}
             </>
           ) : (
             <div ref={container} />

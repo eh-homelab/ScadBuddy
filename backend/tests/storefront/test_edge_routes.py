@@ -1576,6 +1576,7 @@ CHECKOUT = {
     "client_id": "AYSq3RDGsmBLJE-otTkBtM",
     "environment": "sandbox",
     "paypal_order_id": "5O190127TN364715T",
+    "minor_exponent": 2,
 }
 
 
@@ -1603,3 +1604,18 @@ def test_an_empty_crud_404_is_the_edge_s_own_404(
     crud_mock.post(f"{PAY}/checkout").respond(404, headers=CRUD)
     r = edge.post("/api/store/v1/pay/checkout", json={"token": "x"}, headers={"Origin": PUBLIC_URL})
     assert (r.status_code, r.content) == (404, b"")
+
+
+@pytest.mark.parametrize("code", [404, 422])
+def test_a_pay_checkout_refusal_with_a_problem_is_not_blanked_to_an_empty_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    code: int,
+) -> None:
+    problem = {"type": "about:blank", "title": "No", "status": code, "detail": "A reason."}
+    crud_mock.post(f"{PAY}/checkout").respond(
+        code, json=problem, headers={**CRUD, "Content-Type": "application/problem+json"}
+    )
+    r = edge.post("/api/store/v1/pay/checkout", json={"token": "x"}, headers={"Origin": PUBLIC_URL})
+    assert (r.status_code, r.content) != (404, b"")
+    assert r.status_code >= 400

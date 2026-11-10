@@ -1,6 +1,12 @@
 import { act, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+const navigate = vi.hoisted(() => vi.fn())
+vi.mock('react-router', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => navigate,
+}))
 import type { PayCheckout } from '../api/client'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -15,6 +21,7 @@ const CHECKOUT: PayCheckout = {
   client_id: 'AYSq3RDGsmBLJE-otTkBtM',
   environment: 'sandbox',
   paypal_order_id: '5O190127TN364715T',
+  minor_exponent: 2,
 }
 
 interface ButtonOptions {
@@ -56,7 +63,13 @@ async function sdk(): Promise<HTMLScriptElement> {
   })
 }
 
+function referrer(value: string) {
+  Object.defineProperty(document, 'referrer', { value, configurable: true })
+}
+
 afterEach(() => {
+  referrer('')
+  navigate.mockReset()
   delete (window as unknown as { paypal?: unknown }).paypal
   document.querySelectorAll('script[src*="paypal.com"]').forEach((node) => node.remove())
 })
@@ -83,7 +96,7 @@ describe('PayPage', () => {
     expect(script.src).not.toContain(TOKEN)
   })
 
-  it('renders the buttons for the request\'s PayPal order and thanks the payer on approval', async () => {
+  async function approve(): Promise<void> {
     serve(() => HttpResponse.json(CHECKOUT))
     const paypal = fakePayPal()
     renderPage(<PayPage />, { route: `/pay#${TOKEN}` })
@@ -96,7 +109,42 @@ describe('PayPage', () => {
     expect(screen.queryByText(/Thanks/)).not.toBeInTheDocument()
     await act(async () => paypal.rendered[0]!.onApprove({ orderID: CHECKOUT.paypal_order_id }))
     expect(await screen.findByText('Thanks. We will confirm your payment shortly.')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /order/i })).toHaveAttribute('href', '/o')
+  }
+
+  it('renders the buttons for the request\'s PayPal order and thanks the payer on approval', async () => {
+    await approve()
+    expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
+  })
+
+  it('goes back to the order when the payer came from this site\'s order page', async () => {
+    referrer(`${window.location.origin}/o`)
+    await approve()
+    const { default: userEvent } = await import('@testing-library/user-event')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Back to your order' }))
+    expect(navigate).toHaveBeenCalledWith(-1)
+    expect(screen.queryByText('Open your order from the link in your mail.')).not.toBeInTheDocument()
+  })
+
+  it.each(['https://elsewhere.example/o', `${window.location.origin}/draft`, `${window.location.origin}/order`])(
+    'offers no way back from %s',
+    async (from) => {
+      referrer(from)
+      await approve()
+      expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
+      expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
+    },
+  )
+
+  it.each([
+    ['JPY', 0, '¥1,250'],
+    ['USD', 2, '$12.50'],
+    ['KWD', 3, 'KWD 1.250'],
+  ])('shows %s with %i decimals from the checkout\'s own exponent', async (currency, exponent, shown) => {
+    serve(() => HttpResponse.json({ ...CHECKOUT, currency, minor_exponent: exponent }))
+    renderPage(<PayPage />, { route: `/pay#${TOKEN}` })
+    expect(await screen.findByText((text) => text.replace(/\s/g, ' ').includes(shown.replace(/\s/g, ' ')))).toBeInTheDocument()
   })
 
   it('says so when PayPal cannot be reached', async () => {

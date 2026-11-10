@@ -1,7 +1,7 @@
-"""Venmo through PayPal (#4960): once the storefront's pay page exists (`PAY_PAGE_READY`), a
+"""Venmo through PayPal (#4960): once the pay page is switched on (`PAY_PAGE_READY`), a
 USD PayPal request from a shop with Venmo on gets a pay token, its link is that page, and
 ``venmo_checkout`` reads what the page needs by the token only while the request can still
-be paid. Until then no link is rewritten and Venmo cannot be turned on; the tests of the
+be paid. Until it is on, no link is rewritten and Venmo cannot be turned on; the tests of the
 rewrite turn the flag on (`page_ready`)."""
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def connect_paypal(rows: OrderStore, settings: Mapping[str, str] = SETTINGS) -> 
 
 @pytest.fixture
 def page_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The storefront's pay page exists (#5283 phase 4)."""
+    """The pay page is switched on (`PAY_PAGE_READY`)."""
     monkeypatch.setattr(venmo, "PAY_PAGE_READY", True)
 
 
@@ -136,6 +136,7 @@ def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
         client_id=SETTINGS["client_id"],
         environment="sandbox",
         paypal_order_id=PAYPAL_ORDER,
+        minor_exponent=2,
     )
 
 
@@ -246,11 +247,11 @@ def test_venmo_needs_paypal_usd_the_toggle_and_the_storefront(
     assert venmo_eligible(provider, settings, currency, storefront) is eligible
 
 
-def test_nothing_is_eligible_until_the_pay_page_exists() -> None:
+def test_nothing_is_eligible_until_the_pay_page_is_switched_on() -> None:
     assert not venmo_eligible("paypal", SETTINGS, "USD", STOREFRONT)
 
 
-def test_the_toggle_is_refused_until_the_pay_page_exists() -> None:
+def test_the_toggle_is_refused_until_the_pay_page_is_switched_on() -> None:
     with pytest.raises(VenmoPageMissingError):
         venmo_setting_error("paypal", SETTINGS, STOREFRONT)
     assert venmo_setting_error("paypal", SETTINGS | {"venmo": "off"}, STOREFRONT) is None
@@ -308,7 +309,7 @@ def service(
     )
 
 
-async def test_until_the_pay_page_exists_paypal_s_link_stays(shop: PayShop) -> None:
+async def test_until_the_pay_page_is_switched_on_paypal_s_link_stays(shop: PayShop) -> None:
     """#5769 review: no request links to a page nothing serves."""
     order, _ = shop.accepted()
     req = shop.lifecycle.open_payment_request(order.id, BY, provider="paypal")
@@ -346,7 +347,7 @@ async def test_any_other_request_keeps_paypal_s_link(
     assert stored_hash(shop, req.id) is None
 
 
-async def test_connect_refuses_venmo_on_until_the_pay_page_exists(shop: PayShop) -> None:
+async def test_connect_refuses_venmo_on_until_the_pay_page_is_switched_on(shop: PayShop) -> None:
     payments = service(shop)
     body = ProviderConnect(settings=dict(SETTINGS), secrets={"client_secret": "s"})
     with pytest.raises(VenmoPageMissingError):

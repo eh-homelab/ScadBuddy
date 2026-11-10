@@ -22,7 +22,15 @@ QUOTE_ID: Final = re.compile(rf"{LISTING_ID.pattern}|[0-9a-f]{{32}}")
 #: The fields of the pay page's checkout (`payments/venmo.py` `VenmoCheckout`) the edge
 #: sends on; nothing else the CRUD side sent reaches the browser.
 PAY_CHECKOUT_FIELDS: Final = frozenset(
-    {"amount_minor", "currency", "order_number", "client_id", "environment", "paypal_order_id"}
+    {
+        "amount_minor",
+        "currency",
+        "order_number",
+        "client_id",
+        "environment",
+        "paypal_order_id",
+        "minor_exponent",
+    }
 )
 #: Every field of the customer's order view (`orders/storefront/wire.py`
 #: `CustomerOrderView`), by its dotted path from the view: the edge sends on these only

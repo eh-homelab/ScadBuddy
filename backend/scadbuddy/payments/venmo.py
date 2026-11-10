@@ -38,6 +38,7 @@ from typing import Final
 
 from pydantic import BaseModel
 
+from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.store import Conn
 
 #: Whether Venmo's pay page (``/pay#<token>``, #5283 phase 4) is switched on. The page is
@@ -45,8 +46,10 @@ from scadbuddy.orders.store import Conn
 #: made, and flips in its own PR. While False, no request is Venmo-eligible and the toggle
 #: cannot be turned on.
 PAY_PAGE_READY: Final = False
-#: Why the toggle's ``on`` is refused while the page does not exist.
-PAY_PAGE_MISSING: Final = "Venmo needs the storefront's pay page, which is not built yet"
+#: Why the toggle's ``on`` is refused while `PAY_PAGE_READY` is off.
+PAY_PAGE_MISSING: Final = (
+    "Venmo is not switched on yet: the storefront's pay page waits for a PayPal sandbox measurement"
+)
 #: The provider Venmo rides on, and its settings field that turns Venmo on.
 PROVIDER: Final = "paypal"
 SETTING: Final = "venmo"
@@ -56,7 +59,7 @@ _TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 class VenmoPageMissingError(Exception):
-    """Venmo turned on before the storefront's pay page exists (#4960); 409
+    """Venmo turned on before the pay page is switched on (`PAY_PAGE_READY`, #4960); 409
     ``venmo_page_missing``."""
 
 
@@ -69,6 +72,9 @@ class VenmoCheckout(BaseModel):
     client_id: str
     environment: str
     paypal_order_id: str
+    #: The currency's decimal places (`orders/currency.py`), so the page never asks the
+    #: browser's `Intl` for them.
+    minor_exponent: int
 
 
 def token_hash(token: str) -> str:
@@ -99,7 +105,7 @@ def venmo_setting_error(
     provider: str, settings: Mapping[str, str], storefront_url: str | None
 ) -> str | None:
     """Why the connect form's Venmo toggle cannot be saved, or None; raises
-    `VenmoPageMissingError` for ``on`` while the pay page does not exist."""
+    `VenmoPageMissingError` for ``on`` until the pay page is switched on (`PAY_PAGE_READY`)."""
     if provider != PROVIDER or settings.get(SETTING, "off") == "off":
         return None
     if settings.get(SETTING) != "on":
@@ -135,4 +141,4 @@ def venmo_checkout(conn: Conn, token: str) -> VenmoCheckout | None:
     ).fetchone()
     if row is None or row["client_id"] is None or row["environment"] is None:
         return None
-    return VenmoCheckout.model_validate(dict(row))
+    return VenmoCheckout.model_validate({**row, "minor_exponent": minor_exponent(row["currency"])})

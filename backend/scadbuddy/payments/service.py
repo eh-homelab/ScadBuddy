@@ -252,7 +252,7 @@ class Payments:
             if storefront and venmo_eligible(
                 found.provider, credential.settings, found.currency, storefront
             ):
-                # #4960: once the storefront's pay page exists (`PAY_PAGE_READY`), it
+                # #4960: once the pay page is switched on (`PAY_PAGE_READY`), it
                 # offers Venmo for the same order.
                 token, token_digest = pay_token()
                 hosted = HostedRequest.model_validate(

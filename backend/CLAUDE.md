@@ -1242,7 +1242,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   link, are its docstring),
   `venmo.py` (#4960: once `PAY_PAGE_READY` flips (#5283 phase 4 built the storefront's `/pay#<token>`
   page; the flag stays false until its PayPal sandbox measurement is made), a USD PayPal request from a shop with the `venmo`
-  setting on will link to it; until then no link is rewritten and a connect with `venmo`
+  setting on will link to it; until it is on no link is rewritten and a connect with `venmo`
   `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
   it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
   show `on` disabled, with why). Only the token's sha256 is kept, in

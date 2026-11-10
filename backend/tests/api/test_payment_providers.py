@@ -97,9 +97,9 @@ def test_a_value_outside_a_field_s_choices_is_422_on_that_field(client: TestClie
     assert refused.json()["errors"][0]["loc"] == ["body", "settings", "environment"]
 
 
-def test_venmo_on_before_the_pay_page_exists_is_409(client: TestClient) -> None:
+def test_venmo_on_before_the_pay_page_is_switched_on_is_409(client: TestClient) -> None:
     """#5769 review: no request may link to a page nothing serves, so ``on`` is refused
-    until the storefront's ``/pay#<token>`` page ships (#5283 phase 4)."""
+    until the pay page is switched on (``PAY_PAGE_READY``, after its sandbox measurement)."""
     body = {
         "settings": {"environment": "sandbox", "client_id": "c", "webhook_id": "W1", "venmo": "on"},
         "secrets": {"client_secret": "s"},

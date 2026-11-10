@@ -58,7 +58,9 @@ TURNSTILE_CSP: Final = STOREFRONT_CSP.replace(
 #: SDK script loads from them, its buttons are frames of them, and the SDK calls them. Added
 #: on top of the shared policy (Turnstile's origins stay while a site key is set), so no
 #: other path may reach PayPal
-#: (https://developer.paypal.com/sdk/js/configuration/, read 2026-11-10).
+#: (https://developer.paypal.com/sdk/js/configuration/, read 2026-11-10). Not measured: PayPal's
+#: SDK guidance may also list ``*.paypalobjects.com`` (scripts, connect) and the Venmo flow may
+#: need more; the sandbox measurement (`payments/venmo.py`) decides, and adds them then.
 PAYPAL_ORIGINS: Final = "https://www.paypal.com https://www.sandbox.paypal.com"
 PAY_PATH: Final = "/pay"
 

@@ -237,7 +237,7 @@ class PayPalProvider:
         ProviderField(name="client_id", label="Client ID", secret=False),
         ProviderField(name="webhook_id", label="Webhook ID", secret=False),
         # #4960: Venmo on the storefront's pay page, for USD requests (`venmo.py`); off when
-        # left out, and refused on until that page exists.
+        # left out, and refused on until the pay page is switched on (`PAY_PAGE_READY`).
         ProviderField(
             name="venmo",
             label="Venmo (USD)",
