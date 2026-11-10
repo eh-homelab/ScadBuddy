@@ -56,6 +56,8 @@ export type TurnRunnerTestOptions = {
   toolLoadings?: Record<string, ToolLoading>
   /** The registry's tiers; every tool `read` when undefined. */
   tierOf?: TurnRunnerDeps['tierOf']
+  /** The turn's calls as activities, with these tools listed as its turn tools (`<server>__<tool>`): its plugins are then proxied. */
+  turnTools?: string[]
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -175,6 +177,15 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    ...(options.turnTools
+      ? {
+          toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),
+          turnTools: () =>
+            Promise.resolve({
+              tools: options.turnTools!.map((name) => ({ name, description: name, input_schema: { type: 'object' }, may_park: true })),
+            }),
+        }
+      : {}),
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),
