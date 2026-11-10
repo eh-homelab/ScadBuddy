@@ -867,9 +867,8 @@ class Lifecycle:
            queues no `payment_requested` mail, since no link exists yet: the order link's
            mail leads to the page that shows it). An anonymous submit's customer is new, so
            a ``first_order`` rule always applies to it, even when the email has ordered
-           before; the shop can change the deposit before it accepts (§8). A policy that
-           applies only in another currency sets none, and `deposit.policy_skipped` tells
-           the shop;
+           before; the shop can change the deposit before it accepts (§8). Step 2 gave the
+           cart the shop's currency, so no rule is skipped for its currency;
         6. stamps ``submitted_at``;
         7. makes the order link (`create_order_link`);
         8. queues the `order_link` mail to ``body.email``;

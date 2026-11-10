@@ -449,11 +449,14 @@ def test_a_shop_with_no_kek_cannot_take_an_order(settings: Settings) -> None:
     with TestClient(app) as api:
         crud = CrudCaller(api)
         draft = draft_of(crud, _published_listing(api))
+        customers = rows(api, "SELECT id FROM customers")
         r = crud.post("/draft/submit", json=submit_body(draft), key="s1")
         assert r.status_code == 503, r.text
         assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}submit_unavailable"
         order = _orders(api).store.order(draft["id"])
         assert order is not None and order.unsubmitted
+        # The whole submit rolled back: the customer it made first is gone too.
+        assert rows(api, "SELECT id FROM customers") == customers
 
 
 def test_a_submit_needs_an_idempotency_key(crud: CrudCaller, listing: Listing) -> None:
