@@ -340,7 +340,9 @@ other customer notification stays a plugin's job (orders spec §12).
 ### 5.8 Abuse
 
 Sign-up, submit and design requests take a bot check, Cloudflare Turnstile, on when its
-keys are set **(call)**. Every storefront route has a per-client rate limit. Nothing a
+keys are set **(call)**. Asking for a sign-in code (action `sign_up`) and verifying one
+(`sign_in`) take it too (the coordinator's ruling on #5283, 2026-11-09). Every storefront
+route has a per-client rate limit. Nothing a
 customer writes is rendered as HTML: notes are text.
 
 ## 6. Lifecycle changes

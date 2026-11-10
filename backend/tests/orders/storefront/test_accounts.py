@@ -1,10 +1,11 @@
-"""Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in by an
-eight-character code, server-side sessions, the customer link rule, and what an account
-sees."""
+"""Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in by a
+sixteen-character code, server-side sessions, the customer link rule, and what an account
+sees. No address can be locked: nothing one client does stops another from signing in."""
 
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import threading
 from collections.abc import Iterator
@@ -17,11 +18,10 @@ from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.orders.storefront.accounts import (
     CODE_ALPHABET,
-    CODE_TRIES,
     CODES_PER_ADDRESS,
+    CODES_PER_ADDRESS_CLIENT,
     CODES_PER_CLIENT,
     FAILURES_PER_CLIENT,
-    LIVE_CODES,
     EmailInvalidError,
     SignedIn,
     SignInLimitedError,
@@ -29,6 +29,7 @@ from scadbuddy.orders.storefront.accounts import (
     account_owns_order,
     attach_order,
     end_session,
+    normalized_code,
     normalized_email,
     orders_of_account,
     request_code,
@@ -42,8 +43,10 @@ type Conn = Connection[DictRow]
 
 EMAIL = "Ada@Example.com"
 CLIENT = "203.0.113.9"
+#: The owner's second device.
+LAPTOP = "203.0.113.10"
 VISITOR = "v" * 43
-CODE_SHAPE = re.compile(f"[{CODE_ALPHABET}]{{8}}")
+CODE_SHAPE = re.compile("-".join([f"[{CODE_ALPHABET}]{{4}}"] * 4))
 
 
 @pytest.fixture
@@ -71,8 +74,14 @@ def verify(conn: Conn, code: str, *, email: str = EMAIL, client: str = CLIENT) -
     return verify_code(conn, email, code, client, visitor_id=None, previous_session=None)
 
 
+def code_for(conn: Conn, email: str = EMAIL, client: str = CLIENT) -> str:
+    code = request_code(conn, email, client)
+    assert code is not None
+    return code
+
+
 def sign_in(conn: Conn, email: str = EMAIL) -> SignedIn:
-    code = request_code(conn, email, CLIENT)
+    code = code_for(conn, email)
     signed = verify(conn, code, email=email)
     assert signed is not None
     return signed
@@ -105,21 +114,22 @@ def test_the_alphabet_has_no_ambiguous_characters() -> None:
     assert not set("01ILOU") & set(CODE_ALPHABET)
 
 
-def test_a_code_is_eight_unambiguous_characters_and_only_its_digest_is_kept(
+def test_a_code_is_sixteen_characters_shown_grouped_and_only_its_digest_is_kept(
     conn: Conn,
 ) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     assert CODE_SHAPE.fullmatch(code)
     rows = conn.execute("SELECT * FROM storefront_sign_in_codes").fetchall()
     assert len(rows) == 1
     row = rows[0]
     assert row["email"] == "ada@example.com" and row["client"] == CLIENT
-    assert code not in str(dict(row))
-    assert row["code_sha256"] == hashlib.sha256(f"{row['id']}:{code}".encode()).hexdigest()
+    bare = normalized_code(code)
+    assert code not in str(dict(row)) and bare not in str(dict(row))
+    assert row["code_sha256"] == hashlib.sha256(f"{row['id']}:{bare}".encode()).hexdigest()
 
 
 def test_the_right_code_signs_in_once_and_makes_a_session(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     signed = verify(conn, code)
     assert signed is not None
     assert signed.account.email == "ada@example.com"
@@ -131,81 +141,116 @@ def test_the_right_code_signs_in_once_and_makes_a_session(conn: Conn) -> None:
     assert verify(conn, code) is None
 
 
-def test_a_code_typed_with_spaces_hyphens_or_lowercase_still_reads(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
-    assert verify(conn, f" {code[:4].lower()}-{code[4:]} ") is not None
+@pytest.mark.parametrize("typed", ["{bare}", "{lower}", " {a} {b} ", "{a}--{b}"])
+def test_a_code_reads_whatever_its_case_spaces_or_hyphens(conn: Conn, typed: str) -> None:
+    code = code_for(conn)
+    bare = normalized_code(code)
+    text = typed.format(bare=bare, lower=code.lower(), a=bare[:8], b=bare[8:])
+    assert verify(conn, text) is not None
 
 
-def test_the_fifth_wrong_try_spends_the_code(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
-    for _ in range(CODE_TRIES):
-        assert verify(conn, wrong(code)) is None
-    assert verify(conn, code) is None
+def test_a_code_asked_for_on_one_client_signs_in_on_another(conn: Conn) -> None:
+    code = code_for(conn)
+    assert verify(conn, code, client=LAPTOP) is not None
 
 
-def test_a_new_code_keeps_the_live_ones_up_to_three(conn: Conn) -> None:
-    codes = [request_code(conn, EMAIL, CLIENT) for _ in range(LIVE_CODES)]
-    # Each of the three is good; a sign-in with one spends them all.
-    assert verify(conn, codes[0]) is not None
-    assert verify(conn, codes[2]) is None
-    other = "bob@example.com"
-    codes = [request_code(conn, other, f"198.51.100.{n}") for n in range(LIVE_CODES)]
-    assert verify(conn, codes[1], email=other) is not None
-
-
-def test_a_fourth_code_voids_only_the_oldest(conn: Conn) -> None:
-    codes = [request_code(conn, EMAIL, CLIENT) for _ in range(LIVE_CODES + 1)]
-    assert verify(conn, codes[0]) is None
-    assert verify(conn, codes[1]) is not None
+def test_wrong_guesses_never_spend_a_correct_code(conn: Conn) -> None:
+    code = code_for(conn)
+    for n in range(100):
+        assert verify(conn, wrong(code), client=f"198.51.100.{n % 10}") is None
+    assert verify(conn, code, client=LAPTOP) is not None
 
 
 def test_an_expired_code_reads_nothing(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     conn.execute("UPDATE storefront_sign_in_codes SET expires_at = now() - interval '1 second'")
     assert verify(conn, code) is None
 
 
-def test_wrong_guesses_by_others_never_lock_the_owner_out(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, "192.0.2.1")
-    for n in range(10):
-        # Each try spends one of the code's five: ask for a new one when it is spent.
-        if n == CODE_TRIES:
-            code = request_code(conn, EMAIL, "192.0.2.2")
-        assert verify(conn, wrong(code), client=f"198.51.100.{n}") is None
-    # The owner's own code still signs in.
-    mine = request_code(conn, EMAIL, "203.0.113.50")
-    assert verify(conn, mine, client="203.0.113.50") is not None
-    # Each wrong guess is kept by address, for the logs.
-    kept = conn.execute(
-        "SELECT count(*) AS n FROM storefront_sign_in_failures WHERE email = 'ada@example.com'"
-    ).fetchone()
-    assert kept is not None and kept["n"] == 10
+def test_requests_are_limited_per_address_and_client_and_per_client(conn: Conn) -> None:
+    for _ in range(CODES_PER_ADDRESS_CLIENT):
+        code_for(conn)
+    with pytest.raises(SignInLimitedError) as limited:
+        code_for(conn)
+    assert 0 < limited.value.retry_after <= 3600
+    # Another client still gets a code for the address.
+    assert CODE_SHAPE.fullmatch(code_for(conn, client=LAPTOP))
+    for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS_CLIENT):
+        request_code(conn, f"other{n}@example.com", CLIENT)
+    with pytest.raises(SignInLimitedError):
+        request_code(conn, "fresh@example.com", CLIENT)
 
 
-def test_guesses_at_once_never_overspend_a_code(conn: Conn, pg_conninfo: str) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
-    guesses = 10
-    start = threading.Barrier(guesses)
+def test_others_requests_and_guesses_never_lock_the_owner_out(conn: Conn) -> None:
+    count = math.ceil(CODES_PER_ADDRESS / CODES_PER_ADDRESS_CLIENT) + 1
+    attackers = [f"198.51.100.{n}" for n in range(count)]
+    inbox: list[str] = []
+    for attacker in attackers:
+        for _ in range(CODES_PER_ADDRESS_CLIENT):
+            code = request_code(conn, EMAIL, attacker)
+            if code is not None:
+                inbox.append(code)
+    # The cap is full: every code made went to the owner's inbox, and no more are made.
+    assert len(inbox) == CODES_PER_ADDRESS
+    assert request_code(conn, EMAIL, CLIENT) is None
+    for n in range(100):
+        guess = wrong(inbox[n % len(inbox)])
+        assert verify(conn, guess, client=attackers[n % len(attackers)]) is None
+    # The owner signs in from a fresh client with any code in the inbox.
+    assert verify(conn, inbox[0], client="192.0.2.77") is not None
 
-    def guess(n: int) -> SignedIn | None:
+
+def test_the_mail_cap_makes_no_code_and_raises_nothing(conn: Conn) -> None:
+    others = [code_for(conn, client=f"198.51.100.{n}") for n in range(CODES_PER_ADDRESS)]
+    assert len({*others}) == CODES_PER_ADDRESS
+    # Past the cap: no code, no row, no refusal; the caller sends nothing.
+    assert request_code(conn, EMAIL, CLIENT) is None
+    count = conn.execute("SELECT count(*) AS n FROM storefront_sign_in_codes").fetchone()
+    assert count is not None and count["n"] == CODES_PER_ADDRESS
+    # Not a lockout: a code another client's request put in the inbox signs in here.
+    assert verify(conn, others[-1]) is not None
+    # Other addresses are not capped by it.
+    assert code_for(conn, "bob@example.com")
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "shared"),
+    [
+        ("2001:db8:1:2::1", "2001:db8:1:2::ffff", True),  # one /64
+        ("2001:db8:1:2::1", "2001:db8:1:3::1", False),
+        ("203.0.113.9", "203.0.113.10", False),  # IPv4 whole
+    ],
+)
+def test_ipv6_clients_are_counted_by_their_64(
+    conn: Conn, first: str, second: str, shared: bool
+) -> None:
+    for _ in range(CODES_PER_ADDRESS_CLIENT):
+        code_for(conn, client=first)
+    if shared:
+        with pytest.raises(SignInLimitedError):
+            request_code(conn, EMAIL, second)
+    else:
+        assert code_for(conn, client=second)
+
+
+def test_a_code_typed_at_once_signs_in_once(conn: Conn, pg_conninfo: str) -> None:
+    code = code_for(conn)
+    tries = 10
+    start = threading.Barrier(tries)
+
+    def use(n: int) -> SignedIn | None:
         with psycopg.connect(pg_conninfo, row_factory=dict_row) as own, own.transaction():
             start.wait()
             return verify_code(
-                own,
-                EMAIL,
-                wrong(code),
-                f"198.51.100.{n}",
-                visitor_id=None,
-                previous_session=None,
+                own, EMAIL, code, f"198.51.100.{n}", visitor_id=None, previous_session=None
             )
 
-    with ThreadPoolExecutor(guesses) as pool:
-        assert list(pool.map(guess, range(guesses))) == [None] * guesses
-    row = conn.execute("SELECT attempts FROM storefront_sign_in_codes").fetchone()
-    assert row is not None and row["attempts"] == CODE_TRIES
+    with ThreadPoolExecutor(tries) as pool:
+        signed = [s for s in pool.map(use, range(tries)) if s is not None]
+    assert len(signed) == 1
 
 
-def test_requests_at_once_never_pass_the_address_cap(conn: Conn, pg_conninfo: str) -> None:
+def test_requests_at_once_never_pass_a_cap(conn: Conn, pg_conninfo: str) -> None:
     requests = 10
     start = threading.Barrier(requests)
 
@@ -213,48 +258,30 @@ def test_requests_at_once_never_pass_the_address_cap(conn: Conn, pg_conninfo: st
         try:
             with psycopg.connect(pg_conninfo, row_factory=dict_row) as own, own.transaction():
                 start.wait()
-                request_code(own, EMAIL, f"198.51.100.{n}")
+                # Half for one address, half for others: both caps are under test.
+                request_code(own, EMAIL if n % 2 else f"x{n}@example.com", CLIENT)
         except SignInLimitedError:
             return False
         return True
 
     with ThreadPoolExecutor(requests) as pool:
         issued = sum(pool.map(ask, range(requests)))
-    assert issued == CODES_PER_ADDRESS
-    row = conn.execute("SELECT count(*) AS n FROM storefront_sign_in_codes").fetchone()
-    assert row is not None and row["n"] == CODES_PER_ADDRESS
-
-
-def test_codes_are_limited_per_address_and_per_client(conn: Conn) -> None:
-    for _ in range(CODES_PER_ADDRESS):
-        request_code(conn, EMAIL, CLIENT)
-    with pytest.raises(SignInLimitedError) as limited:
-        request_code(conn, EMAIL, "198.51.100.1")
-    assert 0 < limited.value.retry_after <= 3600
-    for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS):
-        request_code(conn, f"other{n}@example.com", CLIENT)
-    with pytest.raises(SignInLimitedError):
-        request_code(conn, "fresh@example.com", CLIENT)
+    rows = conn.execute(
+        "SELECT count(*) FILTER (WHERE email = 'ada@example.com') AS ada, count(*) AS n"
+        " FROM storefront_sign_in_codes"
+    ).fetchone()
+    assert rows is not None
+    assert rows["ada"] == CODES_PER_ADDRESS_CLIENT and rows["n"] == issued == 8
 
 
 def test_wrong_guesses_are_limited_per_client(conn: Conn) -> None:
     for n in range(FAILURES_PER_CLIENT):
-        assert (
-            verify_code(
-                conn,
-                f"x{n}@example.com",
-                "ABCDEFGH",
-                CLIENT,
-                visitor_id=None,
-                previous_session=None,
-            )
-            is None
-        )
-    code = request_code(conn, EMAIL, "198.51.100.1")
+        assert verify(conn, "ABCD-EFGH-JKMN-PQRS", email=f"x{n}@example.com") is None
+    code = code_for(conn, client="198.51.100.1")
     with pytest.raises(SignInLimitedError):
-        verify_code(conn, EMAIL, code, CLIENT, visitor_id=None, previous_session=None)
+        verify(conn, code)
     # Another client is not held back by this one's guesses.
-    assert verify_code(conn, EMAIL, code, "198.51.100.1", visitor_id=None, previous_session=None)
+    assert verify(conn, code, client="198.51.100.1") is not None
 
 
 def test_the_account_links_the_one_customer_with_that_email(conn: Conn) -> None:
@@ -278,7 +305,7 @@ def test_with_none_or_several_customers_a_new_one_is_made(conn: Conn, others: in
 
 def test_a_second_sign_in_keeps_the_account_and_rotates_the_session(conn: Conn) -> None:
     first = sign_in(conn)
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     second = verify_code(
         conn,
         EMAIL,
@@ -330,7 +357,7 @@ def visitor_row(conn: Conn, visitor_id: str) -> str:
 
 
 def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     signed = verify_code(conn, EMAIL, code, CLIENT, visitor_id=VISITOR, previous_session=None)
     assert signed is not None
     mine = order(conn, visitor_row(conn, VISITOR))
@@ -345,11 +372,11 @@ def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Con
 
 
 def test_a_visitor_of_another_account_is_not_moved(conn: Conn) -> None:
-    code = request_code(conn, EMAIL, CLIENT)
+    code = code_for(conn)
     ada = verify_code(conn, EMAIL, code, CLIENT, visitor_id=VISITOR, previous_session=None)
     assert ada is not None
     adas = order(conn, visitor_row(conn, VISITOR))
-    code = request_code(conn, "bob@example.com", CLIENT)
+    code = code_for(conn, "bob@example.com")
     bob = verify_code(
         conn, "bob@example.com", code, CLIENT, visitor_id=VISITOR, previous_session=None
     )
@@ -361,6 +388,6 @@ def test_a_visitor_of_another_account_is_not_moved(conn: Conn) -> None:
 def test_the_same_answer_whether_or_not_an_account_exists(conn: Conn) -> None:
     sign_in(conn)
     # Both addresses get a code the same way; nothing says which has an account.
-    known = request_code(conn, EMAIL, "198.51.100.2")
-    unknown = request_code(conn, "nobody@example.com", "198.51.100.2")
+    known = code_for(conn, EMAIL, "198.51.100.2")
+    unknown = code_for(conn, "nobody@example.com", "198.51.100.2")
     assert CODE_SHAPE.fullmatch(known) and CODE_SHAPE.fullmatch(unknown)

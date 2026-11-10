@@ -12,8 +12,9 @@ CREATE TABLE storefront_accounts (
 );
 CREATE INDEX storefront_accounts_customer ON storefront_accounts (customer_id);
 
--- An eight-character code sent to an address. `client` is the address that asked, for
--- the per-client limit. The newest three unused codes of an address are good.
+-- A sixteen-character code sent to an address; it dies when used or expired. `client`
+-- is the client key that asked: the limits are per address and client, per client, and
+-- per address (the mail cap).
 CREATE TABLE storefront_sign_in_codes (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
   email text NOT NULL,
@@ -21,11 +22,11 @@ CREATE TABLE storefront_sign_in_codes (
   code_sha256 text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
-  attempts integer NOT NULL DEFAULT 0,
   used_at timestamptz
 );
 CREATE INDEX storefront_sign_in_codes_email ON storefront_sign_in_codes (email, created_at);
 CREATE INDEX storefront_sign_in_codes_client ON storefront_sign_in_codes (client, created_at);
+CREATE INDEX storefront_sign_in_codes_email_client ON storefront_sign_in_codes (email, client, created_at);
 CREATE INDEX storefront_sign_in_codes_created ON storefront_sign_in_codes (created_at);
 
 -- A wrong code, by the client that sent it and the address it was for: the per-client
@@ -50,6 +51,7 @@ CREATE TABLE storefront_sessions (
   expires_at timestamptz NOT NULL
 );
 CREATE INDEX storefront_sessions_account ON storefront_sessions (account_id);
+CREATE INDEX storefront_sessions_expires ON storefront_sessions (expires_at);
 
 -- The visitor that signed in belongs to the account: its orders are the account's.
 ALTER TABLE storefront_visitors

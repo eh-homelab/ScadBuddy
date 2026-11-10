@@ -1046,18 +1046,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
-  - `request_code` makes an eight-character code from `CODE_ALPHABET` (Crockford's base32
-    less `0` and `1`). It does the same for every address, whether or not an account
-    exists (enumeration-safe). Only a salted sha256 is kept, and a code lives 10 minutes
-    for 5 tries. A new code keeps the address's live ones, up to `LIVE_CODES` (3), so
-    another's requests cannot cancel a code. The limits are per address and per client
-    for codes, and per client for wrong guesses (`SignInLimitedError`). No address is ever
-    locked (a lock would let anyone lock its owner out): a correct live code always signs
-    in, and the bound is the code (about 25 guesses an hour at 3 in 30^8; the arithmetic is
-    in the docstring). `request_code` and `verify_code` each hold a transaction lock per
-    address while they count, read or spend the codes, so call them in a transaction. The
-    code route takes Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a
-    site key is set.
+  - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's
+    base32 less `0` and `1`), shown `XXXX-XXXX-XXXX-XXXX`; `verify_code` reads it with
+    case, spaces and hyphens ignored. It does the same for every address, whether or not
+    an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
+    when used or after 10 minutes; wrong guesses never spend it, and a correct live code
+    signs in from any client. No address can be locked: requests are limited per address
+    and client (3 an hour) and per client (10), wrong guesses per client (20), never per
+    address, and a client is `core/proxies.py` `client_key` (IPv4 address, IPv6 /64).
+    The mail cap is 20 codes an hour per address: past it `request_code` returns None,
+    raises nothing, and the caller answers as usual and sends no mail. The bound is the
+    code (about 10^-17 an hour per address; the arithmetic is in the docstring).
+    `request_code` and `verify_code` each hold transaction locks on the client, then the
+    address, so call them in a transaction. The code route, a later PR, is to take
+    Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a site key is set.
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit
@@ -1065,8 +1067,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
     The order page attaches an order whose link was opened while signed in, in its own
     transaction.
-  - Old code, failure and expired-session rows are pruned as new rows are written. There
-    is no sweep.
+  - Old code and failure rows are pruned as new rows are written, and every expired
+    session at each sign-in. There is no sweep.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by
