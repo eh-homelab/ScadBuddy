@@ -9,7 +9,9 @@ import { newId, now } from './state'
  * to the order or the customer would. A binding whose tool is `missing_tool` fails the check.
  * A send is claimed under its `Idempotency-Key`, as the agent's is: a retry with the same key is
  * answered from that claim. `mockLoseNextSendAnswer()` claims and sends the next one, then drops
- * its answer, as a network error after the plugin already sent would.
+ * its answer, as a network error after the plugin already sent would. `mockStorefrontMails()`
+ * makes the storefront email every template itself: a preview or send without
+ * `also_when_storefront_mails` is refused 409 `storefront_mail`, as the agent's routes do.
  */
 
 let messages: OrderMessage[] = []
@@ -17,6 +19,7 @@ let version = 0
 const tests: { to: string }[] = []
 const claims = new Map<string, OrderMessage>()
 let loseNextAnswer = false
+let storefrontMails = false
 
 export function reset(): void {
   messages = []
@@ -24,6 +27,7 @@ export function reset(): void {
   tests.length = 0
   claims.clear()
   loseNextAnswer = false
+  storefrontMails = false
 }
 
 /** A message recorded on `orderId`, for a test's setup. */
@@ -59,6 +63,23 @@ export function mockMessageChange(): void {
 /** The next send is claimed and sent, but its answer is lost on the way back. */
 export function mockLoseNextSendAnswer(): void {
   loseNextAnswer = true
+}
+
+/** The storefront emails every template to the customer itself from now on. */
+export function mockStorefrontMails(): void {
+  storefrontMails = true
+}
+
+/** The agent's refusal of a template the storefront emails, unless the body says send it too. */
+function storefrontRefusal(body: { also_when_storefront_mails?: boolean }) {
+  if (!storefrontMails || body.also_when_storefront_mails) return null
+  return HttpResponse.json(
+    {
+      detail: 'storefront_mail: the storefront mails this news to the order’s customer itself, so nothing was sent through the plugin',
+      type: 'storefront_mail',
+    },
+    { status: 409 },
+  )
 }
 
 /** The Idempotency-Keys the sends were claimed under, for a test to read. */
@@ -111,20 +132,33 @@ export const handlers = [
     return HttpResponse.json({ ok: true, status: 'sent' })
   }),
   http.post('/api/v1/ai/orders/:id/messages/preview', async ({ request, params }) => {
-    const { template } = (await request.json()) as { template: string }
+    const body = (await request.json()) as { template: string; also_when_storefront_mails?: boolean }
+    const { template } = body
+    const refused = storefrontRefusal(body)
+    if (refused) return refused
     return HttpResponse.json({ message: composed(String(params.id), template), digest: digestOf(version) })
   }),
   http.post('/api/v1/ai/orders/:id/messages/send', async ({ request, params }) => {
-    const { template, resend_of, digest } = (await request.json()) as { template: OrderMessage['template']; resend_of: string; digest: string }
+    const body = (await request.json()) as {
+      template: OrderMessage['template']
+      resend_of: string
+      digest: string
+      also_when_storefront_mails?: boolean
+    }
+    const { template, resend_of, digest } = body
+    // As the agent's: a key that already claimed is answered from its claim before any refusal,
+    // the digest's included (#5978).
+    const key = request.headers.get('idempotency-key') ?? ''
+    const claimed = claims.get(key)
+    if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
     if (digest !== digestOf(version)) {
       return HttpResponse.json(
         { detail: 'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing was sent; preview it again', type: 'message_changed' },
         { status: 409 },
       )
     }
-    const key = request.headers.get('idempotency-key') ?? ''
-    const claimed = claims.get(key)
-    if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
+    const refused = storefrontRefusal(body)
+    if (refused) return refused
     const message = composed(String(params.id), template)
     const sent = mockOrderMessage(String(params.id), {
       template,

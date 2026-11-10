@@ -240,10 +240,17 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   aborted opens no wait. Only once per call: a read retry that still finds no tab fails
   with the hub's usual `no browser attached: …` error followed by why — "The session's tab
   reconnected, but it cannot be reached now: it may have dropped again." or
-  "The user said they were back, but no tab is attached here yet." A turn waits for its
-  tab at most 3 times (`TAB_WAITS_PER_TURN`), and after "Carry on without the tab", a
-  typed reply, a timeout, or a reconnect to another replica it does not ask again that
-  turn. Across the user's sessions at most 10 tab waits are opened in 10 minutes
+  "The user said they were back, but no tab is attached here yet." A write or outward call
+  whose wait ended `reconnected` is not run; when the tab's replica was only slow to answer
+  its status read, it fails with "… take a snapshot to see the page, then call again."
+  (`WHY_SLOW`, #5974). A turn waits for its tab at most 3 times (`TAB_WAITS_PER_TURN`), and
+  after "Carry on without the tab", a typed reply, a timeout, or a reconnect to a replica
+  that cannot be reached it does not ask again that turn. A tab whose replica is only slow
+  to answer its status read counts as back (#5974): a read runs once more (if it still finds
+  no tab it fails with "The session's tab may be connected … take a snapshot, then call
+  again.", `WHY_SLOW_READ`), and the turn may
+  still wait for its tab later. Such a tab also ends a wait as soon as the wait is
+  recorded, as a tab that came back in between does, so its card closes at once. Across the user's sessions at most 10 tab waits are opened in 10 minutes
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
   fails at once with "The user was not asked for the tab: …". Every wait opened counts,
   including ones withdrawn because their calls stopped.

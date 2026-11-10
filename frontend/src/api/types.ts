@@ -107,8 +107,11 @@ export interface RecentOutputsQuery {
   /** `yes`: only outputs an order item names; `no`: only the others. */
   ordered?: 'yes' | 'no'
 }
-/** #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went. */
-export type ArchiveOutcome = Schemas['ArchiveOutcome']
+/**
+ * #4777 — one Bambuddy archive (a past print, ScadBuddy's or not) and how it went, and
+ * (#4698) `scadbuddy_print`: whether a print link names it.
+ */
+export type ArchiveOutcome = Schemas['FarmArchive']
 /** #4777 — the filters `GET /farm/archives` takes; status and name are the browser's. */
 export interface FarmArchivesQuery {
   /** First day, inclusive (`YYYY-MM-DD`). */

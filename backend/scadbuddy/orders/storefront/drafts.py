@@ -45,7 +45,6 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, has_reply, idempotent_write, stored
 from scadbuddy.orders.attachments import SNIFF_BYTES, clean_filename, keep_file, sniff
 from scadbuddy.orders.component import ORDERS, OrdersComponent
-from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
@@ -201,7 +200,6 @@ async def _view(state: AppState, order: Order) -> DraftView:
         list[Attachment],
         list[Listing],
         list[PublicShippingOption],
-        str,
     ]:
         offered = orders.store.storefront_offered(order.id)
         items = orders.store.items(order.id)
@@ -218,11 +216,14 @@ async def _view(state: AppState, order: Order) -> DraftView:
             offered,
             orders.store.attachments(order.id),
             orders.listings.at_commits(pairs) if pairs else [],
-            [PublicShippingOption(**option.model_dump()) for option in rules.shipping_options],
-            rules.shop_currency,
+            # An option is priced in the shop's currency, never converted: a cart in
+            # another currency (made before the shop changed it) lists none.
+            [PublicShippingOption(**option.model_dump()) for option in rules.shipping_options]
+            if order.currency == rules.shop_currency
+            else [],
         )
 
-    rows, offered, files, listings, shipping, shipping_currency = await asyncio.to_thread(read)
+    rows, offered, files, listings, shipping = await asyncio.to_thread(read)
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -262,8 +263,6 @@ async def _view(state: AppState, order: Order) -> DraftView:
         minor_exponent=order.minor_exponent,
         items=items,
         shipping_options=shipping,
-        shipping_currency=shipping_currency,
-        shipping_minor_exponent=minor_exponent(shipping_currency),
     )
 
 

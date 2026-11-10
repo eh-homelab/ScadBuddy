@@ -62,6 +62,7 @@ from scadbuddy.bambuddy.uploads import (
     SlicedCopy,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
@@ -356,7 +357,7 @@ async def record_sends(
                 for item in outcome.queue_item_ids
             ],
         )
-    except psycopg.Error as exc:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
         logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
 
 
@@ -749,15 +750,22 @@ class PrintPipeline:
         ]
         output_id = self.subject.output_id
         if self.prints is not None and output_id is not None:
-            # The output page's own last print (#1060), beside the subject's record.
-            for queue_item_id in outcome.queue_item_ids:
-                await asyncio.to_thread(
-                    self.prints.record,
-                    output_id,
-                    queue_item_id=queue_item_id,
-                    slice_job_id=outcome.slice_job_id,
-                    project_id=project_id,
-                    plates=sent,
+            # The output page's own last print (#1060), beside the subject's record. Best
+            # effort, as `record_sends`: the plate is queued, and failing the activity
+            # over its record could queue it again on the retry.
+            try:
+                for queue_item_id in outcome.queue_item_ids:
+                    await asyncio.to_thread(
+                        self.prints.record,
+                        output_id,
+                        queue_item_id=queue_item_id,
+                        slice_job_id=outcome.slice_job_id,
+                        project_id=project_id,
+                        plates=sent,
+                    )
+            except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
+                logger.warning(
+                    "could not record the last print of %s: %s", output_id, type(exc).__name__
                 )
         await record_sends(self.sends, self.subject, plate_id, outcome, project_id, run_id)
         return sent

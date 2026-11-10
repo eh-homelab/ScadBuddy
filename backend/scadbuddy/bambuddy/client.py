@@ -68,6 +68,7 @@ from scadbuddy.bambuddy.models import (
     PresetRef,
     PresetValues,
     Printer,
+    PrinterFiles,
     PrinterMaintenanceOverview,
     PrinterMedia,
     PrinterStatus,
@@ -187,6 +188,8 @@ Operation = Literal[
     "printers.camera.stream",
     "printers.camera.token",
     "printers.cover",
+    "printers.files",
+    "printers.files.download",
     "printers.inventory_remain",
     "printers.list",
     "printers.read",
@@ -1039,6 +1042,20 @@ class BambuddyClient:
         )
         return PrinterMedia.model_validate(response.json())
 
+    async def printer_files(self, printer_id: int, path: str) -> PrinterFiles:
+        """``GET /printers/{id}/files?path=`` (#4698): one directory of the printer's
+        storage, read over FTP. Only on an explicit request: it reaches the printer. The key
+        needs Control Printer (``PRINTERS_FILES``)."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/files",
+            scope=Scope.CONTROL_PRINTER,
+            operation="printers.files",
+            what=f"list {path} on printer {printer_id}",
+            params={"path": path},
+        )
+        return PrinterFiles.model_validate(response.json())
+
     async def select_timelapse(self, archive_id: int, filename: str) -> None:
         """Pull ``filename`` off the printer and attach it to the archive. Only on an
         explicit request: it downloads over FTP, as Bambuddy's own UI does."""
@@ -1089,6 +1106,7 @@ class BambuddyClient:
         if_range: str | None = None,
         params: Mapping[str, str] | None = None,
         pass_416: bool = True,
+        scope: Scope = Scope.READ_STATUS,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
@@ -1115,7 +1133,7 @@ class BambuddyClient:
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         # A transport error there is the body's read failing, which is Bambuddy's.
         consumer_error: Exception | None = None
-        with _call_span(operation, "GET", Scope.READ_STATUS, detached=True) as current:
+        with _call_span(operation, "GET", scope, detached=True) as current:
             try:
                 response = await self._http.send(request, stream=True)
             except httpx.HTTPError as error:
@@ -1125,7 +1143,7 @@ class BambuddyClient:
             try:
                 if not response.is_success and (response.status_code != 416 or not pass_416):
                     await response.aread()
-                    raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                    raise map_response(response, scope=scope, what=what)
                 try:
                     yield response
                 except httpx.HTTPError as error:

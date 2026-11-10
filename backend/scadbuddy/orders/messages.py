@@ -87,13 +87,28 @@ class OrderMessages:
             check_submitted(order)
             return self._told(conn, order_id, template, self._episode(conn, order_id))
 
-    def storefront_mails(self, order_id: str, template: NotifyTemplate) -> bool:
-        """Whether the storefront mails ``template``'s news to this order's customer itself,
-        so a send through the plugin would be skipped. Writes nothing."""
+    def check(
+        self, order_id: str, template: NotifyTemplate, key: str | None = None
+    ) -> tuple[OrderMessage | None, bool, OrderMessage | None]:
+        """What a claim of ``template`` under ``key`` would meet now, read in one
+        transaction: the message that already told the customer since the order's last
+        status change (``told``), whether the storefront mails this news to the customer
+        itself (so a claim without ``also_when_storefront_mails`` would be skipped), and the
+        row ``key`` already claimed. A claimed key answers its row and no refusal, as its
+        claim would (a retry after a lost answer is served from the first claim). Writes
+        nothing."""
         with self.store.transaction() as conn:
             order = self._order(conn, order_id, lock=False)
+            if key is not None:
+                existing = conn.execute(
+                    f"SELECT {_COLUMNS} FROM order_messages WHERE idempotency_key = %s", (key,)
+                ).fetchone()
+                if existing is not None:
+                    claimed = self._same_order(OrderMessage.model_validate(existing), order)
+                    return None, False, claimed
             check_submitted(order)
-            return self._skipped_for_storefront(conn, order.id, template)
+            told = self._told(conn, order_id, template, self._episode(conn, order_id))
+            return told, self._skipped_for_storefront(conn, order.id, template), None
 
     # -- writes ------------------------------------------------------------------------
 

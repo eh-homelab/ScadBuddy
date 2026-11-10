@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -278,22 +280,40 @@ def test_the_draft_view_shows_the_shipping_options(
         {"id": "post", "label": "Post", "amount_minor": 700, "ships": True},
         {"id": "pickup", "label": "Pick up", "amount_minor": 0, "ships": False},
     ]
-    assert (draft["shipping_currency"], draft["shipping_minor_exponent"]) == ("USD", 2)
 
 
-def test_the_shipping_options_are_in_the_shops_currency_not_the_carts(
-    crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
+def test_a_cart_in_another_currency_than_the_shops_lists_no_options(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
 ) -> None:
     """The cart keeps the currency it was made in; the options are priced in the shop's
-    ``orders_currency`` now, so the view says which, with its minor exponent."""
+    ``orders_currency`` now and never converted, so the view lists none."""
     draft = draft_of(crud, listing)
     owner_lifecycle.rules = rules(options=(POST,), currency="JPY")
     r = crud.get("/draft")
     assert r.status_code == 200, r.text
     view = r.json()
     assert (view["currency"], view["minor_exponent"]) == ("USD", 2)
-    assert (view["shipping_currency"], view["shipping_minor_exponent"]) == ("JPY", 0)
+    assert view["shipping_options"] == []
     assert view["id"] == draft["id"]
+
+
+def test_a_submit_of_a_cart_in_another_currency_is_409(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
+) -> None:
+    """No 500 yen becomes 5.00 dollars: the submit is refused, with its own text, and the
+    cart stays a draft."""
+    draft = draft_of(crud, listing)
+    owner_lifecycle.rules = rules(options=(POST,), currency="JPY")
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
+        key="s1",
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}shipping_currency_mismatch"
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.submitted_at is None
+    assert rows(api, "SELECT 1 FROM order_charges WHERE order_id = %s", draft["id"]) == []
 
 
 def test_the_deposit_policy_applies(
@@ -443,6 +463,11 @@ def test_a_422_refusal_keeps_its_own_slug(slug: str) -> None:
         ("order_submitted", "This order is sent already."),
         ("draft_empty", "Your order is empty. Add something to it first."),
         ("shipping_address_required", "This way of shipping needs your address."),
+        (
+            "shipping_currency_mismatch",
+            "The shop's prices changed currency after you started this order, so it cannot"
+            " be shipped as it is. Start a new order.",
+        ),
     ],
 )
 def test_a_409_refusal_with_its_own_text_keeps_its_slug(slug: str, own: str) -> None:
@@ -706,3 +731,43 @@ def test_a_signed_in_submit_never_takes_a_customer_the_shop_archived(
     second = store.order(again["id"])
     assert second is not None and second.customer_id == order.customer_id
     assert rows(api, "SELECT id FROM customers ORDER BY id") == customers
+
+
+def test_two_signed_in_submits_of_an_archived_customer_make_one_new_customer(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """The account's row is locked before its customer's (`submitting_customer`): two
+    submits at once of one account, whose customer the shop archived, make one customer
+    between them. Both orders are on it, and the account links to it."""
+    session, account = signed_in(api, "grace@example.com", None)
+    store = _orders(api).store
+    assert store.archive_customer(account.customer_id) is not None
+    first = draft_of(crud, listing, token=TOKEN_A, key="a1")
+    second = draft_of(crud, listing, token=TOKEN_B, key="b1")
+    before = {r["id"] for r in rows(api, "SELECT id FROM customers")}
+    start = threading.Barrier(2)
+
+    def submit(draft: Any, token: str, key: str) -> int:
+        start.wait()
+        return int(
+            crud.post(
+                "/draft/submit", json=submit_body(draft), key=key, token=token, session=session
+            ).status_code
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        done = [
+            pool.submit(submit, first, TOKEN_A, "s1"),
+            pool.submit(submit, second, TOKEN_B, "s2"),
+        ]
+        assert [f.result(timeout=60) for f in done] == [200, 200]
+    made = {r["id"] for r in rows(api, "SELECT id FROM customers")} - before
+    assert len(made) == 1
+    [new] = made
+    for draft in (first, second):
+        order = store.order(draft["id"])
+        assert order is not None and order.customer_id == new
+    assert rows(api, "SELECT customer_id FROM storefront_accounts WHERE id = %s", account.id) == [
+        {"customer_id": new}
+    ]
+    assert sorted(account_orders(api, account.id)) == sorted([first["id"], second["id"]])

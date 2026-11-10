@@ -101,7 +101,9 @@ same way, `vite.config.ts`).
   backend (`api/client.ts` `orderMessages`, `markOrderMessageSent`); the binding's check and
   test send, and the preview and send, go through the agent's routes (`api/orderMessages.ts`).
   An open preview keeps one `Idempotency-Key` for all its sends, so a retry after a lost
-  answer is served from the first claim. Mocks `src/mocks/features/orders/messages.ts`.
+  answer is served from the first claim. A `storefront_mail` refusal asks "Send it here too?"
+  and a row skipped for it offers "Send here too", both sending with
+  `also_when_storefront_mails`. Mocks `src/mocks/features/orders/messages.ts`.
 
 ## See also
 

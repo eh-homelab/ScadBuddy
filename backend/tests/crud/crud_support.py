@@ -72,6 +72,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
+from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
@@ -440,9 +441,10 @@ def print_crud_app(
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
-    through ``operations`` of ``kinds``, printer rows through ``printers``, and the queue
-    item a reprint queued through ``links``, and the uploads, slices,
-    background slices and project records on ``store``'s pool."""
+    through ``operations`` of ``kinds``, printer rows through ``printers``, the print
+    links, sends and the queue item a reprint queued through ``links`` (the API's own
+    on ``store``'s pool when not given), and the uploads, slices, background slices,
+    project records and outputs' last prints on ``store``'s pool."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -453,8 +455,10 @@ def print_crud_app(
         settings=SimpleNamespace(auth_mode="enforce"),
         settings_store=store,
         print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
-        print_links=links,
+        print_links=links if links is not None else PrintLinkStore(store.pool),
         uploads=BambuddyUploadStore(store.pool),
+        # The API's `OutputStore`, of which the routes read only its last prints.
+        outputs=SimpleNamespace(prints=OutputPrintStore(store.pool)),
         events=events,
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
@@ -532,6 +536,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "uploads",
         "previews",
         "copy-leases",
+        "links",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

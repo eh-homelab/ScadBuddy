@@ -536,20 +536,64 @@ def test_a_paused_order_offers_no_answer(api: TestClient, crud: CrudCaller) -> N
     assert rev["can_answer"] is False
 
 
+def _unname_quote(api: TestClient, item: OrderItem, after_send: bool = True) -> None:
+    """The item's quote names no design; its `created_at` is after the first design's
+    send (the quote was made then) unless ``after_send`` is false (made before it)."""
+    stamp = "now()" if after_send else "now() - interval '1 hour'"
+    with _orders(api).store.transaction() as conn:
+        conn.execute(
+            f"UPDATE order_item_quotes SET revision_id = NULL, created_at = {stamp}"
+            " WHERE order_item_id = %s",
+            (item.id,),
+        )
+
+
 def test_a_price_that_names_no_design_shows_with_the_newest_sent_one(
     api: TestClient, crud: CrudCaller
 ) -> None:
     """#5965 review: a manual price may name no design; it prices the item as the
-    customer last saw it, so it shows once a design was sent."""
+    customer saw it when the price was made, so it shows once a design was sent by then."""
     made = make_order(api, crud)
     [item] = items_of(api, made)
-    with _orders(api).store.transaction() as conn:
-        conn.execute(
-            "UPDATE order_item_quotes SET revision_id = NULL WHERE order_item_id = %s",
-            (item.id,),
-        )
+    _unname_quote(api, item)
     quote = made.reader.view().json()["items"][0]["quote"]
     assert quote is not None and quote["unit_price_minor"] == 1250
+
+
+def test_a_price_made_before_any_design_was_sent_is_hidden(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    [item] = items_of(api, made)
+    _unname_quote(api, item, after_send=False)
+    assert made.reader.view().json()["items"][0]["quote"] is None
+
+
+def test_a_price_that_names_no_design_does_not_follow_a_design_sent_after_it(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """The price was made while design 1 was the newest sent, so it shows from then on,
+    whatever is sent later. Accepting it follows `Lifecycle.accept_quote`: a price that
+    names no design is accepted against the item's current design, here design 2,
+    unanswered, so the page does not offer it, and the lifecycle refuses it too."""
+    made = make_order(api, crud, approval="design_first")
+    [item] = items_of(api, made)
+    first = newest(api, item)
+    _unname_quote(api, item)
+    life = _orders(api).lifecycle
+    assert made.reader.answer(first.id, "accepted", key="k1").status_code == 200
+    life.add_revision(made.order.id, item.id, BY, note="again")
+    second = newest(api, item)
+    attach(api, made.order, item, second)
+    life.send_revision(made.order.id, item.id, second.id, BY)
+    [rev1, rev2] = made.reader.view().json()["items"][0]["revisions"]
+    assert (rev1["answer"], rev2["answer"]) == ("accepted", None)
+    quote = made.reader.view().json()["items"][0]["quote"]
+    assert quote is not None and quote["unit_price_minor"] == 1250
+    assert quote["can_accept"] is False
+    [row] = _orders(api).store.quotes(item.id)
+    refused = made.reader.accept(row.id, key="k2")
+    assert refused.status_code == 409 and slug(refused) == "revision_not_accepted"
 
 
 def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: CrudCaller) -> None:

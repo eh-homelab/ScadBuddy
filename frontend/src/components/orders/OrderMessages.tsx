@@ -48,12 +48,18 @@ function slugOf(error: unknown): string | null {
  * the plugin already sent) is then served from the first claim, never sent twice. An error status
  * keeps it too, since a proxy's 502 can hide a send that went out: only a new "Send again" makes
  * a new key.
+ * A template the storefront already emails to the customer (#5660 §8) is refused
+ * `storefront_mail`: the page asks whether to send it here too, and on yes previews it again with
+ * `also_when_storefront_mails`; that preview's Send carries it under its own key. A message
+ * skipped for that reason offers "Send here too", which previews it with the flag at once.
  * The order page keys this by the order. Without the key it still clears the preview, the note
  * and the error when `orderId` changes, and drops a preview that comes back for another order.
  */
 export function OrderMessages({ orderId }: { orderId: string }) {
   const listed = useAsync(() => api.orderMessages(orderId), [orderId], [`order:${orderId}`])
-  const [preview, setPreview] = useState<{ of: OrderMessage; shown: MessagePreview; key: string } | null>(null)
+  const [preview, setPreview] = useState<{ of: OrderMessage; shown: MessagePreview; key: string; also: boolean } | null>(null)
+  // The message whose send the storefront overlap refused, while the page asks about it.
+  const [asking, setAsking] = useState<OrderMessage | null>(null)
   // The order this view shows now; null once it is gone. A late preview for another is dropped.
   const showing = useRef<string | null>(orderId)
   useEffect(() => {
@@ -69,6 +75,7 @@ export function OrderMessages({ orderId }: { orderId: string }) {
   if (stateFor !== orderId) {
     setStateFor(orderId)
     setPreview(null)
+    setAsking(null)
     setError(null)
     setNote(null)
   }
@@ -77,14 +84,16 @@ export function OrderMessages({ orderId }: { orderId: string }) {
 
   /**
    * Runs one click's action. `still()` says whether this view still shows the order the click
-   * was for; an answer that comes back after the order changed sets nothing.
+   * was for; an answer that comes back after the order changed sets nothing. `of` is the message
+   * the click sends again, which a `storefront_mail` refusal asks about.
    */
-  async function act(action: (still: () => boolean) => Promise<void>) {
+  async function act(action: (still: () => boolean) => Promise<void>, of?: OrderMessage) {
     const asked = orderId
     const still = () => showing.current === asked
     setBusy(true)
     setError(null)
     setNote(null)
+    setAsking(null)
     try {
       await action(still)
     } catch (err) {
@@ -92,6 +101,9 @@ export function OrderMessages({ orderId }: { orderId: string }) {
       if (slugOf(err) === 'message_changed') {
         setPreview(null)
         setError('The message changed since you saw it (the order, the customer or the binding), so nothing was sent. Choose Send again to see it as it is now.')
+      } else if (slugOf(err) === 'storefront_mail' && of) {
+        setPreview(null)
+        setAsking(of)
       } else {
         setError(refusalText(err))
       }
@@ -99,6 +111,14 @@ export function OrderMessages({ orderId }: { orderId: string }) {
       listed.refresh()
       setBusy(false)
     }
+  }
+
+  /** Shows the message composed now for `of`; `also` sends it even where the storefront emails it. */
+  function previewFor(of: OrderMessage, also: boolean) {
+    void act(async (still) => {
+      const shown = await previewOrderMessage(orderId, of.template, of.id, also)
+      if (still()) setPreview({ of, shown, key: newRequestId(), also })
+    }, of)
   }
 
   return (
@@ -138,25 +158,33 @@ export function OrderMessages({ orderId }: { orderId: string }) {
                     Mark sent
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    void act(async (still) => {
-                      const shown = await previewOrderMessage(orderId, m.template, m.id)
-                      if (still()) setPreview({ of: m, shown, key: newRequestId() })
-                    })
-                  }
-                  {...USER_ONLY}
-                >
-                  Send again
-                </Button>
+                {m.status === 'skipped' && m.reason === 'storefront_mail' ? (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={() => previewFor(m, true)} {...USER_ONLY}>
+                    Send here too
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={() => previewFor(m, false)} {...USER_ONLY}>
+                    Send again
+                  </Button>
+                )}
               </span>
             )}
           </li>
         ))}
       </ul>
+      {asking && (
+        <section aria-label="Storefront mail" className="space-y-1 rounded-md border p-2 text-[13px]">
+          <p>The storefront already emails this update to the customer. Send it here too?</p>
+          <span className="flex gap-2">
+            <Button size="sm" disabled={busy} onClick={() => previewFor(asking, true)} {...USER_ONLY}>
+              Yes, send it here too
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setAsking(null)}>
+              No
+            </Button>
+          </span>
+        </section>
+      )}
       {preview && (
         <section aria-label="Message to send" className="space-y-1 rounded-md border p-2 text-[13px]">
           <p>
@@ -170,12 +198,12 @@ export function OrderMessages({ orderId }: { orderId: string }) {
               disabled={busy}
               onClick={() =>
                 void act(async (still) => {
-                  const { of, shown, key } = preview
-                  const answer = await sendOrderMessage(orderId, of.template, of.id, shown.digest, key)
+                  const { of, shown, key, also } = preview
+                  const answer = await sendOrderMessage(orderId, of.template, of.id, shown.digest, key, also)
                   if (!still()) return
                   setPreview(null)
                   setNote(answer.warning ?? (answer.sent ? 'Sent.' : `Not sent: ${STATUS[answer.message.status]}.`))
-                })
+                }, preview.of)
               }
               {...USER_ONLY}
             >

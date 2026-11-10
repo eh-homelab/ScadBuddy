@@ -528,10 +528,15 @@ def attach_order(conn: Conn, account_id: str, order_id: str, link_id: str | None
 def submitting_customer(conn: Conn, account_id: str, visitor_row: str | None) -> str | None:
     """The customer a signed-in submit takes (§5.5 step 1): the account's. None when the
     cart's visitor (``visitor_row``, `storefront_visitors.id`) belongs to another account,
-    whose cart this session may not submit, and when the account no longer exists."""
+    whose cart this session may not submit, and when the account no longer exists.
+
+    The account's row is locked (``FOR UPDATE OF a``) and ``customer_id`` read under that
+    lock, so two submits of one account at once run one after the other, and the second
+    sees the link the first made (`relink_account`). The lock order is the account, then
+    its customer (the caller locks that): no transaction takes them the other way."""
     row = conn.execute(
         "SELECT a.customer_id, v.account_id AS visitor_account FROM storefront_accounts a"
-        " LEFT JOIN storefront_visitors v ON v.id = %s WHERE a.id = %s",
+        " LEFT JOIN storefront_visitors v ON v.id = %s WHERE a.id = %s FOR UPDATE OF a",
         (visitor_row, account_id),
     ).fetchone()
     if row is None or row["visitor_account"] not in (None, account_id):
