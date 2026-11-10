@@ -344,11 +344,13 @@ opens every one and seals it again byte for byte).
     `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,
     both through the forwarder) and calls its tool; an `McpError` is `failed`, a timeout, a
     closed connection or another error is `unknown`. `order_notify_customer` (`read`) composes
-    and answers `channel` and `send_ready`; `order_notify_customer_send` (`outward`) parks the
+    and answers `channel` and `send_ready`; `order_messages_list` (`read`) lists the order's
+    messages, whose ids `resend_of` takes; `order_notify_customer_send` (`outward`) parks the
     exact message as `approved`, claims an `order_messages` row through the backend's
     `POST /api/v1/orders/{id}/messages` (`Idempotency-Key`, the call's `idempotencyKey`),
     sends, then posts the outcome. A replayed claim sends again only when the binding maps an
-    `idempotency_key` argument; otherwise it is `unknown`, never resent by itself.
+    `idempotency_key` argument; otherwise a fresh `sending` row is answered as in flight (no
+    outcome posted) and one that reads `unknown` is recorded `unknown`, never resent by itself.
     `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
     message (a person's session only, kept in the audit log as `messaging.test_send`).
     `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message

@@ -363,12 +363,17 @@ The handler's order of work:
    answer, between the call and the outcome.
    - With `args.idempotency_key` bound: call the plugin again with the same key (the
      plugin drops the copy), then post the outcome.
-   - Without it: post `unknown` (`no_answer`) and send nothing. The answer tells the
-     person to check the inbox, then "Mark sent" or send again.
+   - Without it, a row that reads `unknown` (stale, or recorded so): post `unknown`
+     (`no_answer`) and send nothing. The answer tells the person to check the inbox, then
+     "Mark sent" or send again.
+   - Without it, a row still `sending` and fresh: another call is sending it now. Send
+     nothing and post no outcome; the answer says it is in flight. Once stale, it reads
+     `unknown` (above).
 5. The plugin's key is the message row's `id`, so each send attempt of one row has one key.
 
 "Send again" is a new call with `resend_of: <message id>`: a new key, a new approval, a
-new row. It is the only way past `already_notified` and `unknown`.
+new row. It is the only way past `already_notified` and `unknown`. The ids are the read tool
+`order_messages_list`'s (`GET …/messages`), as the order page lists them.
 
 On the order page (PR 3), "Send again" goes to the agent's person-only routes
 `POST /api/v1/ai/orders/{id}/messages/preview` and `…/send` (`routes/orderMessages.ts`, the
