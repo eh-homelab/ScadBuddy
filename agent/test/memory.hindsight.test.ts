@@ -26,6 +26,7 @@ import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
 import { type FakeHindsight, RECALL_PATH, RETAIN_PATH, startFakeHindsight } from './support/fakeHindsight.js'
 import { resetTracing, testTracing, waitForSpan } from './support/tracing.js'
+import { until } from './support/until.js'
 
 // The automatic-memory hooks (memory/hindsight.ts) against a local fake
 // Hindsight. The plugin URL names a host that does not resolve
@@ -348,6 +349,8 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(past).toEqual({})
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatch(/timed out after 500 ms/)
+    // The timed-out request's 1 s answer is not left pending in the fake.
+    await until(() => fake.pending() === 0, 300)
   })
 
   it('injects nothing and logs when recall fails, with the plugin secret redacted', async () => {
