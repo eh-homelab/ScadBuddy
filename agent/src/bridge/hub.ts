@@ -57,6 +57,12 @@ export const CALL_TIMEOUT_MS = 30_000
  * answered every navigate and snapshot (#5939).
  */
 export const STATUS_PROBE_MS = 10_000
+/**
+ * The same read behind a chat attach (`sessionTab`, `routes/chat.ts` `pairUnlessHeld`), kept at
+ * 6 s (#5962 review): it treats a slow owner as not held anyway and then pairs the session with
+ * the tab the user is sending from, so waiting longer would only delay the attach.
+ */
+export const ATTACH_PROBE_MS = 6_000
 /** How often connected tabs are sent the pairing requests, when they changed. */
 export const PAIRINGS_POLL_MS = 3_000
 /** Calls one tab may have waiting at once. */
@@ -513,7 +519,7 @@ export class TabHub implements BrowserTabs {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
     try {
-      const answer = await this.#probe(tabId, undefined)
+      const answer = await this.#probe(tabId, undefined, Math.min(this.#statusProbeMs, ATTACH_PROBE_MS))
       // A slow owner counts as not held here, on purpose: a chat attach then pairs the session
       // with the tab the user is sending from, which is known to answer (#5962 review).
       return answer !== 'slow' && answer?.op === 'status'
@@ -670,7 +676,7 @@ export class TabHub implements BrowserTabs {
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {
-      const answer = await this.#probe(resolved.tabId, signal)
+      const answer = await this.#probe(resolved.tabId, signal, this.#statusProbeMs)
       if (answer === 'slow') return { attached: false, reason: SLOW_OWNER }
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer
@@ -685,12 +691,12 @@ export class TabHub implements BrowserTabs {
   }
 
   /**
-   * A status read of `tabId` on another replica, cut short after `STATUS_PROBE_MS`: `slow`
+   * A status read of `tabId` on another replica, cut short after `probeMs`: `slow`
    * then, told apart from undefined, a tab no replica holds. Rejects with the abort error only
    * when `signal` aborts.
    */
-  async #probe(tabId: string, signal: AbortSignal | undefined): Promise<RelayAnswer | 'slow' | undefined> {
-    const bound = AbortSignal.timeout(this.#statusProbeMs)
+  async #probe(tabId: string, signal: AbortSignal | undefined, probeMs: number): Promise<RelayAnswer | 'slow' | undefined> {
+    const bound = AbortSignal.timeout(probeMs)
     try {
       return await this.#relay!.forward(tabId, { op: 'status' }, {
         signal: signal ? AbortSignal.any([signal, bound]) : bound,
@@ -699,7 +705,7 @@ export class TabHub implements BrowserTabs {
     } catch (err) {
       if (signal?.aborted) throw abortError()
       if (!bound.aborted) throw err
-      this.#log(`bridge: tab ${tabId}'s replica gave no status within ${this.#statusProbeMs} ms; read as not attached (slow)`)
+      this.#log(`bridge: tab ${tabId}'s replica gave no status within ${probeMs} ms; read as not attached (slow)`)
       return 'slow'
     }
   }

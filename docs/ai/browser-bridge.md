@@ -215,6 +215,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
   the paired tab is not connected, or no database for pairing), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
+  `browser_status` on a tab whose replica did not answer in time says `no answer from the
+  paired ScadBuddy tab in time: …` instead, a prefix of its own on purpose: the tab may
+  still be connected, so it is not one of the `no browser attached` reasons (#5962).
   In a session the browser user owns, `no browser attached` does not fail the call at
   once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
   card and the Assistant badge), and calls that fail together share one request, as does
@@ -430,7 +433,8 @@ sequenceDiagram
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
   tab's route and live tools, but waits at most 10 s for the answer (`STATUS_PROBE_MS`,
-  #4950), as does the check behind a chat attach. Past it `browser_status` answers not
+  #4950); the check behind a chat attach waits 6 s (`ATTACH_PROBE_MS`), since it pairs the
+  session with the sending tab when the owner is slow. Past it `browser_status` answers not
   attached with its own reason: the tab's replica did not answer in time, the tab may still
   be connected, and a call may still reach it. It does not say "not connected", which is
   kept for a tab no replica holds. The 10 s cover the ack (3 s), the status activity's
