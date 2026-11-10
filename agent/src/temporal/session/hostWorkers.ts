@@ -41,6 +41,8 @@ export const BRIDGE_CACHED_WORKFLOWS = 50
  */
 export const PINNED_SHUTDOWN_GRACE_MS = 6_000
 export const PINNED_SHUTDOWN_FORCE_MS = 8_000
+/** How long after its grace the pinned worker stops regardless: a cancelled activity's window to end. */
+export const PINNED_SHUTDOWN_FORCE_MARGIN_MS = PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS
 
 export type HostWorkersOptions = {
   address: string
@@ -90,7 +92,7 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
     activities: options.pinned,
     shutdownGraceMs: options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS,
     // Force keeps its margin after any grace, so a cancelled activity always has a window to end.
-    shutdownForceMs: (options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS) + (PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS),
+    shutdownForceMs: (options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS) + PINNED_SHUTDOWN_FORCE_MARGIN_MS,
     ...(options.pinnedWorkflows ? { workflows: options.pinnedWorkflows, maxCachedWorkflows: BRIDGE_CACHED_WORKFLOWS } : {}),
   })
   const sessions = options.sessions
