@@ -592,8 +592,9 @@ at each call site. A `ScrubbingSpanExporter` wraps the OTLP exporter in each
 service (and `RelayExporter` in the browser), and every span passes through it
 before it leaves the process. It:
 
-- drops `exception.message` from every `exception` event (the agent's scrub drops it,
-  and the stack, from an event of any name, #5913);
+- drops `exception.message` from every `exception` event (the agent's scrub drops it from
+  an event of any name, and drops `exception.stacktrace` from any event not named
+  `exception`, #5913);
 - replaces `exception.stacktrace` with its frame lines only (Python: the
   `File "…", line N, in f` lines; Node: the `at …` lines). A formatted
   traceback otherwise ends with, and for chained exceptions repeats, the
