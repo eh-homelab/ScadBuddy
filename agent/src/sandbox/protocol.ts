@@ -50,7 +50,8 @@ export type Manifest = { files: ManifestEntry[]; truncated: boolean; unsynced?: 
 
 /**
  * GET and PUT /v1/kept: the files a sync back left in the pod past a cap, by path, with what the
- * session directory held at that path then (its sha256, `large`, or null for none). The exec
+ * session directory held at that path then (its sha256, `large` when it could not be hashed, or
+ * null for none). The exec
  * server keeps it in its own memory, outside /work, so every worker's sync in sees it (client.ts
  * `Kept`); it is as untrusted as the rest of what the pod says.
  */
