@@ -118,7 +118,7 @@ export const printHistoryTools: Tool[] = [
 
   // ── #4698: import a print ScadBuddy did not start (backend/scadbuddy/api/print_imports.py) ──
   defineTool({
-    name: 'list_print_sources',
+    name: 'get_print_sources',
     label: "Find a print's 3MF to import it",
     description:
       'For a Bambuddy archive ScadBuddy did not start (list_print_archives rows with `scadbuddy_print: false`; one ' +
@@ -155,7 +155,7 @@ export const printHistoryTools: Tool[] = [
     description:
       'Make a Bambuddy archive ScadBuddy did not start a ScadBuddy print of a model, so get_print, its photos, ' +
       'timelapse, attachments, workspace_save print_image/print_timelapse and Print again work, and it shows on ' +
-      "the model's Prints tab. `source` is one list_print_sources lists as available, the one the user chose: " +
+      "the model's Prints tab. `source` is one get_print_sources lists as available, the one the user chose: " +
       '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`. ' +
       'Link it to a model that exists (`slug`), or make a new mesh model from the 3MF (`new_model: {name}`; a ' +
       'sliced file has no meshes, so choose an unsliced one). A `printer` source reads the file over FTP and keeps ' +

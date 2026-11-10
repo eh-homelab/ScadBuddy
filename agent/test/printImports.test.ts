@@ -45,9 +45,9 @@ const IMPORTED = {
   imported: { archive_id: 193, slug: 'basketball-trophy', source: 'archive', filename: 'x.gcode.3mf' },
 }
 
-describe('list_print_sources and import_print (#4698)', () => {
+describe('get_print_sources and import_print (#4698)', () => {
   it('read the sources, and import as a write, through the import routes', () => {
-    expect(tool('list_print_sources')).toMatchObject({
+    expect(tool('get_print_sources')).toMatchObject({
       risk: 'read',
       routes: ['GET /api/v1/print-imports/{archive_id}/sources'],
     })
@@ -62,7 +62,7 @@ describe('list_print_sources and import_print (#4698)', () => {
         return HttpResponse.json({ archive_id: 193, sources: [] })
       }),
     )
-    const result = await runTool(tool('list_print_sources'), { archive_id: 193 }, ctx())
+    const result = await runTool(tool('get_print_sources'), { archive_id: 193 }, ctx())
     expect(result.isError).toBeFalsy()
     expect(Object.fromEntries(seen[0]!)).toEqual({})
   })
@@ -70,10 +70,10 @@ describe('list_print_sources and import_print (#4698)', () => {
   it('pins every printer read to a person, whatever the tier', async () => {
     const onPrinter = { archive_id: 193, source: { kind: 'printer', path: '/cache/x.gcode.3mf' }, slug: 'm' }
     const fromArchive = { archive_id: 193, source: { kind: 'archive' }, slug: 'm' }
-    expect(pinnedOutward('list_print_sources', { archive_id: 193, printer: true })).toBe(true)
-    expect(pinnedOutward('mcp__scadbuddy__list_print_sources', { archive_id: 193, printer: 'yes' })).toBe(true)
-    expect(pinnedOutward('list_print_sources', { archive_id: 193 })).toBe(false)
-    expect(pinnedOutward('list_print_sources', { archive_id: 193, printer: false })).toBe(false)
+    expect(pinnedOutward('get_print_sources', { archive_id: 193, printer: true })).toBe(true)
+    expect(pinnedOutward('mcp__scadbuddy__get_print_sources', { archive_id: 193, printer: 'yes' })).toBe(true)
+    expect(pinnedOutward('get_print_sources', { archive_id: 193 })).toBe(false)
+    expect(pinnedOutward('get_print_sources', { archive_id: 193, printer: false })).toBe(false)
     expect(pinnedOutward('import_print', onPrinter)).toBe(true)
     expect(pinnedOutward('import_print', { archive_id: 193 })).toBe(true)
     expect(pinnedOutward('import_print', fromArchive)).toBe(false)

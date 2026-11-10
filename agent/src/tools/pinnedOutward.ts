@@ -2,7 +2,7 @@
 // no Settings override, access tier or InputGuard `allow` verdict may run one unapproved.
 // A one-off approval of a host off the asset allowlist IS the approval of the call that
 // names it (fetch_asset's `allow_host`), so that call is always parked for a person. A
-// call that reads the printer's storage (#4698: list_print_sources with `printer`,
+// call that reads the printer's storage (#4698: get_print_sources with `printer`,
 // import_print from a `printer` source) reaches the printer, so it is parked too.
 //
 // Read by every gate: the harness seam (harness/permissions.ts `decide`) and the
@@ -32,7 +32,7 @@ export function pinnedOutwardReason(toolName: string, input: unknown): string | 
   if (name === 'fetch_asset' && field(input, 'allow_host') !== undefined) {
     return `${toolName} asks to fetch from a host off the asset allowlist, which needs a human approval in the ScadBuddy UI.`
   }
-  if (name === 'list_print_sources' && ![undefined, false].includes(field(input, 'printer') as undefined | false)) {
+  if (name === 'get_print_sources' && ![undefined, false].includes(field(input, 'printer') as undefined | false)) {
     return `${toolName} asks to read the printer's storage, which reaches the printer and needs a human approval in the ScadBuddy UI.`
   }
   if (name === 'import_print') {
