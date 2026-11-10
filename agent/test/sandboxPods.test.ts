@@ -160,6 +160,7 @@ describe('sandbox pods on Kubernetes', () => {
       enableServiceLinks: false,
       hostUsers: false,
       restartPolicy: 'Never',
+      nodeSelector: { 'kubernetes.io/arch': 'amd64' },
       dnsPolicy: 'None',
       securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },
     })

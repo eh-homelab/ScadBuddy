@@ -120,6 +120,8 @@ export function sandboxPod(config: Pick<SandboxConfig, 'image'>, sessionId: stri
     },
     spec: {
       restartPolicy: 'Never',
+      // The image is built for amd64 only (build-image.yml); the cluster's admission policy allows this selector and no other.
+      nodeSelector: { 'kubernetes.io/arch': 'amd64' },
       automountServiceAccountToken: false,
       enableServiceLinks: false,
       hostUsers: false,
