@@ -442,6 +442,45 @@
           "limit": 20
         }
       ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Browser calls that waited out a workflow task timeout",
+      "description": "agent.bridge.call spans (a browser_* call to a tab on another replica, agent/src/bridge/relay.ts) whose BridgeCall workflow had a workflow task time out, per second, by the caller's queue (scadbuddy.task_queue). Temporal started each such task and never delivered it (ScadBuddy#5939, eh-homelab/clusters#3418), and it cost the call BRIDGE_WORKFLOW_TASK_TIMEOUT_MS (3 s). scadbuddy.bridge.task_timeouts is read from the call's history only for a call that took at least that long. A TraceQL metrics query, as above.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 74, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.bridge.call\" && span.scadbuddy.bridge.task_timeouts > 0} | rate() by (span.scadbuddy.task_queue)",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "table",
+      "title": "Browser calls with workflow task timeouts",
+      "description": "The agent.bridge.call spans above, with how many of the call's workflow tasks timed out (scadbuddy.bridge.task_timeouts), the request (scadbuddy.bridge.op) and the queues. Tempo search returns recent matches, not the slowest of the whole range: sort by Duration to find the worst of them. Needs the Tempo datasource (clusters#1596 Phase 4).",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 12, "y": 74, "w": 12, "h": 8 },
+      "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.bridge.call\" && span.scadbuddy.bridge.task_timeouts > 0} | select(span.scadbuddy.bridge.task_timeouts, span.scadbuddy.bridge.op, span.scadbuddy.task_queue, span.scadbuddy.bridge.owner_queue)",
+          "limit": 20,
+          "spss": 3,
+          "tableType": "spans"
+        }
+      ]
     }
   ]
 }

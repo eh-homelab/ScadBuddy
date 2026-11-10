@@ -1,5 +1,7 @@
 import { type Client, TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
+import type { Span } from '@opentelemetry/api'
+import { tracer } from '../telemetry/trace.js'
 import {
   BRIDGE_CALL_WORKFLOW,
   BRIDGE_TAB_ACTIVITY,
@@ -143,6 +145,8 @@ export type TemporalTabRelayOptions = {
   /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
   ready?: () => Promise<boolean>
   log?: (message: string) => void
+  /** The clock a call's length is read on; `Date.now` when omitted. */
+  now?: () => number
 }
 
 /**
@@ -186,6 +190,7 @@ export class TemporalTabRelay implements TabRelay {
   #writes: Promise<void> = Promise.resolve()
   readonly #refreshMs: number
   #refresh: NodeJS.Timeout | undefined
+  readonly #now: () => number
 
   constructor(options: TemporalTabRelayOptions) {
     this.#owners = options.owners
@@ -195,6 +200,7 @@ export class TemporalTabRelay implements TabRelay {
     this.#log = options.log ?? ((m) => console.error(m))
     this.#ready = options.ready
     this.#refreshMs = options.refreshMs ?? OWNER_REFRESH_MS
+    this.#now = options.now ?? Date.now
   }
 
   useClient(client: SealingClient): void {
@@ -322,7 +328,11 @@ export class TemporalTabRelay implements TabRelay {
       workflowExecutionTimeout: this.#ackTimeoutMs + ownerRunMs(input) + WORKFLOW_SLACK_MS,
       workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS,
     })
-    const answer = await new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
+    const span = tracer().startSpan('agent.bridge.call', {
+      attributes: { 'scadbuddy.bridge.op': request.op, 'scadbuddy.bridge.owner_queue': queue, 'scadbuddy.task_queue': this.hostQueue },
+    })
+    const startedAt = this.#now()
+    const answering = new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
       const onAbort = () => {
         // The tab is not told, as for a local call; the workflow stops waiting for it. Its
         // key stays for the workflow's last tasks, and the sweep deletes it (sweepBridgeKeys).
@@ -354,6 +364,12 @@ export class TemporalTabRelay implements TabRelay {
         },
       )
     })
+    let answer: BridgeCallAnswer | 'failed'
+    try {
+      answer = await answering
+    } finally {
+      this.#traceTaskTimeouts(client, workflowId, span, startedAt, tabId)
+    }
     // The workflow is closed and its answer read: nobody needs its payloads again.
     dropKey(workflowId).catch((err: unknown) => this.#failed(err))
     if (answer === 'failed') return answer
@@ -364,6 +380,43 @@ export class TemporalTabRelay implements TabRelay {
       return undefined
     }
     return answer.op === 'gone' ? undefined : answer
+  }
+
+  /**
+   * How many of the call's workflow tasks timed out (#5939): `scadbuddy.bridge.task_timeouts` on
+   * its `agent.bridge.call` span, and a log line when any did. A task times out only after
+   * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, so a call answered sooner had none and its history is not
+   * read. A longer one's is, once the workflow has closed (a cancelled call's runs its last task
+   * after the caller gave up), off the caller's path. The span ends when the caller had its answer.
+   */
+  #traceTaskTimeouts(client: Client, workflowId: string, span: Span, startedAt: number, tabId: string): void {
+    const endedAt = this.#now()
+    const answeredAt = new Date()
+    const end = (timeouts: number | undefined) => {
+      if (timeouts !== undefined) span.setAttribute('scadbuddy.bridge.task_timeouts', timeouts)
+      span.end(answeredAt)
+    }
+    if (endedAt - startedAt < BRIDGE_WORKFLOW_TASK_TIMEOUT_MS) return end(0)
+    void (async () => {
+      const handle = client.workflow.getHandle(workflowId)
+      // Only that it closed: its payloads may be past reading (the key is dropped once answered).
+      await handle.result().catch(() => undefined)
+      const { events } = await handle.fetchHistory()
+      return (events ?? []).filter((e) => e.workflowTaskTimedOutEventAttributes).length
+    })().then(
+      (timeouts) => {
+        if (timeouts > 0) {
+          this.#log(
+            `bridge relay: the call to tab ${tabId} (${workflowId}) waited out ${timeouts} workflow task timeout(s) of ${BRIDGE_WORKFLOW_TASK_TIMEOUT_MS} ms on ${this.hostQueue}: a task Temporal started and never delivered (#5939, eh-homelab/clusters#3418)`,
+          )
+        }
+        end(timeouts)
+      },
+      (err: unknown) => {
+        this.#log(`bridge relay: could not read ${workflowId}'s history for its task timeouts: ${errorMessage(err)}`)
+        end(undefined)
+      },
+    )
   }
 
   #failed(err: unknown): void {

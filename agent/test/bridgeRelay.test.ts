@@ -1,9 +1,10 @@
 import { TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
-import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { STATUS_PROBE_MS } from '../src/bridge/hub.js'
 import { BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
 import type { TabOwnerStore } from '../src/bridge/tabOwners.js'
 import { BRIDGE_CALL_WORKFLOW } from '../src/temporal/bridgeCall.js'
+import { resetTracing, testTracing } from './support/tracing.js'
 
 // TemporalTabRelay's own rules, without Temporal or Postgres (#4780, #4806 review). The
 // calls across replicas are bridgeRelay.temporal.test.ts; the Postgres store's own rules,
@@ -47,6 +48,43 @@ function failingWorkflowClient(err: Error = new Error('the owner failed')): Seal
 /** What the Temporal client's `result()` rejects with when a workflow hits its execution timeout. */
 const executionTimeout = () =>
   new WorkflowFailedError('Workflow execution timed out', new TimeoutFailure('Workflow execution timed out', undefined, 'START_TO_CLOSE'), 'TIMEOUT')
+
+const spans = testTracing()
+
+/**
+ * A sealing client whose call answers `status`, with `timedOutTasks` workflow-task timeouts in its
+ * history; `historyReads` counts the reads.
+ */
+function answeringClient(timedOutTasks: number): { sealing: SealingClient; historyReads: () => number } {
+  let reads = 0
+  const handle = {
+    workflowId: 'bridge-x',
+    result: async () => ({ op: 'status', route: '/m/box', live: [] }),
+    cancel: async () => {},
+    fetchHistory: async () => {
+      reads++
+      return {
+        events: [
+          { workflowTaskStartedEventAttributes: {} },
+          ...Array.from({ length: timedOutTasks }, () => ({ workflowTaskTimedOutEventAttributes: {} })),
+          { workflowTaskCompletedEventAttributes: {} },
+        ],
+      }
+    },
+  }
+  const client = { workflow: { start: async () => handle, getHandle: () => handle } }
+  return { sealing: { client: client as never, dropKey: async () => {} }, historyReads: () => reads }
+}
+
+/** A clock that reads `atStart` the first time and `atEnd` after. */
+function clock(atStart: number, atEnd: number): () => number {
+  let first = true
+  return () => {
+    const t = first ? atStart : atEnd
+    first = false
+    return t
+  }
+}
 
 const owner = (tabs: string[]): RelayOwner => ({ tabs: () => tabs, run: async () => ({ op: 'gone' }) })
 
@@ -215,6 +253,54 @@ describe('TemporalTabRelay', () => {
     // Temporal's default is 10 s: a task the cluster records as started and never delivers
     // held the call that long, and a status read gave up at 6 s. The retry needs the rest.
     expect(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS).toBeLessThanOrEqual(STATUS_PROBE_MS / 2)
+  })
+
+  describe('workflow task timeouts on the agent.bridge.call span (#5939)', () => {
+    beforeEach(() => resetTracing())
+
+    it('counts a slow call\'s timed-out workflow tasks from its history, and logs them', async () => {
+      const owners = memoryOwners()
+      owners.rows.set('tab-1', 'agent-tools.b')
+      const logged: string[] = []
+      const { sealing, historyReads } = answeringClient(2)
+      const relay = new TemporalTabRelay({
+        owners,
+        hostQueue: 'agent-tools.a',
+        client: sealing,
+        log: (m) => logged.push(m),
+        now: clock(1_000, 1_000 + BRIDGE_WORKFLOW_TASK_TIMEOUT_MS + 500),
+      })
+      expect(await relay.forward('tab-1', { op: 'status' }, options())).toEqual({ op: 'status', route: '/m/box', live: [] })
+      await vi.waitFor(() => expect(spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')).toBeDefined())
+      const span = spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')!
+      expect(span.attributes).toMatchObject({
+        'scadbuddy.bridge.task_timeouts': 2,
+        'scadbuddy.bridge.op': 'status',
+        'scadbuddy.bridge.owner_queue': 'agent-tools.b',
+        'scadbuddy.task_queue': 'agent-tools.a',
+      })
+      expect(historyReads()).toBe(1)
+      expect(logged.join('\n')).toMatch(/waited out 2 workflow task timeout/)
+    })
+
+    it('reads no history for a call answered within one task timeout: it cannot have had one', async () => {
+      const owners = memoryOwners()
+      owners.rows.set('tab-1', 'agent-tools.b')
+      const logged: string[] = []
+      const { sealing, historyReads } = answeringClient(0)
+      const relay = new TemporalTabRelay({
+        owners,
+        hostQueue: 'agent-tools.a',
+        client: sealing,
+        log: (m) => logged.push(m),
+        now: clock(1_000, 1_000 + BRIDGE_WORKFLOW_TASK_TIMEOUT_MS - 1),
+      })
+      await relay.forward('tab-1', { op: 'status' }, options())
+      const span = spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')!
+      expect(span.attributes['scadbuddy.bridge.task_timeouts']).toBe(0)
+      expect(historyReads()).toBe(0)
+      expect(logged).toEqual([])
+    })
   })
 
   it("answers no_answer, and logs, when the owner's row cannot be read: the tool never throws", async () => {
