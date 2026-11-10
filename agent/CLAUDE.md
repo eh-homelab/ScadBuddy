@@ -296,7 +296,8 @@ opens every one and seals it again byte for byte).
     `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
     `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
     the row that names a blob and releases after the row is gone, and `reconcile`, on the
-    sweeper's tick hourly, releases what cascades, `forgetSubject` and crashes left and holds
+    sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
+    on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
