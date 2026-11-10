@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -34,6 +34,7 @@ describe('PrintQueue (#2351)', () => {
     expect(within(list).getAllByRole('listitem').map((row) => row.dataset.testid)).toEqual([
       'queue-item-259',
       'queue-item-260',
+      'queue-item-263',
     ])
     const keychain = screen.getByTestId('queue-item-259')
     expect(keychain).toHaveTextContent('Luna keychain')
@@ -92,6 +93,25 @@ describe('PrintQueue (#2351)', () => {
     })
     expect(bracket).toHaveAttribute('href', 'http://bambuddy.local/queue')
     expect(bracket).toHaveAttribute('target', '_blank')
+  })
+
+  it("shows each row's picture: ScadBuddy's, Bambuddy's, or a placeholder (#3742)", async () => {
+    renderPage(<PrintQueue />)
+
+    const ours = within(await screen.findByTestId('queue-item-259')).getByTestId('job-picture')
+    // The name is beside it, so the picture says nothing more to a screen reader.
+    expect(ours.querySelector('img')).toHaveAttribute('src', '/api/v1/outputs/luna-0002/thumbnail')
+    expect(ours.querySelector('img')).toHaveAttribute('alt', '')
+    const theirs = within(screen.getByTestId('queue-item-260')).getByTestId('job-picture')
+    expect(theirs.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/library/1615/thumbnail')
+    const none = within(screen.getByTestId('queue-item-263')).getByTestId('job-picture')
+    expect(none.querySelector('img')).toBeNull()
+    expect(within(none).getByTestId('job-picture-placeholder')).toBeInTheDocument()
+
+    // A picture that fails to load is the placeholder, never a broken image.
+    fireEvent.error(theirs.querySelector('img')!)
+    expect(theirs.querySelector('img')).toBeNull()
+    expect(within(theirs).getByTestId('job-picture-placeholder')).toBeInTheDocument()
   })
 
   it('opens Bambuddy on the hostname framing ScadBuddy (#3743)', async () => {

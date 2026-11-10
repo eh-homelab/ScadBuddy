@@ -186,6 +186,7 @@ Operation = Literal[
     "printers.camera.snapshot",
     "printers.camera.stream",
     "printers.camera.token",
+    "printers.cover",
     "printers.inventory_remain",
     "printers.list",
     "printers.read",

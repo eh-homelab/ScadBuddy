@@ -152,6 +152,69 @@ def test_every_active_printer_says_what_it_is_doing(client: TestClient) -> None:
     # #3632: a failed read does not know the plate is clear, so it never says so.
     assert cards[3]["awaiting_plate_clear"] is None
 
+    # #3742: a job not ScadBuddy's shows Bambuddy's cover (its status's `cover_url`)
+    # through ScadBuddy's farm proxy, keyed by the job's archive; a failed read shows none.
+    assert running["picture"] == "/api/v1/farm/printers/1/cover?archive=13"
+    assert paused["picture"] == "/api/v1/farm/printers/2/cover?archive=90"
+    assert cards[3]["picture"] is None
+
+
+@respx.mock
+def test_a_cover_is_keyed_by_its_print_not_its_name(client: TestClient) -> None:
+    """#3742 review: Bambu job names repeat, so a cover is keyed by its archive, one per
+    print (Bambuddy's ``current_archive_id`` while it runs or is paused): two jobs of one
+    name have two covers. With no archive the job's name keys it, and with neither
+    nothing does; the route then lets no browser keep it (`api/farm.py`)."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(p) for p in (1, 2, 3, 4)])
+    )
+    name = "Name_Keychain_Font_Basic_Plate_1"
+    jobs: dict[int, dict[str, Any]] = {
+        1: {"subtask_name": name, "current_archive_id": 13},
+        2: {"subtask_name": name, "current_archive_id": 14},
+        3: {"subtask_name": name, "current_archive_id": None},
+        4: {"subtask_name": None, "current_print": None, "current_archive_id": None},
+    }
+    for printer_id, fields in jobs.items():
+        respx.get(f"{API}/printers/{printer_id}/status").mock(
+            return_value=httpx.Response(200, json=status(printer_id, **fields))
+        )
+
+    response = client.get(NOW)
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card["picture"] for card in response.json()["printers"]}
+    assert cards == {
+        1: "/api/v1/farm/printers/1/cover?archive=13",
+        2: "/api/v1/farm/printers/2/cover?archive=14",
+        3: f"/api/v1/farm/printers/3/cover?job={name}",
+        4: "/api/v1/farm/printers/4/cover",
+    }
+
+
+@respx.mock
+def test_a_job_bambuddy_gives_no_cover_has_no_picture(client: TestClient) -> None:
+    """#3742: Bambuddy names a cover only while a job is running or paused
+    (`cover_url`); an idle printer, or a job it gives none, has no picture."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+    )
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1, cover_url=None))
+    )
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(200, json=status(2, state="IDLE", subtask_name=None))
+    )
+
+    response = client.get(NOW)
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card for card in response.json()["printers"]}
+    assert (cards[1]["activity"], cards[1]["picture"]) == ("printing", None)
+    assert (cards[2]["activity"], cards[2]["picture"]) == ("idle", None)
+
 
 @pytest.mark.parametrize(
     ("version", "has_page"),
@@ -764,6 +827,9 @@ def test_a_job_whose_queue_item_scadbuddy_sent_is_marked(client: TestClient) -> 
     }
     assert cards[2]["scadbuddy"] is None
     assert cards[3]["scadbuddy"] is None
+    # #3742: ScadBuddy's job shows ScadBuddy's own picture, not Bambuddy's cover.
+    assert cards[1]["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert cards[2]["picture"] == "/api/v1/farm/printers/2/cover?archive=90"
 
 
 @respx.mock
@@ -848,6 +914,9 @@ def test_a_job_a_run_started_over_the_lan_is_marked(client: TestClient) -> None:
     }
     assert cards[shed]["scadbuddy"] is None
     assert cards[loft]["scadbuddy"] is None
+    # #3742: a LAN card asks Bambuddy nothing, so only ScadBuddy's job has a picture.
+    assert cards[garage]["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert cards[loft]["picture"] is None
 
 
 def test_a_lan_start_two_runs_share_is_not_marked(client: TestClient) -> None:

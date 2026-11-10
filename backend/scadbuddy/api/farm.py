@@ -1,5 +1,6 @@
 """``/api/v1/farm/…`` — the farm's context from Bambuddy (#1912): the queue, every
-archive with its outcome, aggregate stats and the spool inventory.
+archive with its outcome, aggregate stats and the spool inventory, and (#3742) the
+pictures of the queue's items and the printers' jobs.
 
 Read only: nothing here writes to Bambuddy, and every call needs only the ``Read
 Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
@@ -11,9 +12,11 @@ import logging
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
+from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.farm import (
     ArchiveOutcome,
@@ -23,6 +26,7 @@ from scadbuddy.bambuddy.farm import (
     spool_summary,
 )
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
+from scadbuddy.bambuddy.pictures import queue_item_picture
 from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
 from scadbuddy.core.problems import DATABASE_ERRORS
 
@@ -59,6 +63,10 @@ class FarmQueueItem(QueueItem):
     #: reprint of an archive ScadBuddy linked too), or when ScadBuddy's records cannot be
     #: read. Never taken from Bambuddy's answer.
     scadbuddy: ScadBuddyJob | None = None
+    #: The item's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's for its
+    #: own item (`scadbuddy`), else Bambuddy's thumbnail of the item's library file or
+    #: archive through this router (`bambuddy/pictures.py`). ``None`` when there is none.
+    picture: str | None = None
 
 
 @router.get("/queue", response_model=list[FarmQueueItem], summary="Bambuddy's print queue")
@@ -73,14 +81,107 @@ async def get_queue(
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
     is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
     Each pending or printing item ScadBuddy queued carries ``scadbuddy`` (#3741); only
-    those items are looked up (#5833)."""
+    those items are looked up (#5833). Each item's ``picture`` (#3742) is built from
+    this one read."""
     async with client_for(store.load()) as client:
         items = await client.queue(printer_id=printer_id, status=status)
     matches = await _jobs(links, [item for item in items if item.status in MARKED_STATUSES])
-    return [
-        FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
-        for item in items
-    ]
+
+    def row(item: QueueItem) -> FarmQueueItem:
+        job = matches.queue_items.get(item.id)
+        picture = queue_item_picture(item, job)
+        return FarmQueueItem(**item.model_dump(), scadbuddy=job, picture=picture)
+
+    return [row(item) for item in items]
+
+
+#: How long the browser keeps a picture (#3742). A library file's or an archive's
+#: thumbnail is the same image while its id stands; a printer's cover is kept only when
+#: its URL names the job's archive, one per print (`get_printer_cover`).
+PICTURE_CACHE_CONTROL = "private, max-age=3600"
+PictureId = Annotated[int, Path(ge=1)]
+
+
+@router.get(
+    "/library/{file_id}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="A Bambuddy library file's thumbnail",
+)
+async def get_library_thumbnail(
+    file_id: PictureId, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's thumbnail of a file in its own library (#3742), for a queue item not
+    ScadBuddy's. Always Bambuddy's library, whichever library ScadBuddy serves: the
+    queue's ids are Bambuddy's."""
+    return await _proxy(
+        store,
+        request,
+        f"/library/files/{file_id}/thumbnail",
+        operation="library.thumbnail",
+        what="show the file's thumbnail",
+        cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+@router.get(
+    "/archives/{archive_id}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="A Bambuddy archive's thumbnail",
+)
+async def get_archive_thumbnail(
+    archive_id: PictureId, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's thumbnail of any of its archives (#3742), for a queue item not
+    ScadBuddy's. ``/archives`` above already lists every archive; this serves its
+    thumbnail only, none of its other files (those stay ``/prints/{id}``'s, which takes
+    only an archive ScadBuddy printed)."""
+    return await _proxy(
+        store,
+        request,
+        f"/archives/{archive_id}/thumbnail",
+        operation="media.thumbnail",
+        what="show the thumbnail",
+        cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+@router.get(
+    "/printers/{printer_id}/cover",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="The cover of a printer's job",
+)
+async def get_printer_cover(
+    printer_id: PictureId,
+    request: Request,
+    store: SettingsStoreDep,
+    archive: Annotated[
+        int | None,
+        Query(ge=1, description="The job's archive, one per print: the browser keeps it"),
+    ] = None,
+    job: Annotated[
+        str | None,
+        Query(max_length=512, description="The job's name, with no archive: never kept"),
+    ] = None,
+) -> Response:
+    """Bambuddy's cover image of the job a Bambuddy printer prints (#3742), the status's
+    ``cover_url``: maziggy/bambuddy f9080d1 ``backend/app/api/routes/printers.py``
+    lines 506-509 (set while it runs or is paused) and 1128 (the route, which takes an
+    API key with ``printers:read``). Neither ``archive`` nor ``job`` is sent to Bambuddy:
+    they key the browser's copy (`bambuddy/pictures.py` `printer_cover`). Only a cover
+    keyed by its archive is kept; job names repeat, so one keyed by its name, or by
+    nothing, is fetched again on each load (``no-store``)."""
+    del job
+    return await _proxy(
+        store,
+        request,
+        f"/printers/{printer_id}/cover",
+        operation="printers.cover",
+        what="show the cover of the printer's job",
+        cache_control=PICTURE_CACHE_CONTROL if archive is not None else "no-store",
+    )
 
 
 @router.get(

@@ -2,9 +2,9 @@ import { HttpResponse, http } from 'msw'
 import type { ArchiveStats, QueueItem } from '../../api/types'
 
 /**
- * #2351 — Bambuddy's queue and the farm's totals: two waiting items (one for a
- * printer that ScadBuddy queued, #3741; one for any H2C, short of filament) and finished
- * history, which the panel never asks for.
+ * #2351 — Bambuddy's queue and the farm's totals: three waiting items (one for a
+ * printer that ScadBuddy queued, #3741; one for any H2C, short of filament; one with no
+ * picture, #3742) and finished history, which the panel never asks for.
  */
 export const PRINT_QUEUE: QueueItem[] = [
   {
@@ -40,6 +40,8 @@ export const PRINT_QUEUE: QueueItem[] = [
       archive_id: null,
       matched_by: 'queue_item',
     },
+    // #3742 — ScadBuddy's own picture of its job.
+    picture: '/api/v1/outputs/luna-0002/thumbnail',
   },
   {
     id: 260,
@@ -54,6 +56,22 @@ export const PRINT_QUEUE: QueueItem[] = [
     filament_used_grams: 48,
     manual_start: false,
     filament_short: true,
+    // #3742 — Bambuddy's thumbnail of its library file, through ScadBuddy's farm proxy.
+    picture: '/api/v1/farm/library/1615/thumbnail',
+  },
+  {
+    id: 263,
+    printer_id: null,
+    target_model: 'H2C',
+    library_file_name: 'Spool hook.3mf',
+    status: 'pending',
+    position: 9,
+    print_time_seconds: 1800,
+    filament_used_grams: 9,
+    manual_start: false,
+    filament_short: false,
+    // #3742 — no picture anywhere: the row shows a placeholder.
+    picture: null,
   },
   {
     id: 205,
