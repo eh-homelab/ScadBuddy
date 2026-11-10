@@ -17,16 +17,19 @@ Codes:
   customer, and the code dies in 10 minutes. A key would need the KEK, which a deployment
   may lack, so the salt is the choice.
 - The digests are compared in constant time (`hmac.compare_digest`), against every live
-  code, with no early exit.
+  code, with no early exit. A correct live code always signs in.
+- A verify holds a transaction lock per address (`pg_advisory_xact_lock`) before it reads
+  the codes, so guesses at once cannot spend more than a code's `CODE_TRIES`.
 - Limits:
   - `CODES_PER_ADDRESS` codes an hour per address, and `CODES_PER_CLIENT` per client
     address. Over either is `SignInLimitedError` with the seconds to wait.
   - `FAILURES_PER_CLIENT` wrong guesses an hour per client (`SignInLimitedError`).
-  - `FAILURES_PER_ADDRESS` (10) wrong guesses per address in a rolling
-    `ADDRESS_FAILURE_WINDOW` (24 hours), across all its codes and from any client. Past
-    it, `verify_code` reads nothing for that address until the window passes, with the
-    same answer as a wrong code. So guesses spread over many clients get at most 10 a
-    day against an address, 10 in 2^39.
+- No address is ever locked: a lock would let anyone who asks for a code and guesses
+  wrong lock its owner out. The bound is the code itself. An address gets at most
+  `CODES_PER_ADDRESS` codes an hour with `CODE_TRIES` tries each, so at most 25 guesses an
+  hour from any number of clients, each with a chance of at most `LIVE_CODES` in 30^8
+  (about 2^39). A success then takes about 30^8 / (3 * 25), about 8.7 * 10^9 hours.
+  Failures are kept by address too, for the logs only.
 - The route that asks for a code takes the bot check (Turnstile, action ``sign_up``)
   whenever a site key is set (`storefront/turnstile.py` `require_turnstile`).
 
@@ -73,10 +76,8 @@ CODES_PER_ADDRESS: Final = 5
 CODES_PER_CLIENT: Final = 10
 FAILURES_PER_CLIENT: Final = 20
 LIMIT_WINDOW: Final = timedelta(hours=1)
-FAILURES_PER_ADDRESS: Final = 10
-ADDRESS_FAILURE_WINDOW: Final = timedelta(hours=24)
-#: How long a code or failure row is kept, for the limits: past the longest window.
-KEEP_ROWS: Final = timedelta(days=2)
+#: How long a code or failure row is kept: past the limits' window, for the logs.
+KEEP_ROWS: Final = timedelta(days=1)
 SESSION_TTL: Final = timedelta(days=30)
 #: An address's longest form (RFC 5321 §4.5.3.1.3's path, less its brackets).
 MAX_EMAIL: Final = 254
@@ -174,7 +175,7 @@ def request_code(conn: Conn, email: str, client: str) -> str:
 
 
 def _failed(conn: Conn, client: str, address: str | None) -> None:
-    """A wrong guess by ``client``; with ``address``, it counts against its budget too."""
+    """A wrong guess by ``client``, at ``address`` when it was one (kept for the logs)."""
     conn.execute(
         "DELETE FROM storefront_sign_in_failures WHERE failed_at < now() - %s", (KEEP_ROWS,)
     )
@@ -182,16 +183,6 @@ def _failed(conn: Conn, client: str, address: str | None) -> None:
         "INSERT INTO storefront_sign_in_failures (client, email) VALUES (%s, %s)",
         (client, address),
     )
-
-
-def _address_spent(conn: Conn, address: str) -> bool:
-    """Whether ``address`` has had `FAILURES_PER_ADDRESS` wrong guesses in the window."""
-    row = conn.execute(
-        "SELECT count(*) AS n FROM storefront_sign_in_failures"
-        " WHERE email = %s AND failed_at > now() - %s",
-        (address, ADDRESS_FAILURE_WINDOW),
-    ).fetchone()
-    return row is not None and row["n"] >= FAILURES_PER_ADDRESS
 
 
 def verify_code(
@@ -204,9 +195,9 @@ def verify_code(
     previous_session: str | None,
 ) -> SignedIn | None:
     """The sign-in ``code`` makes for ``email``, or None for any code that reads nothing
-    (wrong, expired, used, voided, out of tries, no code at all, or an address past its
-    failure budget): one answer, so a caller says nothing more. `SignInLimitedError`
-    once ``client`` guessed wrong `FAILURES_PER_CLIENT` times in the window."""
+    (wrong, expired, used, voided, out of tries, or no code at all): one answer, so a
+    caller says nothing more. `SignInLimitedError` once ``client`` guessed wrong
+    `FAILURES_PER_CLIENT` times in the window."""
     _limit(
         conn,
         "storefront_sign_in_failures",
@@ -220,11 +211,10 @@ def verify_code(
     except EmailInvalidError:
         _failed(conn, client, None)
         return None
-    if _address_spent(conn, address):
-        # Counted against the client, not the address: the window ends 24 hours after
-        # the guess that spent it.
-        _failed(conn, client, None)
-        return None
+    # One verify of an address at a time, so guesses at once never overspend a code.
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"storefront_signin:{address}",)
+    )
     rows = conn.execute(
         "SELECT id, code_sha256 FROM storefront_sign_in_codes"
         " WHERE email = %s AND used_at IS NULL AND expires_at > now() AND attempts < %s"

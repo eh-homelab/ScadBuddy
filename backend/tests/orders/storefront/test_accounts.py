@@ -6,18 +6,20 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
+import psycopg
 import pytest
 from psycopg import Connection
-from psycopg.rows import DictRow
+from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.orders.storefront.accounts import (
     CODE_ALPHABET,
     CODE_TRIES,
     CODES_PER_ADDRESS,
     CODES_PER_CLIENT,
-    FAILURES_PER_ADDRESS,
     FAILURES_PER_CLIENT,
     LIVE_CODES,
     EmailInvalidError,
@@ -163,21 +165,44 @@ def test_an_expired_code_reads_nothing(conn: Conn) -> None:
     assert verify(conn, code) is None
 
 
-def test_wrong_guesses_spread_over_clients_spend_the_address_for_a_day(conn: Conn) -> None:
-    for n in range(FAILURES_PER_ADDRESS):
-        code = request_code(conn, EMAIL, f"192.0.2.{n}") if n % 2 == 0 else None
-        assert verify(conn, wrong(code or "ABCDEFGH"), client=f"198.51.100.{n}") is None
-    # Past the budget even the right code reads nothing, with the same answer.
-    conn.execute("DELETE FROM storefront_sign_in_codes")
-    code = request_code(conn, EMAIL, "192.0.2.200")
-    assert verify(conn, code, client="198.51.100.200") is None
-    # Another address is not held back.
-    assert sign_in(conn, "bob@example.com")
-    # The window passes: the address signs in again.
-    conn.execute("UPDATE storefront_sign_in_failures SET failed_at = now() - interval '25 hours'")
-    conn.execute("DELETE FROM storefront_sign_in_codes")
-    code = request_code(conn, EMAIL, "192.0.2.201")
-    assert verify(conn, code, client="198.51.100.201") is not None
+def test_wrong_guesses_by_others_never_lock_the_owner_out(conn: Conn) -> None:
+    code = request_code(conn, EMAIL, "192.0.2.1")
+    for n in range(10):
+        # Each try spends one of the code's five: ask for a new one when it is spent.
+        if n == CODE_TRIES:
+            code = request_code(conn, EMAIL, "192.0.2.2")
+        assert verify(conn, wrong(code), client=f"198.51.100.{n}") is None
+    # The owner's own code still signs in.
+    mine = request_code(conn, EMAIL, "203.0.113.50")
+    assert verify(conn, mine, client="203.0.113.50") is not None
+    # Each wrong guess is kept by address, for the logs.
+    kept = conn.execute(
+        "SELECT count(*) AS n FROM storefront_sign_in_failures WHERE email = 'ada@example.com'"
+    ).fetchone()
+    assert kept is not None and kept["n"] == 10
+
+
+def test_guesses_at_once_never_overspend_a_code(conn: Conn, pg_conninfo: str) -> None:
+    code = request_code(conn, EMAIL, CLIENT)
+    guesses = 10
+    start = threading.Barrier(guesses)
+
+    def guess(n: int) -> SignedIn | None:
+        with psycopg.connect(pg_conninfo, row_factory=dict_row) as own, own.transaction():
+            start.wait()
+            return verify_code(
+                own,
+                EMAIL,
+                wrong(code),
+                f"198.51.100.{n}",
+                visitor_id=None,
+                previous_session=None,
+            )
+
+    with ThreadPoolExecutor(guesses) as pool:
+        assert list(pool.map(guess, range(guesses))) == [None] * guesses
+    row = conn.execute("SELECT attempts FROM storefront_sign_in_codes").fetchone()
+    assert row is not None and row["attempts"] == CODE_TRIES
 
 
 def test_codes_are_limited_per_address_and_per_client(conn: Conn) -> None:

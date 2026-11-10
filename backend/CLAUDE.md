@@ -1051,10 +1051,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     exists (enumeration-safe). Only a salted sha256 is kept, and a code lives 10 minutes
     for 5 tries. A new code keeps the address's live ones, up to `LIVE_CODES` (3), so
     another's requests cannot cancel a code. The limits are per address and per client
-    for codes, and per client for wrong guesses (`SignInLimitedError`). Each address also
-    has a budget of 10 wrong guesses in a rolling 24 hours from any client, past which
-    `verify_code` reads nothing for it. The code route takes Turnstile (`sign_up`)
-    whenever a site key is set.
+    for codes, and per client for wrong guesses (`SignInLimitedError`). No address is ever
+    locked (a lock would let anyone lock its owner out): a correct live code always signs
+    in, and the bound is the code (about 25 guesses an hour at 3 in 30^8; the arithmetic is
+    in the docstring). `verify_code` holds a transaction lock per address while it reads
+    and spends the codes. The code route takes Turnstile (`sign_up`) whenever a site key
+    is set.
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit

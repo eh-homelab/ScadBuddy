@@ -29,7 +29,7 @@ CREATE INDEX storefront_sign_in_codes_client ON storefront_sign_in_codes (client
 CREATE INDEX storefront_sign_in_codes_created ON storefront_sign_in_codes (created_at);
 
 -- A wrong code, by the client that sent it and the address it was for: the per-client
--- guess limit, and the per-address failure budget (`email` is null for a guess at no
+-- guess limit; the address is kept for the logs only (`email` is null for a guess at no
 -- valid address).
 CREATE TABLE storefront_sign_in_failures (
   client text NOT NULL,
