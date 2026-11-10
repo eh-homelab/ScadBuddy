@@ -35,6 +35,7 @@ const SECRETS = {
   google_fonts_api_key: 'has_google_fonts_api_key',
   store_s3_secret_access_key: 'has_store_s3_secret_access_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 } as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
 const NULLABLE = new Set([
@@ -52,6 +53,8 @@ const NULLABLE = new Set([
   'git_remote_url',
   'git_remote_username',
   'git_remote_token',
+  'storefront_turnstile_site_key',
+  'storefront_turnstile_secret',
 ])
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
 const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])

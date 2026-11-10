@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { ApiError, api, newRequestId } from '../../api/client'
 import { type MessagePreview, previewOrderMessage, sendOrderMessage } from '../../api/orderMessages'
@@ -41,13 +41,36 @@ function slugOf(error: unknown): string | null {
  * customer and is never sent again by itself: a person checks the inbox, then "Mark sent", or
  * "Send again". "Send again" first shows the message composed now; "Send" sends that message
  * only, by its digest (the agent composes it again and refuses one that changed).
+ *
+ * The open preview keeps one Idempotency-Key for every click on its "Send", and drops it only when
+ * a send is answered (the preview closes). A click after a lost answer (a network error after
+ * the plugin already sent) is then served from the first claim, never sent twice. An error status
+ * keeps it too, since a proxy's 502 can hide a send that went out: only a new "Send again" makes
+ * a new key.
+ * The order page keys this by the order. Without the key it still clears the preview, the note
+ * and the error when `orderId` changes, and drops a preview that comes back for another order.
  */
 export function OrderMessages({ orderId }: { orderId: string }) {
   const listed = useAsync(() => api.orderMessages(orderId), [orderId], [`order:${orderId}`])
-  const [preview, setPreview] = useState<{ of: OrderMessage; shown: MessagePreview } | null>(null)
+  const [preview, setPreview] = useState<{ of: OrderMessage; shown: MessagePreview; key: string } | null>(null)
+  // The order this view shows now; null once it is gone. A late preview for another is dropped.
+  const showing = useRef<string | null>(orderId)
+  useEffect(() => {
+    showing.current = orderId
+    return () => {
+      showing.current = null
+    }
+  }, [orderId])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [stateFor, setStateFor] = useState(orderId)
+  if (stateFor !== orderId) {
+    setStateFor(orderId)
+    setPreview(null)
+    setError(null)
+    setNote(null)
+  }
   const messages = listed.data ?? []
   if (messages.length === 0 && !error) return null
 
@@ -111,7 +134,13 @@ export function OrderMessages({ orderId }: { orderId: string }) {
                   size="sm"
                   variant="outline"
                   disabled={busy}
-                  onClick={() => void act(async () => setPreview({ of: m, shown: await previewOrderMessage(orderId, m.template, m.id) }))}
+                  onClick={() =>
+                    void act(async () => {
+                      const asked = orderId
+                      const shown = await previewOrderMessage(asked, m.template, m.id)
+                      if (showing.current === asked) setPreview({ of: m, shown, key: newRequestId() })
+                    })
+                  }
                   {...USER_ONLY}
                 >
                   Send again
@@ -134,8 +163,8 @@ export function OrderMessages({ orderId }: { orderId: string }) {
               disabled={busy}
               onClick={() =>
                 void act(async () => {
-                  const { of, shown } = preview
-                  const answer = await sendOrderMessage(orderId, of.template, of.id, shown.digest, newRequestId())
+                  const { of, shown, key } = preview
+                  const answer = await sendOrderMessage(orderId, of.template, of.id, shown.digest, key)
                   setPreview(null)
                   setNote(answer.warning ?? (answer.sent ? 'Sent.' : `Not sent: ${STATUS[answer.message.status]}.`))
                 })

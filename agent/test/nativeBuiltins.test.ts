@@ -3,7 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { AccessRow } from '../src/access/model.js'
-import { NATIVE_BUILTINS, nativeBuiltinTools } from '../src/access/nativeBuiltins.js'
+import { monitorAccess, NATIVE_BUILTINS, SESSION_BUILTINS, sessionTierOf, SHELL_BUILTINS, turnBuiltins } from '../src/access/nativeBuiltins.js'
+import { BACKGROUND_BUILTINS, BUILTINS } from '../src/builtins/server.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { confineGuard, projectDirName } from '../src/harness/confine.js'
 import { claudeConfigDir } from '../src/harness/options.js'
@@ -14,7 +15,7 @@ import { TASK_LIST_DIR, ensureStateDirs, linkTaskList } from '../src/harness/sta
 
 describe("Claude Code's built-ins by default", () => {
   it('offers the file tools and the task list, at read or write, and never Bash or PowerShell', async () => {
-    const offered = await nativeBuiltinTools({ native: async (_name, declared) => declared }, [])
+    const { native: offered } = await turnBuiltins({ native: async (_name, declared) => declared }, [], { background: true })
     expect(Object.fromEntries(offered.map((t) => [t.name, t.tier]))).toEqual({
       Read: 'read',
       Glob: 'read',
@@ -32,16 +33,61 @@ describe("Claude Code's built-ins by default", () => {
   })
 
   it('leaves out one set off, and a package that names an off one switches it on at its own tier', async () => {
-    const offered = await nativeBuiltinTools(
+    const { native: offered } = await turnBuiltins(
       {
         native: async (name, declared, packages) => (name === 'Grep' ? 'off' : declared === 'off' && packages.length ? 'outward' : declared),
       },
       [{ name: 'Bash', packages: ['shell-pkg'] }],
+      { background: true },
     )
     const names = offered.map((t) => t.name)
     expect(names).not.toContain('Grep')
     expect(names).not.toContain('PowerShell')
     expect(offered.find((t) => t.name === 'Bash')).toEqual({ name: 'Bash', tier: 'outward' })
+  })
+})
+
+describe("the session's own built-ins by default (#2726 R2)", () => {
+  const declared = { native: async (_name: string, access: 'off' | 'read' | 'write' | 'outward') => access }
+
+  it('are the built-ins the session serves, the background ones marked as server.ts marks them', () => {
+    // Bash and PowerShell are served too, but only with a sandbox (#5864), under Claude Code's own items.
+    expect(SESSION_BUILTINS.map((b) => b.name).sort()).toEqual(Object.keys(BUILTINS).filter((n) => !SHELL_BUILTINS.includes(n)).sort())
+    expect(SESSION_BUILTINS.filter((b) => b.background).map((b) => b.name).sort()).toEqual([...BACKGROUND_BUILTINS].sort())
+  })
+
+  it('offers each at its tier: the web ones outward, the ones that change background tasks write, CronList read', async () => {
+    const { served } = await turnBuiltins(declared, [], { background: true })
+    expect(Object.fromEntries(served.map((t) => [t.name, t.tier]))).toEqual({
+      WebFetch: 'outward',
+      WebSearch: 'outward',
+      CronCreate: 'write',
+      CronDelete: 'write',
+      CronList: 'read',
+      ScheduleWakeup: 'write',
+      Monitor: 'write',
+      Workflow: 'write',
+      TaskStop: 'write',
+    })
+  })
+
+  it('offers no background one where the session keeps no background tasks', async () => {
+    const { served } = await turnBuiltins(declared, [{ name: 'CronCreate', packages: ['p'] }], { background: false })
+    expect(served.map((t) => t.name)).toEqual(['WebFetch', 'WebSearch'])
+  })
+
+  it("raises a Monitor by its source: ws outward, a command to Bash's tier, off without Bash", () => {
+    expect(monitorAccess('write', { ws: { url: 'wss://x.example' } }, undefined)).toBe('outward')
+    expect(monitorAccess('write', { command: 'ls' }, 'outward')).toBe('outward')
+    expect(monitorAccess('write', { command: 'ls' }, 'read')).toBe('write')
+    expect(monitorAccess('write', { command: 'ls' }, undefined)).toBe('off')
+    expect(monitorAccess('write', { command: 'ls', ws: { url: 'wss://x.example' } }, 'read')).toBe('outward')
+    expect(monitorAccess('write', {}, undefined)).toBe('outward')
+    const tierOf = sessionTierOf([{ name: 'Monitor', tier: 'write' }, { name: 'CronList', tier: 'read' }], undefined)
+    expect(tierOf('mcp__builtin__CronList', {})).toBe('read')
+    expect(tierOf('mcp__builtin__Monitor', { command: 'ls' })).toBe('outward')
+    expect(tierOf('mcp__builtin__WebFetch', {})).toBeUndefined()
+    expect(sessionTierOf([{ name: 'Monitor', tier: 'write' }], 'write')('mcp__builtin__Monitor', { command: 'ls' })).toBe('write')
   })
 })
 
@@ -378,9 +424,10 @@ describe('AccessResolver.native, over stored rows', () => {
         return Promise.resolve([row(CC, 'Grep', 'off')].filter((r) => sources.includes(r.source)))
       },
     })
-    const offered = await nativeBuiltinTools(counted, [])
+    const { native: offered, served } = await turnBuiltins(counted, [], { background: true })
     expect(offered.map((t) => t.name)).not.toContain('Grep')
     expect(offered.map((t) => t.name)).toContain('Read')
+    expect(served.map((t) => t.name)).toContain('WebFetch')
     expect(reads).toBe(1)
   })
 

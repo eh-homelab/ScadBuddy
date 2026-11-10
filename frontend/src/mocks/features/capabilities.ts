@@ -69,11 +69,15 @@ const SPECS: readonly Spec[] = [
   { id: 'builtin:claude-code', title: "Claude Code's built-in tools", switchable: true, options_route: null },
 ]
 
-/** `risk` is the default: Claude Code's Bash and PowerShell are `off` by default (the agent's nativeBuiltins.ts). */
-type BuiltInTool = { name: string; label: string; description: string; risk: RiskTier | 'off'; note?: string }
+/**
+ * `risk` is the default: Claude Code's Bash and PowerShell are `off` by default (the agent's nativeBuiltins.ts).
+ * `served`: one of the session's own built-ins (`SESSION_BUILTINS`), named `mcp__builtin__<Name>`.
+ */
+type BuiltInTool = { name: string; label: string; description: string; risk: RiskTier | 'off'; note?: string; served?: boolean }
 
 const CLAUDE_CODE = 'builtin:claude-code'
 const NATIVE_OFF_NOTE = 'off: it would run unsandboxed in the worker pod (#779); a plugin package that names it switches it on, asking first'
+const MONITOR_NOTE = 'write; a WebSocket asks first, and a command runs only while Bash is on, at its tier'
 
 const TOOLS: Record<string, readonly BuiltInTool[]> = {
   'builtin:scadbuddy': [
@@ -99,6 +103,18 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
     { name: 'Write', label: 'Write a file', description: "Writes a file in the session's working directory.", risk: 'write' },
     { name: 'Edit', label: 'Edit a file', description: "Replaces exact text in a file of the session's working directory.", risk: 'write' },
     { name: 'Bash', label: 'Run a shell command', description: 'Runs a shell command in the worker pod.', risk: 'off', note: NATIVE_OFF_NOTE },
+    { name: 'WebFetch', label: 'Fetch a web page', description: 'Fetches a URL, egress-checked, and answers a prompt about the page.', risk: 'outward', served: true },
+    { name: 'CronList', label: 'List the scheduled prompts', description: "Lists the session's scheduled jobs.", risk: 'read', served: true },
+    {
+      name: 'Monitor',
+      label: 'Watch a source',
+      description:
+        "Streams a WebSocket's frames, or a shell command's output lines, to the session as events. A WebSocket asks first, as WebFetch does; " +
+        'a command runs only while Bash is on, at its tier.',
+      risk: 'write',
+      note: MONITOR_NOTE,
+      served: true,
+    },
   ],
 }
 
@@ -285,7 +301,7 @@ function builtInItem(source: string, tool: BuiltInTool): ItemView {
     id: tool.name,
     kind: 'tool',
     name: tool.name,
-    harness_name: source === CLAUDE_CODE ? tool.name : `mcp__scadbuddy__${tool.name}`,
+    harness_name: tool.served ? `mcp__builtin__${tool.name}` : source === CLAUDE_CODE ? tool.name : `mcp__scadbuddy__${tool.name}`,
     label: tool.label,
     description: tool.description,
     default: tool.risk,

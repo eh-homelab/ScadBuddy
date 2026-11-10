@@ -30,6 +30,7 @@ from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
@@ -70,6 +71,14 @@ def _client(request: Request) -> str:
 Crud = Annotated[StorefrontCrud, Depends(_crud)]
 Visitor = Annotated[str, Depends(_visitor)]
 Client = Annotated[str, Depends(_client)]
+
+
+@visitor_router.get("/turnstile")
+async def turnstile(request: Request, crud: Crud) -> Any:
+    """The bot check's public site key for the page's widget, or null while the check is
+    off (`turnstile.py`): the CRUD side's ``GET …/turnstile``, as last read."""
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    return {"site_key": await site_key.get(crud)}
 
 
 @visitor_router.get("/listings")
@@ -255,7 +264,9 @@ async def _refuse_unless_sent(
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
     428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
-    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    client's allowance is spent, or its one upload is running), then 403
+    ``bot_check_failed`` or 503 ``bot_check_unavailable`` (`turnstile.py`; neither spends
+    the allowance), 503 ``uploads_busy``
     (`uploads.py` `UploadGate`). The body is then read whole with every cap
     (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
     "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
@@ -281,6 +292,10 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             retry_after=held,
         )
     try:
+        # After the allowance, which spends nothing until the check passes: a client out
+        # of allowance costs no Siteverify call, and a failed check spends no allowance
+        # (failed checks have their own limit, `turnstile.py` `FailedChecks`).
+        await require_turnstile(request, "request")
         upload = await _read_spent(request, allowance, held)
     finally:
         allowance.finish(held)

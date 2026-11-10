@@ -17,7 +17,7 @@ import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, ty
 import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import { NATIVE_NAMES, TASK_TOOLS, nativeBuiltinTools } from '../access/nativeBuiltins.js'
+import { BASH, NATIVE_NAMES, SESSION_NAMES, TASK_TOOLS, sessionTierOf, turnBuiltins } from '../access/nativeBuiltins.js'
 import { liveAccess } from '../access/live.js'
 import { SeamLedger } from '../harness/seamLedger.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
@@ -55,7 +55,7 @@ import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
-import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import { BUILTIN_SERVER, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 import { sandboxShellTools, SHELL_BUILTINS } from '../builtins/sandboxShell.js'
 
 /** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
@@ -142,7 +142,11 @@ export type FingerprintParts = {
   builtinTools: string[]
   /** Claude Code's own built-ins the turn offers and their tiers (Step 9.6, `<name>=<tier>`): Settings → Tools & plugins' `builtin:claude-code`. */
   nativeTools: string[]
-  /** The package built-ins the session serves in place of Claude Code's (#2684): background ones and WebFetch. */
+  /**
+   * The built-ins the session serves in place of Claude Code's, every turn (`builtin:claude-code`'s
+   * SESSION_BUILTINS not off): WebFetch, pinned to the addresses it checked (#2684), WebSearch, and the
+   * background ones, kept past the turn.
+   */
   servedBuiltins: string[]
   /** Whether the session keeps background tasks (src/background/), which decides which built-ins it serves. */
   backgroundTasks: boolean
@@ -313,7 +317,9 @@ export class TurnRunner {
     // The http tools' tier depends on the method in their input (#827), unless
     // http_request's access in ai_access is a tier (#2171), read with its switch below.
     let httpTier: TierResolver = httpTierOf
-    const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? registryTierOf(name, input)
+    // The session's own built-ins' tiers (nativeBuiltins.ts `sessionTierOf`), once read below.
+    let servedTier: TierResolver = () => undefined
+    const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? servedTier(name, input) ?? registryTierOf(name, input)
     // Replaced by the gate's own resolver once the run is built below, so the
     // panel shows every tool at the tier the permission seam applies.
     // Settings → Tools & plugins' raised tiers (#1953), once read below, over every tier shown.
@@ -450,12 +456,23 @@ export class TurnRunner {
         name,
         packages: allowedLoaded.filter((p) => p.builtinTools.includes(name)).map((p) => p.name),
       }))
-      // Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every one not off under
-      // `builtin:claude-code`, which a package that names one can only switch on.
-      const allNative = await nativeBuiltinTools(access, callBuiltins)
+      // Claude Code's own built-ins (plan 2026-10-13 Step 9.6) and the session's (WebFetch,
+      // WebSearch and, where the session keeps background tasks, the background ones): every one
+      // not off under `builtin:claude-code`, which a package that names one can only switch on.
+      const { native: allNative, served: sessionTools } = await turnBuiltins(access, callBuiltins, {
+        background: this.deps.background !== undefined && session.backgroundTools,
+      })
       // Bash and PowerShell in the session's sandbox pod where one is set up (#5864), never here.
       const shellTools = this.deps.sandbox ? await sandboxShellTools(access, callBuiltins) : []
       const nativeTools = this.deps.sandbox ? allNative.filter((t) => !SHELL_BUILTINS.includes(t.name)) : allNative
+      const servedTools = [...sessionTools, ...shellTools]
+      const served = servedTools.map((t) => t.name)
+      /**
+       * Bash's tier when the turn offers it natively: a Monitor's command runs a shell where Bash runs
+       * (nativeBuiltins.ts `SESSION_BUILTINS`). Never with a sandbox: there Bash runs in the pod.
+       */
+      const shellTier = nativeTools.find((t) => t.name === BASH)?.tier
+      servedTier = sessionTierOf(servedTools, shellTier)
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).
       packageServers =
@@ -476,6 +493,8 @@ export class TurnRunner {
               plugins: callPlugins,
               builtins: callBuiltins,
               native: true,
+              served,
+              shell: shellTier !== undefined,
               sandboxShell: this.deps.sandbox !== undefined,
             }),
             ledger,
@@ -614,8 +633,6 @@ export class TurnRunner {
               ),
             )
           : undefined
-      // The built-ins the packages name that the session serves instead of Claude Code: the
-      // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
       // With the turn's calls as activities (plan 2026-10-13 Step 9.3), its remote plugins, package
       // http servers and http_request are in-process proxies of the same names, each call a ToolCall
       // whose activity builds the server again where it runs: none is handed to Claude Code. Listed
@@ -653,12 +670,6 @@ export class TurnRunner {
           this.deps.stderr?.(`session ${id}: its plugin and http tools could not be listed, so they run in this turn's process: ${err instanceof Error ? err.message : String(err)}\n`)
         }
       }
-      const packageServed = allowedPluginPaths.length
-        ? (packages?.builtinTools ?? []).filter(
-            (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
-          )
-        : []
-      const served = [...packageServed, ...shellTools.map((t) => t.name)]
       const run: AssembledTurn['run'] = {
         paths: this.deps.paths,
         cwd,
@@ -699,7 +710,7 @@ export class TurnRunner {
           : {}),
         // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
         // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
-        systemPromptAppend: [systemAppend(), ...(packageServed.length ? [classicBuiltinNote(packageServed)] : []), turnSettings.system_prompt_append.trim()]
+        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier !== undefined, this.deps.sandbox !== undefined)] : []), turnSettings.system_prompt_append.trim()]
           .filter((part) => part !== '')
           .join('\n\n'),
         systemPromptBase: turnSettings.system_prompt_base,
@@ -759,9 +770,9 @@ export class TurnRunner {
                                 owner: session.owner,
                                 tz: this.deps.background.tz,
                                 now: () => new Date(),
-                                // A Monitor's command runs on this replica, where Claude Code's own Bash would; with a
-                                // sandbox (#5864) the session's Bash runs in its pod instead, so a command is refused.
-                                ...(this.deps.sandbox ? {} : { commandQueue: this.deps.background.commandQueue }),
+                                // A Monitor's command runs where this turn's Bash runs: this replica, and only while
+                                // Bash is on there. With a sandbox (#5864) the session's Bash runs in its pod, so never.
+                                ...(shellTier !== undefined ? { commandQueue: this.deps.background.commandQueue } : {}),
                                 workspace: this.deps.files,
                                 // Where Claude Code's file tools work: a Workflow's script is kept there (#5162).
                                 dir: cwd,
@@ -804,7 +815,7 @@ export class TurnRunner {
           : {}),
         ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(allowedPluginPaths.length
-          ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n) && !NATIVE_NAMES.has(n)) }
+          ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !SESSION_NAMES.has(n) && !NATIVE_NAMES.has(n)) }
           : {}),
         ...(nativeTools.length ? { nativeTools } : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),

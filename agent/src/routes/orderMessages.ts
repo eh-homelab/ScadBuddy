@@ -1,4 +1,5 @@
 import type { Context } from 'hono'
+import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import { requestSession } from '../auth/browserSession.js'
@@ -52,8 +53,16 @@ async function parsed<T>(c: Context, schema: z.ZodType<T>): Promise<T | string> 
   return result.success ? result.data : result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
 }
 
-/** A refusal's slug (`message_changed: …`) as the route's status: 409 for the order's state, 422 otherwise. */
+/**
+ * A refusal as the route's answer. The agent's own (`message_changed: …`) maps its slug: 409 for
+ * the order's state, 503 for the plugin, else 422. A backend refusal (a claim that lost a race:
+ * 409 `already_notified`) keeps the backend's 4xx status and problem slug; its 5xx is a 502.
+ */
 function refusal(c: Context, err: ToolError) {
+  if (err.status !== undefined) {
+    const status = err.status >= 400 && err.status < 500 ? err.status : 502
+    return c.json({ detail: err.message, ...(err.problem ? { type: err.problem } : {}) }, status as ContentfulStatusCode)
+  }
   const slug = /^([a-z_]+):/.exec(err.message)?.[1]
   const conflict = slug === 'message_changed' || slug === 'already_notified' || slug === 'no_messaging_plugin' || slug === 'no_contact'
   const status = slug === 'messaging_plugin_unavailable' ? 503 : conflict ? 409 : 422
@@ -103,7 +112,8 @@ export function registerOrderMessageRoutes(app: Parameters<RouteModule['register
     const { digest, ...rest } = body
     const args: PersonSend = { order_id: c.req.param('id'), ...rest }
     try {
-      // One key per click: a retry of the same click is answered from its claim, never sent twice.
+      // One key per open preview (the browser keeps it): a retry after a lost answer is
+      // answered from its claim, never sent twice.
       return c.json(await personSend({ ...g.ctx, callKey: `order-page:${args.order_id}:${key}` }, args, digest))
     } catch (err) {
       if (err instanceof ToolError) return refusal(c, err)

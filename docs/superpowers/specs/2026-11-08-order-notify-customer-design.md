@@ -381,7 +381,11 @@ UI's origin and a signed-in person, as the test send). The preview composes the 
 answers it with its digest; nothing is sent or recorded. The send names the template,
 `resend_of` and that digest, never the text: the agent composes the message again, refuses
 409 `message_changed` when its digest differs, and else claims and sends it as the tool does,
-under the click's `Idempotency-Key`. The person's click on the shown message is the approval.
+under the open preview's `Idempotency-Key`. The browser makes one key per preview and keeps it
+for every click on its Send until a send is answered, so a retry after a lost answer is served
+from the first claim. A refusal from the backend keeps its status and slug: a claim that lost a
+race after the preview is 409 `already_notified`. The person's click on the shown message is
+the approval.
 
 Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only `read`
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a

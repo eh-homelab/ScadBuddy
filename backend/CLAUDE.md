@@ -521,6 +521,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
   `SCADBUDDY_TRUSTED_PROXIES` set). The bridge itself is `library/lsp.py`.
+- The storefront's bot check (#5283, storefront spec §5.8): Cloudflare Turnstile, on while
+  `storefront_turnstile_site_key` is set. Only the CRUD service holds the secret
+  (`storefront_turnstile_secret`, a `SECRET_FIELDS` member; a save needs the KEK, as
+  `git_remote_token`'s does), and only it calls Siteverify (`orders/storefront/turnstile.py`
+  `verify`; the Cloudflare facts are its docstring). The edge's `storefront/turnstile.py`
+  `require_turnstile(request, action)` forwards the page's `X-Turnstile-Token` to `POST
+  …/crud/storefront/turnstile/verify` (area `turnstile`) and refuses 403
+  `bot_check_failed` or 503 `bot_check_unavailable`. It fails closed: a site key with no
+  secret this process can open is `unavailable`, never a pass. A client (IPv4
+  address, IPv6 /64) with `FAILED_CHECKS` (10) failed checks in 10 minutes, or any client
+  of a prefix (IPv4 /24, IPv6 /48) with 100, is refused with no Siteverify call
+  (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
+  without tracking them, never refusing them). A
+  design request checks its upload allowance first, and only a passed check spends it.
+  The edge asks for the verdict once, never retried, with 15 s to answer; no answer is
+  503 and never counts as a failed check. While the edge's `SiteKey` read no key within
+  `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
+  within 30 s. A form route awaits it
+  before it reads its body. Today only design requests (`request`) take it; the actions
+  `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
+  routes still to come. The edge's page CSP (`storefront/static.py`) names
+  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the

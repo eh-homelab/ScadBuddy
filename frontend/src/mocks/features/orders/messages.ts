@@ -7,16 +7,23 @@ import { newId, now } from './state'
  * around them (`agent/src/routes/messagingBinding.ts`, `orderMessages.ts`). A preview's message
  * is fixed text; `mockMessageChange()` makes the next send find a different message, as an edit
  * to the order or the customer would. A binding whose tool is `missing_tool` fails the check.
+ * A send is claimed under its `Idempotency-Key`, as the agent's is: a retry with the same key is
+ * answered from that claim. `mockLoseNextSendAnswer()` claims and sends the next one, then drops
+ * its answer, as a network error after the plugin already sent would.
  */
 
 let messages: OrderMessage[] = []
 let version = 0
 const tests: { to: string }[] = []
+const claims = new Map<string, OrderMessage>()
+let loseNextAnswer = false
 
 export function reset(): void {
   messages = []
   version = 0
   tests.length = 0
+  claims.clear()
+  loseNextAnswer = false
 }
 
 /** A message recorded on `orderId`, for a test's setup. */
@@ -47,6 +54,16 @@ export function mockOrderMessage(orderId: string, message: Partial<OrderMessage>
 /** The next send finds another message than the one previewed. */
 export function mockMessageChange(): void {
   version += 1
+}
+
+/** The next send is claimed and sent, but its answer is lost on the way back. */
+export function mockLoseNextSendAnswer(): void {
+  loseNextAnswer = true
+}
+
+/** The Idempotency-Keys the sends were claimed under, for a test to read. */
+export function mockSendKeys(): string[] {
+  return [...claims.keys()]
 }
 
 /** The test messages sent, for a test to read. */
@@ -105,6 +122,9 @@ export const handlers = [
         { status: 409 },
       )
     }
+    const key = request.headers.get('idempotency-key') ?? ''
+    const claimed = claims.get(key)
+    if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
     const message = composed(String(params.id), template)
     const sent = mockOrderMessage(String(params.id), {
       template,
@@ -114,6 +134,11 @@ export const handlers = [
       resend_of,
       episode: 1,
     })
+    claims.set(key, sent)
+    if (loseNextAnswer) {
+      loseNextAnswer = false
+      return HttpResponse.error()
+    }
     return HttpResponse.json({ sent: true, message: sent })
   }),
 ]

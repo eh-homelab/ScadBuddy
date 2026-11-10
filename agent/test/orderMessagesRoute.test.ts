@@ -29,6 +29,8 @@ function signedIn(): BrowserSessions {
 /** The backend as a send reads and writes it; `customer.name` may change between calls. */
 function fakeBackend() {
   const customer = { name: 'Ada' }
+  /** A rival claim won between the preview and this send: the backend answers 409. */
+  const race = { lost: false }
   const claims: { body: Record<string, unknown>; key: string | null; author: string | null }[] = []
   const backend = createBackendClient(BACKEND, async (input) => {
     const request = input as Request
@@ -47,6 +49,12 @@ function fakeBackend() {
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
       const body = (await request.json()) as Record<string, unknown>
       claims.push({ body, key: request.headers.get('idempotency-key'), author: request.headers.get('x-scadbuddy-agent-author') })
+      if (race.lost) {
+        return Response.json(
+          { type: 'https://scadbuddy.dev/problems/orders/already_notified', title: 'Conflict', detail: "ORD-2026-7's customer was already sent 'ready'" },
+          { status: 409 },
+        )
+      }
       return Response.json({ id: 'm2', status: 'sending', ...body }, { status: 201 })
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {
@@ -54,7 +62,7 @@ function fakeBackend() {
     }
     return Response.json({ detail: `unexpected ${request.method} ${path}` }, { status: 500 })
   })
-  return { backend, customer, claims }
+  return { backend, customer, race, claims }
 }
 
 /** The plugin tool's inputSchema as BINDING expects it. */
@@ -80,7 +88,7 @@ function fakeMessaging() {
 }
 
 function app(sessions?: BrowserSessions) {
-  const { backend, customer, claims } = fakeBackend()
+  const { backend, customer, race, claims } = fakeBackend()
   const { messaging, sends } = fakeMessaging()
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, 'off'))
@@ -89,7 +97,7 @@ function app(sessions?: BrowserSessions) {
     origins: ORIGINS,
     remoteAddress: () => LOOPBACK,
   } as never)
-  return { hono, customer, claims, sends }
+  return { hono, customer, race, claims, sends }
 }
 
 const post = (hono: Hono, path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -144,6 +152,17 @@ describe('the order page’s Send again (#5660)', () => {
     expect(changed.status).toBe(409)
     expect(await changed.json()).toMatchObject({ type: 'message_changed' })
     expect(claims).toEqual([])
+    expect(sends).toEqual([])
+  })
+
+  it('answers a claim that lost a race with the backend’s 409 already_notified', async () => {
+    const { hono, race, claims, sends } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    race.lost = true
+    const lost = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0004' })
+    expect(lost.status).toBe(409)
+    expect(await lost.json()).toMatchObject({ type: 'already_notified' })
+    expect(claims).toHaveLength(1)
     expect(sends).toEqual([])
   })
 
