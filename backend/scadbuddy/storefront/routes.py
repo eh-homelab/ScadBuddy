@@ -11,10 +11,12 @@ is relayed as a stream, never held whole, as ``model/gltf-binary``. A design req
 read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
 spooled, then sent on as multipart a chunk at a time.
 
-The customer's order page (``/o#<token>``) posts the order link's token in each body,
-which goes on unread (`order_view` and the writes under ``/order``); its answer goes back
-with the fields of `ORDER_VIEW_FIELDS` only (`_shown`). A token that reads nothing is the
-CRUD side's 404 with no body, and the edge's own 404 with no body too.
+The customer's order page (``/o#<token>``, or ``/o?order=<id>`` signed in) posts the
+order link's token, or the order's id, in each body, which goes on unread with the store
+session's token when there is one (`order_view` and the writes under ``/order``); its
+answer goes back with the fields of `ORDER_VIEW_FIELDS` only (`_shown`). A reader that
+reads nothing is the CRUD side's 404 with no body, and the edge's own 404 with no body
+too.
 
 Accounts (#5283): ``POST /account/verify`` (the bot check ``sign_in`` first) sets the
 ``sb_session`` cookie from the CRUD side's answer (`accounts.py`), ``POST
@@ -415,11 +417,14 @@ def _shown(node: Any, path: str = "") -> Any:
     return node
 
 
-async def _order(crud: StorefrontCrud, path: str, body: bytes, key: str | None = None) -> Any:
-    """The CRUD side's order route's answer, allowlisted; a token that read nothing is a
-    404 with no body here too."""
+async def _order(
+    request: Request, crud: StorefrontCrud, path: str, body: bytes, key: str | None = None
+) -> Any:
+    """The CRUD side's order route's answer, allowlisted, sent with the browser's store
+    session when it has one (a signed-in reader's ``order_id``); a reader that read
+    nothing is a 404 with no body here too."""
     try:
-        answer = await crud.order(path, body, key=key)
+        answer = await crud.order(path, body, key=key, session=session_of(request))
     except CrudRefusedError as error:
         if error.status == status.HTTP_404_NOT_FOUND and not error.problem:
             return Response(status_code=status.HTTP_404_NOT_FOUND)
@@ -429,8 +434,9 @@ async def _order(crud: StorefrontCrud, path: str, body: bytes, key: str | None =
 
 @visitor_router.post("/order/view")
 async def order_view(request: Request, crud: Crud) -> Any:
-    """The customer's order, which the body's token opens."""
-    return await _order(crud, "view", await _body(request, "order_body_invalid"))
+    """The customer's order, which the body's token opens, or the ``order_id`` of the
+    signed-in account (``/o?order=<id>``)."""
+    return await _order(request, crud, "view", await _body(request, "order_body_invalid"))
 
 
 @visitor_router.post("/order/revisions/{revision_id}/answer")
@@ -443,7 +449,7 @@ async def order_answer(revision_id: str, request: Request, crud: Crud, visitor_i
         )
     key = _request_key(request, visitor_id)
     body = await _body(request, "order_body_invalid")
-    return await _order(crud, f"revisions/{revision_id}/answer", body, key)
+    return await _order(request, crud, f"revisions/{revision_id}/answer", body, key)
 
 
 @visitor_router.post("/order/quotes/{quote_id}/accept")
@@ -455,7 +461,7 @@ async def order_accept(quote_id: str, request: Request, crud: Crud, visitor_id: 
         )
     key = _request_key(request, visitor_id)
     body = await _body(request, "order_body_invalid")
-    return await _order(crud, f"quotes/{quote_id}/accept", body, key)
+    return await _order(request, crud, f"quotes/{quote_id}/accept", body, key)
 
 
 @visitor_router.post("/order/cancel")
@@ -463,7 +469,7 @@ async def order_cancel(request: Request, crud: Crud, visitor_id: Visitor) -> Any
     """The customer cancels the order while nothing is approved."""
     key = _request_key(request, visitor_id)
     body = await _body(request, "order_body_invalid")
-    return await _order(crud, "cancel", body, key)
+    return await _order(request, crud, "cancel", body, key)
 
 
 def _sign_in_required() -> ApiError:

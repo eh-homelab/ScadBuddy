@@ -267,15 +267,22 @@ class StorefrontCrud:
         )
         return response.json()
 
-    async def order(self, path: str, body: bytes, *, key: str | None = None) -> Any:
+    async def order(
+        self, path: str, body: bytes, *, key: str | None = None, session: str | None = None
+    ) -> Any:
         """``POST …/storefront/order/<path>`` (the customer's order page): the page's JSON
         body as it came, unread, since it holds the order link's token, which never
-        leaves a body; a write's ``Idempotency-Key``. No visitor or client header: the
-        token is the secret. ``path`` is the edge's own (`storefront/routes.py` checks
-        each id in it), so it cannot leave ``order/``. A token that reads nothing raises
-        `CrudRefusedError` 404 with no problem."""
+        leaves a body; a write's ``Idempotency-Key``; the store session's token
+        (`SESSION_HEADER`), when the browser has one, for a signed-in reader. No visitor
+        or client header: the token or the session is the secret. ``path`` is the edge's
+        own (`storefront/routes.py` checks each id in it), so it cannot leave ``order/``.
+        A reader that reads nothing raises `CrudRefusedError` 404 with no problem."""
         response = await self._crud.request(
-            "POST", f"{BASE}/order/{path}", content=body, idempotency_key=key
+            "POST",
+            f"{BASE}/order/{path}",
+            content=body,
+            idempotency_key=key,
+            headers=None if session is None else {SESSION_HEADER: session},
         )
         return response.json()
 

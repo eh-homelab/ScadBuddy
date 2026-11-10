@@ -1,10 +1,15 @@
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { PreviewJob } from '../../components/Preview'
 import type { CustomerOrder } from '../api/client'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { OrderPage } from './OrderPage'
+
+vi.mock('../../components/Preview', () => ({
+  Preview: ({ job }: { job?: PreviewJob }) => <div data-testid="preview" data-url={job?.preview_url ?? ''} />,
+}))
 
 const HOSTILE = '<img src=x onerror=alert(1)>'
 const TOKEN = 'T'.repeat(43)
@@ -84,6 +89,32 @@ describe('OrderPage', () => {
     expect(sent[0]!.path).toBe('/api/store/v1/order/view')
     expect(sent[0]!.body).toEqual({ token: TOKEN })
     expect(screen.getByText('Price: $12.50')).toBeInTheDocument()
+  })
+
+  it('reads a signed-in order from ?order= and sends its id in the body only', async () => {
+    const sent = serve(ORDER)
+    renderPage(<OrderPage />, { route: '/o?order=o-1' })
+    expect(await screen.findByRole('heading', { name: 'Order 2026-7' })).toBeInTheDocument()
+    expect(sent[0]!.body).toEqual({ order_id: 'o-1' })
+  })
+
+  it('takes the fragment token over ?order=', async () => {
+    const sent = serve(ORDER)
+    renderPage(<OrderPage />, { route: `/o?order=o-1#${TOKEN}` })
+    expect(await screen.findByRole('heading', { name: 'Order 2026-7' })).toBeInTheDocument()
+    expect(sent[0]!.body).toEqual({ token: TOKEN })
+  })
+
+  it("shows a design's 3D preview in the shared viewer", async () => {
+    const revision = ORDER.items[0]!.revisions[0]!
+    const model = { url: 'https://store.example/customer-file-1', kind: 'model', caption: 'Design 1, picture 3' } as const
+    serve({
+      ...ORDER,
+      items: [{ ...ORDER.items[0]!, revisions: [{ ...revision, pictures: [...revision.pictures, model] }] }],
+    })
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', model.url)
+    expect(screen.getByRole('figure', { name: 'Design 1, picture 3' })).toBeInTheDocument()
   })
 
   it('renders what the shop typed as text', async () => {

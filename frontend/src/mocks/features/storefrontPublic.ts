@@ -135,6 +135,8 @@ function outside(body: Body): Response | Listing {
 }
 
 export const ORDER_TOKEN = 'tok'
+/** The order a signed-in reader opens at `/o?order=<id>`. */
+export const ORDER_ID = 'order-1'
 
 function freshOrder(): CustomerOrder {
   return {
@@ -172,10 +174,12 @@ function freshOrder(): CustomerOrder {
 
 let order = freshOrder()
 
-/** The order the body's token opens, or the empty 404 the CRUD side answers. */
+/** The order the body's token, or a signed-in reader's `order_id`, opens, or the empty 404 the CRUD side answers. */
 async function orderOf(request: Request): Promise<CustomerOrder | Response> {
-  const body = (await request.json().catch(() => ({}))) as { token?: unknown }
-  return body.token === ORDER_TOKEN ? order : new HttpResponse(null, { status: 404 })
+  const body = (await request.json().catch(() => ({}))) as { token?: unknown; order_id?: unknown }
+  return body.token === ORDER_TOKEN || (body.token === undefined && body.order_id === ORDER_ID)
+    ? order
+    : new HttpResponse(null, { status: 404 })
 }
 
 function ensureDraft(): Draft {

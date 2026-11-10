@@ -351,13 +351,14 @@ class SubmittedOrder(BaseModel):
 
 
 class CustomerPicture(BaseModel):
-    """A picture or a video of a design revision, as a presigned GET of an hour; ``url``
-    is null when the picture cannot be shown now (its copy failed, or it is too large to
-    copy). ``caption`` is the shop's caption, else "Design N, picture K": never the
+    """A picture, a video or a 3D preview of a design revision, as a presigned GET of an
+    hour; ``url`` is null when the picture cannot be shown now (its copy failed, or it is
+    too large to copy). ``caption`` is the shop's caption, else "Design N, picture K": never the
     file's own name, which may be the shop's internal one."""
 
     url: str | None
-    kind: Literal["image", "video"]
+    #: ``model`` is a render's 3D preview (``model/gltf-binary``) for the 3D viewer.
+    kind: Literal["image", "video", "model"]
     caption: str
 
 

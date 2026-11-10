@@ -70,8 +70,11 @@ order link's) opens; ``POST …/order/revisions/{id}/answer``, ``…/order/quote
 and ``…/order/cancel`` (each with an ``Idempotency-Key``, 428 without) are the customer's
 writes, each answering the view after it. Any token that reads nothing (unknown, revoked,
 or not a token) is a 404 with no body, as ``pay/checkout``'s, and the token travels in the
-body only. They take no visitor or client header: the token is the secret, and the
-customer actor's session is the link's.
+body only. Signed in, the body may name an ``order_id`` in place of a token: the
+store session's account must own it (`accounts.account_owns_order`), and any failure,
+no session included, is the same 404 with no body. They take no visitor or client
+header: the token, or the session, is the secret; the customer actor's session is the
+link's or the account's.
 """
 
 from __future__ import annotations
@@ -209,7 +212,7 @@ StoreSession = Annotated[str | None, Depends(store_session)]
 
 async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
     """The account of the request's session, or None. Submit takes the account from here,
-    never from a body, and so is the order page to (a later PR)."""
+    never from a body, and so does the order page (``order/*``, a `ByAccount` reader)."""
     if session is None:
         return None
 
@@ -584,14 +587,17 @@ async def turnstile_verify(
     return TurnstileVerdict(verdict=verdict)
 
 
-#: The body of every order route: the order link's token, and the write's own fields.
+#: The body of every order route: the order link's ``token``, or, signed in, the
+#: ``order_id`` the session's account owns; and the write's own fields.
 _ORDER_TOKEN: dict[str, Any] = {
     "type": "object",
-    "required": ["token"],
-    "properties": {"token": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS}},
+    "properties": {
+        "token": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS},
+        "order_id": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS},
+    },
 }
 _UNREAD: dict[int | str, dict[str, Any]] = {
-    status.HTTP_404_NOT_FOUND: {"description": "The token reads nothing (an empty body)"}
+    status.HTTP_404_NOT_FOUND: {"description": "The reader reads nothing (an empty body)"}
 }
 
 
@@ -602,9 +608,13 @@ def _order_body(model: type[BaseModel] | None = None) -> dict[str, Any]:
         schema = {
             **schema,
             "properties": {**own.get("properties", {}), **schema["properties"]},
-            "required": [*own.get("required", []), "token"],
+            "required": own.get("required", []),
         }
     return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+def _account_id(account: Account | None) -> str | None:
+    return None if account is None else account.id
 
 
 def _answered(found: CustomerOrderView | None) -> CustomerOrderView | Response:
@@ -619,10 +629,13 @@ def _answered(found: CustomerOrderView | None) -> CustomerOrderView | Response:
     responses=_UNREAD,
     openapi_extra=_order_body(),
 )
-async def order_view(request: Request, state: StateDep) -> CustomerOrderView | Response:
-    """The order the body's token opens, as its customer reads it; the first view stamps
-    the link's ``opened_at``."""
-    reader, _ = order_page.read_body(await request.body())
+async def order_view(
+    request: Request, state: StateDep, account: StoreAccount
+) -> CustomerOrderView | Response:
+    """The order the body's token opens, or the signed-in account's ``order_id``, as its
+    customer reads it. The first view stamps the link's ``opened_at``; a link opened while
+    signed in attaches the order to the account."""
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
     return _answered(await order_page.view(state, reader))
 
 
@@ -637,11 +650,12 @@ async def order_answer(
     revision_id: str,
     request: Request,
     state: StateDep,
+    account: StoreAccount,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> CustomerOrderView | Response:
     """The customer's answer to a design (`order_page.answer`)."""
     key = required_key(idempotency_key)
-    reader, body = order_page.read_body(await request.body())
+    reader, body = order_page.read_body(await request.body(), _account_id(account))
     return _answered(await order_page.answer(state, reader, key, revision_id, body))
 
 
@@ -656,11 +670,12 @@ async def order_accept(
     quote_id: str,
     request: Request,
     state: StateDep,
+    account: StoreAccount,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> CustomerOrderView | Response:
     """The customer accepts a price (`order_page.accept`)."""
     key = required_key(idempotency_key)
-    reader, _ = order_page.read_body(await request.body())
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
     return _answered(await order_page.accept(state, reader, key, quote_id))
 
 
@@ -674,12 +689,13 @@ async def order_accept(
 async def order_cancel(
     request: Request,
     state: StateDep,
+    account: StoreAccount,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> CustomerOrderView | Response:
     """The customer cancels the order while nothing is approved and nothing is paid
     (`order_page.cancel`: 409 ``order_approved``, 409 ``order_paid``)."""
     key = required_key(idempotency_key)
-    reader, body = order_page.read_body(await request.body())
+    reader, body = order_page.read_body(await request.body(), _account_id(account))
     return _answered(await order_page.cancel(state, reader, key, body))
 
 

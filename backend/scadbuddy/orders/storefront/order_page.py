@@ -2,10 +2,15 @@
 
 A customer reads their order and answers it at ``/o#<token>``: the page sends the order
 link's token in each request's body, never in a path, and the edge forwards it unread.
-`resolve` is the one way to an order: a `Reader` (today a link's token, `ByLink`) gives an
-`Access` (the order and the customer's session), or None. Any token that reads nothing
-(unknown, revoked, or not a token at all) costs the same one indexed lookup
-(`links.link_by_token`) and gets the same empty 404 from the route. A token is never
+`resolve` is the one way to an order: a `Reader` gives an `Access` (the order and the
+customer's session), or None. A `ByLink` reader holds the link's token; a `ByAccount`
+reader (``/o?order=<id>``) is the signed-in account of the request's store session, which
+must own the order (`accounts.account_owns_order`), and every failure there (no session,
+another account's order, an unknown id) is the same empty 404. A link opened while signed
+in attaches the order to the account (`accounts.attach_order`), in the view's
+transaction. Any token that reads nothing (unknown, revoked, or not a token at all) costs
+the same one indexed lookup (`links.link_by_token`) and gets the same empty 404 from the
+route. A token is never
 logged and never stored: the ledger keeps its sha256 inside the request's digest only.
 
 `view` builds the `CustomerOrderView`: the status in the customer's words (`ORDER_WORDS`,
@@ -26,9 +31,11 @@ view copies its bytes to `customer_file_key` on the S3 content store and presign
 Every attachment that shows the copy holds it (`hold_with_attachment`). A picture that
 cannot be shown now (the copy failed, the file is past `MAX_PICTURE_COPY_BYTES`, or the
 store is not S3, which `listings.public_content` logs) is listed with no URL: the view
-never fails for one. Its caption is the shop's caption or "Design N, picture K", never
-the file's own name. Each revision also lists its colours by slot, with the price book's
-colour names: they are part of the design the customer accepts.
+never fails for one. A render's 3D preview (`PREVIEW_3D`) is one too, of kind ``model``,
+presigned the same way for the storefront's viewer. Its caption is the shop's caption or
+"Design N, picture K", never the file's own name. Each revision also lists its colours by
+slot, with the price book's colour names: they are part of the design the customer
+accepts.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from fastapi import status
 from pydantic import BaseModel, ValidationError
@@ -63,6 +70,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import Conn
+from scadbuddy.orders.storefront.accounts import account_owns_order, attach_order
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import link_by_token, mark_opened, token_sha256
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
@@ -130,6 +138,8 @@ MAX_PICTURE_COPY_BYTES: Final = 25 * 1024 * 1024
 _SHOWN_ROLES: Final = REVISION_ROLES | {"reference"}
 #: The video types a picture may be; images are `SHOWN_IMAGES`.
 _VIDEOS: Final = frozenset({"video/mp4", "video/webm", "video/quicktime"})
+#: A render's 3D preview, which the storefront's viewer (`components/Preview.tsx`) shows.
+PREVIEW_3D: Final = "model/gltf-binary"
 
 
 def customer_file_key(sha256: str) -> str:
@@ -139,47 +149,85 @@ def customer_file_key(sha256: str) -> str:
 
 @dataclass(frozen=True)
 class ByLink:
-    """A reader who holds the order link's token (``/o#<token>``)."""
+    """A reader who holds the order link's token (``/o#<token>``). ``account_id`` is the
+    signed-in account of the request's store session, if any: a view attaches the order
+    to it (spec §5.2), and nothing else does."""
 
     token: str
+    account_id: str | None = None
+
+    def ledger(self) -> dict[str, str]:
+        """What names this reader in a write's ledger digest: the token's sha256 only."""
+        return {"link": token_sha256(self.token)}
 
 
-#: Who reads an order. The account path (``/o?order=<id>`` with an account session, which
-#: owns the order) adds its own reader here.
-Reader = ByLink
+@dataclass(frozen=True)
+class ByAccount:
+    """A signed-in reader (``/o?order=<id>``): the account of the request's store session
+    (None with no live session) and the order it asks for. It reads only an order the
+    account owns (`accounts.account_owns_order`)."""
+
+    account_id: str | None
+    order_id: str
+
+    def ledger(self) -> dict[str, str]:
+        return {"account": self.account_id or "", "order": self.order_id}
+
+
+#: Who reads an order: a link's holder, or a signed-in account that owns it.
+Reader = ByLink | ByAccount
 
 
 @dataclass(frozen=True)
 class Access:
-    """The order a reader may read and answer, and the customer actor's session."""
+    """The order a reader may read and answer, the customer actor's session
+    (``link:<id>`` or ``account:<id>``), and the link that opened it, if one did."""
 
     order_id: str
     session: str
-    link_id: str
+    link_id: str | None
 
 
 def resolve(conn: Conn, reader: Reader) -> Access | None:
-    """The order ``reader`` opens, or None for a reader that reads nothing."""
+    """The order ``reader`` opens, or None for a reader that reads nothing: an unknown,
+    revoked or malformed token, no live session, or an order the account does not own.
+    Every one of them is the same empty 404."""
+    if isinstance(reader, ByAccount):
+        if reader.account_id is None or not reader.order_id:
+            return None
+        if not account_owns_order(conn, reader.account_id, reader.order_id):
+            return None
+        return Access(
+            order_id=reader.order_id, session=f"account:{reader.account_id}", link_id=None
+        )
     link = link_by_token(conn, reader.token)
     if link is None:
         return None
     return Access(order_id=link.order_id, session=f"link:{link.id}", link_id=link.id)
 
 
-def read_body(raw: bytes) -> tuple[ByLink, dict[str, Any]]:
-    """The body's reader and the body. A body that is not a JSON object, or a token that
-    is not a string of at most `MAX_TOKEN_CHARS`, reads as the empty token, which reads
+def read_body(raw: bytes, account_id: str | None = None) -> tuple[Reader, dict[str, Any]]:
+    """The body's reader and the body: ``token`` (a link), else ``order_id`` (the signed-in
+    ``account_id``'s). A body that is not a JSON object, or a token or an order id that is
+    not a string of at most `MAX_TOKEN_CHARS`, reads as the empty token, which reads
     nothing: the route answers it as any other unknown token."""
     try:
         body = json.loads(raw)
     except (ValueError, RecursionError):
         body = None
     if not isinstance(body, dict):
-        return ByLink(""), {}
-    token = body.get("token")
-    if not isinstance(token, str) or len(token) > MAX_TOKEN_CHARS:
-        token = ""
-    return ByLink(token), body
+        return ByLink("", account_id), {}
+
+    def text(name: str) -> str | None:
+        value = body.get(name)
+        return value if isinstance(value, str) and len(value) <= MAX_TOKEN_CHARS else None
+
+    token = text("token")
+    if token is None and "token" not in body:
+        order_id = text("order_id")
+        if order_id is not None:
+            return ByAccount(account_id, order_id), body
+    return ByLink(token or "", account_id), body
 
 
 def _orders(state: AppState) -> OrdersComponent:
@@ -211,9 +259,17 @@ class _Rows:
 def _picture(attachment: Attachment) -> bool:
     if attachment.role not in _SHOWN_ROLES:
         return False
-    return (attachment.kind == "image" and attachment.media_type in SHOWN_IMAGES) or (
-        attachment.kind == "video" and attachment.media_type in _VIDEOS
+    return (
+        (attachment.kind == "image" and attachment.media_type in SHOWN_IMAGES)
+        or (attachment.kind == "video" and attachment.media_type in _VIDEOS)
+        or attachment.media_type == PREVIEW_3D
     )
+
+
+def _picture_kind(attachment: Attachment) -> Literal["image", "video", "model"]:
+    if attachment.media_type == PREVIEW_3D:
+        return "model"
+    return "video" if attachment.kind == "video" else "image"
 
 
 def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
@@ -358,7 +414,7 @@ async def _item(
             pictures.append(
                 CustomerPicture(
                     url=url,
-                    kind="video" if attachment.kind == "video" else "image",
+                    kind=_picture_kind(attachment),
                     caption=attachment.caption.strip()
                     or f"Design {revision.number}, picture {number}",
                 )
@@ -454,7 +510,11 @@ async def view(state: AppState, reader: Reader) -> CustomerOrderView | None:
             access = resolve(conn, reader)
             if access is None:
                 return None
-            mark_opened(conn, access.link_id)
+            if access.link_id is not None:
+                mark_opened(conn, access.link_id)
+                if isinstance(reader, ByLink) and reader.account_id is not None:
+                    # A link opened while signed in joins that account (spec §5.2).
+                    attach_order(conn, reader.account_id, access.order_id)
             return _read(conn, orders, access.order_id)
 
     rows = await asyncio.to_thread(read)
@@ -546,7 +606,7 @@ async def _write(
     answers the view and does nothing else. None when the reader's link was revoked
     meanwhile."""
     orders = _orders(state)
-    asked = {"link": token_sha256(reader.token), **asked}
+    asked = {**reader.ledger(), **asked}
 
     def run() -> None:
         with state.projection.pool.connection() as conn:

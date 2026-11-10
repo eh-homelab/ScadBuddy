@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 import { formatMoney } from '../../lib/money'
 import {
@@ -10,7 +10,17 @@ import {
   type CustomerOrder,
   type CustomerPayment,
   type CustomerRevision,
+  type OrderReader,
 } from '../api/client'
+import type { PreviewJob } from '../../components/Preview'
+
+// three.js is most of the viewer: its own chunk, fetched only for a design with a 3D preview.
+const Preview = lazy(async () => ({ default: (await import('../../components/Preview')).Preview }))
+
+/** A design's 3D preview (`kind: 'model'`, a presigned `model/gltf-binary`) as the viewer's finished job. */
+function modelJob(url: string): PreviewJob {
+  return { id: url, status: 'done', preview_url: url, plates: null, bbox_mm: null, colors: [], error: null }
+}
 
 /** What a link that opens no order reads (an unknown, revoked or broken link). */
 const NO_ORDER = 'This link does not open an order. It may have been replaced by a newer one: use the link in the latest mail from the shop.'
@@ -18,14 +28,25 @@ const NO_ORDER = 'This link does not open an order. It may have been replaced by
 /**
  * `/o#<token>`: the customer's order (spec §5.2, §5.6). The token is the order link's,
  * read from the URL fragment, which the browser never sends: the page posts it in each
- * request's body and never puts it into a path or the history. Every text the customer or
+ * request's body and never puts it into a path or the history. With no token,
+ * `/o?order=<id>` (a signed-in account's "Your orders") posts the order's id instead, and
+ * the shop reads it only for the session's own account. A design's 3D preview shows in
+ * the shared viewer (`components/Preview.tsx`). Every text the customer or
  * the shop typed is a text node. Each design shows its pictures (a picture the shop cannot
  * show now is its caption) and its colours, which are part of what the customer accepts. A payment shows "Paid" only from the shop's own answer,
  * never because the provider sent the browser back here (spec §7): "Check for updates"
  * reads the order again.
  */
 export function OrderPage() {
-  const token = useLocation().hash.replace(/^#/, '')
+  const location = useLocation()
+  const token = location.hash.replace(/^#/, '')
+  const orderId = new URLSearchParams(location.search).get('order') ?? ''
+  const who = useMemo<OrderReader | null>(
+    () => (token ? { token } : orderId ? { order_id: orderId } : null),
+    [token, orderId],
+  )
+  /** The writes' reader: they are offered only once `who` has read an order. */
+  const reader: OrderReader = who ?? { token: '' }
   const [order, setOrder] = useState<CustomerOrder | null>()
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -34,17 +55,18 @@ export function OrderPage() {
   const load = useCallback(async () => {
     setError(null)
     try {
-      setOrder(await store.orderView(token))
+      if (who === null) return
+      setOrder(await store.orderView(who))
     } catch (caught) {
       if (caught instanceof StoreError && caught.status === 404) setOrder(null)
       else setError(errorText(caught))
     }
-  }, [token])
+  }, [who])
 
   useEffect(() => {
-    if (token) void load()
+    if (who) void load()
     else setOrder(null)
-  }, [token, load])
+  }, [who, load])
 
   /** One write at a time, each with its own key; the answer is the order after it. */
   const write = async (what: string, send: (key: string) => Promise<CustomerOrder>): Promise<boolean> => {
@@ -98,10 +120,10 @@ export function OrderPage() {
                 busy={busy}
                 answer={(revision, answer, note) =>
                   write(`answer:${revision.id}:${answer}:${note}`, (key) =>
-                    store.answerRevision(token, revision.id, answer, note, key),
+                    store.answerRevision(reader, revision.id, answer, note, key),
                   )
                 }
-                acceptPrice={(quoteId) => write(`accept:${quoteId}`, (key) => store.acceptQuote(token, quoteId, key))}
+                acceptPrice={(quoteId) => write(`accept:${quoteId}`, (key) => store.acceptQuote(reader, quoteId, key))}
               />
             ))}
           </ul>
@@ -125,7 +147,7 @@ export function OrderPage() {
             </button>
           </p>
           {order.can_cancel && (
-            <Cancel busy={busy} cancel={(reason) => write(`cancel:${reason}`, (key) => store.cancelOrder(token, reason, key))} />
+            <Cancel busy={busy} cancel={(reason) => write(`cancel:${reason}`, (key) => store.cancelOrder(reader, reason, key))} />
           )}
         </>
       )}
@@ -196,6 +218,12 @@ function Revision({
       {revision.pictures.map((picture, index) =>
         picture.url === null ? (
           <p key={index} className="sf-hint">{`${picture.caption}: this picture cannot be shown now.`}</p>
+        ) : picture.kind === 'model' ? (
+          <figure key={index} className="sf-stage" aria-label={picture.caption}>
+            <Suspense fallback={<div className="sf-stage-empty">Loading the viewer…</div>}>
+              <Preview job={modelJob(picture.url)} unit="mm" rendering={false} />
+            </Suspense>
+          </figure>
         ) : picture.kind === 'video' ? (
           <video key={index} className="sf-file" src={picture.url} controls aria-label={picture.caption} />
         ) : (

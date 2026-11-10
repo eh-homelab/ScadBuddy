@@ -28,14 +28,17 @@ from scadbuddy.orders.lifecycle import Lifecycle, ManualQuoteInput, NewModelItem
 from scadbuddy.orders.models import Actor, Order, OrderItem, Revision
 from scadbuddy.orders.numbers import next_number
 from scadbuddy.orders.storefront import order_page
+from scadbuddy.orders.storefront.accounts import SignedIn, account_owns_order
 from scadbuddy.orders.storefront.links import revoke_order_links
 from scadbuddy.orders.storefront.mail import issue_link
 from scadbuddy.orders.storefront.order_page import ITEM_WORDS, ORDER_WORDS, customer_file_key
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.orders.storefront.wire import CustomerOrderView
 from scadbuddy.payments import store as payments
+from scadbuddy.payments.fake import FAKE
 from scadbuddy.store.content import ContentStore
-from scadbuddy.storefront.wire import ORDER_VIEW_FIELDS, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import ORDER_VIEW_FIELDS, SESSION_HEADER, STOREFRONT_PROBLEMS
+from tests.orders.storefront.test_accounts import sign_in
 from tests.orders.storefront.test_drafts import CRUD, CrudCaller, _orders, _state
 from tests.orders.test_lifecycle import resolved
 from tests.support.store import s3  # noqa: F401  (fixture)
@@ -67,30 +70,45 @@ def crud(api: TestClient) -> CrudCaller:
 
 
 class Reader:
-    """The edge's calls for one link holder: the token in the body, never a path."""
+    """The edge's calls for one reader: a link's token, or (``order_id``) a signed-in
+    account's order, in the body, never a path; the store session as the edge sends it."""
 
-    def __init__(self, crud: CrudCaller, token: Any) -> None:
+    def __init__(
+        self,
+        crud: CrudCaller,
+        token: Any = None,
+        *,
+        order_id: str | None = None,
+        session: str | None = None,
+    ) -> None:
         self.crud = crud
         self.token = token
+        self.order_id = order_id
+        self.session = session
+
+    def _who(self) -> dict[str, Any]:
+        return {"order_id": self.order_id} if self.order_id is not None else {"token": self.token}
 
     def _post(self, path: str, body: dict[str, Any], key: str | None) -> Any:
         headers = {**self.crud.bearer}
         if key is not None:
             headers["Idempotency-Key"] = key
-        return self.crud.api.post(CRUD + path, json=body, headers=headers)
+        if self.session is not None:
+            headers[SESSION_HEADER] = self.session
+        return self.crud.api.post(CRUD + path, json={**self._who(), **body}, headers=headers)
 
     def view(self) -> Any:
-        return self._post("/order/view", {"token": self.token}, None)
+        return self._post("/order/view", {}, None)
 
     def answer(self, revision_id: str, answer: str, note: str = "", *, key: str | None) -> Any:
-        body = {"token": self.token, "answer": answer, "note": note}
+        body = {"answer": answer, "note": note}
         return self._post(f"/order/revisions/{revision_id}/answer", body, key)
 
     def accept(self, quote_id: str, *, key: str | None) -> Any:
-        return self._post(f"/order/quotes/{quote_id}/accept", {"token": self.token}, key)
+        return self._post(f"/order/quotes/{quote_id}/accept", {}, key)
 
     def cancel(self, reason: str = "", *, key: str | None) -> Any:
-        return self._post("/order/cancel", {"token": self.token, "reason": reason}, key)
+        return self._post("/order/cancel", {"reason": reason}, key)
 
 
 class Made:
@@ -151,6 +169,8 @@ def attach(
     attachment_id: str | None = None,
     role: str = "render",
     caption: str = "",
+    kind: str = "image",
+    media_type: str = "image/png",
 ) -> None:
     digest = sha256(data).hexdigest()
     assert api.portal is not None
@@ -160,10 +180,10 @@ def attach(
         item.id,
         BY,
         attachment_id=attachment_id or f"att-{rev.id}",
-        kind="image",
+        kind=kind,  # type: ignore[arg-type]
         role=role,  # type: ignore[arg-type]
         filename="internal-name-v3.png",
-        media_type="image/png",
+        media_type=media_type,
         size_bytes=len(data),
         sha256=digest,
         blob_key=key,
@@ -430,6 +450,34 @@ def test_the_last_acceptance_accepts_the_order_as_the_customer(
     assert by.session == f"link:{link['id']}"
 
 
+@pytest.mark.xfail(reason="closing helper lands with #5923", strict=True)
+def test_the_customers_last_accept_closes_an_open_deposit_requests_page(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    made = make_order(api, crud)
+    with _orders(api).store.transaction() as conn:
+        deposit = payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="deposit",
+            provider="fake",
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        payments.set_request_link(
+            conn, deposit.id, provider_ref="r1", hosted_url="https://pay.example/1", link_error=None
+        )
+    [item] = items_of(api, made)
+    last = made.reader.answer(newest(api, item).id, "accepted", key="k1")
+    assert last.json()["status"] == ORDER_WORDS["accepted"]
+    with _orders(api).store.transaction() as conn:
+        found = {r.id: r.status for r in payments.requests_for_order(conn, made.order.id)}
+    assert found[deposit.id] == "cancelled"
+    assert FAKE.cancelled == ["r1"]
+
+
 def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud, approval="design_first")
     [item] = items_of(api, made)
@@ -647,5 +695,110 @@ def test_a_picture_past_the_size_bound_is_not_copied(
     assert picture["url"] is None and puts == []
 
 
+GLB = b"glTF" + (2).to_bytes(4, "little") + (12).to_bytes(4, "little")
+
+
+def test_a_revisions_3d_preview_is_presigned_for_the_viewer(s3_api: TestClient) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud)
+    [item] = items_of(s3_api, made)
+    attach(
+        s3_api,
+        made.order,
+        item,
+        newest(s3_api, item),
+        GLB,
+        attachment_id="glb",
+        kind="other",
+        media_type="model/gltf-binary",
+    )
+    pictures = made.reader.view().json()["items"][0]["revisions"][0]["pictures"]
+    [model] = [p for p in pictures if p["kind"] == "model"]
+    assert model["caption"] == "Design 1, picture 2"
+    got = httpx.get(model["url"])
+    assert got.status_code == 200 and got.content == GLB
+    assert got.headers["content-type"] == "model/gltf-binary"
+
+
 def test_the_crud_side_lists_the_order_area(crud: CrudCaller) -> None:
     assert "order" in crud.get("/areas").json()["areas"]
+
+
+# -- the signed-in account path (``/o?order=<id>``) ------------------------------------------
+
+
+def signed_in(api: TestClient, email: str = "Ada@Example.com") -> SignedIn:
+    with _orders(api).store.transaction() as conn:
+        return sign_in(conn, email)
+
+
+def owns(api: TestClient, account_id: str, order_id: str) -> bool:
+    with _orders(api).store.transaction() as conn:
+        return account_owns_order(conn, account_id, order_id)
+
+
+def test_a_token_view_while_signed_in_attaches_the_order(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    assert not owns(api, me.account.id, made.order.id)
+    assert Reader(crud, made.token, session=me.session_token).view().status_code == 200
+    assert owns(api, me.account.id, made.order.id)
+    # A view with no session attaches nothing.
+    other = make_order(api, crud, visitor="o")
+    other.reader.view()
+    assert not owns(api, me.account.id, other.order.id)
+
+
+def test_an_account_reads_its_own_order(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    Reader(crud, made.token, session=me.session_token).view()
+    mine = Reader(crud, order_id=made.order.id, session=me.session_token).view()
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["number"] == made.order.number
+
+
+def test_an_order_another_account_owns_or_none_is_an_empty_404(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    owner = signed_in(api)
+    Reader(crud, made.token, session=owner.session_token).view()
+    stranger = signed_in(api, "bob@example.com")
+    [item] = items_of(api, made)
+    for reader in (
+        Reader(crud, order_id=made.order.id, session=stranger.session_token),
+        Reader(crud, order_id=made.order.id),
+        Reader(crud, order_id=made.order.id, session="not-a-session"),
+        Reader(crud, order_id="nope", session=owner.session_token),
+    ):
+        for r in (
+            reader.view(),
+            reader.answer(newest(api, item).id, "accepted", key="k1"),
+            reader.cancel(key="k2"),
+        ):
+            assert (r.status_code, r.content) == (404, b"")
+    assert newest(api, item).answer is None
+
+
+def test_an_account_answers_and_accepts_as_the_orders_customer(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud, count=2)
+    me = signed_in(api)
+    Reader(crud, made.token, session=me.session_token).view()
+    mine = Reader(crud, order_id=made.order.id, session=me.session_token)
+    a, b = items_of(api, made)
+    first = mine.answer(newest(api, a).id, "accepted", key="k1")
+    assert first.status_code == 200, first.text
+    assert mine.answer(newest(api, a).id, "accepted", key="k1").status_code == 200
+    last = mine.answer(newest(api, b).id, "accepted", key="k2")
+    assert last.json()["status"] == ORDER_WORDS["accepted"]
+    accepted = [
+        e
+        for e in _orders(api).store.events(made.order.id)
+        if e.kind == "order.status" and e.detail["to"] == "accepted"
+    ]
+    [by] = [e.by for e in accepted]
+    assert by.principal == f"customer:{made.order.customer_id}"
+    assert by.session == f"account:{me.account.id}"

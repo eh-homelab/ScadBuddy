@@ -9,8 +9,8 @@
  * it bound to the visitor (`backend/scadbuddy/storefront/routes.py` `_request_key`), and
  * the CRUD side keeps one answer per key, so a render, an add, a removal or a design
  * request or a submit sent again after a lost answer is done once. The customer's order page
- * sends the order link's token in each body (`order*`), never in a path; a token that reads
- * nothing is a 404 with no body. A refusal is a `StoreError` with the problem's
+ * sends the order link's token, or a signed-in reader's order id, in each body (`order*`),
+ * never in a path; a reader that reads nothing is a 404 with no body. A refusal is a `StoreError` with the problem's
  * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
  * seconds the edge says to wait.
  */
@@ -29,6 +29,11 @@ export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
 export type ShippingOption = Schemas['PublicShippingOption']
 export type SubmittedOrder = Schemas['SubmittedOrder']
 export type CustomerOrder = Schemas['CustomerOrderView']
+/**
+ * Who reads an order: the order link's token (`/o#<token>`), or, signed in, the order's
+ * id (`/o?order=<id>`), which the CRUD side reads only for the session's own account.
+ */
+export type OrderReader = { token: string } | { order_id: string }
 export type CustomerItem = Schemas['CustomerItem']
 export type CustomerRevision = Schemas['CustomerRevision']
 export type CustomerPayment = Schemas['CustomerPayment']
@@ -145,17 +150,23 @@ export const store = {
   submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
     call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
-  orderView: (token: string) => call<CustomerOrder>('/order/view', { method: 'POST', json: { token } }),
-  answerRevision: (token: string, revisionId: string, answer: 'accepted' | 'changes_requested', note: string, key: string) =>
+  orderView: (who: OrderReader) => call<CustomerOrder>('/order/view', { method: 'POST', json: { ...who } }),
+  answerRevision: (
+    who: OrderReader,
+    revisionId: string,
+    answer: 'accepted' | 'changes_requested',
+    note: string,
+    key: string,
+  ) =>
     call<CustomerOrder>(`/order/revisions/${encodeURIComponent(revisionId)}/answer`, {
       method: 'POST',
-      json: { token, answer, note },
+      json: { ...who, answer, note },
       key,
     }),
-  acceptQuote: (token: string, quoteId: string, key: string) =>
-    call<CustomerOrder>(`/order/quotes/${encodeURIComponent(quoteId)}/accept`, { method: 'POST', json: { token }, key }),
-  cancelOrder: (token: string, reason: string, key: string) =>
-    call<CustomerOrder>('/order/cancel', { method: 'POST', json: { token, reason }, key }),
+  acceptQuote: (who: OrderReader, quoteId: string, key: string) =>
+    call<CustomerOrder>(`/order/quotes/${encodeURIComponent(quoteId)}/accept`, { method: 'POST', json: { ...who }, key }),
+  cancelOrder: (who: OrderReader, reason: string, key: string) =>
+    call<CustomerOrder>('/order/cancel', { method: 'POST', json: { ...who, reason }, key }),
 }
 
 /**
