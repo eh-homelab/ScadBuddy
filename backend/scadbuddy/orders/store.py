@@ -1775,13 +1775,14 @@ class OrderStore:
 
     def archive_origin(self, archive_id: int, *, conn: Conn | None = None) -> ArchiveOrigin | None:
         """What printed Bambuddy archive ``archive_id`` (#4777): the output or library file
-        whose link owns it, an output's before a library file's as every owner lookup
-        orders (``bambuddy/print_links.py`` ``_OWNER_ORDER``); None when ScadBuddy printed
-        neither."""
+        whose link owns it, an output's before a library file's, both before an import's,
+        as every owner lookup orders (``bambuddy/print_links.py`` ``_OWNER_ORDER``); None
+        when ScadBuddy printed neither."""
         with self._read(conn) as c:
             row = c.execute(
                 "SELECT subject FROM print_links WHERE archive_id = %s"
-                " ORDER BY (subject LIKE 'library:%%'), first_seen, subject, queue_item_id"
+                " ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                " subject, queue_item_id"
                 " LIMIT 1",
                 (archive_id,),
             ).fetchone()

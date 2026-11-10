@@ -5,8 +5,11 @@ maziggy/bambuddy@f9080d1."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import io
 import zipfile
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -14,7 +17,10 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print_history import link, mock_archive
+from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
+from tests.api.test_print_history import NATIVE_HASH, link, mock_archive, native_slice, state
 from tests.api.test_send import API, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -233,6 +239,7 @@ def test_an_import_onto_a_model_makes_it_a_scadbuddy_print(client: TestClient, m
         "filename": FILE,
         "size": 4242,
         "sha256": HASH,
+        "created_model": False,
         "imported_at": None,
     }
     assert not download.called, "Bambuddy keeps the archive's file: nothing is copied"
@@ -273,6 +280,7 @@ def test_importing_again_is_idempotent_and_another_model_is_refused(
 @respx.mock
 def test_a_print_scadbuddy_started_is_not_imported(client: TestClient, model: str) -> None:
     configure(client)
+    bambuddy()
     output_id = make_output(client, model)
     link(client, output_id, ARCHIVE)
 
@@ -345,6 +353,9 @@ def test_a_printer_file_is_kept_in_the_library_inbox(client: TestClient, model: 
     download = respx.get(
         f"{API}/printers/1/files/download", params={"path": f"/cache/{FILE}"}
     ).mock(return_value=httpx.Response(200, content=data))
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
     upload = respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(200, json={"id": 55, "filename": FILE})
     )
@@ -439,3 +450,164 @@ def test_the_archives_say_which_are_scadbuddy_prints(client: TestClient, model: 
     rows = client.get("/api/v1/farm/archives").json()
 
     assert [(row["id"], row["scadbuddy_print"]) for row in rows] == [(35, True), (36, False)]
+
+
+# --- a print ScadBuddy made, not linked yet (review of #5951) -------------------------
+
+
+def sliced_output(client: TestClient, model: str, file_hash: str | None) -> str:
+    """An output with one Bambuddy slice, sliced file 81, its hash ``file_hash`` (None:
+    not read from Bambuddy yet), as a send records it."""
+    output_id = make_output(client, model)
+    uploads = state(client).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=12, folder_id=None, target_key="H2C")))
+    asyncio.run(uploads.record_sliced(output_id, 12, SlicedCopy(id=81)))
+    if file_hash is not None:
+        asyncio.run(uploads.record_slice_hash(output_id, 81, file_hash))
+    return output_id
+
+
+def assert_refused_for(client: TestClient, model: str, output_id: str) -> None:
+    linked = sources(client)["linked"]
+    assert linked is not None and linked["output_id"] == output_id
+
+    response = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["owner"]["output_id"] == output_id
+    links = state(client).print_links
+    assert asyncio.run(links.import_of(ARCHIVE)) is None
+    assert asyncio.run(links.for_subject(PrintSubject.model(model))) == []
+    assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["output_id"] == output_id
+
+
+@respx.mock
+def test_a_print_of_an_output_s_slice_is_linked_to_it_not_imported(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = sliced_output(client, model, HASH)
+    bambuddy()
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+    assert_refused_for(client, model, output_id)
+
+
+@respx.mock
+def test_a_slice_whose_hash_was_not_read_yet_is_read_for_the_archive(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = sliced_output(client, model, None)
+    bambuddy(created_at=datetime.now(UTC).isoformat())
+    respx.get(f"{API}/library/files/81").mock(
+        return_value=httpx.Response(200, json={"id": 81, "filename": FILE, "file_hash": HASH})
+    )
+
+    assert_refused_for(client, model, output_id)
+
+
+@respx.mock
+def test_a_lan_start_s_print_is_linked_to_its_output_not_imported(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    native_slice(client, pg_conninfo, output_id)
+    bambuddy(content_hash=NATIVE_HASH)
+
+    assert_refused_for(client, model, output_id)
+
+
+@respx.mock
+def test_a_repeat_of_a_new_model_import_says_it_made_the_model(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    bambuddy()
+    links = state(client).print_links
+    from scadbuddy.bambuddy.print_links import PrintImport
+
+    record = PrintImport(
+        archive_id=ARCHIVE, slug=model, source="archive_source", filename=FILE, created_model=True
+    )
+    assert asyncio.run(links.record_import(record)) is None
+
+    again = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert again.status_code == 200, again.text
+    assert again.json()["created_model"] is True
+
+
+@respx.mock
+def test_a_printer_file_is_deleted_when_the_import_is_refused(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client)
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": FILE, "path": f"/cache/{FILE}", "size": 4242}],
+            "warnings": [],
+        }
+    )
+    respx.get(f"{API}/printers/1/files/download", params={"path": f"/cache/{FILE}"}).mock(
+        return_value=httpx.Response(200, content=a_3mf())
+    )
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 55, "filename": FILE})
+    )
+    deleted = respx.delete(f"{API}/library/files/55").mock(return_value=httpx.Response(200))
+    links = state(client).print_links
+    output_id = make_output(client, model)
+
+    async def lost_race(record: Any, **_: Any) -> Any:
+        await links.record(
+            PrintSubject.output(output_id), PrintLink(archive_id=ARCHIVE, matched_by="queue_item")
+        )
+        return await links.linked(ARCHIVE)
+
+    monkeypatch.setattr(links, "record_import", lost_race)
+
+    response = import_print(
+        client, {"source": {"kind": "printer", "path": f"/cache/{FILE}"}, "slug": model}
+    )
+
+    assert response.status_code == 409, response.text
+    assert deleted.called, "the library copy no import names is deleted"
+
+
+@respx.mock
+def test_a_printer_file_already_in_the_inbox_is_reused(client: TestClient, model: str) -> None:
+    configure(client)
+    data = a_3mf()
+    digest = hashlib.sha256(data).hexdigest()
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": FILE, "path": f"/cache/{FILE}", "size": len(data)}],
+            "warnings": [],
+        }
+    )
+    respx.get(f"{API}/printers/1/files/download", params={"path": f"/cache/{FILE}"}).mock(
+        return_value=httpx.Response(200, content=data)
+    )
+    kept = {**library_row(56, FILE, digest), "file_size": len(data)}
+    respx.get(f"{API}/library/files", params={"folder_id": "2"}).mock(
+        return_value=httpx.Response(200, json=[kept])
+    )
+    respx.get(f"{API}/library/files/56").mock(
+        return_value=httpx.Response(200, json={"id": 56, "filename": FILE, "file_hash": digest})
+    )
+    upload = respx.post(f"{API}/library/files")
+
+    response = import_print(
+        client, {"source": {"kind": "printer", "path": f"/cache/{FILE}"}, "slug": model}
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["imported"]["library_file_id"] == 56
+    assert not upload.called, "a retry's copy is the first one's"

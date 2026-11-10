@@ -195,9 +195,16 @@ export const printHistoryTools: Tool[] = [
             `call import_print with the new model's slug.`,
         })
       }
-      // A new model's operation answers the model; the same call again (its key) then links the print.
-      if (body.new_model !== undefined && (first as { archive_id?: unknown }).archive_id === undefined) return json(await send())
-      return json(first)
+      // A route that answered at once answers the import. A slow new model answers 202 with the
+      // `mesh_model_create` operation, which `command` followed to its end: its result is the model
+      // (no `archive_id`). The same request with the same key then reuses that operation's model
+      // and links the print (test/printImports.test.ts, "links a new model once its operation is done").
+      if ('archive_id' in (first as object)) return json(first)
+      const linked = await send()
+      if (isRunning(linked) || !('archive_id' in (linked as object))) {
+        throw new ToolError(`the new model for print ${archive_id} was made, but the print was not linked: call import_print with its slug`)
+      }
+      return json(linked)
     },
   }),
 

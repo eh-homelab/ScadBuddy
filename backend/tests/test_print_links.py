@@ -198,8 +198,9 @@ async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
 
 
 def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conninfo: str) -> None:
-    # #609 review: the page's DISTINCT ON walks (archive_id DESC, outputs first,
-    # first_seen, subject); an index in that order spares it a sort of the whole table.
+    # #609 review: the page's DISTINCT ON walks (archive_id DESC, imports last (#4698),
+    # outputs first, first_seen, subject); an index in that order spares it a sort of the
+    # whole table.
     with psycopg.connect(pg_conninfo) as conn:
         definitions = [
             row[0]
@@ -208,7 +209,10 @@ def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conn
                 " AND tablename = 'print_links'"
             )
         ]
-    owner = "(archive_id DESC, ((subject ~~ 'library:%'::text)), first_seen, subject)"
+    owner = (
+        "(archive_id DESC, ((subject ~~ 'model:%'::text)), ((subject ~~ 'library:%'::text)),"
+        " first_seen, subject)"
+    )
     assert any(owner in d for d in definitions), definitions
 
 
@@ -410,6 +414,17 @@ async def test_a_second_import_names_the_first(links: PrintLinkStore) -> None:
     assert owner is not None and owner.subject == TROPHY.key
     record = await links.import_of(193)
     assert record is not None and record.slug == "basketball-trophy"
+
+
+async def test_a_run_s_link_wins_over_an_import_made_before_it(links: PrintLinkStore) -> None:
+    await links.record_import(imported(193))
+    await links.record(OUT, link(193))
+
+    owner = await links.linked(193)
+    assert owner is not None and owner.subject == OUT.key
+    [row] = await links.page(limit=10)
+    assert (row.archive_id, row.output_id) == (193, OUTPUT)
+    assert await links.output_for(193) == OUTPUT
 
 
 async def test_the_linked_archives_among_some_ids(links: PrintLinkStore) -> None:

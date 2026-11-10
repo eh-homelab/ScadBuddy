@@ -479,6 +479,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
   links the archive to a model as a `print_links` row with the subject `model:<slug>` and
   `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  Both routes first run the link passes for the one archive (`linking.link_archive`), so a
+  print ScadBuddy made is linked to its run and refused (409), never imported; a run's
+  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  of an archive runs at a time (`PrintLinkStore.import_lock`).
   Only a source the listing finds is read. A printer file is kept as a Bambuddy library
   file in the inbox folder. A model's delete forgets its imports (`delete_models`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes

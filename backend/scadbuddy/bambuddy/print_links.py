@@ -49,12 +49,13 @@ queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 
-from psycopg import Connection
+from psycopg import AsyncConnection, Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
@@ -69,6 +70,8 @@ ImportSource = Literal["archive", "archive_source", "library", "printer"]
 #: The first key of ``pg_advisory_xact_lock(int, int)`` that serialises the imports of
 #: one archive ("SBPI").
 IMPORT_LOCK_CLASS = 0x5342_5049
+#: The class of `PrintLinkStore.import_lock`'s session lock, one per archive.
+IMPORT_SESSION_LOCK_CLASS = 0x5342_5053
 
 
 class PrintLink(BaseModel):
@@ -109,6 +112,8 @@ class PrintImport(BaseModel):
     filename: str
     size: int | None = None
     sha256: str | None = None
+    #: Whether the import made its model (``new_model``), so a repeat answers the same.
+    created_model: bool = False
     #: Set by the database.
     imported_at: datetime | None = None
 
@@ -271,11 +276,16 @@ class PendingLibraryPrint(BaseModel):
 #: A subject that is a library file's; every other is an output's.
 _LIBRARY = "subject LIKE 'library:%%'"
 
-#: Which of an archive's links owns it: an output's before a library file's, then the
-#: first seen, the lower subject on a tie. Every lookup of an owner orders by this, so
-#: the proxy's gate, the list and the detail can never name different owners (#609
-#: review). The ``print_links_owner`` index is in this order.
-_OWNER_ORDER = f"({_LIBRARY}), first_seen, subject, queue_item_id"
+#: A subject that is a model's: an imported print's (#4698).
+_MODEL = "subject LIKE 'model:%%'"
+
+#: Which of an archive's links owns it: an output's before a library file's, both before
+#: an import's (#4698 review: ScadBuddy links its own prints lazily, so a run's link can
+#: come after an import and must still own the print), then the first seen, the lower
+#: subject on a tie. Every lookup of an owner orders by this, so the proxy's gate, the
+#: list and the detail can never name different owners (#609 review). The
+#: ``print_links_owner`` index is in this order.
+_OWNER_ORDER = f"({_MODEL}), ({_LIBRARY}), first_seen, subject, queue_item_id"
 
 #: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
 _LINKED = "SELECT DISTINCT ON (archive_id) * FROM print_links"
@@ -382,6 +392,27 @@ class PrintLinkStore:
         and that link (its owner) is returned. Imports of one archive are serialised, so
         two at once cannot both win."""
         return await asyncio.to_thread(self._record_import, record, printer_id, plate_id)
+
+    @asynccontextmanager
+    async def import_lock(self, archive_id: int) -> AsyncIterator[None]:
+        """Held, across every replica, while one request imports ``archive_id`` (#4698
+        review): from its owner check through the model it makes and the printer file it
+        keeps to `record_import`, so two imports of one archive never both make a model or
+        a library copy. A session lock on a connection of its own, as
+        `BambuddyUploadStore.copy_lock` takes one: the section spans Bambuddy calls and an
+        operation, longer than a pooled connection should be held. Its key differs from
+        `record_import`'s transaction lock, which runs inside it on another connection."""
+        pool = self._pool
+        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
+        conn = await AsyncConnection.connect(conninfo, autocommit=True)
+        try:
+            await conn.execute(
+                "SELECT pg_advisory_lock(%s, %s)",
+                (IMPORT_SESSION_LOCK_CLASS, archive_id % (2**31)),
+            )
+            yield
+        finally:
+            await conn.close()
 
     async def import_of(self, archive_id: int) -> PrintImport | None:
         """What the import of ``archive_id`` read, or None when it was not imported."""
@@ -576,13 +607,14 @@ class PrintLinkStore:
             # this row stayed) is replaced.
             conn.execute(
                 "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
-                " printer_id, printer_path, filename, size, sha256)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " printer_id, printer_path, filename, size, sha256, created_model)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
                 " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
                 " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
                 " filename = EXCLUDED.filename, size = EXCLUDED.size,"
-                " sha256 = EXCLUDED.sha256, imported_at = now()",
+                " sha256 = EXCLUDED.sha256, created_model = EXCLUDED.created_model,"
+                " imported_at = now()",
                 (
                     record.archive_id,
                     record.slug,
@@ -593,6 +625,7 @@ class PrintLinkStore:
                     record.filename,
                     record.size,
                     record.sha256,
+                    record.created_model,
                 ),
             )
             conn.execute(
@@ -607,7 +640,8 @@ class PrintLinkStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT archive_id, slug, source, library_file_id, printer_id, printer_path,"
-                " filename, size, sha256, imported_at FROM print_imports WHERE archive_id = %s",
+                " filename, size, sha256, created_model, imported_at FROM print_imports"
+                " WHERE archive_id = %s",
                 (archive_id,),
             ).fetchone()
         return None if row is None else PrintImport.model_validate(dict(row))

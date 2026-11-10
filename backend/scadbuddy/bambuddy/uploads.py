@@ -498,6 +498,23 @@ class BambuddyUploadStore:
         LAN start of it uploaded. A slice whose row was purged has none."""
         return await asyncio.to_thread(self._native_slice_hashes, output_id)
 
+    async def slice_owners(self, file_hash: str) -> list[str]:
+        """Each run subject (an output's id, or a library file's ``library:<id>``) with a
+        slice whose file has ``file_hash`` (#4698 review): a Bambuddy slice by the hash
+        read from Bambuddy, a native slice by its row's SHA-256. An archive with that
+        ``content_hash`` is a print of it (`linking.link_archive`)."""
+        return await asyncio.to_thread(self._slice_owners, file_hash)
+
+    async def unhashed_near(
+        self, at: datetime, limit: int, *, before: timedelta, after: timedelta
+    ) -> list[str]:
+        """The run subjects, newest slice first, with a Bambuddy slice whose hash was not
+        read yet and whose send window (`sent_between`, widened as `linking` widens it)
+        holds ``at``, ``before`` its first upload to ``after`` its last slice: those an
+        archive made at ``at`` can be a print of, until their hashes are read (#4698
+        review)."""
+        return await asyncio.to_thread(self._unhashed_near, at, limit, before, after)
+
     async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         """When the output's first recorded copy was uploaded and its last slice was
         recorded, or ``None`` with no slice (#306).
@@ -914,6 +931,44 @@ class BambuddyUploadStore:
                 (output_id, NATIVE_ID_BASE),
             ).fetchall()
         return {row["sha256"] for row in rows}
+
+    def _slice_owners(self, file_hash: str) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT s.output_id FROM output_bambuddy_slices s"
+                " WHERE (s.sliced_library_file_id < %(base)s AND s.file_hash = %(hash)s)"
+                " OR (s.sliced_library_file_id >= %(base)s AND EXISTS (SELECT 1 FROM"
+                "  library_files f WHERE f.id = s.sliced_library_file_id"
+                "  AND f.sha256 = %(hash)s))"
+                " ORDER BY s.output_id",
+                {"hash": file_hash, "base": NATIVE_ID_BASE},
+            ).fetchall()
+        return [row["output_id"] for row in rows]
+
+    def _unhashed_near(
+        self, at: datetime, limit: int, before: timedelta, after: timedelta
+    ) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT s.output_id, max(s.created_at) AS last_slice"
+                " FROM output_bambuddy_slices s"
+                " WHERE s.sliced_library_file_id < %(base)s"
+                " GROUP BY s.output_id"
+                " HAVING bool_or(s.file_hash IS NULL)"
+                " AND max(s.created_at) + %(after)s >= %(at)s"
+                " AND (SELECT min(u.created_at) FROM output_bambuddy_uploads u"
+                "  WHERE u.output_id = s.output_id AND u.library_file_id < %(base)s)"
+                "  - %(before)s <= %(at)s"
+                " ORDER BY last_slice DESC LIMIT %(limit)s",
+                {
+                    "base": NATIVE_ID_BASE,
+                    "at": at,
+                    "after": after,
+                    "before": before,
+                    "limit": limit,
+                },
+            ).fetchall()
+        return [row["output_id"] for row in rows]
 
     def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
         with self._pool.connection() as conn:
