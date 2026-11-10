@@ -37,6 +37,7 @@ import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { SessionFiles } from '../workspace/store.js'
+import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
 import { event } from './protocol.js'
@@ -90,25 +91,6 @@ export type TurnRunnerDeps = Pick<
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
   files: SessionFiles
-}
-
-/** How the directory note starts (`directoryNote`). */
-export const DIRECTORY_NOTE_MARK = "[System note] This session's working directory is now"
-
-/**
- * What a turn's prompt starts with when the transcript it resumes last ran in another directory
- * (#5867): a fork's first turn (its parent's entries name the parent's directory), or a session
- * whose sessions root moved. Every session's cwd is its own `<root>/<id>/` (harness/stateDirs.ts
- * `sessionWorkDir`). One path for every session (`/workspace`) cannot be made: the warm sessions
- * on a worker pod share its filesystem, a per-process mount needs a mount namespace, which
- * AppArmor refuses there (`unshare --mount`, measured 2026-11-01, docs/ai/operating.md "Claude Code's own built-ins"), and
- * Claude Code takes `process.cwd()`, the real path (harness/confine.ts), so a link would not hide
- * the session's own directory either. Claude Code itself adds only "Primary working directory:
- * <new> (was <old>)" on such a turn (measured on the bundled CLI, test/forkCow.pg.test.ts); with
- * that alone the model still read the old absolute path first, and the seam refused it.
- */
-export function directoryNote(from: string, to: string): string {
-  return `${DIRECTORY_NOTE_MARK} ${to}. ${from}, the directory earlier messages name, is gone: this session was forked from another one or moved. Use the same relative paths under ${to}.`
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
@@ -196,7 +178,7 @@ export type AssembledTurn = {
   observe(message: SDKMessage): Promise<void>
   /** The turn's automatic memory hooks, recalled against `userText`; only when a Hindsight plugin is loaded. */
   memory?: (userText: string, turnId: string) => MemoryHooks
-  /** What the turn's prompt starts with when the transcript it resumes ran in another directory (`directoryNote`, #5867). */
+  /** What the turn's prompt starts with when the transcript it resumes ran in another directory (directoryNote.ts, #5867). */
   directoryNote?: string
   /**
    * Ends the upstream MCP sessions the plugins' routes saw, then releases the routes: Claude

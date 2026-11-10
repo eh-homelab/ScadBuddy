@@ -136,7 +136,7 @@ opens every one and seals it again byte for byte).
   `tools_as_activities` switch is gone, Step 9.9); without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
   below); a turn whose transcript last ran in another directory (a fork's first) is told so in
-  its prompt (`turnRunner.ts` `directoryNote`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
+  its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
   `agent.turn.spawn` (`warm.outcome`), `agent.turn.release` and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
   charts.
