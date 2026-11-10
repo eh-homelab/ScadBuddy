@@ -45,6 +45,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, has_reply, idempotent_write, stored
 from scadbuddy.orders.attachments import SNIFF_BYTES, clean_filename, keep_file, sniff
 from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
@@ -200,6 +201,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
         list[Attachment],
         list[Listing],
         list[PublicShippingOption],
+        str,
     ]:
         offered = orders.store.storefront_offered(order.id)
         items = orders.store.items(order.id)
@@ -216,14 +218,13 @@ async def _view(state: AppState, order: Order) -> DraftView:
             offered,
             orders.store.attachments(order.id),
             orders.listings.at_commits(pairs) if pairs else [],
-            # An option is priced in the shop's currency, never converted: a cart in
-            # another currency (made before the shop changed it) lists none.
-            [PublicShippingOption(**option.model_dump()) for option in rules.shipping_options]
-            if order.currency == rules.shop_currency
-            else [],
+            [PublicShippingOption(**option.model_dump()) for option in rules.shipping_options],
+            # A cart holds no amount, and the submit takes the shop's currency
+            # (`Lifecycle.submit_order`), so the view shows that one.
+            rules.shop_currency,
         )
 
-    rows, offered, files, listings, shipping = await asyncio.to_thread(read)
+    rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -259,8 +260,8 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
     return DraftView(
         id=order.id,
-        currency=order.currency,
-        minor_exponent=order.minor_exponent,
+        currency=currency,
+        minor_exponent=minor_exponent(currency),
         items=items,
         shipping_options=shipping,
     )

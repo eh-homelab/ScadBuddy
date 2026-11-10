@@ -9,7 +9,7 @@ import { OUTPUT_REAGAN } from './state'
  * `OUTPUT_REAGAN`; 9103 printed library file 120; 9104 is nobody's; 9105 failed. The
  * route's `date_from`, `date_to`, `printer_id`, `project_id`, `limit` and `offset` are
  * honoured; status and name are the browser's. Each row's `scadbuddy_print` (#4698) says
- * whether an output or a library file printed it.
+ * whether an output or a library file printed it, or a person imported it (`archiveImports`).
  */
 
 /** What the backend reads of an archive beyond the listing: its owner and its slots. */
@@ -59,8 +59,12 @@ export const archiveCopies = new Map<number, { id: number; filename: string }>()
 
 const LISTED = ['id', 'print_name', 'status', 'printer_id', 'project_id', 'plate_id', 'created_at', 'completed_at', 'print_time_seconds', 'actual_time_seconds', 'filament_used_grams', 'quantity', 'run_count', 'successful_run_count', 'failed_run_count'] as const
 
+/** #4698 — the archives a person imported onto a model, by archive id: the model's slug. */
+export const archiveImports = new Map<number, string>()
+
 export function reset(): void {
   archiveCopies.clear()
+  archiveImports.clear()
 }
 
 export const handlers = [
@@ -81,7 +85,7 @@ export const handlers = [
         (p): ArchiveOutcome => ({
           ...(Object.fromEntries(LISTED.map((key) => [key, p[key]])) as Omit<ArchiveOutcome, 'scadbuddy_print'>),
           // #4698: an archive an output or a library file printed is a ScadBuddy print.
-          scadbuddy_print: p.output_id !== undefined || p.library_file_id !== undefined,
+          scadbuddy_print: p.output_id !== undefined || p.library_file_id !== undefined || archiveImports.has(p.id),
         }),
       )
     return HttpResponse.json(rows)

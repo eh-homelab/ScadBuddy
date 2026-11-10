@@ -1583,6 +1583,53 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
   const call = (gate: QuestionGate) =>
     waitForTab(gate, never, noop)({ tool: 'browser_snapshot', toolUseId: 'toolu_1', signal: never, isBack: gone })
 
+  // #5981 review: the check for a slow owner comes after the turn's latch and its wait limit.
+  it('asks whether the owner is only slow before it opens a wait, and opens none when it is', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    const waited = await waitForTab(gate, never, noop)({
+      tool: 'browser_snapshot', toolUseId: 'toolu_1', signal: never, isBack: gone, slow: () => Promise.resolve('slow, try again'),
+    })
+    expect(waited).toEqual({ back: false, message: 'slow, try again' })
+    expect(asked).toHaveLength(0)
+  })
+
+  it('stops asking a slow owner after as many tries as the turn has waits, and latches the turn', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    let slowAsked = 0
+    const slow = () => (slowAsked++, Promise.resolve('slow, try again'))
+    const wait = waitForTab(gate, never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `toolu_${i}`, signal: never, isBack: gone, slow })).toEqual({ back: false, message: 'slow, try again' })
+    }
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual({
+      back: false,
+      message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/),
+    })
+    expect(slowAsked).toBe(TAB_WAITS_PER_TURN)
+    expect(asked).toHaveLength(0)
+  })
+
+  it("never lets a slow owner's advice override the turn's carry-on latch or its spent waits", async () => {
+    let slowAsked = 0
+    const slow = () => (slowAsked++, Promise.resolve('slow, try again'))
+    // The user says to carry on; a later call on a slow owner gets the latch, not the retry advice.
+    const carryOn = waitForTab((request) => Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'Carry on without the tab' } }), never, noop)
+    await carryOn({ tool: 'browser_snapshot', toolUseId: 'toolu_1', signal: never, isBack: gone })
+    expect(await carryOn({ tool: 'browser_snapshot', toolUseId: 'toolu_2', signal: never, isBack: gone, slow })).toEqual({
+      back: false,
+      message: expect.stringMatching(/carry on without the tab/),
+    })
+    // The turn's waits spent: the limit's message, not the retry advice.
+    const spent = waitForTab(gateOf({ answered: false, reconnected: true, message: 'x' }).gate, never, noop)
+    // Each wait ends reconnected with the tab here, so none latches the turn; the limit does.
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) await spent({ tool: 'browser_snapshot', toolUseId: `toolu_${i}`, signal: never, isBack: here })
+    expect(await spent({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual({
+      back: false,
+      message: expect.stringMatching(/waited for 3 times this turn/),
+    })
+    expect(slowAsked).toBe(0)
+  })
+
   it("parks a tab_disconnected request with a five-minute proceed timer and the I'm back / carry on replies", async () => {
     const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
     expect(await call(gate)).toEqual({ back: true, why: 'reconnected' })

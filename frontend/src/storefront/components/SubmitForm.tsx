@@ -16,8 +16,7 @@ const EMPTY_ADDRESS = { recipient: '', street: '', street2: '', locality: '', re
 
 /**
  * Submit (spec 2026-11-02 §5.5): a name, an email, one of the shop's shipping options (priced in the
- * draft's currency: the draft lists none when the shop's has changed since the cart was made) and,
- * when that option ships, the address. The shop mails a link to the order to the email.
+ * draft's currency, which is the shop's) and, when that option ships, the address. The shop mails a link to the order to the email.
  * One `Idempotency-Key` per submit: sent again after a failure, the same form is the
  * same submit to the shop, which makes one order and sends one mail. The bot check
  * (§5.8) shows its widget while it is on, and each send takes a new token. A cart sent

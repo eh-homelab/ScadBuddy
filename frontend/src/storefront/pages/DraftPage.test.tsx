@@ -119,34 +119,11 @@ describe('Submitting the order', () => {
     expect(screen.getByRole('radio', { name: /Pick up at the workshop.*\$0\.00/ })).toBeInTheDocument()
   })
 
-  it('lists no shipping option for a cart the shop has no options for in its currency', async () => {
-    // The draft view sends none when the cart's currency is not the shop's now.
+  it('lists no shipping option when the shop has none', async () => {
     server.use(http.get('/api/store/v1/draft', () => HttpResponse.json({ ...DRAFT, shipping_options: [] })))
     renderPage(<DraftPage />)
     expect(await screen.findByLabelText('Your name')).toBeInTheDocument()
     expect(screen.queryByRole('radio')).toBeNull()
-  })
-
-  it('tells the visitor the shipping currency changed when the submit is refused for it', async () => {
-    server.use(
-      http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)),
-      http.post('/api/store/v1/draft/submit', () =>
-        HttpResponse.json(
-          {
-            type: 'https://scadbuddy.dev/problems/storefront/shipping_currency_mismatch',
-            status: 409,
-            detail: 'The shop prices changed currency.',
-          },
-          { status: 409 },
-        ),
-      ),
-    )
-    const { user } = renderPage(<DraftPage />)
-    await user.type(await screen.findByLabelText('Your name'), 'Ada')
-    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
-    await user.click(screen.getByRole('radio', { name: /Pick up/ }))
-    await user.click(screen.getByRole('button', { name: 'Send my order' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('The shop prices changed currency.')
   })
 
   it('asks for an address only when the option ships', async () => {
