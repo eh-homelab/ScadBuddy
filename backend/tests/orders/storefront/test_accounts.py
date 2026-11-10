@@ -1,5 +1,6 @@
-"""Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in by a six-digit
-code, server-side sessions, the customer link rule, and what an account sees."""
+"""Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in by an
+eight-character code, server-side sessions, the customer link rule, and what an account
+sees."""
 
 from __future__ import annotations
 
@@ -12,10 +13,13 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 
 from scadbuddy.orders.storefront.accounts import (
+    CODE_ALPHABET,
     CODE_TRIES,
     CODES_PER_ADDRESS,
     CODES_PER_CLIENT,
+    FAILURES_PER_ADDRESS,
     FAILURES_PER_CLIENT,
+    LIVE_CODES,
     EmailInvalidError,
     SignedIn,
     SignInLimitedError,
@@ -37,6 +41,7 @@ type Conn = Connection[DictRow]
 EMAIL = "Ada@Example.com"
 CLIENT = "203.0.113.9"
 VISITOR = "v" * 43
+CODE_SHAPE = re.compile(f"[{CODE_ALPHABET}]{{8}}")
 
 
 @pytest.fixture
@@ -60,11 +65,21 @@ def customer(conn: Conn, name: str, email: str | None, *, archived: bool = False
     return str(row["id"])
 
 
+def verify(conn: Conn, code: str, *, email: str = EMAIL, client: str = CLIENT) -> SignedIn | None:
+    return verify_code(conn, email, code, client, visitor_id=None, previous_session=None)
+
+
 def sign_in(conn: Conn, email: str = EMAIL) -> SignedIn:
     code = request_code(conn, email, CLIENT)
-    signed = verify_code(conn, email, code, CLIENT, visitor_id=None, previous_session=None)
+    signed = verify(conn, code, email=email)
     assert signed is not None
     return signed
+
+
+def wrong(code: str) -> str:
+    """Another code of the same shape."""
+    first = CODE_ALPHABET[(CODE_ALPHABET.index(code[0]) + 1) % len(CODE_ALPHABET)]
+    return first + code[1:]
 
 
 def test_an_address_is_one_plain_lowercased_address() -> None:
@@ -83,9 +98,16 @@ def test_an_address_is_one_plain_lowercased_address() -> None:
             normalized_email(bad)
 
 
-def test_a_code_is_six_digits_and_only_its_digest_is_kept(conn: Conn) -> None:
+def test_the_alphabet_has_no_ambiguous_characters() -> None:
+    assert len(CODE_ALPHABET) == len(set(CODE_ALPHABET)) == 30
+    assert not set("01ILOU") & set(CODE_ALPHABET)
+
+
+def test_a_code_is_eight_unambiguous_characters_and_only_its_digest_is_kept(
+    conn: Conn,
+) -> None:
     code = request_code(conn, EMAIL, CLIENT)
-    assert re.fullmatch(r"\d{6}", code)
+    assert CODE_SHAPE.fullmatch(code)
     rows = conn.execute("SELECT * FROM storefront_sign_in_codes").fetchall()
     assert len(rows) == 1
     row = rows[0]
@@ -96,7 +118,7 @@ def test_a_code_is_six_digits_and_only_its_digest_is_kept(conn: Conn) -> None:
 
 def test_the_right_code_signs_in_once_and_makes_a_session(conn: Conn) -> None:
     code = request_code(conn, EMAIL, CLIENT)
-    signed = verify_code(conn, EMAIL, code, CLIENT, visitor_id=None, previous_session=None)
+    signed = verify(conn, code)
     assert signed is not None
     assert signed.account.email == "ada@example.com"
     assert re.fullmatch(r"[A-Za-z0-9_-]{43}", signed.session_token)
@@ -104,25 +126,58 @@ def test_the_right_code_signs_in_once_and_makes_a_session(conn: Conn) -> None:
     assert session is not None and signed.session_token not in str(dict(session))
     assert account_for_session(conn, signed.session_token) == signed.account
     # Single use: the same code again reads nothing.
-    assert verify_code(conn, EMAIL, code, CLIENT, visitor_id=None, previous_session=None) is None
+    assert verify(conn, code) is None
 
 
-def test_a_wrong_code_counts_and_the_fifth_wrong_try_spends_the_code(conn: Conn) -> None:
+def test_a_code_typed_with_spaces_hyphens_or_lowercase_still_reads(conn: Conn) -> None:
     code = request_code(conn, EMAIL, CLIENT)
-    wrong = f"{(int(code) + 1) % 1_000_000:06d}"
+    assert verify(conn, f" {code[:4].lower()}-{code[4:]} ") is not None
+
+
+def test_the_fifth_wrong_try_spends_the_code(conn: Conn) -> None:
+    code = request_code(conn, EMAIL, CLIENT)
     for _ in range(CODE_TRIES):
-        assert (
-            verify_code(conn, EMAIL, wrong, CLIENT, visitor_id=None, previous_session=None) is None
-        )
-    assert verify_code(conn, EMAIL, code, CLIENT, visitor_id=None, previous_session=None) is None
+        assert verify(conn, wrong(code)) is None
+    assert verify(conn, code) is None
 
 
-def test_an_expired_code_or_a_superseded_one_reads_nothing(conn: Conn) -> None:
-    old = request_code(conn, EMAIL, CLIENT)
-    new = request_code(conn, EMAIL, CLIENT)
-    assert verify_code(conn, EMAIL, old, CLIENT, visitor_id=None, previous_session=None) is None
+def test_a_new_code_keeps_the_live_ones_up_to_three(conn: Conn) -> None:
+    codes = [request_code(conn, EMAIL, CLIENT) for _ in range(LIVE_CODES)]
+    # Each of the three is good; a sign-in with one spends them all.
+    assert verify(conn, codes[0]) is not None
+    assert verify(conn, codes[2]) is None
+    other = "bob@example.com"
+    codes = [request_code(conn, other, f"198.51.100.{n}") for n in range(LIVE_CODES)]
+    assert verify(conn, codes[1], email=other) is not None
+
+
+def test_a_fourth_code_voids_only_the_oldest(conn: Conn) -> None:
+    codes = [request_code(conn, EMAIL, CLIENT) for _ in range(LIVE_CODES + 1)]
+    assert verify(conn, codes[0]) is None
+    assert verify(conn, codes[1]) is not None
+
+
+def test_an_expired_code_reads_nothing(conn: Conn) -> None:
+    code = request_code(conn, EMAIL, CLIENT)
     conn.execute("UPDATE storefront_sign_in_codes SET expires_at = now() - interval '1 second'")
-    assert verify_code(conn, EMAIL, new, CLIENT, visitor_id=None, previous_session=None) is None
+    assert verify(conn, code) is None
+
+
+def test_wrong_guesses_spread_over_clients_spend_the_address_for_a_day(conn: Conn) -> None:
+    for n in range(FAILURES_PER_ADDRESS):
+        code = request_code(conn, EMAIL, f"192.0.2.{n}") if n % 2 == 0 else None
+        assert verify(conn, wrong(code or "ABCDEFGH"), client=f"198.51.100.{n}") is None
+    # Past the budget even the right code reads nothing, with the same answer.
+    conn.execute("DELETE FROM storefront_sign_in_codes")
+    code = request_code(conn, EMAIL, "192.0.2.200")
+    assert verify(conn, code, client="198.51.100.200") is None
+    # Another address is not held back.
+    assert sign_in(conn, "bob@example.com")
+    # The window passes: the address signs in again.
+    conn.execute("UPDATE storefront_sign_in_failures SET failed_at = now() - interval '25 hours'")
+    conn.execute("DELETE FROM storefront_sign_in_codes")
+    code = request_code(conn, EMAIL, "192.0.2.201")
+    assert verify(conn, code, client="198.51.100.201") is not None
 
 
 def test_codes_are_limited_per_address_and_per_client(conn: Conn) -> None:
@@ -141,7 +196,12 @@ def test_wrong_guesses_are_limited_per_client(conn: Conn) -> None:
     for n in range(FAILURES_PER_CLIENT):
         assert (
             verify_code(
-                conn, f"x{n}@example.com", "000000", CLIENT, visitor_id=None, previous_session=None
+                conn,
+                f"x{n}@example.com",
+                "ABCDEFGH",
+                CLIENT,
+                visitor_id=None,
+                previous_session=None,
             )
             is None
         )
@@ -258,4 +318,4 @@ def test_the_same_answer_whether_or_not_an_account_exists(conn: Conn) -> None:
     # Both addresses get a code the same way; nothing says which has an account.
     known = request_code(conn, EMAIL, "198.51.100.2")
     unknown = request_code(conn, "nobody@example.com", "198.51.100.2")
-    assert re.fullmatch(r"\d{6}", known) and re.fullmatch(r"\d{6}", unknown)
+    assert CODE_SHAPE.fullmatch(known) and CODE_SHAPE.fullmatch(unknown)

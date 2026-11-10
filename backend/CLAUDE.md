@@ -1046,10 +1046,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
-  - `request_code` makes a six-digit code. It does the same for every address, whether or
-    not an account exists (enumeration-safe). Only a salted sha256 is kept, and a code lives
-    10 minutes for 5 tries. The limits are per address, per client and per client's wrong
-    guesses (`SignInLimitedError`).
+  - `request_code` makes an eight-character code from `CODE_ALPHABET` (Crockford's base32
+    less `0` and `1`). It does the same for every address, whether or not an account
+    exists (enumeration-safe). Only a salted sha256 is kept, and a code lives 10 minutes
+    for 5 tries. A new code keeps the address's live ones, up to `LIVE_CODES` (3), so
+    another's requests cannot cancel a code. The limits are per address and per client
+    for codes, and per client for wrong guesses (`SignInLimitedError`). Each address also
+    has a budget of 10 wrong guesses in a rolling 24 hours from any client, past which
+    `verify_code` reads nothing for it. The code route takes Turnstile (`sign_up`)
+    whenever a site key is set.
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit

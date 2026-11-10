@@ -12,8 +12,8 @@ CREATE TABLE storefront_accounts (
 );
 CREATE INDEX storefront_accounts_customer ON storefront_accounts (customer_id);
 
--- A six-digit code sent to an address. `client` is the address that asked, for the
--- per-client limit. Only the newest unused code of an address is good.
+-- An eight-character code sent to an address. `client` is the address that asked, for
+-- the per-client limit. The newest three unused codes of an address are good.
 CREATE TABLE storefront_sign_in_codes (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
   email text NOT NULL,
@@ -28,12 +28,16 @@ CREATE INDEX storefront_sign_in_codes_email ON storefront_sign_in_codes (email, 
 CREATE INDEX storefront_sign_in_codes_client ON storefront_sign_in_codes (client, created_at);
 CREATE INDEX storefront_sign_in_codes_created ON storefront_sign_in_codes (created_at);
 
--- A wrong code, by the client that sent it: the per-client guess limit.
+-- A wrong code, by the client that sent it and the address it was for: the per-client
+-- guess limit, and the per-address failure budget (`email` is null for a guess at no
+-- valid address).
 CREATE TABLE storefront_sign_in_failures (
   client text NOT NULL,
+  email text,
   failed_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX storefront_sign_in_failures_client ON storefront_sign_in_failures (client, failed_at);
+CREATE INDEX storefront_sign_in_failures_email ON storefront_sign_in_failures (email, failed_at);
 CREATE INDEX storefront_sign_in_failures_at ON storefront_sign_in_failures (failed_at);
 
 -- A signed-in session. Signing out deletes its row.

@@ -1,21 +1,34 @@
 """Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in. A visitor
 asks for a code by email (`request_code`), types it back (`verify_code`), and gets a
 server-side session. Every function runs on the caller's connection, in its transaction:
-the code's mail is queued in the same one (`orders/storefront/mail.py` `queue_mail`, PR 3).
+the code's mail is queued in the same one (`orders/storefront/mail.py` `queue_mail`).
 
 Codes:
 
-- Six digits from `secrets`, good for `CODE_TTL` (10 minutes) and `CODE_TRIES` (5)
-  guesses, single use. A new code for an address supersedes its older ones.
+- Eight characters from `CODE_ALPHABET` (Crockford's base32 less ``0`` and ``1``; it has
+  no ``I``, ``L``, ``O`` or ``U`` already), drawn with `secrets`: 30^8, about 2^39. A code
+  is good for `CODE_TTL` (10 minutes) and `CODE_TRIES` (5) guesses, and is single use.
+- A new code does not void the live ones: up to `LIVE_CODES` (3) live codes of an address
+  are each good, and only a fourth voids the oldest. So someone who asks for codes for
+  another's address cannot cancel the code that person is about to type.
 - Only a digest is kept: sha256 over ``<row id>:<code>``. The row id salts it, so one
-  table of the 10^6 digests does not read every row. It is not a keyed hash: someone who
-  can read the table can still try the 10^6 codes of one row. That reader already reads
-  every order and customer, and the code dies in 10 minutes. A key would need the KEK,
-  which a deployment may lack, so the salt is the choice.
-- The digests are compared in constant time (`hmac.compare_digest`).
-- Limits: `CODES_PER_ADDRESS` codes an hour per address, `CODES_PER_CLIENT` per client
-  address, and `FAILURES_PER_CLIENT` wrong guesses an hour per client. Over a limit is
-  `SignInLimitedError` with the seconds to wait.
+  table of digests does not read every row. It is not a keyed hash. Someone who can read
+  the table can try one row's 2^39 codes, but that reader already reads every order and
+  customer, and the code dies in 10 minutes. A key would need the KEK, which a deployment
+  may lack, so the salt is the choice.
+- The digests are compared in constant time (`hmac.compare_digest`), against every live
+  code, with no early exit.
+- Limits:
+  - `CODES_PER_ADDRESS` codes an hour per address, and `CODES_PER_CLIENT` per client
+    address. Over either is `SignInLimitedError` with the seconds to wait.
+  - `FAILURES_PER_CLIENT` wrong guesses an hour per client (`SignInLimitedError`).
+  - `FAILURES_PER_ADDRESS` (10) wrong guesses per address in a rolling
+    `ADDRESS_FAILURE_WINDOW` (24 hours), across all its codes and from any client. Past
+    it, `verify_code` reads nothing for that address until the window passes, with the
+    same answer as a wrong code. So guesses spread over many clients get at most 10 a
+    day against an address, 10 in 2^39.
+- The route that asks for a code takes the bot check (Turnstile, action ``sign_up``)
+  whenever a site key is set (`storefront/turnstile.py` `require_turnstile`).
 
 Enumeration: `request_code` does the same thing for every valid address, whether or not
 an account exists. It always makes and returns a code, so the route can always queue the
@@ -50,18 +63,26 @@ from typing import Final
 from scadbuddy.orders.store import Conn
 from scadbuddy.orders.storefront.visitors import token_sha256 as visitor_sha256
 
+#: Crockford's base32 (https://www.crockford.com/base32.html) less ``0`` and ``1``.
+CODE_ALPHABET: Final = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+CODE_LENGTH: Final = 8
 CODE_TTL: Final = timedelta(minutes=10)
 CODE_TRIES: Final = 5
+LIVE_CODES: Final = 3
 CODES_PER_ADDRESS: Final = 5
 CODES_PER_CLIENT: Final = 10
 FAILURES_PER_CLIENT: Final = 20
 LIMIT_WINDOW: Final = timedelta(hours=1)
-#: How long a code or failure row is kept, for the limits: past the window.
-KEEP_ROWS: Final = timedelta(days=1)
+FAILURES_PER_ADDRESS: Final = 10
+ADDRESS_FAILURE_WINDOW: Final = timedelta(hours=24)
+#: How long a code or failure row is kept, for the limits: past the longest window.
+KEEP_ROWS: Final = timedelta(days=2)
 SESSION_TTL: Final = timedelta(days=30)
 #: An address's longest form (RFC 5321 §4.5.3.1.3's path, less its brackets).
 MAX_EMAIL: Final = 254
-_CODE: Final = re.compile(r"\d{6}")
+_CODE: Final = re.compile(f"[{CODE_ALPHABET}]{{{CODE_LENGTH}}}")
+#: What a person may type around a code: spaces and hyphens, in any case.
+_CODE_SPACING: Final = re.compile(r"[\s-]")
 _TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 #: One plain address: no spaces, commas, brackets or control characters, one ``@`` and a
 #: dotted domain. The mail step checks it again (`queue_mail`'s `email_invalid`).
@@ -128,31 +149,49 @@ def request_code(conn: Conn, email: str, client: str) -> str:
 
     Enumeration-safe: it does the same for every valid address, whether or not an account
     exists, so its caller answers the same way. `EmailInvalidError` for an address that is
-    not one, and `SignInLimitedError` over a limit; neither depends on an account."""
+    not one, and `SignInLimitedError` over a limit; neither depends on an account. The
+    address's live codes stay good, up to `LIVE_CODES`; only the oldest beyond that is
+    voided."""
     address = normalized_email(email)
     conn.execute("DELETE FROM storefront_sign_in_codes WHERE created_at < now() - %s", (KEEP_ROWS,))
     _limit(conn, "storefront_sign_in_codes", "email", address, "created_at", CODES_PER_ADDRESS)
     _limit(conn, "storefront_sign_in_codes", "client", client, "created_at", CODES_PER_CLIENT)
-    # Only the newest code is good.
-    conn.execute(
-        "UPDATE storefront_sign_in_codes SET used_at = now() WHERE email = %s AND used_at IS NULL",
-        (address,),
-    )
-    code = f"{secrets.randbelow(1_000_000):06d}"
+    code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     row_id = secrets.token_hex(16)
     conn.execute(
         "INSERT INTO storefront_sign_in_codes (id, email, client, code_sha256, expires_at)"
         " VALUES (%s, %s, %s, %s, now() + %s)",
         (row_id, address, client, _code_digest(row_id, code), CODE_TTL),
     )
+    conn.execute(
+        "UPDATE storefront_sign_in_codes SET used_at = now() WHERE id IN ("
+        " SELECT id FROM storefront_sign_in_codes"
+        " WHERE email = %s AND used_at IS NULL AND expires_at > now()"
+        " ORDER BY created_at DESC, id OFFSET %s)",
+        (address, LIVE_CODES),
+    )
     return code
 
 
-def _failed(conn: Conn, client: str) -> None:
+def _failed(conn: Conn, client: str, address: str | None) -> None:
+    """A wrong guess by ``client``; with ``address``, it counts against its budget too."""
     conn.execute(
         "DELETE FROM storefront_sign_in_failures WHERE failed_at < now() - %s", (KEEP_ROWS,)
     )
-    conn.execute("INSERT INTO storefront_sign_in_failures (client) VALUES (%s)", (client,))
+    conn.execute(
+        "INSERT INTO storefront_sign_in_failures (client, email) VALUES (%s, %s)",
+        (client, address),
+    )
+
+
+def _address_spent(conn: Conn, address: str) -> bool:
+    """Whether ``address`` has had `FAILURES_PER_ADDRESS` wrong guesses in the window."""
+    row = conn.execute(
+        "SELECT count(*) AS n FROM storefront_sign_in_failures"
+        " WHERE email = %s AND failed_at > now() - %s",
+        (address, ADDRESS_FAILURE_WINDOW),
+    ).fetchone()
+    return row is not None and row["n"] >= FAILURES_PER_ADDRESS
 
 
 def verify_code(
@@ -165,9 +204,9 @@ def verify_code(
     previous_session: str | None,
 ) -> SignedIn | None:
     """The sign-in ``code`` makes for ``email``, or None for any code that reads nothing
-    (wrong, expired, used, superseded, out of tries, or no code at all): one answer, so a
-    caller says nothing more. `SignInLimitedError` once ``client`` guessed wrong
-    `FAILURES_PER_CLIENT` times in the window."""
+    (wrong, expired, used, voided, out of tries, no code at all, or an address past its
+    failure budget): one answer, so a caller says nothing more. `SignInLimitedError`
+    once ``client`` guessed wrong `FAILURES_PER_CLIENT` times in the window."""
     _limit(
         conn,
         "storefront_sign_in_failures",
@@ -179,27 +218,33 @@ def verify_code(
     try:
         address = normalized_email(email)
     except EmailInvalidError:
-        _failed(conn, client)
+        _failed(conn, client, None)
         return None
-    row = conn.execute(
-        "SELECT id, code_sha256, attempts FROM storefront_sign_in_codes"
-        " WHERE email = %s AND used_at IS NULL AND expires_at > now()"
-        " ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
-        (address,),
-    ).fetchone()
-    given = code.strip()
-    if (
-        row is None
-        or row["attempts"] >= CODE_TRIES
-        or _CODE.fullmatch(given) is None
-        or not hmac.compare_digest(_code_digest(row["id"], given), row["code_sha256"])
-    ):
-        if row is not None:
+    if _address_spent(conn, address):
+        # Counted against the client, not the address: the window ends 24 hours after
+        # the guess that spent it.
+        _failed(conn, client, None)
+        return None
+    rows = conn.execute(
+        "SELECT id, code_sha256 FROM storefront_sign_in_codes"
+        " WHERE email = %s AND used_at IS NULL AND expires_at > now() AND attempts < %s"
+        " ORDER BY created_at DESC, id LIMIT %s FOR UPDATE",
+        (address, CODE_TRIES, LIVE_CODES),
+    ).fetchall()
+    given = _CODE_SPACING.sub("", code).upper()
+    shaped = _CODE.fullmatch(given) is not None
+    matched = False
+    for row in rows:
+        # Every live code is compared, with no early exit.
+        same = hmac.compare_digest(_code_digest(row["id"], given), row["code_sha256"])
+        matched = matched or (shaped and same)
+    if not matched:
+        if rows:
             conn.execute(
-                "UPDATE storefront_sign_in_codes SET attempts = attempts + 1 WHERE id = %s",
-                (row["id"],),
+                "UPDATE storefront_sign_in_codes SET attempts = attempts + 1 WHERE id = ANY(%s)",
+                ([row["id"] for row in rows],),
             )
-        _failed(conn, client)
+        _failed(conn, client, address)
         return None
     conn.execute(
         "UPDATE storefront_sign_in_codes SET used_at = now() WHERE email = %s AND used_at IS NULL",
