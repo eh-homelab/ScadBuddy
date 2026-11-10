@@ -25,8 +25,31 @@ SOURCE = re.compile(
     r"^(remote:[A-Za-z0-9_.-]{1,100}|package:[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100})$"
 )
 ARG = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
-#: A `fixed_args` key that looks like a secret: secrets go in the plugin's header or OAuth.
-SECRET_KEY = re.compile(r"pass|token|secret|key|auth|credential", re.IGNORECASE)
+#: A `fixed_args` key with one of these words looks like a secret: secrets go in the
+#: plugin's header or OAuth. Words are split at `_` and at a lower-to-upper case change,
+#: so `smtp_password` and `apiKey` are refused and `author` and `keyword` pass.
+SECRET_WORDS = frozenset(
+    {
+        "pass",
+        "passwd",
+        "password",
+        "passphrase",
+        "pwd",
+        "token",
+        "secret",
+        "key",
+        "apikey",
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+    }
+)
+_WORD_BREAK = re.compile(r"_+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def looks_secret(key: str) -> bool:
+    return any(word.lower() in SECRET_WORDS for word in _WORD_BREAK.split(key))
 
 
 class BindingArgs(BaseModel):
@@ -60,7 +83,7 @@ class MessagingBinding(BaseModel):
         for key, entry in value.items():
             if not re.match(ARG, key):
                 raise ValueError(f"fixed_args key {key!r} is not an argument name")
-            if SECRET_KEY.search(key):
+            if looks_secret(key):
                 raise ValueError(
                     f"fixed_args key {key!r} looks like a secret: put it in the plugin's "
                     "header or OAuth sign-in"
