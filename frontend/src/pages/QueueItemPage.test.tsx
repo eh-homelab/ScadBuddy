@@ -185,6 +185,8 @@ describe('QueueItemPage (#3744)', () => {
       failing = true
       act(() => emitRealtime('printer.changed', ['printers', 'printer:p-7'], {}))
       await waitFor(() => expect(reads).toHaveBeenCalled())
+      // The page's own read is the only one: a second reader would make results[0] someone else's.
+      expect(reads).toHaveBeenCalledTimes(1)
       const read = reads.mock.results[0]!.value as Promise<unknown>
       // The read is known to have failed; one more flush lets the hook commit that.
       await act(async () => {
