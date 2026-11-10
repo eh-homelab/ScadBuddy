@@ -349,7 +349,13 @@ opens every one and seals it again byte for byte).
     Code's own `Read`, `Write` and the rest, with paths in the session directory (its cwd).
     The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
     background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
-    `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
+    `builtin` server, `mcp__builtin__<Name>`), in every turn, not only one whose package names
+    them (#2726 R2): each is an item of `builtin:claude-code` too (`nativeBuiltins.ts`
+    `SESSION_BUILTINS`, `turnBuiltins`), `WebFetch` and `WebSearch` at `outward`, `CronList` at
+    `read`, the rest at `write`; a flow's turn (no `deps.background`) gets no background one. A
+    `Monitor`'s `ws` source is `outward`, and its `command` source runs a shell where Bash runs,
+    so a turn gives it a command queue only while `Bash` is on, at Bash's tier if stricter
+    (`monitorAccess`, `sessionTierOf`). `CronCreate`, `CronDelete`,
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own
     (`src/background/`: `ai_background_tasks`; a recurring cron is a Temporal Schedule
     `bgtask-<session>-<id>` whose `BackgroundFire` sends the prompt when the session is idle

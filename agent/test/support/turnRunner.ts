@@ -15,6 +15,7 @@ import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.j
 import { TurnRunner, type TurnRunnerDeps } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
 import type { SessionFiles } from '../../src/workspace/store.js'
+import type { BackgroundTasks } from '../../src/background/service.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
 import { fixedCredentials } from './fixedCredentials.js'
 import { memoryAccess } from './memoryAccess.js'
@@ -54,6 +55,8 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** Whether the session keeps background tasks (a chat's does, a flow's does not); none when undefined. */
+  background?: boolean
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -173,6 +176,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    // Never called: the tests only assemble.
+    ...(options.background ? { background: { tasks: {} as BackgroundTasks, tz: 'UTC', commandQueue: 'agent-sessions.test' } } : {}),
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),

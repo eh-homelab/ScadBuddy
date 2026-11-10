@@ -4,7 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
-import { NATIVE_BUILTINS } from './nativeBuiltins.js'
+import { monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -33,10 +33,13 @@ export type LiveTurn = {
   builtins: readonly { name: string; packages: readonly string[] }[]
   /** Whether the turn offers Claude Code's own built-ins (nativeBuiltins.ts, Step 9.6): each call reads `builtin:claude-code`. */
   native?: boolean
+  /** The session's own built-ins the turn serves (nativeBuiltins.ts `SESSION_BUILTINS`): each call reads `builtin:claude-code` too. */
+  served?: readonly string[]
 }
 
-/** The prefix of the built-ins a classic turn serves itself (builtins/server.ts `BUILTIN_SERVER`, `mcp__builtin__<Name>`). */
-const SERVED_PREFIX = 'mcp__builtin__'
+/** Why a Monitor `command` call is refused while Bash is off. */
+export const MONITOR_SHELL_OFF =
+  "Monitor's command runs a shell where Bash runs, and Bash is off in Settings → Tools & plugins (no sandbox, #779). Watch a WebSocket (`ws`) instead."
 
 /**
  * The seam's per-call read (harness/permissions.ts `LiveSeam`): a registry tool's access
@@ -45,16 +48,18 @@ const SERVED_PREFIX = 'mcp__builtin__'
  * (`off` when the server is switched off, else outward unless stored), and
  * http_request's (`off` when `builtin:http` is, its item when one is stored, else its
  * method's tier), a Skill, Agent or Task call's (`off` when it names an item that is off,
- * items.ts `offCallItem`, else undefined: the turn's tier stands) and a package built-in's
- * (resolver.ts `builtin` over the packages that name it, by its own name or the name the
- * session serves it under). Anything else is undefined.
+ * items.ts `offCallItem`, else undefined: the turn's tier stands), a built-in's of
+ * `builtin:claude-code` (resolver.ts `native`: Claude Code's own by its name, the session's
+ * by the name it serves them under) and any other package built-in's (resolver.ts `builtin`
+ * over the packages that name it). Anything else is undefined.
  */
 export function liveAccess(
   resolver: Pick<AccessResolver, 'item' | 'entry' | 'switchedItem' | 'builtin' | 'native' | 'rows'>,
   turn: LiveTurn,
 ): LiveAccess {
   const native = new Map(turn.native ? NATIVE_BUILTINS.map((b) => [b.name, b.access]) : [])
-  const own = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
+  const served = new Map(SESSION_BUILTINS.filter((b) => turn.served?.includes(b.name)).map((b) => [`${SERVED_PREFIX}${b.name}`, b]))
+  const registry = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
   const sources: { prefix: string; source: string }[] = [
     ...turn.remote.map((name) => ({ prefix: toolPrefix(name), source: remoteSource(name) })),
     ...turn.packageServers.map((s) => ({ prefix: toolPrefix(s.name), source: packageServerSource(s.pkg, s.server) })),
@@ -71,10 +76,20 @@ export function liveAccess(
     // Claude Code's own: its item, which a package that names it can only switch on.
     const declared = native.get(harnessName)
     if (declared !== undefined) return resolver.native(harnessName, declared, builtins.get(harnessName) ?? [])
+    // The session's own: its item too; a Monitor's by its source as well (nativeBuiltins.ts `monitorAccess`).
+    const own = served.get(harnessName)
+    if (own) {
+      const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
+      if (own.name !== 'Monitor' || access === 'off') return access
+      const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
+      const shell = command ? await resolver.native('Bash', 'off', builtins.get('Bash') ?? []) : undefined
+      if (shell === 'off') return { off: MONITOR_SHELL_OFF }
+      return monitorAccess(access, input, shell)
+    }
     const packages = builtins.get(builtin)
     if (packages) return resolver.builtin(builtin, packages)
     if (namesItem(harnessName)) return undefined
-    const tool = own.get(harnessName)
+    const tool = registry.get(harnessName)
     if (tool) {
       const source = registrySource(tool.name)
       return source === BUILTIN_SOURCES.browser

@@ -10,7 +10,7 @@ import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, tool
 import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
 import { skillItem, subagentItem } from './items.js'
-import { NATIVE_BUILTINS, type NativeBuiltin } from './nativeBuiltins.js'
+import { BUILTIN_ITEMS, type NativeBuiltin, SERVED_PREFIX, SESSION_NAMES } from './nativeBuiltins.js'
 import type { ListedTool, ToolListings } from './listings.js'
 import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource, type ToolAccess } from './model.js'
 import { isRegistrySource, sourceEnabled, toolAccess } from './resolve.js'
@@ -86,7 +86,7 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
   }
 }
 
-/** One of Claude Code's own built-ins (nativeBuiltins.ts): its row, else its default; Bash and PowerShell say why they are off. */
+/** One of `builtin:claude-code`'s built-ins (nativeBuiltins.ts): its row, else its default; Bash and PowerShell say why they are off, Monitor how its source raises it. */
 function nativeItem(builtin: NativeBuiltin, rows: readonly AccessRow[]): ItemView {
   const row = rowOf(rows, BUILTIN_SOURCES.claudeCode, builtin.name)
   const access = row !== undefined && isToolAccess(row.access) ? row.access : builtin.access
@@ -94,11 +94,12 @@ function nativeItem(builtin: NativeBuiltin, rows: readonly AccessRow[]): ItemVie
     id: builtin.name,
     kind: 'tool',
     name: builtin.name,
-    harness_name: builtin.name,
+    // The session's own are served as `mcp__builtin__<Name>` (builtins/server.ts).
+    harness_name: SESSION_NAMES.has(builtin.name) ? `${SERVED_PREFIX}${builtin.name}` : builtin.name,
     label: builtin.label,
     description: builtin.description,
     default: builtin.access,
-    default_note: builtin.access === 'off' ? NATIVE_OFF_NOTE : null,
+    default_note: builtin.access === 'off' ? NATIVE_OFF_NOTE : builtin.name === 'Monitor' ? MONITOR_NOTE : null,
     suggested: null,
     access,
     own_access: access,
@@ -111,6 +112,7 @@ function nativeItem(builtin: NativeBuiltin, rows: readonly AccessRow[]): ItemVie
 }
 
 export const NATIVE_OFF_NOTE = 'off: it would run unsandboxed in the worker pod (#779); a plugin package that names it switches it on, asking first'
+export const MONITOR_NOTE = 'write; a WebSocket asks first, and a command runs only while Bash is on, at its tier'
 
 const OWN_PLUGIN = BUILT_INS.find((b) => b.name === OWN_PLUGIN_NAME)!
 
@@ -174,7 +176,7 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
     if (isRegistrySource(spec.id)) items = tools.filter((t) => registrySource(t.name) === spec.id).map((t) => registryItem(t, rows))
     else if (spec.id === BUILTIN_SOURCES.http) items = [httpItem(rows)]
     else if (spec.id === BUILTIN_SOURCES.ownPlugin) items = ownPluginItems(reviewOf(OWN_PLUGIN), rows)
-    else if (spec.id === BUILTIN_SOURCES.claudeCode) items = NATIVE_BUILTINS.map((b) => nativeItem(b, rows))
+    else if (spec.id === BUILTIN_SOURCES.claudeCode) items = BUILTIN_ITEMS.map((b) => nativeItem(b, rows))
     return {
       id: spec.id,
       kind: 'builtin',
