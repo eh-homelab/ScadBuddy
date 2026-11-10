@@ -2,6 +2,8 @@ import { useId, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { ActionKey, StoreError, errorText, store } from '../api/client'
 import { useDraftChanged } from '../draftCount'
+import { forgetTurnstileSiteKey, useTurnstileSiteKey } from '../turnstile'
+import { Turnstile } from './Turnstile'
 
 /** The edge's caps (`storefront/wire.py`): the page says so before a byte is sent. */
 const MAX_FILES = 10
@@ -31,10 +33,16 @@ export function RequestForm() {
   const key = useRef(new ActionKey())
   const draftChanged = useDraftChanged()
   const problem = filesProblem(files)
+  // The bot check (spec §5.8): a widget while it is on, and a new token after each send.
+  const [token, setToken] = useState<string | null>(null)
+  const [widget, setWidget] = useState(0)
+  const siteKey = useTurnstileSiteKey(widget)
+  const checking = siteKey !== null
+  const needsCheck = checking && token === null
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (problem) return
+    if (problem || needsCheck) return
     if (!text.trim() && files.length === 0) {
       setError('Tell us what to make, or add a photo.')
       return
@@ -43,17 +51,21 @@ export function RequestForm() {
     setSending(true)
     setError(null)
     try {
-      const draft = await store.addRequest(text, files, key.current.for(what))
+      const draft = await store.addRequest(text, files, key.current.for(what), token)
       key.current.done()
       draftChanged(draft)
       setSent(true)
       setText('')
       setFiles([])
     } catch (caught) {
+      // Refused for its bot check: the check may have been turned on since the key was read.
+      if (caught instanceof StoreError && caught.slug === 'bot_check_failed') forgetTurnstileSiteKey()
       const wait = caught instanceof StoreError && caught.status === 429 && caught.retryAfter !== null
       setError(wait ? `${errorText(caught)} Try again in ${(caught as StoreError).retryAfter} seconds.` : errorText(caught))
     } finally {
       setSending(false)
+      // A token passes one check only; a site key that failed to read is read again.
+      setWidget((n) => n + 1)
     }
   }
 
@@ -113,12 +125,13 @@ export function RequestForm() {
           </ul>
         )}
       </div>
+      {siteKey && <Turnstile siteKey={siteKey} action="request" onToken={setToken} resetKey={widget} />}
       {error && (
         <p className="sf-error" role="alert">
           {error}
         </p>
       )}
-      <button type="submit" className="sf-button" disabled={sending || problem !== null}>
+      <button type="submit" className="sf-button" disabled={sending || problem !== null || needsCheck}>
         {sending ? 'Sending…' : 'Send request'}
       </button>
     </form>
