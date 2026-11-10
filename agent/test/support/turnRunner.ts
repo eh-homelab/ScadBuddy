@@ -55,6 +55,8 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** The sessions' sandbox pods (#5864); none when undefined. */
+  sandbox?: TurnRunnerDeps['sandbox']
   /** Whether the agent keeps background tasks (`deps.background`: Temporal and a database); none when undefined. */
   background?: boolean
   /** The session's `backgroundTools` (false: flow-started, or a Workflow agent's chat); true when undefined. */
@@ -183,6 +185,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
     // Never called: the tests only assemble.
     ...(options.background ? { background: { tasks: {} as BackgroundTasks, tz: 'UTC', commandQueue: 'agent-sessions.test' } } : {}),
     ...(options.turnTools

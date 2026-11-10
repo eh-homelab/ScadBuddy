@@ -12,8 +12,11 @@ import { type AccessRow, BUILTIN_SOURCES, type ToolAccess } from './model.js'
 // --map-root-user --pid --fork` works, but with `--mount` it fails with "cannot change root
 // filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`, enforce),
 // and the image has no bwrap. Without a sandbox, Bash reads what the worker can (the KEK mount,
-// every session's directory). A sandbox pod (#779) is the follow-up. An `allow_refused`
-// package that names one still switches it on (`turnBuiltins`), at `outward`.
+// every session's directory). An `allow_refused` package that names one still switches it on
+// (`turnBuiltins`), at `outward`. Where the deployment sets up sandbox pods (#5864,
+// config.ts `sandbox`), the turn never gets the native ones: the same two items govern the
+// session's own Bash and PowerShell, which run in its sandbox pod (builtins/sandboxShell.ts),
+// `outward` by default (SANDBOXED_ACCESS).
 //
 // WebFetch and WebSearch stay ScadBuddy's egress-checked ones (decision Q2, builtins/web.ts),
 // and CronCreate, CronDelete, CronList, ScheduleWakeup, Monitor, Workflow and TaskStop the
@@ -45,15 +48,21 @@ export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
     name: BASH,
     access: 'off',
     label: 'Run a shell command',
-    description: 'Runs a shell command in the worker pod. Off: no sandbox can run there yet (#779), so it could read every session and the key.',
+    description:
+      "Runs a shell command in the session's sandbox pod, where one is set up (#5864); there, outward by default. Off where none is: in the worker pod it could read every session and the key.",
   },
   {
     name: 'PowerShell',
     access: 'off',
     label: 'Run a PowerShell command',
-    description: 'Runs a PowerShell command in the worker pod. Off, as Bash is.',
+    description: "Runs a PowerShell command in the session's sandbox pod, where one is set up (#5864), as Bash does. Off where none is.",
   },
 ]
+
+/** The access Bash and PowerShell default to where they run in a sandbox pod (#5864): each call parks for a person. */
+export const SANDBOXED_ACCESS: ToolAccess = 'outward'
+/** The built-ins that run in a session's sandbox pod where one is set up (#5864, builtins/sandboxShell.ts). */
+export const SHELL_BUILTINS: readonly string[] = ['Bash', 'PowerShell']
 
 export const NATIVE_NAMES: ReadonlySet<string> = new Set(NATIVE_BUILTINS.map((b) => b.name))
 
@@ -70,8 +79,9 @@ export type SessionBuiltin = NativeBuiltin & { background: boolean }
  * Monitor is `write`, by its source (`sessionTierOf`): a `ws` source connects to a web host as
  * WebFetch does, so `outward`; a `command` source runs a shell where the session's Bash runs,
  * unsandboxed in the worker pod (decision Q4), so the turn offers it only while Bash is on, at
- * Bash's tier or Monitor's, the stricter. With Bash off (its default) a Monitor watches a
- * WebSocket only, and asks first.
+ * Bash's tier or Monitor's, the stricter, and never where Bash runs in a sandbox pod (#5864:
+ * the command would run in the worker, not the pod; live.ts `MONITOR_SANDBOXED`, #5916). With Bash
+ * off (its default) a Monitor watches a WebSocket only, and asks first.
  */
 export const SESSION_BUILTINS: readonly SessionBuiltin[] = [
   { name: 'WebFetch', access: 'outward', background: false, label: 'Fetch a web page', description: 'Fetches a URL, egress-checked, and answers a prompt about the page.' },
@@ -87,7 +97,7 @@ export const SESSION_BUILTINS: readonly SessionBuiltin[] = [
     label: 'Watch a source',
     description:
       "Streams a WebSocket's frames, or a shell command's output lines, to the session as events. A WebSocket asks first, as WebFetch does; " +
-      'a command runs only while Bash is on, at its tier.',
+      'a command runs only while Bash is on, at its tier, and never where Bash runs in a sandbox pod.',
   },
   { name: 'Workflow', access: 'write', background: true, label: 'Run a workflow', description: 'Runs a script that orchestrates subagents in the background.' },
   { name: 'TaskStop', access: 'write', background: true, label: 'Stop a background task', description: "Stops one of the session's cron jobs, wakeups, monitors or workflows." },

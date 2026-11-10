@@ -26,8 +26,8 @@ export type BackgroundContext = {
   tz: string
   now: () => Date
   /**
-   * The queue a Monitor's command runs on: where this session's Bash runs (the replica
-   * that ran a classic turn, agent-durable's for a durable one). None: no commands.
+   * The queue a Monitor's command runs on: the replica that ran the turn. None: no commands,
+   * as where a sandbox is set up (#5864: the session's Bash runs in its pod, not here).
    */
   commandQueue?: string | undefined
   /** The session workspace: a Workflow's script is kept there without a working directory, and a scriptPath read from it. */

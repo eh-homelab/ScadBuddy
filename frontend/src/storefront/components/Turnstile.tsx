@@ -37,6 +37,8 @@ export function Turnstile({ siteKey, action, onToken, resetKey = 0 }: Props) {
   useEffect(() => {
     let live = true
     let widgetId: string | undefined
+    // A new widget (a new resetKey) tries the script again: drop the last failure.
+    setFailed(false)
     report.current(null)
     loadTurnstile().then(
       (turnstile) => {
@@ -46,7 +48,13 @@ export function Turnstile({ siteKey, action, onToken, resetKey = 0 }: Props) {
           action,
           callback: (token) => report.current(token),
           'expired-callback': () => report.current(null),
-          'error-callback': () => report.current(null),
+          // True: the error is handled here (no token), so Turnstile logs no warning of
+          // its own (https://developers.cloudflare.com/turnstile/troubleshooting/client-side-errors/,
+          // "Error handling").
+          'error-callback': () => {
+            report.current(null)
+            return true
+          },
         })
       },
       () => live && setFailed(true),

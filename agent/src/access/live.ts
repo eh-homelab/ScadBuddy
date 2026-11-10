@@ -4,7 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
-import { BASH, MONITOR, monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS, SESSION_NAMES } from './nativeBuiltins.js'
+import { BASH, MONITOR, monitorAccess, NATIVE_BUILTINS, SANDBOXED_ACCESS, SERVED_PREFIX, SESSION_BUILTINS, SESSION_NAMES, SHELL_BUILTINS } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -37,11 +37,17 @@ export type LiveTurn = {
   served?: readonly string[]
   /** Whether the turn gave Monitor a command queue (Bash was on when it was assembled): without one a command call is refused. */
   shell?: boolean
+  /** Whether its Bash and PowerShell are the session's own in a sandbox pod (#5864): each call reads its item, `outward` by default. */
+  sandboxShell?: boolean
 }
 
 /** Why a Monitor `command` call is refused while Bash is off. */
 export const MONITOR_SHELL_OFF =
   "Monitor's command runs a shell where Bash runs, and Bash is off in Settings → Tools & plugins (no sandbox, #779). Watch a WebSocket (`ws`) instead."
+
+/** Why a Monitor `command` call is refused where the session's Bash runs in a sandbox pod (#5864, #5916). */
+export const MONITOR_SANDBOXED =
+  "This session's Bash runs in a sandbox pod, and a Monitor command would not run there, so it is not available. Watch a WebSocket (`ws`) instead."
 
 /** Why a Monitor `command` call is refused when Bash is on now but was off when the turn started (its server has no command queue). */
 export const MONITOR_SHELL_NEXT_TURN =
@@ -83,6 +89,10 @@ export function liveAccess(
     // Claude Code's own: its item, which a package that names it can only switch on.
     const declared = native.get(harnessName)
     if (declared !== undefined) return resolver.native(harnessName, declared, builtins.get(harnessName) ?? [])
+    // The session's sandboxed Bash and PowerShell (#5864): their items, `outward` by default.
+    if (turn.sandboxShell && harnessName !== builtin && SHELL_BUILTINS.includes(builtin)) {
+      return resolver.native(builtin, SANDBOXED_ACCESS, builtins.get(builtin) ?? [])
+    }
     // The session's own: its item too; a Monitor's by its source as well (nativeBuiltins.ts `monitorAccess`).
     const own = served.get(harnessName)
     // One of the session's own the turn does not serve (its item was off when it was assembled, or a flow's background one): off, as its item.
@@ -91,6 +101,8 @@ export function liveAccess(
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
       if (own.name !== MONITOR || access === 'off') return access
       const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
+      // With a sandbox the session's Bash runs in its pod, and a monitor command would not (#5916).
+      if (command && turn.sandboxShell) return { off: MONITOR_SANDBOXED }
       const shell = command ? await resolver.native(BASH, bashDeclared, builtins.get(BASH) ?? []) : undefined
       if (shell === 'off') return { off: MONITOR_SHELL_OFF }
       // Bash on now but off when the turn was assembled: its server has no command queue, so refused, never asked.

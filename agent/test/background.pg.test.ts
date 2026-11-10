@@ -14,7 +14,7 @@ import { AuditLog } from '../src/audit/log.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
-import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
+import { type BuiltinContext, builtinServer, classicBuiltinServer, MONITOR_WS_ONLY } from '../src/builtins/server.js'
 import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
 import { confineGuard } from '../src/harness/confine.js'
@@ -485,6 +485,39 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     expect((await store.get(idOf(watch.content[0]!.text)))!.spec).toMatchObject({ queue: 'agent-tools.pod-b' })
     await turnClient.close()
     classic.abortAll()
+  })
+
+  it("refuses a Monitor's command where the session's Bash runs in a sandbox pod (#5864)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'bg-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'watch' }))
+    const pkg = { name: 'watch', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['Monitor'] }
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const sandboxed = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+      sandbox: { acquire: () => Promise.reject(new Error('not called')) },
+    })
+    const { session } = await sandboxed.start(browser, { origin: 'chat' })
+    await sandboxed.send(session.id, browser, 'watch it')
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const run = scripted.runs[0]!
+    // A command would run on this replica, beside the database secret and the KEK: refused; a ws source still works.
+    const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+    const watch = (await turnClient.callTool({ name: 'Monitor', arguments: { description: 'log', command: 'tail -f x.log', timeout_ms: 60_000 } })) as {
+      content: { text: string }[]
+      isError?: boolean
+    }
+    expect(watch.isError).toBe(true)
+    expect(watch.content[0]!.text).toContain('cannot run monitor commands')
+    // Its description offers only a ws source, so the model is not told otherwise.
+    const monitorTool = (await turnClient.listTools()).tools.find((t) => t.name === 'Monitor')!
+    expect(monitorTool.description).toBe(MONITOR_WS_ONLY)
+    await turnClient.close()
+    sandboxed.abortAll()
   })
 
   it("gives a flow-started session's turns, a Workflow agent's chat's and their forks' only WebFetch and WebSearch (#5870)", async () => {

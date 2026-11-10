@@ -465,7 +465,8 @@ def _turnstile_config(state: StateDep) -> TurnstileConfig:
     runtime = state.settings_store.snapshot().runtime
     public = state.settings.storefront_public_url
     return TurnstileConfig(
-        site_key=runtime.storefront_turnstile_site_key or None,
+        # A key of only spaces is no key: the check stays off rather than fail every form.
+        site_key=(runtime.storefront_turnstile_site_key or "").strip() or None,
         secret=runtime.storefront_turnstile_secret or None,
         hostname=urlsplit(public).hostname if public else None,
     )

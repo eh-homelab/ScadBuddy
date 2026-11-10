@@ -68,6 +68,24 @@ def test_a_site_key_with_no_secret_fails_closed(client: TestClient) -> None:
     assert check(client, {"token": "t", "action": "submit"}) == "unavailable"
 
 
+def test_a_blank_site_key_is_refused_when_saved(client: TestClient) -> None:
+    response = client.put("/api/v1/settings", json={"storefront_turnstile_site_key": "   "})
+    assert response.status_code == 422
+    assert "storefront_turnstile_site_key" in response.text
+    assert client.get(SITE, headers=token(client)).json() == {"site_key": None}
+
+
+def test_a_blank_site_key_from_the_environment_reads_as_unset(
+    settings: Settings,
+) -> None:
+    blank = settings.model_copy(update={"storefront_turnstile_site_key": "  "})
+    with TestClient(create_app(blank)) as client:
+        assert client.get(SITE, headers=token(client)).json() == {"site_key": None}
+        with respx.mock(assert_all_called=False) as cloudflare:
+            assert check(client, {"token": None, "action": "submit"}) == "off"
+            assert not cloudflare.calls
+
+
 def test_the_secret_is_sealed_never_read_back_and_sent_only_to_cloudflare(
     keyed_client: TestClient, settings: Settings
 ) -> None:

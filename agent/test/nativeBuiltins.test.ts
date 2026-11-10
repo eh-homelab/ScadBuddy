@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { AccessRow } from '../src/access/model.js'
-import { monitorAccess, NATIVE_BUILTINS, SESSION_BUILTINS, sessionTierOf, turnBuiltins } from '../src/access/nativeBuiltins.js'
+import { monitorAccess, NATIVE_BUILTINS, SESSION_BUILTINS, sessionTierOf, SHELL_BUILTINS, turnBuiltins } from '../src/access/nativeBuiltins.js'
 import { BACKGROUND_BUILTINS, BUILTINS } from '../src/builtins/server.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { confineGuard, projectDirName } from '../src/harness/confine.js'
@@ -51,7 +51,8 @@ describe("the session's own built-ins by default (#2726 R2)", () => {
   const declared = { native: async (_name: string, access: 'off' | 'read' | 'write' | 'outward') => access }
 
   it('are the built-ins the session serves, the background ones marked as server.ts marks them', () => {
-    expect(SESSION_BUILTINS.map((b) => b.name).sort()).toEqual(Object.keys(BUILTINS).sort())
+    // Bash and PowerShell are served too, but only with a sandbox (#5864), under Claude Code's own items.
+    expect(SESSION_BUILTINS.map((b) => b.name).sort()).toEqual(Object.keys(BUILTINS).filter((n) => !SHELL_BUILTINS.includes(n)).sort())
     expect(SESSION_BUILTINS.filter((b) => b.background).map((b) => b.name).sort()).toEqual([...BACKGROUND_BUILTINS].sort())
   })
 

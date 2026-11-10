@@ -21,6 +21,7 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { ConfigError, loadConfig } from './config.js'
 import { type PolledQueue, queuesPolled, workerHealthApp } from './runtime/health.js'
 import { roleParts } from './runtime/role.js'
+import { inClusterApi, KubernetesSandboxes } from './sandbox/pods.js'
 import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
@@ -577,6 +578,16 @@ if (role.http && database && dataKeys) {
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
+// Bash and PowerShell in a sandbox pod per session (#5864, sandbox/pods.ts): only where turns run,
+// and only once the cluster side is set up (SCADBUDDY_SANDBOX_*). Each minute the pods that have
+// ended (idle, or past their deadline) are deleted.
+const sandboxes = config.sandbox && role.sessionHost ? new KubernetesSandboxes(config.sandbox, inClusterApi(config.sandbox)) : undefined
+if (sandboxes) {
+  setInterval(() => {
+    sandboxes.sweep().catch((err: unknown) => console.error('sandbox: the sweep of ended pods failed:', err instanceof Error ? err.message : String(err)))
+  }, 60_000).unref()
+}
+
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
 // Temporal client below exists; read by each turn (until then, its calls run in-process).
 let toolCallStart: ToolCallStarter | undefined
@@ -629,6 +640,7 @@ const sessions =
         ...(workspace ? { workspace } : {}),
         // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
         ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: HOST_QUEUE } } : {}),
+        ...(sandboxes ? { sandbox: sandboxes } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),

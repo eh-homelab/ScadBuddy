@@ -48,7 +48,8 @@ STOREFRONT_CSP: Final = (
 #: storefront does not use
 #: (https://developers.cloudflare.com/turnstile/reference/content-security-policy/, read
 #: 2026-11-09). The page is one app and a CSP binds at a full load, so every page names it
-#: while the bot check is on (a site key is set), and none does while it is off.
+#: while a site key is set, and until the edge's first site-key read succeeds
+#: (`turnstile.py` `SiteKey.ever_read`), and none does while the check is known off.
 TURNSTILE_ORIGIN: Final = "https://challenges.cloudflare.com"
 TURNSTILE_CSP: Final = STOREFRONT_CSP.replace(
     "script-src 'self';", f"script-src 'self' {TURNSTILE_ORIGIN}; frame-src {TURNSTILE_ORIGIN};"

@@ -99,6 +99,8 @@ check Leathong/openscad-LSP "$(arg OPENSCAD_LSP_ASSET_AMD64)" \
   "$(arg OPENSCAD_LSP_SHA256_AMD64)" "openscad-lsp amd64"
 check Leathong/openscad-LSP "$(arg OPENSCAD_LSP_ASSET_ARM64)" \
   "$(arg OPENSCAD_LSP_SHA256_ARM64)" "openscad-lsp arm64"
+check PowerShell/PowerShell "$(arg POWERSHELL_ASSET_AMD64)" \
+  "$(arg POWERSHELL_SHA256_AMD64)" "PowerShell amd64"
 check temporalio/cli "$(arg TEMPORAL_CLI_ASSET_ARM64)" \
   "$(arg TEMPORAL_CLI_SHA256_ARM64)" "Temporal CLI arm64"
 check kubernetes-sigs/kustomize "$(ci_env KUSTOMIZE_ASSET_ID)" \

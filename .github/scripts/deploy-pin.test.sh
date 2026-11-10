@@ -33,6 +33,7 @@ export IMAGE=ghcr.io/eh-homelab/scadbuddy
 export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
 export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
+export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -49,7 +50,8 @@ REVISION="$(printf '2%.0s' {1..40})"
 AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
 AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
 SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST
+SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -59,6 +61,8 @@ durable="$AGENT_DURABLE_IMAGE:sha-3333333@sha256:$(printf '6%.0s' {1..64})"
 durable_pinned="$AGENT_DURABLE_IMAGE:$VERSION@$AGENT_DURABLE_DIGEST"
 slicer_old="$SLICER_IMAGE:sha-3333333@sha256:$(printf '8%.0s' {1..64})"
 slicer_pinned="$SLICER_IMAGE:$VERSION@$SLICER_DIGEST"
+sandbox_old="$SANDBOX_IMAGE:sha-3333333@sha256:$(printf 'a%.0s' {1..64})"
+sandbox_pinned="$SANDBOX_IMAGE:$VERSION@$SANDBOX_DIGEST"
 failures=0
 
 fail() {
@@ -428,6 +432,46 @@ else
 fi
 extra_path=
 extra_content=
+
+# 8d. The sessions' shell sandbox (#5864): every image: or value: line that names it, in any
+#     scanned file (an overlay subdirectory too), moves to this build; a build with no sandbox
+#     image keeps them and warns; a mention on any other kind of line fails.
+sandbox_file() { # image-ref value-ref
+  printf '%s\n' 'apiVersion: apps/v1' 'kind: Deployment' 'metadata:' '  name: sandbox-egress' 'spec:' '  template:' '    spec:' \
+    '      containers:' '        - name: egress' "          image: $1" '          env:' '            - name: SCADBUDDY_SANDBOX_IMAGE' \
+    "              value: $2"
+}
+extra_path=clusters/prod/scadbuddy/sandbox-egress.yaml
+extra_content=$(sandbox_file "$sandbox_old" "$sandbox_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -qF "image: $sandbox_pinned" "$work/repo/$extra_path" || fail "sandbox: image line not pinned"
+  grep -qF "value: $sandbox_pinned" "$work/repo/$extra_path" || fail "sandbox: value line not pinned"
+  grep -q '^sandbox=pinned$' "$work/out" || fail "sandbox: output is not pinned"
+  grep -q "$extra_path" "$work/out" || fail "sandbox: not among the changed files"
+else
+  fail "sandbox: step failed: $(grep '::error' "$work/log")"
+fi
+if SANDBOX_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -qF "image: $sandbox_old" "$work/repo/$extra_path" || fail "sandbox, no image: old pin was not kept"
+  grep -q '^sandbox=kept$' "$work/out" || fail "sandbox, no image: output is not kept"
+  grep -q '::warning.*keeping the sandbox pins' "$work/log" || fail "sandbox, no image: no warning: $(cat "$work/log")"
+else
+  fail "sandbox, no image: step failed: $(grep '::error' "$work/log")"
+fi
+extra_content=$(printf '%s\n' "$(sandbox_file "$sandbox_old" "$sandbox_old")" '          args: ["--image", "'"$sandbox_old"'"]')
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "sandbox on another kind of line: step passed, expected an error"
+else
+  grep -q "names $SANDBOX_IMAGE 3 time(s), but 2 of them" "$work/log" \
+    || fail "sandbox on another kind of line: wrong error: $(grep '::error' "$work/log")"
+fi
+extra_path=
+extra_content=
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^sandbox=none$' "$work/out" || fail "no sandbox: output is not none"
+else
+  fail "no sandbox: step failed: $(grep '::error' "$work/log")"
+fi
 
 # `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
 # beside an overlay carrying those lines; the step must fail with that error.

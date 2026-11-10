@@ -1,6 +1,7 @@
 import type { AccessResolver } from '../access/resolver.js'
 import type { ToolLoadings } from '../harness/toolSearch.js'
 import type { nestedQueries } from '../builtins/nested.js'
+import type { Sandboxes } from '../sandbox/client.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import {
@@ -764,6 +765,12 @@ export type SessionManagerDeps = {
    * no turn has them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
+  /**
+   * The sessions' sandbox pods (#5864, sandbox/pods.ts): with it, a turn's Bash and PowerShell
+   * are the session's own (builtins/sandboxShell.ts), run there, never Claude Code's in this
+   * process. Without it they stay `off`.
+   */
+  sandbox?: Sandboxes
   run?: QueryRunner
   /**
    * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),

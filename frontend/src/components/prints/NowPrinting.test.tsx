@@ -8,8 +8,28 @@ import { renderPage } from '../../test/utils'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import type * as Embed from '../../lib/embed'
 import type { PrinterNow } from '../../api/types'
-import { NOW_POLL_MS, NOW_SIGNAL_MS, NowPrinting } from './NowPrinting'
+import { LiveJobItem } from './LiveJobItem'
+import { liveJobs } from './liveJobs'
+import { NOW_POLL_MS, NOW_SIGNAL_MS, PrinterStrip, usePrintersNow } from './NowPrinting'
 import { mergeCards } from './nowCards'
+
+/**
+ * #3745 — one read of the printers, as the Prints page makes it: the strip of printers,
+ * and their working jobs as rows of the list (`printer-job-<id>`).
+ */
+function NowPrinting() {
+  const now = usePrintersNow()
+  return (
+    <>
+      <PrinterStrip now={now} />
+      <ul aria-label="Prints">
+        {liveJobs(now.cards ?? [], []).map((job) => (
+          <LiveJobItem key={job.key} job={job} view="list" />
+        ))}
+      </ul>
+    </>
+  )
+}
 
 const frame = vi.hoisted(() => ({ embedded: false }))
 vi.mock('../../lib/embed', async (original) => ({
@@ -28,7 +48,7 @@ describe('NowPrinting (#977)', () => {
   it("shows each printer's job, progress, time left and HMS errors, whoever started it", async () => {
     renderPage(<NowPrinting />)
 
-    const paused = await screen.findByTestId('printer-now-1')
+    const paused = await screen.findByTestId('printer-job-1')
     expect(paused).toHaveTextContent('3DP-31B-598')
     expect(paused).toHaveTextContent('Paused')
     expect(paused).toHaveTextContent('Bracket')
@@ -47,24 +67,40 @@ describe('NowPrinting (#977)', () => {
     expect(bambuddy).toHaveAttribute('href', 'http://bambuddy.local/archives/90')
     expect(bambuddy).toHaveAttribute('target', '_blank')
 
-    const linked = screen.getByTestId('printer-now-2')
+    const linked = screen.getByTestId('printer-job-2')
     // ScadBuddy's job, archived: its print in ScadBuddy.
-    expect(within(linked).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/prints/35')
-    expect(linked).toHaveTextContent('54m left')
+    expect(within(linked).getByRole('link', { name: 'Nova' })).toHaveAttribute('href', '/prints/37')
+    expect(linked).toHaveTextContent('Printing 66% · 54m left')
 
     const idle = screen.getByTestId('printer-now-3')
     expect(idle).toHaveTextContent('Idle')
     expect(within(idle).queryByRole('progressbar')).toBeNull()
     expect(within(idle).queryByRole('link')).toBeNull()
+    expect(screen.queryByTestId('printer-job-3')).toBeNull()
+  })
+
+  it('keeps the job off the strip: a working printer says its state, not its job (#3745)', async () => {
+    renderPage(<NowPrinting />)
+    const paused = await screen.findByTestId('printer-now-1')
+    expect(screen.getByRole('region', { name: 'Printers' })).toContainElement(paused)
+    expect(paused).toHaveTextContent('Paused')
+    expect(paused).not.toHaveTextContent('Bracket')
+    expect(within(paused).queryByRole('progressbar')).toBeNull()
+    expect(within(paused).queryByTestId('job-picture')).toBeNull()
+    // The printer's own state stays on its card: its HMS errors and its camera.
+    expect(within(paused).getByTestId('printer-now-hms-1')).toBeInTheDocument()
+    expect(within(paused).getByRole('button', { name: 'Camera of 3DP-31B-598' })).toBeInTheDocument()
+    // The job's state is words on its row, not colour alone.
+    expect(within(screen.getByTestId('printer-job-1')).getByText('Paused: Spaghetti detected: check the print.')).toBeInTheDocument()
   })
 
   it('marks the jobs ScadBuddy queued or started, and no other (#3741)', async () => {
     renderPage(<NowPrinting />)
 
-    const linked = await screen.findByTestId('printer-now-2')
+    const linked = await screen.findByTestId('printer-job-2')
     expect(within(linked).getByText('Queued from ScadBuddy')).toBeInTheDocument()
     // Started from Bambuddy, and an idle printer: no mark.
-    expect(within(screen.getByTestId('printer-now-1')).queryByText('Queued from ScadBuddy')).toBeNull()
+    expect(within(screen.getByTestId('printer-job-1')).queryByText('Queued from ScadBuddy')).toBeNull()
     expect(within(screen.getByTestId('printer-now-3')).queryByText('Queued from ScadBuddy')).toBeNull()
   })
 
@@ -74,7 +110,7 @@ describe('NowPrinting (#977)', () => {
     Object.defineProperty(document, 'referrer', { value: 'http://bambuddy.lan:8000/external/3', configurable: true })
     renderPage(<NowPrinting />)
 
-    const paused = await screen.findByTestId('printer-now-1')
+    const paused = await screen.findByTestId('printer-job-1')
     expect(within(paused).getByRole('link', { name: 'Bracket, in Bambuddy' })).toHaveAttribute(
       'href',
       'http://bambuddy.lan:8000/archives/90',
@@ -87,7 +123,7 @@ describe('NowPrinting (#977)', () => {
     setPrintersNow([{ ...paused!, bambuddy_url: 'http://bambuddy.local/archives', bambuddy_archive_page: false }])
     renderPage(<NowPrinting />)
 
-    const card = await screen.findByTestId('printer-now-1')
+    const card = await screen.findByTestId('printer-job-1')
     expect(within(card).getByRole('link', { name: "Bracket, archive 90 in Bambuddy's archives" })).toHaveAttribute(
       'href',
       'http://bambuddy.local/archives',
@@ -102,7 +138,7 @@ describe('NowPrinting (#977)', () => {
     ])
     renderPage(<NowPrinting />)
 
-    const card = await screen.findByTestId('printer-now-1')
+    const card = await screen.findByTestId('printer-job-1')
     expect(within(card).getByRole('link', { name: 'Bracket, in Bambuddy' })).toHaveAttribute(
       'href',
       'http://bambuddy.local/archives/90?view=detail',
@@ -116,17 +152,17 @@ describe('NowPrinting (#977)', () => {
       paused!,
       ours!,
       idle!,
-      { ...paused!, id: '00000000-0000-4000-8000-000000000008', printer_id: 8, name: 'LAN', picture: null },
+      { ...paused!, id: '00000000-0000-4000-8000-000000000008', printer_id: 8, name: 'LAN', archive_id: 91, picture: null },
     ])
     renderPage(<NowPrinting />)
 
-    const cover = within(await screen.findByTestId('printer-now-1')).getByTestId('job-picture')
+    const cover = within(await screen.findByTestId('printer-job-1')).getByTestId('job-picture')
     expect(cover.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/printers/1/cover?archive=90')
     // The job's name is beside it.
     expect(cover.querySelector('img')).toHaveAttribute('alt', '')
-    const render = within(screen.getByTestId('printer-now-2')).getByTestId('job-picture')
+    const render = within(screen.getByTestId('printer-job-2')).getByTestId('job-picture')
     expect(render.querySelector('img')).toHaveAttribute('src', '/api/v1/outputs/luna-0001/thumbnail')
-    const none = within(screen.getByTestId('printer-now-8')).getByTestId('job-picture')
+    const none = within(screen.getByTestId('printer-job-8')).getByTestId('job-picture')
     expect(within(none).getByTestId('job-picture-placeholder')).toBeInTheDocument()
     // An idle printer has no job to picture.
     expect(within(screen.getByTestId('printer-now-3')).queryByTestId('job-picture')).toBeNull()
@@ -154,16 +190,16 @@ describe('NowPrinting (#977)', () => {
     ])
     renderPage(<NowPrinting />)
 
-    const output = await screen.findByTestId('printer-now-2')
-    expect(within(output).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/edit/luna-0001')
-    const library = screen.getByTestId('printer-now-9')
+    const output = await screen.findByTestId('printer-job-2')
+    expect(within(output).getByRole('link', { name: 'Nova' })).toHaveAttribute('href', '/edit/luna-0001')
+    const library = screen.getByTestId('printer-job-9')
     expect(within(library).getByRole('link', { name: 'Bracket plate' })).toHaveAttribute('href', '/library?file=1630')
   })
 
   it('follows the printers as they change', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     renderPage(<NowPrinting />)
-    const card = await screen.findByTestId('printer-now-2')
+    const card = await screen.findByTestId('printer-job-2')
     expect(card).toHaveTextContent('66%')
 
     setPrintersNow(PRINTERS_NOW.map((printer) => (printer.printer_id === 2 ? { ...printer, progress: 80 } : printer)))
@@ -213,7 +249,7 @@ describe('NowPrinting (#977)', () => {
       release()
       await vi.advanceTimersByTimeAsync(50)
     })
-    expect(screen.getByTestId('printer-now-2')).toHaveTextContent('90%')
+    expect(screen.getByTestId('printer-job-2')).toHaveTextContent('90%')
     expect(screen.queryByText('70%')).toBeNull()
   })
 
@@ -268,7 +304,7 @@ describe('NowPrinting (#977)', () => {
 
   it('reads the printers again when one changes, without waiting for the poll (#3823)', async () => {
     renderPage(<NowPrinting />)
-    const card = await screen.findByTestId('printer-now-2')
+    const card = await screen.findByTestId('printer-job-2')
     expect(card).toHaveTextContent('66%')
 
     setPrintersNow(PRINTERS_NOW.map((printer) => (printer.printer_id === 2 ? { ...printer, progress: 80 } : printer)))
