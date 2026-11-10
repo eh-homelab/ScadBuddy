@@ -434,6 +434,8 @@ const workspaceBlobStore = new BackendWorkspaceBlobs(
 const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
+      // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
+      locks: database.locks,
       blobs: {
         store: workspaceBlobStore,
         ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),

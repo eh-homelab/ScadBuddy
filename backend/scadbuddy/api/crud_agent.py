@@ -53,6 +53,9 @@ WORKSPACE_HOLDER = "ai_session_file"
 WORKSPACE_HOLDER_PATTERN = r"^(session|principal):[^/]+(/[^/]+)*/[A-Za-z0-9_][A-Za-z0-9_.-]*$"
 #: The most holds one page lists.
 HOLDS_PAGE_MAX = 1000
+#: The largest ``older_than_seconds`` (a year): far past any grace, and well inside
+#: ``timedelta``'s range, so a larger value is a 422, never an ``OverflowError``.
+OLDER_THAN_MAX_SECONDS = 31_536_000
 
 
 class AssistantCost(BaseModel):
@@ -117,7 +120,7 @@ class WorkspaceHold(BaseModel):
 
 class WorkspaceRelease(WorkspaceHold):
     #: Release only a hold taken longer ago than this; a hold taken again since is kept.
-    older_than_seconds: int | None = Field(default=None, ge=0)
+    older_than_seconds: int | None = Field(default=None, ge=0, le=OLDER_THAN_MAX_SECONDS)
 
 
 class WorkspaceReleased(BaseModel):
@@ -157,7 +160,7 @@ async def release_workspace_blob(body: WorkspaceRelease, state: StateDep) -> Wor
 @router.get("/workspace-blob-refs", name="crud_agent_list_workspace_blob_refs")
 async def list_workspace_blob_refs(
     state: StateDep,
-    older_than_seconds: Annotated[int, Query(ge=0)] = 0,
+    older_than_seconds: Annotated[int, Query(ge=0, le=OLDER_THAN_MAX_SECONDS)] = 0,
     after_holder_id: Annotated[str | None, Query(max_length=1024)] = None,
     after_key: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=HOLDS_PAGE_MAX)] = 500,

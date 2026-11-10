@@ -1674,10 +1674,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
   is refused `unavailable` and writes no row; and it releases after the row is gone (a
   replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
-  `reconcile`, on the sweeper's tick at most once an hour, releases every hold older than an
-  hour whose row is gone or names another blob (a session's cascade, `forgetSubject`, a
-  crash, a failed release), and holds every row no hold names. On `store_backend` local
-  nothing is held. The trigger that once did this (migration
+  `reconcile`, on the sweeper's tick at most once an hour and on one replica at a time (a
+  session advisory lock on a lock connection, `Database.locks`), releases every hold older
+  than an hour whose row is gone or names another blob (a session's cascade, `forgetSubject`,
+  a crash, a failed release), and holds every row no hold names. On `store_backend` local
+  nothing is held.
+  Roll the API before the agent: an agent whose API does not serve the routes yet gets a 404
+  on the hold, and its blob-backed workspace writes are refused `unavailable` until the API
+  has rolled. That fails closed on purpose: a write never leaves a blob that no holder keeps,
+  which the blob sweep could take. The trigger that once did this (migration
   `20261027T0114Z_session_files_blobs.sql`) is dropped by
   `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
   stay valid, and the API revokes `blob_refs` from the agent's role at every start
