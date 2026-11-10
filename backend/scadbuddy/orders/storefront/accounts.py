@@ -94,6 +94,7 @@ from typing import Final
 
 from scadbuddy.core.proxies import client_key
 from scadbuddy.orders.store import Conn
+from scadbuddy.orders.storefront.visitors import VISITOR_ID
 from scadbuddy.orders.storefront.visitors import token_sha256 as visitor_sha256
 
 #: Crockford's base32 (https://www.crockford.com/base32.html) less ``0`` and ``1``.
@@ -282,8 +283,10 @@ def verify_code(
         (client,),
         FAILURES_PER_CLIENT,
     )
-    if address is None:
-        _failed(conn, client, None)
+    # A malformed visitor id answers as a wrong code does, before any code is read,
+    # compared or marked used.
+    if address is None or (visitor_id is not None and VISITOR_ID.fullmatch(visitor_id) is None):
+        _failed(conn, client, address)
         return None
     rows = conn.execute(
         "SELECT id, code_sha256 FROM storefront_sign_in_codes"
@@ -351,9 +354,10 @@ def _customer(conn: Conn, address: str) -> str:
     """The one customer, not archived, with ``address`` as an email contact; else a new
     customer with it as the primary email contact.
 
-    A customer with two email contacts may have an account for each, and both accounts
-    see that customer's orders. That is intended: each address is one the customer
-    gave the shop."""
+    Two addresses of one customer may each have an account linked to that customer.
+    Neither account sees the customer's orders: an account sees only its visitors' orders
+    and the orders attached to it (`orders_of_account`), because a contact the shop typed
+    is not proof of who owns an email (§5.2)."""
     found = conn.execute(
         "SELECT DISTINCT c.id FROM customers c JOIN customer_contacts k ON k.customer_id = c.id"
         " WHERE c.archived_at IS NULL AND k.kind = 'email' AND lower(trim(k.value)) = %s",

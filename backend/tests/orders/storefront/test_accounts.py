@@ -437,6 +437,33 @@ def test_a_sign_in_marks_only_live_codes_used(conn: Conn) -> None:
     assert verify(conn, old, client=LAPTOP) is None
 
 
+def test_an_account_never_sees_its_customers_other_orders(conn: Conn) -> None:
+    known = customer(conn, "Ada", "ada@example.com")
+    row = conn.execute(
+        "INSERT INTO orders (source, customer_id, number, currency, created_by)"
+        """ VALUES ('back_office', %s, 9001, 'USD', '{"kind": "user", "principal": "shop"}')"""
+        " RETURNING id",
+        (known,),
+    ).fetchone()
+    assert row is not None
+    placed = str(row["id"])
+    signed = sign_in(conn)
+    assert signed.account.customer_id == known
+    assert placed not in orders_of_account(conn, signed.account.id)
+    assert not account_owns_order(conn, signed.account.id, placed)
+
+
+def test_a_malformed_visitor_id_spends_nothing(conn: Conn) -> None:
+    code = code_for(conn)
+    assert (
+        verify_code(conn, EMAIL, code, CLIENT, visitor_id="bad id", previous_session=None) is None
+    )
+    row = conn.execute("SELECT used_at FROM storefront_sign_in_codes").fetchone()
+    assert row is not None and row["used_at"] is None
+    assert conn.execute("SELECT count(*) AS n FROM storefront_accounts").fetchone() == {"n": 0}
+    assert verify(conn, code) is not None
+
+
 def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Conn) -> None:
     code = code_for(conn)
     signed = verify_code(conn, EMAIL, code, CLIENT, visitor_id=VISITOR, previous_session=None)
