@@ -498,7 +498,8 @@ function ItemMenu({
 /**
  * #4954 — the empty row under the items: a custom item's title, quantity and unit price,
  * and optional SKU, notes and "Requires printing". Enter in any field saves it, priced
- * and accepted as it is saved (`kind: "custom"`); the row then clears for the next one.
+ * as it is saved (`kind: "custom"`): accepted on a back-office order, `quoted` for the
+ * customer on a storefront one (#5283); the row then clears for the next one.
  * On an accepted, in-production or ready order (`mode` `after_acceptance`, #5541) the first
  * save asks the person to confirm, as Add item does; the second adds the item on that route,
  * its price `quoted`, not accepted. A change to the row asks again.
@@ -877,7 +878,9 @@ function UnitPriceEditor({
     let recorded = false
     try {
       if (item.kind === 'custom') {
-        // #4954 — a custom item's price is its own field, accepted as it is saved.
+        // #4954 — a custom item's price is its own field. The server accepts it as it is
+        // saved on a back-office order; on a storefront order it stays `quoted` for the
+        // customer to accept (#5283).
         await api.updateOrderItem(orderId, item.id, { unit_price_minor: minor })
         setTyped(null)
         onChanged()

@@ -516,6 +516,23 @@ def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Con
     assert sorted(orders_of_account(conn, signed.account.id)) == sorted([mine, stranger])
 
 
+def test_a_sign_in_whose_answer_was_lost_spends_its_code(conn: Conn) -> None:
+    """Review of #5936: verify is single-use, never replayed, so it never hands out a
+    session twice. A sign-in that committed but whose answer never reached the browser
+    leaves the code spent: the person asks for a new one, which signs in."""
+    code = code_for(conn)
+    with conn.transaction():
+        lost = verify(conn, code)
+    assert lost is not None  # committed; the answer is then lost on its way back
+    with conn.transaction():
+        assert verify(conn, code) is None
+    fresh = code_for(conn)
+    with conn.transaction():
+        signed = verify(conn, fresh)
+    assert signed is not None and signed.account.id == lost.account.id
+    assert signed.session_token != lost.session_token
+
+
 def test_an_attached_order_never_submitted_is_not_listed(conn: Conn) -> None:
     signed = sign_in(conn)
     bob = customer(conn, "Bob", "bob@example.com")

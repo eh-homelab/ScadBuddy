@@ -109,6 +109,40 @@ describe('Bash in the session sandbox', () => {
     expect(after.stdout).toBe('mine')
   })
 
+  it("deletes the sandbox's older copy of a session file past the per-file cap, and says the command did not see it", async () => {
+    ctx.limits = async () => ({ fileMaxBytes: 10, workspaceMaxBytes: 1000 })
+    await writeFile(path.join(dir, 'grown.txt'), 'old')
+    expect(content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text).stdout).toBe('old')
+    // The session's copy grows past the cap (Claude Code's own Write, say): the pod's older copy must not stand in for it.
+    await writeFile(path.join(dir, 'grown.txt'), 'x'.repeat(100))
+    const body = content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text)
+    expect(body.stdout).toBe('')
+    expect(body.stderr).toContain('No such file')
+    expect(body.files_not_in_sandbox).toEqual([{ path: 'grown.txt', reason: expect.stringContaining('per-file cap of 10 bytes') }])
+    expect(body.files_removed).toBeUndefined()
+    expect(await readFile(path.join(dir, 'grown.txt'), 'utf8')).toBe('x'.repeat(100))
+  })
+
+  it("keeps the sandbox's own copy of a file past the cap that it left there, over the session's copy past the cap", async () => {
+    ctx.limits = async () => ({ fileMaxBytes: 10, workspaceMaxBytes: 1000 })
+    await writeFile(path.join(dir, 'big.txt'), 'x'.repeat(100))
+    // The command makes its own copy past the cap: it stays in the pod, kept while the session's copy is unchanged.
+    const first = content((await runShell(ctx, 'bash', { command: 'head -c 50 /dev/zero > big.txt' })).text)
+    expect(first.files_not_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('per-file cap') }])
+    expect(first.files_left_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('stays in the sandbox') }])
+    // The kept copy is neither deleted nor named as missing by the next sync in.
+    const next = content((await runShell(ctx, 'bash', { command: 'wc -c < big.txt' })).text)
+    expect(next.stdout).toBe('50\n')
+    expect(next.files_not_in_sandbox).toBeUndefined()
+    expect(await readFile(path.join(dir, 'big.txt'), 'utf8')).toBe('x'.repeat(100))
+    // The session's copy changes while still past the cap (Claude Code's own Write): the kept copy no longer stands in for it.
+    await writeFile(path.join(dir, 'big.txt'), 'y'.repeat(200))
+    const changed = content((await runShell(ctx, 'bash', { command: 'cat big.txt' })).text)
+    expect(changed.stderr).toContain('No such file')
+    expect(changed.files_not_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('per-file cap') }])
+    expect(await readFile(path.join(dir, 'big.txt'), 'utf8')).toBe('y'.repeat(200))
+  })
+
   it('names the paths a command made that never come back', async () => {
     const body = content(
       (await runShell(ctx, 'bash', { command: "echo x > 'my notes.txt'; mkdir -p a/b/c/d && echo y > a/b/c/d/e.txt; echo z > .hidden" })).text,
