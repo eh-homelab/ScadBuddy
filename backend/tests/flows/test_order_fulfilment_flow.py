@@ -497,6 +497,16 @@ async def test_a_trigger_with_no_approved_grant_is_not_moved(
     assert left.notice == NEWER_NOTICE
 
 
+class _NoMail:
+    """The storefront mail sender, faked: `_run` binds it and stops it (#5283)."""
+
+    def bind(self, loop: object) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
 @pytest.mark.parametrize(
     ("switch", "flows", "registered"),
     [(True, "defs", True), (False, "defs", False), (True, None, False)],
@@ -526,6 +536,7 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_NoMail(),
     )
     async with component._run(cast(component.OrdersComponent, orders)):
         await asyncio.sleep(0)
@@ -566,6 +577,7 @@ async def test_a_slow_registration_never_holds_up_the_start(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_NoMail(),
     )
     async with asyncio.timeout(5):
         async with component._run(cast(component.OrdersComponent, orders)):
