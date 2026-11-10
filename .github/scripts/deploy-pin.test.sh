@@ -40,6 +40,7 @@ export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
 export MANIFEST_PROJECTS=applications/scadbuddy/scadbuddy-projects.yaml
 export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yaml
 export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
+export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 # What the step before it found: deploy/grafana exists at REVISION.
@@ -209,6 +210,24 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-
   grep -q "$MANIFEST_PROJECTS" "$work/out" || fail "projects worker: not among the changed files"
 else
   fail "projects worker: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 5d. The storefront's file (#5284), when present, is pinned too; it has no agent.
+extra_path=$MANIFEST_STOREFRONT
+extra_content=$(deployment scadbuddy-storefront "$IMAGE:$old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")"; then
+  has_line "$pinned" "$MANIFEST_STOREFRONT" || fail "storefront: image not pinned"
+  grep -q "$MANIFEST_STOREFRONT" "$work/out" || fail "storefront: not among the changed files"
+else
+  fail "storefront: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path='' extra_content=''
+
+# 5e. Without the storefront's file, the deploy pins the rest and says so.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")"; then
+  grep -q "${MANIFEST_STOREFRONT} is not in clusters yet" "$work/log" || fail "no storefront: no notice"
+else
+  fail "no storefront: step failed: $(grep '::error' "$work/log")"
 fi
 
 # 6. A bare image with no tag or digest is REJECTED, on purpose: clusters pins

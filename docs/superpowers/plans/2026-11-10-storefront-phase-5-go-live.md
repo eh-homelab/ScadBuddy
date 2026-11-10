@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Public host `michaels-workshop.nullreference.io`; `SCADBUDDY_STOREFRONT_PUBLIC_URL=https://michaels-workshop.nullreference.io` (the owner, 2026-11-07, #5284).
-- The storefront pod holds no `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or `SCADBUDDY_TEMPORAL_ADDRESS` (#5295). Today `storefront/settings.py` `FORBIDDEN_ENV` holds the first four only; Task 1 adds `SCADBUDDY_TEMPORAL_ADDRESS`, so `check_environment` refuses all five. The egress policy (Task 2) keeps Temporal unreachable as well.
+- The storefront pod holds no `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or `SCADBUDDY_TEMPORAL_ADDRESS` (#5295). `storefront/settings.py` `FORBIDDEN_ENV` held the first four only until Task 1 added `SCADBUDDY_TEMPORAL_ADDRESS`; `check_environment` refuses all five. The egress policy (Task 2) keeps Temporal unreachable as well.
 - The back office host does not change: `scadbuddy.internal.nullreference.io` (LAN) and `scadbuddy.sso.nullreference.io` (Pomerium).
 - No back-office route is reachable from the public host, except the prefix `/api/v1/payments/webhooks/` on the API (#4957 "Deployment").
 - GitOps only: every cluster change is a PR in eh-homelab/clusters, never `kubectl apply`. Follow that repo's CLAUDE.md (kustomize render, kubeconform, the Gateway API defaulted fields written out, the route on the `public` ListenerSet with `cloudflare-proxied: "true"`).
