@@ -22,6 +22,9 @@ describe('capabilities mock (#2171)', () => {
     // Claude Code's own built-ins by their own names; Bash is off by default (plan 2026-10-13 Step 9.6).
     expect(sources[4]!.items.find((i) => i.id === 'Bash')).toMatchObject({ harness_name: 'Bash', default: 'off', access: 'off' })
     expect(sources[4]!.items.find((i) => i.id === 'Read')).toMatchObject({ harness_name: 'Read', default: 'read' })
+    // The session's own, served as `mcp__builtin__<Name>` in every session (#2726 R2).
+    expect(sources[4]!.items.find((i) => i.id === 'WebFetch')).toMatchObject({ harness_name: 'mcp__builtin__WebFetch', default: 'outward' })
+    expect(sources[4]!.items.find((i) => i.id === 'Monitor')).toMatchObject({ default: 'write', default_note: expect.stringContaining('Bash is on') })
   })
 
   it('a migrated row at the tool\'s own tier is overridden, counted as a change, and Reset removes it (#4994)', async () => {

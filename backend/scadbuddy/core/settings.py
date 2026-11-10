@@ -241,7 +241,7 @@ class Settings(BaseSettings):
     storefront_mail_sender: str | None = None
     storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
     # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on design
-    # requests and submit (sign-up and sign-in once those routes ship), on while the
+    # requests, submit and sign-ins (sign-up once its route ships), on while the
     # site key is set. The secret is sealed at
     # rest like the other secrets, and saving one needs SCADBUDDY_SECRET_KEY_FILE; only
     # this process reads it (`orders/storefront/turnstile.py`), never the edge or a page.

@@ -19,7 +19,11 @@ import { editPath, modelPath } from '../lib/deeplink'
 import { NEW_TAB, openExternal } from '../lib/embed'
 import { amsUnitLabel } from '../lib/filaments'
 import { formatDuration } from '../lib/format'
+import { PRINTER_TOPICS, registryNews } from '../lib/printerRegistry'
 import { useAsync } from '../lib/useAsync'
+
+/** No realtime topic: the registry is not read, so nothing to follow. */
+const NO_TOPICS: readonly string[] = []
 
 /** A queue item id: what Bambuddy's ids look like, so nothing else is asked for. */
 const ITEM_ID = /^[1-9]\d{0,14}$/
@@ -158,11 +162,17 @@ function ItemView({ item }: { item: QueueItem }) {
   )
   const output = outputRead.data
   // The registry, only for trays on an assigned printer when the item names no model
-  // (#5908); a failed read leaves the trays as the first AMS's.
+  // (#5908). While it is needed, it is read again on a registry write or a resync
+  // (#5914), as Settings → Printers is; a LAN printer's reports on the same topic read
+  // nothing. A failed read is not caught here: `useAsync` keeps the data on screen after
+  // a failed background read, and a failed first read leaves no data, so the trays read
+  // as the first AMS's. Only `data` is used, so the page never shows that error.
   const needsPrinter = Boolean(item.ams_mapping?.length) && !itemModel(item) && item.printer_id != null
   const printers = useAsync(
-    async () => (needsPrinter ? await api.listPrinters().catch(() => null) : null),
+    async () => (needsPrinter ? await api.listPrinters() : null),
     [needsPrinter],
+    needsPrinter ? PRINTER_TOPICS : NO_TOPICS,
+    registryNews,
   ).data
   return (
     <div className="h-full overflow-y-auto">

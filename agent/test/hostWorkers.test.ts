@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PINNED_SHUTDOWN_FORCE_MS, PINNED_SHUTDOWN_GRACE_MS, startHostWorkers, stopAfter } from '../src/temporal/session/hostWorkers.js'
+import { PINNED_SHUTDOWN_FORCE_MARGIN_MS, PINNED_SHUTDOWN_FORCE_MS, PINNED_SHUTDOWN_GRACE_MS, startHostWorkers, stopAfter } from '../src/temporal/session/hostWorkers.js'
 import { AgentWorker, type AgentWorkerOptions } from '../src/temporal/worker.js'
 
 // #5862 review: the pinned host worker runs this replica's own BridgeCalls, so a draining turn's
@@ -69,6 +69,6 @@ describe('startHostWorkers', () => {
   it('keeps a window between the cancel and the force when a caller sets a longer grace', () => {
     const pinned = pinnedOptions({ shutdownGraceMs: 9_000 })
     expect(pinned.shutdownGraceMs).toBe(9_000)
-    expect(pinned.shutdownForceMs).toBe(9_000 + PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS)
+    expect(pinned.shutdownForceMs).toBe(9_000 + PINNED_SHUTDOWN_FORCE_MARGIN_MS)
   })
 })

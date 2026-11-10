@@ -1,4 +1,5 @@
-"""The picture of each Up next row and Now printing card on /prints (#3742).
+"""The picture of each queued or working job on /prints (#3742): its row in the Prints
+list (#3745).
 
 A job ScadBuddy queued or started (``scadbuddy``, #3741) shows ScadBuddy's own picture:
 its output's thumbnail (the viewer's capture, or plate 1's cover for an arranged
@@ -32,7 +33,7 @@ def scadbuddy_picture(job: ScadBuddyJob) -> str | None:
 
 
 def queue_item_picture(item: QueueItem, job: ScadBuddyJob | None) -> str | None:
-    """An Up next row's picture: ScadBuddy's for its own job, else Bambuddy's thumbnail
+    """A queued item's picture: ScadBuddy's for its own job, else Bambuddy's thumbnail
     of the item's library file, else of its archive, where Bambuddy has one."""
     ours = scadbuddy_picture(job) if job is not None else None
     if ours is not None:

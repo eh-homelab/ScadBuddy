@@ -31,6 +31,12 @@ name: Deploy (reusable)
 #      scadbuddy-slicer.yaml, once that file exists. Unlike the others, a build
 #      that published no slicer image (its job is continue-on-error) keeps the
 #      pin clusters has and warns; the rest of the deploy goes ahead.
+#      The sessions' shell sandbox (#5864) is pinned the same way, to
+#      `ghcr.io/eh-homelab/scadbuddy-sandbox:<version>@sha256:<its digest>`, in
+#      every line of every scanned file that names it (the agent worker's
+#      SCADBUDDY_SANDBOX_IMAGE value and the egress proxy's image line), so the
+#      agent's sandbox client and the pods' server never drift apart. As for
+#      the slicer, a build that published no sandbox image keeps the pins.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, once clusters#1596 Phase 5 adds it, the `ref=` of the remote
@@ -112,6 +118,11 @@ env:
   # image whose absence for a build is not an error: see the pin step.
   SLICER_IMAGE: ghcr.io/eh-homelab/scadbuddy-slicer
   MANIFEST_SLICER: applications/scadbuddy/scadbuddy-slicer.yaml
+  # The sessions' shell sandbox (#5864), same run, same tags: the image the
+  # agent worker creates each session's sandbox pod from (its
+  # SCADBUDDY_SANDBOX_IMAGE value) and the egress proxy's. Pinned wherever a
+  # scanned file names it; like the slicer, its absence for a build keeps the pins.
+  SANDBOX_IMAGE: ghcr.io/eh-homelab/scadbuddy-sandbox
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -370,6 +381,35 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The sessions' shell sandbox (#5864), resolved like the slicer, but only
+      # when a file under the manifests' or the overlay's directory names it.
+      - name: Resolve the sandbox image
+        id: sandbox
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -rsqF "${SANDBOX_IMAGE}" "clusters/$(dirname "$MANIFEST")" "clusters/$(dirname "$KUSTOMIZATION")"; then
+            echo "clusters does not run ${SANDBOX_IMAGE}; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${SANDBOX_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest'); the sandbox pins stay as they are"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The dashboard's ref= may only move to a revision that has the
       # kustomization it points at: one without it (a rollback to a build from
       # before #988) would fail the whole overlay's sync, the images included.
@@ -407,6 +447,7 @@ jobs:
           AGENT_DIGEST: ${{ steps.agent.outputs.digest }}
           AGENT_DURABLE_DIGEST: ${{ steps.agent-durable.outputs.digest }}
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -698,6 +739,32 @@ jobs:
             echo "::notice::${MANIFEST_SLICER} is not in clusters yet; not pinning it"
           fi
           echo "slicer=$slicer" >> "$GITHUB_OUTPUT"
+          # The sessions' shell sandbox (#5864): every scanned file that names
+          # it, each such line an `image:` or a `value:` (the agent worker's
+          # SCADBUDDY_SANDBOX_IMAGE) holding the image alone. A build with no
+          # sandbox image keeps the pins and warns. Sets $sandbox to `pinned`,
+          # `kept` or (no file names it) `none`.
+          sandbox=none
+          sandbox_line="^(\s*(- )?(image|value): )${SANDBOX_IMAGE//./\\.}[:@][^[:space:]]*\$"
+          while IFS= read -r f; do
+            refs=$(scadbuddy_refs "$f" 2>/dev/null) || continue
+            grep -qE "^${SANDBOX_IMAGE//./\\.}([:@]|\$)" <<< "$refs" || continue
+            n_refs=$(grep -cE "^${SANDBOX_IMAGE//./\\.}([:@]|\$)" <<< "$refs")
+            n_lines=$(grep -cE "$sandbox_line" "$f" || true)
+            if [ "$n_refs" -ne "$n_lines" ]; then
+              echo "::error file=$f::names ${SANDBOX_IMAGE} ${n_refs} time(s), but ${n_lines} of them on an image: or value: line of its own"; exit 1
+            fi
+            if [[ ! "${SANDBOX_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$f::no ${SANDBOX_IMAGE} image was published for ${VERSION}; keeping the sandbox pins as they are"
+              sandbox=kept
+              continue
+            fi
+            # `#` as the delimiter: the pattern's alternation holds a `|`.
+            sed -i -E "s#${sandbox_line}#\1${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}#" "$f"
+            sandbox=pinned
+            manifests+=("$f")
+          done < <(scanned)
+          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
           pin_dashboard "$KUSTOMIZATION"
           echo "dashboard=$dashboard" >> "$GITHUB_OUTPUT"
           if [ "$dashboard" = pinned ]; then
@@ -731,10 +798,12 @@ jobs:
           # not know (a new worker's Deployment), a sibling package this
           # workflow does not resolve, or a second copy of a pin outside its
           # file fails the deploy here, rather than staying on its old build.
-          # The one exception is a slicer pin kept on purpose (pin_slicer).
+          # The exceptions are a slicer pin kept on purpose (pin_slicer) and
+          # the sandbox pins kept the same way.
           allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
           [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
           [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
+          [ "$sandbox" != pinned ] || allowed+=("${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}")
           stale=0
           while IFS= read -r f; do
             refs=$(scadbuddy_refs "$f") \
@@ -744,6 +813,7 @@ jobs:
               ok=false
               for a in "${allowed[@]}"; do [ "$ref" != "$a" ] || ok=true; done
               if [ "$slicer" = kept ] && [ "$f" = "$MANIFEST_SLICER" ] && [[ "$ref" == "${SLICER_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
                 echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
                 stale=1
@@ -775,6 +845,8 @@ jobs:
           DURABLE: ${{ steps.edit.outputs.durable }}
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
           SLICER: ${{ steps.edit.outputs.slicer }}
+          SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
+          SANDBOX: ${{ steps.edit.outputs.sandbox }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           SOURCE_URL: ${{ inputs.source_url }}
@@ -816,6 +888,11 @@ jobs:
             kept)   slicer_note="kept at its current pin: no image was published for ${VERSION}" ;;
             *)      slicer_note="not run in clusters yet (#3822)" ;;
           esac
+          case "$SANDBOX" in
+            pinned) sandbox_note="\`${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}\`" ;;
+            kept)   sandbox_note="kept at its current pins: no image was published for ${VERSION}" ;;
+            *)      sandbox_note="not run in clusters yet (#5864)" ;;
+          esac
           git checkout -B "$DEPLOY_BRANCH"
           git add -- "${manifest_files[@]}"
           git commit -q -F - <<EOF
@@ -823,7 +900,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; slicer: ${slicer_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -845,6 +922,7 @@ jobs:
           - **Agent:** \`${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}\`
           - **Agent-durable:** ${durable_note}
           - **Slicer:** ${slicer_note}
+          - **Sandbox:** ${sandbox_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}
           - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)

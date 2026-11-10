@@ -1,9 +1,10 @@
-import { screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RequestForm } from './RequestForm'
+import { Turnstile } from './Turnstile'
 import { TURNSTILE_SCRIPT, resetTurnstileForTests } from '../turnstile'
 
 function scripts(): HTMLScriptElement[] {
@@ -66,6 +67,9 @@ describe('Turnstile on a design request', () => {
     await user.click(button)
     expect(await screen.findByText('Your request is in your order.')).toBeInTheDocument()
     expect(tokens).toEqual(['token-1'])
+    // The page handles a widget error itself, so Turnstile logs no warning of its own.
+    const options = api.render.mock.calls[0]![1] as unknown as { 'error-callback': () => boolean }
+    expect(options['error-callback']()).toBe(true)
     // The sent form drops its widget; the next request draws a new one for a new token,
     // with the script already loaded.
     await waitFor(() => expect(api.remove).toHaveBeenCalledWith('widget-1'))
@@ -161,5 +165,16 @@ describe('Turnstile on a design request', () => {
     await user.click(screen.getByRole('button', { name: 'Send request' }))
     expect(await screen.findByText('Your request is in your order.')).toBeInTheDocument()
     expect(reads).toBe(1)
+  })
+
+  it('drops a failed load when it is reset, and tries the script again', async () => {
+    const onToken = vi.fn()
+    const { rerender } = render(<Turnstile siteKey="0x4AAA-site" action="request" onToken={onToken} resetKey={0} />)
+    await waitFor(() => expect(scripts()).toHaveLength(1))
+    scripts()[0]!.onerror?.(new Event('error'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('did not load')
+    rerender(<Turnstile siteKey="0x4AAA-site" action="request" onToken={onToken} resetKey={1} />)
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+    await waitFor(() => expect(scripts()).toHaveLength(1))
   })
 })

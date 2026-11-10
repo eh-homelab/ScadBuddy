@@ -21,7 +21,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { JobPicture } from './JobPicture'
-import { mergeCards, type NowCard } from './nowCards'
+import { lastSeen, mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
 import { printPath, scadbuddyJobPath } from './prints'
@@ -45,20 +45,24 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
   unknown: { label: 'Unknown', tone: 'text-muted-foreground' },
 }
 
+/** What {@link usePrintersNow} gives: the cards as last read, and the last read's error. */
+export interface PrintersNowState {
+  /** `null` until the first read answers. */
+  cards: NowCard[] | null
+  error: string | null
+}
+
 /**
  * #977 — what each printer is doing now, whoever started the job: a print ScadBuddy
  * queued, one from Bambuddy's library, or one started on the printer. Read every
  * `NOW_POLL_MS` while the page is visible, and at once when it becomes visible again,
  * and (#3823) on a printer's report or change on the `printers` topic, no sooner than
- * `NOW_SIGNAL_MS` after the last read of any kind. Each card says
- * which link answered for it: the printer's own LAN report or Bambuddy.
+ * `NOW_SIGNAL_MS` after the last read of any kind. #3745 — one read for the whole
+ * Prints page: the strip shows the printers, and the list shows their jobs.
  */
-export function NowPrinting() {
+export function usePrintersNow(): PrintersNowState {
   const [cards, setCards] = useState<NowCard[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  /** #981 — the printer whose camera is open, by id, so its status stays current. */
-  // The registry printer whose camera is open (#3823): only a Bambuddy-linked one has one.
-  const [watching, setWatching] = useState<string | null>(null)
   const signalled = useRef<() => void>(() => undefined)
   // A `resync` (the subscription confirmed, or the socket back) is no news here: the
   // poll and the visibility read cover what a dropped socket missed.
@@ -114,6 +118,22 @@ export function NowPrinting() {
     }
   }, [])
 
+  return { cards, error }
+}
+
+/**
+ * #3745 — the per-printer status strip: what each printer is, not what it prints. Each
+ * card says its activity, which link answered for it (the printer's own LAN report or
+ * Bambuddy), a stale read, a failed status read, HMS errors, "clear the plate", a
+ * native run's controls and the camera. The jobs are rows of the Prints list
+ * (`PrintHistory`); the camera dialog still shows the job beside the image.
+ */
+export function PrinterStrip({ now }: { now: PrintersNowState }) {
+  const { cards, error } = now
+  /** #981 — the printer whose camera is open, by id, so its status stays current. */
+  // The registry printer whose camera is open (#3823): only a Bambuddy-linked one has one.
+  const [watching, setWatching] = useState<string | null>(null)
+
   // #2752 review: a printer that drops out closes its camera for good; it does not
   // reopen on its own when the printer comes back. One whose card went stale has
   // dropped out as far as the camera is concerned.
@@ -133,17 +153,17 @@ export function NowPrinting() {
   const loading = cards === null && error === null
   return (
     <section
-      aria-labelledby="now-printing-heading"
+      aria-labelledby="printers-now-heading"
       aria-busy={loading || undefined}
       className="mb-6"
       data-testid="now-printing"
     >
-      <h2 id="now-printing-heading" className="mb-2 text-sm font-medium">
-        Now printing
+      <h2 id="printers-now-heading" className="mb-2 text-sm font-medium">
+        Printers
       </h2>
       {loading && (
-        <div className="grid gap-3 sm:grid-cols-2" data-testid="now-printing-loading">
-          <Skeleton className="h-[88px] rounded-xl" />
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" data-testid="now-printing-loading">
+          <Skeleton className="h-[52px] rounded-xl" />
           <span className="sr-only">Reading the printers</span>
         </div>
       )}
@@ -153,7 +173,7 @@ export function NowPrinting() {
         </p>
       )}
       {cards && cards.length > 0 && (
-        <ul className="grid gap-3 sm:grid-cols-2" aria-label="Printers">
+        <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label="Printers">
           {cards.map((card) => (
             <PrinterCard key={card.printer.id} card={card} onCamera={() => setWatching(card.printer.id)} />
           ))}
@@ -202,10 +222,10 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
         </div>
         {stale && (
           <p className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid={`printer-now-stale-${printer.printer_id ?? printer.id}`}>
-            Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
+            {lastSeen(card)}
           </p>
         )}
-        <JobStatus printer={printer} />
+        <PrinterState printer={printer} />
         {/* #4942, #4939 — a native run's prints still to start on this printer. */}
         {printer.lan_run && !stale && <LanRunControls control={printer.lan_run} printerName={printer.name} className="mt-2" />}
         {printer.printer_id !== null && printer.activity !== 'offline' && !printer.error && !stale && (
@@ -225,11 +245,56 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
   )
 }
 
-/** What the printer is doing: the job, its progress, HMS errors and where it is recorded. */
+/**
+ * #3745 — a printer's own state on its strip card: a failed status read, "clear the
+ * plate" and its HMS errors. Its job is a row of the list, not repeated here.
+ */
+function PrinterState({ printer }: { printer: PrinterNow }) {
+  return (
+    <>
+      {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
+      <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id ?? printer.id}`} />
+      <HmsErrors printer={printer} testId={`printer-now-hms-${printer.printer_id ?? printer.id}`} />
+    </>
+  )
+}
+
+/** A working job's progress bar and its figures: printer, percent, layer and time left. */
+export function JobProgress({ printer }: { printer: PrinterNow }) {
+  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
+  return (
+    <>
+      {progress !== null && (
+        <div
+          role="progressbar"
+          aria-label={`${printer.name} progress`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress)}
+          className="relative z-10 mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"
+        >
+          <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
+        </div>
+      )}
+      <p className="sb-num mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+        <span>{printer.name}</span>
+        {progress !== null && <span>{Math.round(progress)}%</span>}
+        {printer.layer != null && printer.total_layers ? (
+          <span>
+            Layer {printer.layer}/{printer.total_layers}
+          </span>
+        ) : null}
+        {printer.remaining_minutes != null && printer.remaining_minutes > 0 && (
+          <span>{formatDuration(printer.remaining_minutes * 60)} left</span>
+        )}
+      </p>
+    </>
+  )
+}
+
+/** What the camera dialog shows beside the image: the job, its progress, and the printer's state. */
 function JobStatus({ printer }: { printer: PrinterNow }) {
   const working = printer.activity === 'printing' || printer.activity === 'paused'
-  const hms = printer.hms ?? []
-  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
   return (
     <>
       {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
@@ -243,47 +308,31 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
             </div>
           </div>
           {printer.scadbuddy && <QueuedFromScadBuddy job={printer.scadbuddy} className="mt-1 self-start" />}
-          {progress !== null && (
-            <div
-              role="progressbar"
-              aria-label={`${printer.name} progress`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(progress)}
-              className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted"
-            >
-              <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${progress}%` }} />
-            </div>
-          )}
-          <p className="sb-num mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
-            {progress !== null && <span>{Math.round(progress)}%</span>}
-            {printer.layer != null && printer.total_layers ? (
-              <span>
-                Layer {printer.layer}/{printer.total_layers}
-              </span>
-            ) : null}
-            {printer.remaining_minutes != null && printer.remaining_minutes > 0 && (
-              <span>{formatDuration(printer.remaining_minutes * 60)} left</span>
-            )}
-          </p>
+          <JobProgress printer={printer} />
         </>
       )}
-      <PlateWarning printer={printer} testId={`printer-now-plate-${printer.printer_id ?? printer.id}`} />
-      {hms.length > 0 && (
-        <ul
-          className={cn('mt-1.5 space-y-0.5 text-xs', printer.activity === 'paused' ? 'text-warn' : 'text-muted-foreground')}
-          aria-label={`${printer.name} errors`}
-          data-testid={`printer-now-hms-${printer.printer_id ?? printer.id}`}
-        >
-          {hms.map((error, index) => (
-            <li key={`${index}-${error.code}`}>
-              {error.description ?? 'No description from Bambuddy'}{' '}
-              <span className="sb-num text-muted-foreground/70">HMS {error.code}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <PlateWarning printer={printer} />
+      <HmsErrors printer={printer} />
     </>
+  )
+}
+
+function HmsErrors({ printer, testId }: { printer: PrinterNow; testId?: string }) {
+  const hms = printer.hms ?? []
+  if (hms.length === 0) return null
+  return (
+    <ul
+      className={cn('mt-1.5 space-y-0.5 text-xs', printer.activity === 'paused' ? 'text-warn' : 'text-muted-foreground')}
+      aria-label={`${printer.name} errors`}
+      data-testid={testId}
+    >
+      {hms.map((error, index) => (
+        <li key={`${index}-${error.code}`}>
+          {error.description ?? 'No description from Bambuddy'}{' '}
+          <span className="sb-num text-muted-foreground/70">HMS {error.code}</span>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -298,7 +347,22 @@ const JOB_LINK = 'font-medium text-primary underline-offset-4 hover:underline'
  * A job with none of these is its name only.
  */
 function JobLink({ printer }: { printer: PrinterNow }) {
-  const name = printer.job_name ?? (printer.archive_id != null ? `Archive ${printer.archive_id}` : null)
+  if (!jobName(printer) && !jobLinked(printer)) return null
+  return (
+    <p className="mt-1 truncate">
+      <JobAnchor printer={printer} className={JOB_LINK} />
+    </p>
+  )
+}
+
+/** The job has a page to link: ScadBuddy's, or Bambuddy's. */
+function jobLinked(printer: PrinterNow): boolean {
+  return (printer.linked && printer.archive_id != null) || printer.scadbuddy != null || printer.bambuddy_url != null
+}
+
+/** {@link JobLink}'s link alone, for a list row's heading (#3745). */
+export function JobAnchor({ printer, className }: { printer: PrinterNow; className: string }) {
+  const name = jobName(printer)
   const inside =
     printer.linked && printer.archive_id != null
       ? printPath(printer.archive_id)
@@ -307,11 +371,9 @@ function JobLink({ printer }: { printer: PrinterNow }) {
         : null
   if (inside) {
     return (
-      <p className="mt-1 truncate">
-        <Link to={inside} className={JOB_LINK}>
-          {name ?? 'This print'}
-        </Link>
-      </p>
+      <Link to={inside} className={className}>
+        {name ?? 'This print'}
+      </Link>
     )
   }
   if (printer.bambuddy_url) {
@@ -321,22 +383,25 @@ function JobLink({ printer }: { printer: PrinterNow }) {
     const archivePage = printer.bambuddy_archive_page
     const label = name ?? 'This print'
     return (
-      <p className="mt-1 truncate">
-        <a
-          href={bambuddyLink(printer.bambuddy_url)}
-          {...NEW_TAB}
-          className={JOB_LINK}
-          aria-label={
-            archivePage ? `${label}, in Bambuddy` : `${label}, archive ${printer.archive_id} in Bambuddy's archives`
-          }
-        >
-          {archivePage ? label : `${label} · archive ${printer.archive_id}`}
-          <ExternalLinkIcon aria-hidden="true" className="ml-1 inline size-3 align-baseline" />
-        </a>
-      </p>
+      <a
+        href={bambuddyLink(printer.bambuddy_url)}
+        {...NEW_TAB}
+        className={className}
+        aria-label={
+          archivePage ? `${label}, in Bambuddy` : `${label}, archive ${printer.archive_id} in Bambuddy's archives`
+        }
+      >
+        {archivePage ? label : `${label} · archive ${printer.archive_id}`}
+        <ExternalLinkIcon aria-hidden="true" className="ml-1 inline size-3 align-baseline" />
+      </a>
     )
   }
-  return name ? <p className="mt-1 truncate">{name}</p> : null
+  return <>{name ?? 'A print'}</>
+}
+
+/** What a working job is called: its name, else its archive; `null` with neither. */
+export function jobName(printer: PrinterNow): string | null {
+  return printer.job_name ?? (printer.archive_id != null ? `Archive ${printer.archive_id}` : null)
 }
 
 /**

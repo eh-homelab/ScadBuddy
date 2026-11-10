@@ -77,9 +77,11 @@ test.describe('native hot path (msw)', () => {
     const now = page.getByTestId('now-printing')
     await expect(now.getByText('H2C', { exact: true })).toBeVisible()
     await expect(now).toContainText('LAN')
-    // The LAN watch's reports follow it on the `printers` topic: 30 %, 80 %, then done.
-    await expect(now).toContainText('30%')
-    await expect(now).toContainText('80%')
+    // #3745 — the job is a row of the Prints list, the printer a card of the strip. The
+    // LAN watch's reports follow it on the `printers` topic: 30 %, 80 %, then done.
+    const prints = page.getByRole('list', { name: 'Prints' })
+    await expect(prints).toContainText('Printing 30%')
+    await expect(prints).toContainText('Printing 80%')
     await expect(now).toContainText(/finished/i, { timeout: 15_000 })
     expect(bambuddy).toEqual([])
   })
