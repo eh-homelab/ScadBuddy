@@ -134,6 +134,9 @@ ITEM_WORDS: Final[dict[ItemStatus, str]] = {
 #: test print's photo or short video is well below it. A larger file is shown without a
 #: link rather than held up in the view's request.
 MAX_PICTURE_COPY_BYTES: Final = 25 * 1024 * 1024
+#: How many picture copies one view runs at once; each holds a file open and puts it on
+#: the store (an S3 multipart upload).
+_PICTURE_COPIES: Final = 4
 #: The roles of a revision's files the customer sees: the design's own (`REVISION_ROLES`)
 #: and the files the customer sent with a request for changes. Never a file the shop
 #: added for itself.
@@ -306,6 +309,18 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
     )
 
 
+async def _hold(state: AppState, key: str, attachment_id: str) -> None:
+    """Every attachment that shows a copy holds it, so deleting one never sweeps a copy
+    another still shows. Idempotent."""
+    orders = _orders(state)
+
+    def hold() -> None:
+        with orders.store.transaction() as conn:
+            orders.store.hold_with_attachment(conn, key, attachment_id)
+
+    await asyncio.to_thread(hold)
+
+
 async def _picture_url(
     state: AppState, content: ContentStore, attachment: Attachment, blob_key: str
 ) -> str | None:
@@ -341,15 +356,7 @@ async def _picture_url(
             stat = await asyncio.to_thread(content.index.get, key)
             if stat is None:
                 return None
-        orders = _orders(state)
-
-        def hold() -> None:
-            # Every attachment that shows the copy holds it, so deleting one never
-            # sweeps a copy another still shows. Idempotent.
-            with orders.store.transaction() as conn:
-                orders.store.hold_with_attachment(conn, key, attachment.id)
-
-        await asyncio.to_thread(hold)
+        await _hold(state, key, attachment.id)
         backend = content.backend
         assert isinstance(backend, S3ContentBackend)
         return await backend.presign_get(
@@ -375,9 +382,10 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
     quote = next((q for q in quotes if q.accepted), quotes[-1])
     by_id = {r.id: r for r in revisions}
     # A quote that names no design (a manual price, #4250) prices the item as the
-    # customer last saw it: the newest design sent to them.
-    sent = [r for r in revisions if r.sent_at is not None]
-    named = by_id.get(quote.revision_id) if quote.revision_id else (sent[-1] if sent else None)
+    # customer saw it when the price was made: the newest design sent at or before
+    # `created_at`, never one sent after. None when no design was sent by then.
+    before = [r for r in revisions if r.sent_at is not None and r.sent_at <= quote.created_at]
+    named = by_id.get(quote.revision_id) if quote.revision_id else (before[-1] if before else None)
     if revisions and (named is None or named.sent_at is None):
         return None
     open_order = rows.order.status in ("draft", "quoted") and not rows.order.on_hold
@@ -403,6 +411,35 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
     )
 
 
+async def _picture_urls(
+    state: AppState, content: ContentStore | None, item: OrderItem, rows: _Rows
+) -> dict[str, str | None]:
+    """The URL of each blob key the item's sent revisions show. The first view copies
+    each picture into the store: one copy per key, at most `_PICTURE_COPIES` at once."""
+    if content is None:
+        return {}
+    first: dict[str, Attachment] = {}
+    also: list[tuple[str, Attachment]] = []
+    for revision in rows.revisions[item.id]:
+        if revision.sent_at is not None:
+            for attachment, key in rows.pictures.get(revision.id, []):
+                if first.setdefault(key, attachment) is not attachment:
+                    also.append((key, attachment))
+    gate = asyncio.Semaphore(_PICTURE_COPIES)
+
+    async def one(attachment: Attachment, key: str) -> str | None:
+        async with gate:
+            return await _picture_url(state, content, attachment, key)
+
+    keys = list(first)
+    found = dict(zip(keys, await asyncio.gather(*(one(first[k], k) for k in keys)), strict=True))
+    # The copy is made once; each other attachment that shows it still holds it.
+    for key, attachment in also:
+        if found[key] is not None:
+            await _hold(state, customer_file_key(attachment.sha256), attachment.id)
+    return found
+
+
 async def _item(
     state: AppState, content: ContentStore | None, item: OrderItem, rows: _Rows
 ) -> CustomerItem:
@@ -410,16 +447,12 @@ async def _item(
     newest = revisions[-1] if revisions else None
     open_item = rows.order.status not in ("shipped", *ENDED) and item.status not in SETTLED
     shown: list[CustomerRevision] = []
+    urls_by_key = await _picture_urls(state, content, item, rows)
     for revision in revisions:
         if revision.sent_at is None:
             continue
         held = rows.pictures.get(revision.id, [])
-        # The first view copies each picture into the store; the copies run side by side.
-        urls: list[str | None] = (
-            list(await asyncio.gather(*(_picture_url(state, content, a, k) for a, k in held)))
-            if content is not None
-            else [None] * len(held)
-        )
+        urls = [urls_by_key.get(k) for _a, k in held]
         pictures = [
             CustomerPicture(
                 url=url,
