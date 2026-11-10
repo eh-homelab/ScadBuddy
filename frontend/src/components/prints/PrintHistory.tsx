@@ -30,6 +30,8 @@ import { cn } from '@/lib/utils'
 import { Hint } from '../Hint'
 import { Spinner } from '../ui/spinner'
 import { PrintFilterBar } from './PrintFilterBar'
+import { LiveJobItem } from './LiveJobItem'
+import { printRows, type LiveJob } from './liveJobs'
 import { PrintItem } from './PrintItem'
 import { coverSlides, printSlides } from './prints'
 
@@ -114,6 +116,28 @@ function usePrintPages(filters: PrintFilters) {
     )
   }, [latest])
 
+  /**
+   * #3745 — the first page read again in place: its prints replace the ones shown by
+   * archive, a new one goes on top, and the rest and the cursor stay. Nothing is
+   * cleared while it reads, so no row leaves the list for a moment.
+   */
+  const refresh = useCallback(() => {
+    const { key, filters, current } = latest.current
+    if (!current) return
+    nonEmptyPage(filters, null).then(
+      (page) =>
+        setPages((was) => {
+          if (was.key !== key || was.error) return was
+          const fresh = new Map(page.items.map((item) => [item.archive_id, item]))
+          const kept = was.items.map((item) => fresh.get(item.archive_id) ?? item)
+          const shown = new Set(was.items.map((item) => item.archive_id))
+          return { ...was, items: [...page.items.filter((item) => !shown.has(item.archive_id)), ...kept] }
+        }),
+      // The list shown stays; the next change reads again.
+      () => undefined,
+    )
+  }, [latest])
+
   return {
     loading: !current,
     items: current ? pages.items : [],
@@ -122,6 +146,7 @@ function usePrintPages(filters: PrintFilters) {
     more: current ? pages.more : undefined,
     reload: () => setNonce((n) => n + 1),
     loadMore,
+    refresh,
   }
 }
 
@@ -149,8 +174,12 @@ function wasSent(output: Output): boolean {
 /**
  * #310 — the print history: the global page, or with `fixedSlug` a template's Prints
  * tab. Filters and the view live in the URL (plan §2.7).
+ *
+ * #3745 — on the global page, `live` are the prints with no outcome yet (`liveJobs`):
+ * they join the same list, each print once (`printRows`): working and queued jobs
+ * first, a working job's archived print in its own row with the job's live state.
  */
-export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
+export function PrintHistory({ fixedSlug, live }: { fixedSlug?: string; live?: readonly LiveJob[] }) {
   const [params, setParams] = useSearchParams()
   const parsed = useMemo(() => parsePrintsQuery(params), [params])
   // The URL's view wins; without one, the one this browser last chose.
@@ -205,6 +234,8 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     [templates.data],
   )
   const filtered = isFiltered(query)
+  const rows = printRows(live ?? [], pages.items, filtered)
+  useRefreshOnJobChange(live, pages.refresh)
   const fileName =
     pages.items.find((print) => query.file !== '' && String(print.library_file_id) === query.file)
       ?.library_file_name ?? null
@@ -229,6 +260,43 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
       )}
       {waitingFile !== null && !pages.loading && !pages.error && (
         <LibraryWaiting fileId={waitingFile} name={fileName} prints={pages.items} complete={pages.next === null} />
+      )}
+
+      {(rows.top.length > 0 || rows.rest.length > 0) && (
+        <ul
+          aria-label="Prints"
+          data-view={query.view}
+          className={
+            query.view === 'cards'
+              ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3'
+              : 'flex flex-col gap-2'
+          }
+        >
+          {rows.top.map((row) =>
+            row.print ? (
+              <PrintItem
+                key={row.key}
+                print={row.print}
+                live={row.live}
+                view={query.view}
+                templateName={fixedSlug ? undefined : templateLabel(row.print, templateNames)}
+                onOpenMedia={openMedia}
+              />
+            ) : (
+              <LiveJobItem key={row.key} job={row.live} view={query.view} />
+            ),
+          )}
+          {rows.rest.map(({ print, live: job }) => (
+            <PrintItem
+              key={print.archive_id}
+              print={print}
+              live={job}
+              view={query.view}
+              templateName={fixedSlug ? undefined : templateLabel(print, templateNames)}
+              onOpenMedia={openMedia}
+            />
+          ))}
+        </ul>
       )}
 
       {pages.loading && (
@@ -258,7 +326,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         </Alert>
       )}
 
-      {!pages.loading && !pages.error && pages.items.length === 0 && pages.next === null && (
+      {!pages.loading && !pages.error && pages.items.length === 0 && rows.top.length === 0 && pages.next === null && (
         <Card className="border border-dashed px-6 py-10 text-center ring-0">
           {filtered ? (
             <>
@@ -280,28 +348,6 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         </Card>
       )}
 
-      {pages.items.length > 0 && (
-        <ul
-          aria-label="Prints"
-          data-view={query.view}
-          className={
-            query.view === 'cards'
-              ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3'
-              : 'flex flex-col gap-2'
-          }
-        >
-          {pages.items.map((print) => (
-            <PrintItem
-              key={print.archive_id}
-              print={print}
-              view={query.view}
-              templateName={fixedSlug ? undefined : templateLabel(print, templateNames)}
-              onOpenMedia={openMedia}
-            />
-          ))}
-        </ul>
-      )}
-
       {pages.next !== null && (
         <MorePrints more={pages.more} onLoadMore={pages.loadMore} loaded={pages.items.length} />
       )}
@@ -313,6 +359,41 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
       />
     </>
   )
+}
+
+/**
+ * #3745 — reads the history's first page again when a working job ends or ScadBuddy
+ * links its archive: the print's row then needs the archive's own state (its outcome,
+ * or the print ScadBuddy made of it) to stay in the list in place. It reads at once,
+ * and once more {@link REFRESH_AGAIN_MS} later. Two reads per change of a job, never
+ * per poll of the printers.
+ */
+/** #3745 — how long after a job's change the history's first page is read once more. */
+export const REFRESH_AGAIN_MS = 5_000
+
+function useRefreshOnJobChange(live: readonly LiveJob[] | undefined, refresh: () => void) {
+  const seen = useRef<Set<string> | null>(null)
+  const latest = useLatest(refresh)
+  const again = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(again.current), [])
+  const jobs = live
+    ? live
+        .flatMap((job) => (job.kind === 'working' ? [`${job.key}${job.card.printer.linked ? ' linked' : ''}`] : []))
+        .sort()
+        .join('\n')
+    : null
+  useEffect(() => {
+    if (jobs === null) return
+    const now = new Set(jobs ? jobs.split('\n') : [])
+    const before = seen.current
+    seen.current = now
+    if (before === null || ![...before].some((job) => !now.has(job))) return
+    latest.current()
+    // Bambuddy may not have recorded the archive's outcome yet when the printer has
+    // already ended the job: one more read, a little later, takes it.
+    clearTimeout(again.current)
+    again.current = setTimeout(() => latest.current(), REFRESH_AGAIN_MS)
+  }, [jobs, latest])
 }
 
 /**

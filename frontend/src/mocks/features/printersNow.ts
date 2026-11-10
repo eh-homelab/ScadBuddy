@@ -5,7 +5,9 @@ import { printersState } from './printers'
 
 /**
  * #977 — what each printer is doing now: the H2C paused on the 2026-10-01 spaghetti
- * detection, a print ScadBuddy queued and linked (#3741), and an idle printer.
+ * detection (a job Bambuddy started, which the history does not list), a print
+ * ScadBuddy queued and linked (#3741; the history's printing print 37, so the Prints
+ * list shows it once, #3745), and an idle printer.
  */
 export const PRINTERS_NOW: PrinterNow[] = [
   {
@@ -41,14 +43,14 @@ export const PRINTERS_NOW: PrinterNow[] = [
     name: '3DP-77A-114',
     activity: 'printing',
     state: 'RUNNING',
-    job_name: 'Luna keychain',
+    job_name: 'Nova',
     progress: 66,
     layer: 40,
     total_layers: 79,
     remaining_minutes: 54,
     hms: [],
     awaiting_plate_clear: false,
-    archive_id: 35,
+    archive_id: 37,
     linked: true,
     bambuddy_url: null,
     bambuddy_archive_page: false,
@@ -61,7 +63,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
       library_file_id: null,
       slug: 'keychain',
       run_id: 'run-luna',
-      archive_id: 35,
+      archive_id: 37,
       matched_by: 'queue_item',
     },
     // #3742 — ScadBuddy's own picture of its job.
