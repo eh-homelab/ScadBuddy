@@ -96,6 +96,7 @@ from scadbuddy.orders.storefront.accounts import (
     verify_code,
 )
 from scadbuddy.orders.storefront.addresses import EmailInvalidError as AddressInvalidError
+from scadbuddy.orders.storefront.addresses import check_address
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
@@ -618,8 +619,11 @@ async def account_code(
     public = state.settings.storefront_public_url
 
     def run() -> bool:
+        # The mail's own check first, so an address it refuses is one 422 whatever its
+        # cap: past the cap no mail is built to refuse it (review of #5970).
+        address = check_address(normalized_email(body.email))
         with orders.store.transaction() as conn:
-            code = request_code(conn, body.email, client)
+            code = request_code(conn, address, client)
             if code is None:
                 return False
             if public is None:
@@ -628,7 +632,7 @@ async def account_code(
             queue_mail(
                 conn,
                 "sign_in_code",
-                normalized_email(body.email),
+                address,
                 {"code": code, "link": f"{public}/account/sign-in#code={code}"},
                 None,
             )

@@ -108,6 +108,33 @@ describe('SignInPage', () => {
     expect(screen.queryByText(/We emailed a code to/)).toBeNull()
   })
 
+  it('keeps the step while a send is in flight', async () => {
+    // Review of #5970: a step switch mid-send would be undone by the answer.
+    let answer: () => void = () => {}
+    server.use(
+      http.post(
+        '/api/store/v1/account/code',
+        () => new Promise<Response>((resolve) => (answer = () => resolve(new HttpResponse(null, { status: 204 })))),
+      ),
+      http.post(
+        '/api/store/v1/account/verify',
+        () => new Promise<Response>((resolve) => (answer = () => resolve(HttpResponse.json({ email: 'ada@example.com' })))),
+      ),
+    )
+    const { user } = page()
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send me a code' }))
+    expect(await screen.findByRole('button', { name: 'I have a code' })).toBeDisabled()
+    answer()
+    expect(await screen.findByLabelText('Code')).toBeInTheDocument()
+
+    await user.type(screen.getByLabelText('Code'), CODE)
+    await user.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(await screen.findByRole('button', { name: 'Send me a new code' })).toBeDisabled()
+    answer()
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/account$/))
+  })
+
   it('goes back to ask for a new code, keeping the address', async () => {
     const { user } = page()
     await user.click(screen.getByRole('button', { name: 'I have a code' }))

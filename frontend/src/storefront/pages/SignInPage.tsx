@@ -140,7 +140,7 @@ export function SignInPage() {
           <button type="submit" className="sf-button" disabled={sending || needsCheck}>
             {sending ? 'Sending…' : 'Send me a code'}
           </button>
-          <button type="button" className="sf-link" onClick={() => goTo('code')}>
+          <button type="button" className="sf-link" disabled={sending} onClick={() => goTo('code')}>
             I have a code
           </button>
         </form>
@@ -181,7 +181,7 @@ export function SignInPage() {
         <button type="submit" className="sf-button" disabled={sending || needsCheck}>
           {sending ? 'Signing in…' : 'Sign in'}
         </button>
-        <button type="button" className="sf-link" onClick={() => goTo('ask')}>
+        <button type="button" className="sf-link" disabled={sending} onClick={() => goTo('ask')}>
           Send me a new code
         </button>
       </form>
