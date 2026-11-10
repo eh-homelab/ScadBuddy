@@ -28,7 +28,7 @@ const RETRY_CAP_MS = 30_000
 
 const SLOW = 'This preview is taking longer than usual. Try Render again in a few minutes.'
 
-function wait(ms: number) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
@@ -65,7 +65,16 @@ function changedListing(error: unknown): boolean {
  * sent; every locked value and every default comes from the listing's published snapshot
  * on the shop's side, never from this page.
  */
-export function CustomizePage({ id, timing = POLL }: { id: string; timing?: PollTiming }) {
+export function CustomizePage({
+  id,
+  timing = POLL,
+  wait = sleep,
+}: {
+  id: string
+  timing?: PollTiming
+  /** How a poll waits; a test passes one that fires early, as a real timer can (#5902). */
+  wait?: (ms: number) => Promise<void>
+}) {
   const [listing, setListing] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
