@@ -8,6 +8,7 @@ import json
 import logging
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
@@ -32,6 +33,14 @@ PUBLIC_URL = "https://shop.example.com"
 CRUD_ACCOUNT = "/api/v1/internal/crud/storefront/account"
 STORE = "/api/store/v1/account"
 TOKEN = "t" * 43
+#: The edge's two 503 ``sign_out_incomplete`` bodies, which the storefront page's own
+#: test (``frontend/src/storefront/pages/AccountPage.test.tsx``) serves and shows (#5283,
+#: review of #5955): these tests keep it what the real edge answers.
+INCOMPLETE = json.loads(
+    (
+        Path(__file__).resolve().parents[3] / "test-fixtures/storefront/sign-out-incomplete.json"
+    ).read_text()
+)
 SIGN_IN = {"email": "ada@example.com", "code": "ABCD2345"}
 
 
@@ -176,6 +185,35 @@ def test_a_sign_out_the_crud_side_did_not_answer_is_incomplete_and_queued(
     assert edge.cookies.get(VISITOR_COOKIE) != before
     assert retries.pending == 1
     assert any("sign-out" in record.getMessage() for record in caplog.records)
+    assert r.json() == INCOMPLETE["queued"]
+
+
+def test_a_sign_out_the_full_queue_cannot_take_promises_no_retry(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5953: with the queue full, nothing is queued, the log says so, and the
+    answer says the session ends on its own instead of promising retries."""
+    app = edge.app
+    app.state.sign_out_retries = SignOutRetries(  # type: ignore[attr-defined]
+        app.state.crud.account_sign_out,  # type: ignore[attr-defined]
+        limit=0,
+    )
+    sign_in(edge)
+    crud_mock["sign_out"].side_effect = refused
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.routes"):
+        r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 503
+    assert r.json()["type"] == SIGN_OUT_INCOMPLETE
+    assert r.json() == INCOMPLETE["not_queued"]
+    assert r.json()["detail"].endswith("it ends on its own within 30 days.")
+    (cleared,) = [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
+    assert "max-age=0" in cleared.lower()
+    assert app.state.sign_out_retries.pending == 0  # type: ignore[attr-defined]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("not queued" in m for m in messages)
+    assert not any("; queued" in m for m in messages)
 
 
 def test_a_queued_sign_out_ends_the_session_once_the_crud_side_answers(

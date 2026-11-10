@@ -65,6 +65,26 @@ async def test_the_retries_give_up_after_the_last_try(caplog: pytest.LogCaptureF
     assert any("gave up" in record.getMessage() for record in caplog.records)
 
 
+async def test_an_unexpected_failure_ends_the_retries_with_a_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5953: every give-up is logged, not only the expected ones."""
+    calls = 0
+
+    async def broken(*, visitor_id: str, client: str, session: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("boom")
+
+    retries = SignOutRetries(broken, delays=(0, 0, 0))
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.storefront.sign_out"):
+        retries.add(visitor_id="v", client="c", session=SESSION)
+        await settled(retries)
+    assert calls == 1
+    (record,) = [r for r in caplog.records if r.exc_info]
+    assert "stopping" in record.getMessage()
+
+
 async def test_the_queue_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
     crud = Crud(fails=99)
     retries = SignOutRetries(crud.account_sign_out, delays=(60,), limit=2)

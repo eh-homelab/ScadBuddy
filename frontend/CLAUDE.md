@@ -78,7 +78,12 @@ same way, `vite.config.ts`).
   the mailed code, the code filled from a link's `#code=` and then dropped from the
   address; Turnstile `sign_in`) and `pages/AccountPage.tsx` (`/account`; "Your orders",
   each linking through `api/client.ts` `ACCOUNT_ORDER_URL` to `/o?order=<id>`, and
-  sign-out, which on a 503 `sign_out_incomplete` shows the edge's text). The session is
+  sign-out, which on a 503 `sign_out_incomplete` shows the edge's text). Each order's
+  status reads from the page's `STATUS_LABELS`, and a status it lacks reads "In progress".
+  The edge's two `sign_out_incomplete` bodies are
+  `test-fixtures/storefront/sign-out-incomplete.json`: `backend/tests/storefront/
+  test_accounts_edge.py` checks the real edge answers them, and the page's test serves
+  them. The session is
   the edge's HttpOnly cookie; the page never sees it. Mocks
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
 
