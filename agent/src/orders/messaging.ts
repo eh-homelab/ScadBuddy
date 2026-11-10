@@ -188,3 +188,29 @@ export function bindingMismatch(binding: MessagingBinding, inputSchema: unknown)
   if (missing.length > 0) return `the tool requires ${missing.join(', ')}, which the binding does not fill`
   return undefined
 }
+
+/**
+ * Opens the binding's source and checks its tool against the binding (§4.3 rules 1 to 4): the
+ * open connection, or why it cannot take the binding (the connection is then closed). The
+ * settings check and every send run it, so a binding saved without the check, or a tool
+ * changed since, is refused before anything is claimed or sent.
+ */
+export async function openChecked(messaging: CustomerMessaging, binding: MessagingBinding): Promise<MessagingConnection | string> {
+  let connection: MessagingConnection
+  try {
+    connection = await messaging.open(binding)
+  } catch (err) {
+    if (err instanceof MessagingUnavailableError) return err.message
+    throw err
+  }
+  try {
+    const tool = (await connection.tools()).find((t) => t.name === binding.tool)
+    const problem = tool ? bindingMismatch(binding, tool.inputSchema) : `${binding.source} lists no tool ${binding.tool}`
+    if (problem === undefined) return connection
+    await connection.close()
+    return problem
+  } catch {
+    await connection.close().catch(() => {})
+    return `${binding.source} did not list its tools`
+  }
+}

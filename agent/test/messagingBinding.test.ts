@@ -107,6 +107,22 @@ describe('the messaging binding routes (#5660)', () => {
     ])
   })
 
+  it('answers a test that went out as sent even when its audit record fails', async () => {
+    const { messaging, sends } = fake()
+    const hono = new Hono()
+    hono.use('/api/v1/ai/*', personSessions(signedIn(), 'off'))
+    registerMessagingBindingRoutes(hono, {
+      messaging,
+      audit: { record: async () => Promise.reject(new Error('database down')) },
+      origins: ORIGINS,
+      remoteAddress: () => LOOPBACK,
+    } as never)
+    const sent = await post(hono, 'test', { binding: BINDING, to: 'ada@example.com' }, true)
+    expect(sent.status).toBe(200)
+    expect(await sent.json()).toEqual({ ok: true, status: 'sent' })
+    expect(sends).toHaveLength(1)
+  })
+
   it('refuses a request that is not the UI’s', async () => {
     const { messaging } = fake()
     const { hono } = app(messaging)

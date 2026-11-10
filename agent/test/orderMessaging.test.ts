@@ -95,14 +95,27 @@ function fakeBackend(opts: { binding?: MessagingBinding | null; claim?: { status
   return { backend, writes }
 }
 
-/** A messaging client that records each send and answers `outcome`. */
-function fakeMessaging(outcome: SendOutcome | 'unavailable' = { status: 'sent', providerMessageId: 'p-1' }) {
+/** The plugin tool's `inputSchema` as the binding expects it. */
+const SEND_EMAIL_SCHEMA = {
+  type: 'object',
+  properties: {
+    from: { type: 'string' },
+    to: { type: 'array', items: { type: 'string' } },
+    subject: { type: 'string' },
+    body: { type: 'string' },
+    dedupe: { type: 'string' },
+  },
+  required: ['to', 'body'],
+}
+
+/** A messaging client that records each send and answers `outcome`; its tool takes `inputSchema`. */
+function fakeMessaging(outcome: SendOutcome | 'unavailable' = { status: 'sent', providerMessageId: 'p-1' }, inputSchema: unknown = SEND_EMAIL_SCHEMA) {
   const sends: Record<string, unknown>[] = []
   const messaging: CustomerMessaging = {
     async open() {
       if (outcome === 'unavailable') throw new MessagingUnavailableError('the messaging plugin remote:mail is not installed and enabled')
       const connection: MessagingConnection = {
-        tools: async () => [],
+        tools: async () => [{ name: 'send_email', inputSchema }],
         send: async (args) => {
           sends.push(args)
           return outcome
@@ -183,8 +196,9 @@ describe('order_notify_customer_send (#5660)', () => {
   it('never sends again for a claim already made: an unknown one is recorded unknown', async () => {
     const { backend, writes } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'sending' } } })
     const { messaging, sends } = fakeMessaging()
-    const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean }
+    const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean; warning?: string }
     expect(answer.sent).toBe(false)
+    expect(answer.warning).toMatch(/check the inbox, then "Mark sent"/)
     expect(sends).toEqual([])
     expect(writes[1]!.body).toEqual({ status: 'unknown', reason: 'no_answer' })
   })
@@ -219,6 +233,24 @@ describe('order_notify_customer_send (#5660)', () => {
     const { backend, writes } = fakeBackend()
     const { messaging } = fakeMessaging('unavailable')
     await expect(send.execute(ARGS, ctx({ backend, messaging }))).rejects.toThrow('messaging_plugin_unavailable')
+    expect(writes).toEqual([])
+  })
+
+  it('checks the binding against the tool as it is now, before it claims anything (§4.3)', async () => {
+    const changed = [
+      { ...SEND_EMAIL_SCHEMA, properties: { ...SEND_EMAIL_SCHEMA.properties, to: { type: 'string' } } },
+      { ...SEND_EMAIL_SCHEMA, required: ['to', 'body', 'reply_to'] },
+    ]
+    for (const schema of changed) {
+      const { backend, writes } = fakeBackend()
+      const { messaging, sends } = fakeMessaging(undefined, schema)
+      await expect(send.execute(ARGS, ctx({ backend, messaging }))).rejects.toThrow(/messaging_plugin_unavailable: .*nothing was sent/)
+      expect(writes).toEqual([])
+      expect(sends).toEqual([])
+    }
+    const { backend, writes } = fakeBackend({ binding: { ...BINDING, tool: 'send_mail' } })
+    const { messaging } = fakeMessaging()
+    await expect(send.execute(ARGS, ctx({ backend, messaging }))).rejects.toThrow('remote:mail lists no tool send_mail')
     expect(writes).toEqual([])
   })
 

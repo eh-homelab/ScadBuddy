@@ -3,14 +3,7 @@ import type { Context } from 'hono'
 import { z } from 'zod'
 import type { AuditSink } from '../audit/log.js'
 import { requestSession } from '../auth/browserSession.js'
-import {
-  bindingMismatch,
-  type CustomerMessaging,
-  type MessagingBinding,
-  type MessagingConnection,
-  messageArguments,
-  MessagingUnavailableError,
-} from '../orders/messaging.js'
+import { type CustomerMessaging, type MessagingBinding, messageArguments, openChecked } from '../orders/messaging.js'
 import { uiRequestProblem } from './guard.js'
 import type { RouteModule } from './module.js'
 
@@ -26,7 +19,8 @@ import type { RouteModule } from './module.js'
 // Both come only from the UI (guard.ts `uiRequestProblem`). The test sends a real message, so
 // it needs a person's signed-in session (auth/browserSession.ts `requestSession`): no tool, no
 // flow and no /mcp client reaches it. It belongs to no order, so the agent's audit log keeps it
-// (kind `plugin`, action `messaging.test_send`), never an order's record.
+// (kind `plugin`, action `messaging.test_send`), never an order's record. With auth mode `off`
+// no person is signed in, so the test answers 401 and the page says why.
 
 declare module '../app.js' {
   interface AppDeps {
@@ -65,27 +59,6 @@ async function body<T>(c: Context, schema: z.ZodType<T>): Promise<T | string> {
   return parsed.success ? parsed.data : parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
 }
 
-/** Opens the binding's source and checks its tool; the connection, or why it cannot take the binding. */
-async function checked(messaging: CustomerMessaging, binding: MessagingBinding): Promise<MessagingConnection | string> {
-  let connection: MessagingConnection
-  try {
-    connection = await messaging.open(binding)
-  } catch (err) {
-    if (err instanceof MessagingUnavailableError) return err.message
-    throw err
-  }
-  try {
-    const tool = (await connection.tools()).find((t) => t.name === binding.tool)
-    const problem = tool ? bindingMismatch(binding, tool.inputSchema) : `${binding.source} lists no tool ${binding.tool}`
-    if (problem === undefined) return connection
-    await connection.close()
-    return problem
-  } catch {
-    await connection.close().catch(() => {})
-    return `${binding.source} did not list its tools`
-  }
-}
-
 export function registerMessagingBindingRoutes(app: Parameters<RouteModule['register']>[0], deps: Deps): void {
   const base = '/api/v1/ai/orders/messaging-binding'
 
@@ -95,7 +68,7 @@ export function registerMessagingBindingRoutes(app: Parameters<RouteModule['regi
     if (!deps.messaging) return c.json({ detail: 'this agent cannot reach plugins' }, 503)
     const parsed = await body(c, CheckBody)
     if (typeof parsed === 'string') return c.json({ detail: parsed }, 400)
-    const result = await checked(deps.messaging, parsed.binding as MessagingBinding)
+    const result = await openChecked(deps.messaging, parsed.binding as MessagingBinding)
     if (typeof result === 'string') return c.json({ ok: false, detail: result }, 422)
     await result.close()
     return c.json({ ok: true })
@@ -109,7 +82,7 @@ export function registerMessagingBindingRoutes(app: Parameters<RouteModule['regi
     const parsed = await body(c, TestBody)
     if (typeof parsed === 'string') return c.json({ detail: parsed }, 400)
     const binding = parsed.binding as MessagingBinding
-    const result = await checked(deps.messaging, binding)
+    const result = await openChecked(deps.messaging, binding)
     if (typeof result === 'string') return c.json({ ok: false, detail: result }, 422)
     const startedAt = new Date()
     let outcome
@@ -125,18 +98,21 @@ export function registerMessagingBindingRoutes(app: Parameters<RouteModule['regi
     } finally {
       await result.close().catch(() => {})
     }
-    await deps.audit?.record({
-      kind: 'plugin',
-      action: 'messaging.test_send',
-      surface: 'http',
-      actor: { kind: 'browser', id: requestSession(c)?.principal ?? 'browser', label: 'You' },
-      clientIp: deps.remoteAddress(c),
-      outcome: outcome.status === 'sent' ? 'ok' : 'error',
-      inputSummary: `test message to ${parsed.to} through ${binding.source} ${binding.tool}`,
-      detail: outcome.status === 'sent' ? 'sent' : `${outcome.status}: ${outcome.reason}`,
-      startedAt,
-      finishedAt: new Date(),
-    })
+    // The message went out (or may have): a failed audit write is logged, never answered as a failed send.
+    await deps.audit
+      ?.record({
+        kind: 'plugin',
+        action: 'messaging.test_send',
+        surface: 'http',
+        actor: { kind: 'browser', id: requestSession(c)?.principal ?? 'browser', label: 'You' },
+        clientIp: deps.remoteAddress(c),
+        outcome: outcome.status === 'sent' ? 'ok' : 'error',
+        inputSummary: `test message to ${parsed.to} through ${binding.source} ${binding.tool}`,
+        detail: outcome.status === 'sent' ? 'sent' : `${outcome.status}: ${outcome.reason}`,
+        startedAt,
+        finishedAt: new Date(),
+      })
+      .catch((err: unknown) => console.error(`messaging.test_send: the audit record was not written: ${err instanceof Error ? err.name : 'error'}`))
     return c.json({ ok: outcome.status === 'sent', status: outcome.status, ...(outcome.status === 'sent' ? {} : { reason: outcome.reason }) })
   })
 }

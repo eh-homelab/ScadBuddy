@@ -16,7 +16,7 @@ import {
   supportsChoice,
   tier,
 } from './print.js'
-import { MessagingUnavailableError, messageArguments, type MessagingConnection } from '../orders/messaging.js'
+import { messageArguments, openChecked } from '../orders/messaging.js'
 import { defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -229,13 +229,9 @@ async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Pr
   if (!ctx.messaging) {
     throw new ToolError('messaging_plugin_unavailable: this agent cannot reach plugins, so nothing was sent')
   }
-  let connection: MessagingConnection
-  try {
-    connection = await ctx.messaging.open(plan.binding)
-  } catch (err) {
-    if (err instanceof MessagingUnavailableError) throw new ToolError(`messaging_plugin_unavailable: ${err.message}; nothing was sent`)
-    throw err
-  }
+  // §4.3: the binding is checked again against the tool as it is now, before anything is claimed.
+  const connection = await openChecked(ctx.messaging, plan.binding)
+  if (typeof connection === 'string') throw new ToolError(`messaging_plugin_unavailable: ${connection}; nothing was sent`)
   try {
     const claimed = await backend.POST('/api/v1/orders/{order_id}/messages', {
       params: { path: { order_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
@@ -275,7 +271,16 @@ async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Pr
         warning: `the plugin answered ${outcome.status}, but the order's record could not be updated (HTTP ${recorded.response.status})`,
       }
     }
-    return { sent: outcome.status === 'sent', message: recorded.data as OrderMessage }
+    const answer: SendAnswer = { sent: outcome.status === 'sent', message: recorded.data as OrderMessage }
+    // §7.2 step 4: a replayed claim with no dedupe key is not sent again; a person checks.
+    return resendable
+      ? answer
+      : {
+          ...answer,
+          warning:
+            'this send was tried before and may have reached the customer; it was not sent again. Ask a person to ' +
+            'check the inbox, then "Mark sent" on the order page, or send it again with resend_of',
+        }
   } finally {
     await connection.close().catch(() => {})
   }

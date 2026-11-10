@@ -161,9 +161,10 @@ Rules:
 - `fixed_args` may not name an argument that `args` maps, and its values are strings,
   numbers or booleans. The setting refuses a key whose name looks like a secret: one of
   its words, split at `_` and at a lower-to-upper case change, is `pass`, `password`,
-  `token`, `secret`, `key`, `apikey`, `auth`, `credential` or a near form
-  (`message_models.py` `SECRET_WORDS`). So `smtp_password` and `apiKey` are refused, and
-  `author` and `keyword` pass. Secrets go in the plugin's header or OAuth.
+  `token`, `secret`, `key`, `apikey`, `auth`, `credential`, a near form, or a lowercase
+  compound such as `apitoken`, `smtppass` or `privatekey` (`message_models.py`
+  `SECRET_WORDS`). So `smtp_password` and `apiKey` are refused, and `author` and `keyword`
+  pass. Secrets go in the plugin's header or OAuth.
 
 ### 4.3 Validation (agent route)
 
@@ -188,6 +189,12 @@ The checks:
    flow and no `/mcp` client reaches it. It belongs to no order, so no `order_messages` row
    records it; the agent's audit log does, like any other send (kind `plugin`, action
    `messaging.test_send`, the person, the address, the source and tool, and the outcome).
+   With auth mode `off` no person is signed in, so the test answers 401, and the page says
+   that the test needs a signed-in person.
+
+Every send runs rules 1 to 4 again (`orders/messaging.ts` `openChecked`) before it claims a
+row, so a tool changed or removed since the binding was saved is refused
+`messaging_plugin_unavailable` and nothing is claimed or sent.
 
 The binding is read again at every send. A plugin removed, disabled or changed since is a
 refusal at send time (`messaging_plugin_unavailable`), never a silent fallback.

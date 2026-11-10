@@ -43,6 +43,16 @@ SECRET_WORDS = frozenset(
         "authorization",
         "credential",
         "credentials",
+        # Lowercase compounds a split at `_` or a case change cannot find (#5858 review).
+        "apitoken",
+        "accesstoken",
+        "authtoken",
+        "refreshtoken",
+        "accesskey",
+        "secretkey",
+        "privatekey",
+        "smtppass",
+        "smtppassword",
     }
 )
 _WORD_BREAK = re.compile(r"_+|(?<=[a-z0-9])(?=[A-Z])")
