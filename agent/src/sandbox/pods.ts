@@ -257,7 +257,9 @@ export class KubernetesSandboxes implements Sandboxes {
       const token = randomBytes(32).toString('hex')
       const res = await this.#api('POST', this.#pods(), sandboxPod(this.#config, sessionId, token, await this.#resolveProxy()))
       if (res.status !== 201 && res.status !== 200) throw new Error(`creating the sandbox pod answered ${res.status}: ${JSON.stringify(res.body).slice(0, 500)}`)
-      // Another replica may have made one at the same time: both keep the older, so they settle on one.
+      // Another replica may have made one at the same time: each keeps the first pod in oldestFirst
+      // order, which usually settles the race on one pod but can leave two in use until the extra
+      // one idles out (see #oldest).
       const made = res.body as Pod
       pod = (await this.#oldest(sessionId, made.metadata.name)) ?? made
     }
@@ -268,8 +270,9 @@ export class KubernetesSandboxes implements Sandboxes {
 
   /**
    * The session's first live pod (oldestFirst); a pod two replicas' race left over is deleted,
-   * never one another replica or this one uses. A pod made in a later second than the first is
-   * deleted by any replica: whoever chose it listed after it was made, so saw the older one too.
+   * never one another replica or this one uses (acquire calls it only for a session this replica
+   * holds no pod for, so none of the listed pods is one it uses). A pod made in a later second
+   * than the first is deleted by any replica: whoever chose it listed after it was made, so saw the older one too.
    * A pod made in the same second as the first may be in use by the replica that made it, if its
    * listing came before the first existed; so only that replica deletes it (`mine`, right after
    * it made it), and only when its own listing shows another pod first. The race then settles on
@@ -280,9 +283,7 @@ export class KubernetesSandboxes implements Sandboxes {
       .filter((p) => !p.metadata.deletionTimestamp && !ended(p))
       .sort(oldestFirst)
     const [first, ...rest] = pods
-    const used = new Set([...this.#known.values()].map((k) => k.pod))
     for (const pod of rest) {
-      if (used.has(pod.metadata.name)) continue
       if (createdAt(pod) === createdAt(first!) && pod.metadata.name !== mine) continue
       await this.#delete(pod.metadata.name).catch(() => {})
     }

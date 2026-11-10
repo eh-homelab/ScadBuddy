@@ -123,6 +123,20 @@ describe('Bash in the session sandbox', () => {
     expect(await readFile(path.join(dir, 'grown.txt'), 'utf8')).toBe('x'.repeat(100))
   })
 
+  it("keeps the sandbox's own copy of a file past the cap that it left there, over the session's copy past the cap", async () => {
+    ctx.limits = async () => ({ fileMaxBytes: 10, workspaceMaxBytes: 1000 })
+    await writeFile(path.join(dir, 'big.txt'), 'x'.repeat(100))
+    // The command makes its own copy past the cap: it stays in the pod, kept while the session's copy is unchanged.
+    const first = content((await runShell(ctx, 'bash', { command: 'head -c 50 /dev/zero > big.txt' })).text)
+    expect(first.files_not_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('per-file cap') }])
+    expect(first.files_left_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('stays in the sandbox') }])
+    // The kept copy is neither deleted nor named as missing by the next sync in.
+    const next = content((await runShell(ctx, 'bash', { command: 'wc -c < big.txt' })).text)
+    expect(next.stdout).toBe('50\n')
+    expect(next.files_not_in_sandbox).toBeUndefined()
+    expect(await readFile(path.join(dir, 'big.txt'), 'utf8')).toBe('x'.repeat(100))
+  })
+
   it('names the paths a command made that never come back', async () => {
     const body = content(
       (await runShell(ctx, 'bash', { command: "echo x > 'my notes.txt'; mkdir -p a/b/c/d && echo y > a/b/c/d/e.txt; echo z > .hidden" })).text,
