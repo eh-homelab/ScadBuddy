@@ -81,6 +81,7 @@ from scadbuddy.rack.rank import rack_serials
 from scadbuddy.rack.usage import (
     LanRackUsage,
     PickedHotend,
+    error_facts,
     group_spools,
     record_seen,
     save_lan_picks,
@@ -468,7 +469,7 @@ class LanActivities:
                     # Usage only ranks (#1043): ranked as if no hotend had printed.
                     logger.warning(
                         "rack usage unreadable; ranked without it",
-                        extra={"printer": row.id, "error": type(exc).__name__},
+                        extra={"printer": row.id, **error_facts(exc)},
                     )
             chosen = choose_nozzles(
                 plan,

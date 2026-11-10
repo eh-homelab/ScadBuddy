@@ -40,10 +40,22 @@ def _subclass_names(root: type[Exception]) -> set[str]:
 _POSTGRES = (
     _subclass_names(psycopg.OperationalError)  # QueryCanceled and PoolTimeout too
     | _subclass_names(psycopg.InterfaceError)
-    # The print worker's store is the CRUD service's client (#5298 Task 30): an API that
-    # does not answer within the budget is an outage too. A refusal (a 4xx) is not.
-    | {CrudUnavailableError.__name__}
 )
+
+#: The print worker's rack store is the CRUD service's client (#5298 Task 30). Its
+#: `CrudUnavailableError` is an outage only when the API was not reached, did not answer
+#: (a transport failure, a read timeout among them) or its database was out of reach: the
+#: ``failure`` words `rack.usage.error_facts` logs. A missing route, a route's 5xx and a
+#: refused credential are bugs, as is any refusal (`CrudRefusedError`, a 4xx).
+CRUD_OUTAGES = frozenset({"unreached", "transport", "database_unavailable"})
+
+
+def _crud_outage(record: logging.LogRecord) -> bool:
+    return (
+        getattr(record, "error", None) == CrudUnavailableError.__name__
+        and getattr(record, "failure", None) in CRUD_OUTAGES
+    )
+
 
 #: The usage read is a Postgres call made inside a pick that also reads Bambuddy. The
 #: store's own advisory writes and reads (#1112) call only Postgres, so a Bambuddy or
@@ -60,6 +72,9 @@ _EXPECTED_BY_MESSAGE = {
 #: reads (#1112). Production's own constants, so a reworded message cannot silently drop
 #: out of the guard.
 MESSAGES = RACK_FALLBACKS | RACK_STORE_FALLBACKS
+#: The fallbacks around a rack store call, which on the print worker is a CRUD call: the
+#: usage read and the store's own writes and reads.
+_CRUD_MESSAGES = RACK_STORE_FALLBACKS | {RACK_USAGE_FALLBACK}
 
 
 def foreign_rack_errors(records: Iterable[logging.LogRecord]) -> list[str]:
@@ -70,4 +85,5 @@ def foreign_rack_errors(records: Iterable[logging.LogRecord]) -> list[str]:
         if record.getMessage() in MESSAGES
         and getattr(record, "error", None)
         not in _EXPECTED_BY_MESSAGE.get(record.getMessage(), _EXPECTED)
+        and not (record.getMessage() in _CRUD_MESSAGES and _crud_outage(record))
     ]

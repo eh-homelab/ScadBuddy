@@ -107,15 +107,31 @@ class PrinterReportStore:
         (`api/crud_print.py`)."""
         return self._pool
 
-    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
+    def put(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> PrintEnd | None:
         """Write the report; the print it shows ended (`advance_print`), if any."""
-        return self.advance(printer_id, report, seen_at).ended
+        return self.advance(printer_id, report, seen_at, idempotency_key=idempotency_key).ended
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
         """Write the report; the print it ended and the print it started. A printer gone
         from the registry (deleted while it was watched) or no longer LAN-linked (an
         attempt still running after the unlink) writes nothing, and ends and starts
-        nothing."""
+        nothing. ``idempotency_key`` is the print worker's (`crud/print.py`
+        `RemoteReports.advance`), which may lose an answer; here an answer is never lost,
+        so it is unused."""
         if printer_uuid(printer_id) is None:
             return Advance()
         with self.pool.connection() as conn, conn.transaction():

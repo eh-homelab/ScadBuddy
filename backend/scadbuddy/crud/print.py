@@ -1050,17 +1050,34 @@ class RemoteReports(PrinterReportStore):
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         raise ApiOnlyError("PrinterReportStore.pool is the API's; the worker has none")
 
-    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
-        return self.advance(printer_id, report, seen_at).ended
+    def put(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> PrintEnd | None:
+        return self.advance(printer_id, report, seen_at, idempotency_key=idempotency_key).ended
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
+        """``idempotency_key`` names the write across calls: the watch sends a report whose
+        answer was lost again under the same key, so the route answers the end and the
+        start the first write showed (`printers/watch.py`). None is a new key."""
         if printer_uuid(printer_id) is None:
             return Advance()
         answer = self._client.request(
             "PUT",
             _report(printer_id),
             json={"report": report, "seen_at": seen_at.isoformat()},
-            idempotency_key=uuid.uuid4().hex,
+            idempotency_key=idempotency_key or uuid.uuid4().hex,
             timeout=WATCH_CALL_TIMEOUT,
             budget=WATCH_CALL_BUDGET,
         ).json()

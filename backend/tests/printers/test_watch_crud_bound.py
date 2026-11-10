@@ -23,7 +23,7 @@ from scadbuddy.crud.print import (
     RemoteReports,
 )
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.watch import WatchActivities
+from scadbuddy.printers.watch import OWED, WRITTEN, WatchActivities
 from scadbuddy.workflows.printer_watch import WATCH_HEARTBEAT
 from tests.crud.crud_support import FixedToken
 
@@ -105,7 +105,7 @@ async def test_a_stalled_api_makes_a_reports_write_give_up_within_the_bound() ->
             None,
             write_failed=failed,
         )
-        assert await watches._write(PRINTER, _report()) is False
+        assert await watches._write(PRINTER, _report(), "k1") == OWED
     finally:
         blocking.close()
         await crud.aclose()
@@ -154,7 +154,7 @@ async def test_a_stalled_settle_gives_up_within_the_bound_and_the_write_stands()
             settle_failed=settle_failed,
             write_failed=write_failed,
         )
-        assert await watches._write(PRINTER, _report()) is True
+        assert await watches._write(PRINTER, _report(), "k1") == WRITTEN
     finally:
         blocking.close()
         await crud.aclose()

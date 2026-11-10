@@ -82,6 +82,18 @@ RACK_STORE_FALLBACKS = frozenset(
 )
 
 
+def error_facts(exc: BaseException) -> dict[str, str]:
+    """What a rack fallback logs of the error it swallows (spec §7: never its text, which
+    can carry a serial): its type, and for a CRUD call (`crud/client.py`
+    `CrudUnavailableError`, #5298) its fixed ``failure`` word, which tells an API out of
+    reach from a missing route or a route's 5xx."""
+    facts = {"error": type(exc).__name__}
+    failure = getattr(exc, "failure", None)
+    if isinstance(failure, str):
+        facts["failure"] = failure
+    return facts
+
+
 class PickedSpool(BaseModel):
     """One filament slot of a picked group, and the spool it printed from (#2170)."""
 
@@ -712,7 +724,7 @@ async def record_seen(
     except Exception as exc:
         logger.warning(
             RACK_SEEN_FALLBACK,
-            extra={"printer": printer, "error": type(exc).__name__},
+            extra={"printer": printer, **error_facts(exc)},
         )
 
 
@@ -746,7 +758,7 @@ async def save_picks(
     except Exception as exc:
         logger.warning(
             RACK_PICKS_FALLBACK,
-            extra={"printer": printer, "error": type(exc).__name__},
+            extra={"printer": printer, **error_facts(exc)},
         )
 
 
@@ -768,7 +780,7 @@ async def save_lan_picks(
     except Exception as exc:
         logger.warning(
             RACK_PICKS_FALLBACK,
-            extra={"run_id": run_id, "error": type(exc).__name__},
+            extra={"run_id": run_id, **error_facts(exc)},
         )
 
 
@@ -785,7 +797,7 @@ async def settle_lan_print(
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_FALLBACK,
-            extra={"run_id": run_id, "error": type(exc).__name__},
+            extra={"run_id": run_id, **error_facts(exc)},
         )
 
 
@@ -811,7 +823,7 @@ async def settle_lan_end(
             failed.inc()
         logger.warning(
             RACK_SETTLE_FALLBACK,
-            extra={"printer": printer, "error": type(exc).__name__},
+            extra={"printer": printer, **error_facts(exc)},
         )
 
 
@@ -892,7 +904,7 @@ async def record_settled(
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_READ_FALLBACK,
-            extra={"subject": subject.key, "error": type(exc).__name__},
+            extra={"subject": subject.key, **error_facts(exc)},
         )
         return 0
 
@@ -942,7 +954,7 @@ async def record_settled(
                 extra={
                     "subject": subject.key,
                     "archive_id": archive_id,
-                    "error": type(exc).__name__,
+                    **error_facts(exc),
                 },
             )
     return written
@@ -969,7 +981,7 @@ def settle_hook(
             # Type only, as every rack log (spec §7).
             logger.warning(
                 RACK_SETTLE_SETTINGS_DROPPED,
-                extra={"subject": subject.key, "error": type(exc).__name__},
+                extra={"subject": subject.key, **error_facts(exc)},
             )
             raise
         if not settings.bambuddy_url:
