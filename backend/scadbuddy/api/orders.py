@@ -24,11 +24,11 @@ import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -306,8 +306,10 @@ class ItemCreate(ReferenceBody):
     accept: bool | None = Field(
         default=None,
         description=(
-            "A custom item's only: whether its price is accepted as it is saved. Unset or"
-            " true leaves the item `approved`; false leaves it `quoted`. On"
+            "A custom item's only: whether its price is accepted as it is saved. True"
+            " leaves the item `approved`; false leaves it `quoted`. Unset is true on a"
+            " `back_office` order and false on a `storefront` one, where only the customer"
+            " accepts a price: true there is 409 `customer_accepts` (#5283). On"
             " `POST /orders/{id}/items/after-acceptance` unset means false, and true is"
             " 422: an item added after acceptance needs its quote accepted on its own."
         ),
@@ -441,9 +443,11 @@ class ItemPatch(BaseModel):
     #: A custom item's new price per unit (#4954), priced at once, as is its quantity.
     unit_price_minor: Money | None = Field(default=None, ge=0)
     requires_printing: bool | None = None
-    #: Whether a custom item's new price is accepted (true, the default) or left
-    #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
-    accept: bool = True
+    #: Whether a custom item's new price is accepted (true) or left `quoted` for an
+    #: `outward` accept (false, the agent's); nothing else reads it. Unset is true on a
+    #: `back_office` order and false on a `storefront` one, where true is 409
+    #: `customer_accepts` (#5283), with or without a new price.
+    accept: bool | None = None
     #: Whether the item's design is approved before it is priced (`design_first`) or
     #: with its quote (`together`), in any open state.
     approval: Approval | None = None
@@ -467,6 +471,26 @@ class PaymentCreate(BaseModel):
     notes: str = ""
     #: The open payment request this payment settles (#4957): it closes as `paid`.
     payment_request_id: str | None = None
+
+
+class AcceptForCustomerBody(BaseModel):
+    """The shop's "Accept for the customer" on a storefront order (#5283, storefront spec
+    §6.1): what it accepts, and why the customer did not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: `revision`: the item's newest sent revision, accepted; `quote`: one of its quotes.
+    what: Literal["revision", "quote"]
+    #: The revision's id or the quote's id.
+    target_id: str = Field(min_length=1, max_length=100)
+    #: Why the shop accepts for the customer (e.g. "By phone, 9 Nov"), kept in the audit
+    #: row `item.accepted_for_customer`.
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _trimmed(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class CancelBody(BaseModel):
@@ -568,6 +592,25 @@ async def _run_linked[T](call: Callable[[], T], order_id: str, payments: Payment
         return await payments.service.run_linking(order_id, call)
     except LifecycleError as error:
         raise refused(error) from None
+
+
+async def _run_closing_linked[T](
+    call: Callable[[], T], order_id: str, orders: OrdersComponent, payments: PaymentsComponent
+) -> T:
+    """``_run`` for an accept that may accept the order (#5283), with what ``POST …/accept``
+    does after its commit: the pages of the requests it cancels are closed, the balance
+    request it opens is linked (``Payments.run_closing_linked``), and when it accepted the
+    order its Bambuddy projects are made, best effort (``_ensure_projects``)."""
+    before = await asyncio.to_thread(orders.store.order, order_id)
+    try:
+        result = await payments.service.run_closing_linked(order_id, call)
+    except LifecycleError as error:
+        raise refused(error) from None
+    if before is not None and before.status != "accepted":
+        after = await asyncio.to_thread(orders.store.order, order_id)
+        if after is not None and after.status == "accepted":
+            await _ensure_projects(orders, after)
+    return result
 
 
 def check_path(*values: str) -> None:
@@ -1264,13 +1307,19 @@ async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -
     except LifecycleError as error:
         raise refused(error) from None
     await service.service.link_pending(accepted.id)
+    await _ensure_projects(orders, accepted)
+    return accepted
+
+
+async def _ensure_projects(orders: OrdersComponent, accepted: Order) -> None:
+    """The accepted order's Bambuddy projects, best effort: waited for at most
+    `PROJECTS_WAIT_SECONDS`, then left to finish."""
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
     _ENSURING.add(ensuring)
     ensuring.add_done_callback(lambda task: _ensured(task, accepted.label))
     await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
-    return accepted
 
 
 #: The accepts' project ensures still running past the wait, kept from the collector.
@@ -1746,7 +1795,9 @@ async def _new_item(
     if body.kind == "custom":
         assert body.title is not None and body.unit_price_minor is not None
         # After acceptance an unset accept means false: the price waits for its own accept.
-        accept = body.accept is True if after_acceptance else body.accept is not False
+        # Before, unset is the order's default (`price_accepted`): accepted on a
+        # back-office order, left for the customer on a storefront one (#5283).
+        accept = (body.accept is True) if after_acceptance else body.accept
         return NewCustomItem(
             title=body.title.strip(),
             quantity=body.quantity,
@@ -2163,7 +2214,10 @@ async def send_revision(
         "revision; on a `together` item an acceptance also accepts the quote that names "
         "it. 404 `revision_not_found`; 409 `revision_not_newest`, `revision_not_sent`, "
         "`revision_answered`, `revision_not_quoted`, `item_not_open` and "
-        "`order_closed`/`order_cancelled`/`order_on_hold`."
+        "`order_closed`/`order_cancelled`/`order_on_hold`. On a `storefront` order an "
+        "`accepted` is the customer's: the shop's is 409 `customer_accepts` (use "
+        "`POST …/accept-for-customer`); the customer's accept that leaves every open "
+        "item `approved` accepts the order."
     ),
 )
 async def answer_revision(
@@ -2176,9 +2230,44 @@ async def answer_revision(
 ) -> Revision:
     check_path(order_id, item_id, revision_id)
     by = current_actor()
-    return await _run_linked(
+    return await _run_closing_linked(
         lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by),
         order_id,
+        orders,
+        service,
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/accept-for-customer",
+    response_model=OrderItem,
+    summary="Accept a revision or a quote for a storefront customer",
+    description=(
+        "Storefront spec §6.1: on a `storefront` order only the customer accepts a revision "
+        "or a quote, and the shop's own accept is 409 `customer_accepts`. This accepts "
+        "`target_id` (the newest sent revision, or a quote of the item) for the customer, "
+        "as their accept would, and keeps `reason` in the audit row "
+        "`item.accepted_for_customer`. The accept that leaves every open item `approved` "
+        "accepts the order. 422 for a blank `reason`; 404 `revision_not_found`, "
+        "`quote_not_found`; 409 `order_not_storefront` (a back-office order: accept it "
+        "directly), and the refusals of the revision answer and the quote accept."
+    ),
+)
+async def accept_for_customer(
+    order_id: str,
+    item_id: str,
+    body: AcceptForCustomerBody,
+    orders: OrdersDep,
+    service: PaymentsDep,
+) -> OrderItem:
+    check_path(order_id, item_id, body.target_id)
+    by = current_actor()
+    return await _run_closing_linked(
+        lambda: orders.lifecycle.accept_for_customer(
+            order_id, item_id, body.what, body.target_id, body.reason, by
+        ),
+        order_id,
+        orders,
         service,
     )
 
@@ -2395,14 +2484,21 @@ async def _slice_revision(
     "/{order_id}/items/{item_id}/quotes/{quote_id}/accept",
     response_model=OrderItem,
     summary="Accept a quote",
+    description=(
+        "On a `storefront` order only the customer accepts a quote: the shop's accept is "
+        "409 `customer_accepts` (use `POST …/accept-for-customer`)."
+    ),
 )
 async def accept_quote(
     order_id: str, item_id: str, quote_id: str, orders: OrdersDep, service: PaymentsDep
 ) -> OrderItem:
     check_path(order_id, item_id, quote_id)
     by = current_actor()
-    return await _run_linked(
-        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by), order_id, service
+    return await _run_closing_linked(
+        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by),
+        order_id,
+        orders,
+        service,
     )
 
 

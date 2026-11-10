@@ -497,6 +497,16 @@ async def test_a_trigger_with_no_approved_grant_is_not_moved(
     assert left.notice == NEWER_NOTICE
 
 
+class _IdleMail:
+    """The storefront's mail (#5283) as `_run` uses it: bound to the loop, stopped at the end."""
+
+    def bind(self, loop: asyncio.AbstractEventLoop) -> None:
+        del loop
+
+    async def stop(self) -> None:
+        return None
+
+
 @pytest.mark.parametrize(
     ("switch", "flows", "registered"),
     [(True, "defs", True), (False, "defs", False), (True, None, False)],
@@ -526,6 +536,7 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_IdleMail(),
     )
     async with component._run(cast(component.OrdersComponent, orders)):
         await asyncio.sleep(0)
@@ -566,6 +577,7 @@ async def test_a_slow_registration_never_holds_up_the_start(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_IdleMail(),
     )
     async with asyncio.timeout(5):
         async with component._run(cast(component.OrdersComponent, orders)):

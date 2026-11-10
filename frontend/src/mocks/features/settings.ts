@@ -53,6 +53,10 @@ const NULLABLE = new Set([
   'git_remote_url',
   'git_remote_username',
   'git_remote_token',
+  // #5283 — the storefront's mail.
+  'storefront_mail_host',
+  'storefront_mail_user',
+  'storefront_mail_sender',
   'storefront_turnstile_site_key',
   'storefront_turnstile_secret',
 ])
@@ -93,6 +97,8 @@ function shippingOptionProblem(option: Record<string, unknown>): string | null {
   if (typeof option.ships !== 'boolean') return 'ships: Input should be a valid boolean'
   return null
 }
+/** #5283 — the storefront mail's login and TLS mode, checked on the merged result. */
+const MAIL_LOGIN_TLS = ['storefront_mail_user', 'storefront_mail_tls']
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
   'store_backend',
@@ -189,6 +195,19 @@ function putSettings(body: Record<string, unknown>) {
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")
     }
+    // #5283 — `core/settings.py`'s checks of the storefront's mail.
+    if (name === 'storefront_mail_port' && !(Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 65535)) {
+      return refused(name, 'Input should be between 1 and 65535')
+    }
+    if (name === 'storefront_mail_sender' && typeof value === 'string' && !/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is an address, such as shop@example.com`)
+    }
+    if (name === 'storefront_mail_tls' && value !== 'starttls' && value !== 'implicit' && value !== 'none') {
+      return refused(name, "Input should be 'starttls', 'implicit' or 'none'")
+    }
+    if (name === 'storefront_mail_host' && typeof value === 'string' && (/[\s/@]/.test(value.trim()) || !value.trim())) {
+      return refused(name, `Value error, ${envName(name)} is a host name, such as smtp.example.com`)
+    }
     if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
       return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
     }
@@ -250,6 +269,18 @@ function putSettings(body: Record<string, unknown>) {
       422,
       'Unprocessable Content',
       "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
+    )
+  }
+  // #5283 — `SettingsStore.save`: a login is never sent on a plain connection.
+  if (
+    MAIL_LOGIN_TLS.some((name) => name in body || reset.includes(name)) &&
+    next.storefront_mail_user &&
+    next.storefront_mail_tls === 'none'
+  ) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      'a plain connection (storefront_mail_tls none) is for a relay with no login: clear the user, or use starttls or implicit',
     )
   }
   // #426 — without their own key, render workers are handed the full one.

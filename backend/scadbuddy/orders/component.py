@@ -32,6 +32,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
 from scadbuddy.orders.integrations import OrderIntegrations, choose
@@ -42,6 +43,7 @@ from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.listings import ListingStore
+from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, StorefrontMail
 from scadbuddy.payments.registry import providers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
@@ -75,6 +77,7 @@ class OrdersComponent:
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
         self._listings: ListingStore | None = None
+        self._mail: StorefrontMail | None = None
         self._integrations: tuple[str | None, OrderIntegrations] | None = None
         #: The slice quotes' holds on their sliced files (#4250 Ruling 3), on the
         #: projection's autocommit pool as every `blob_refs` writer's.
@@ -135,6 +138,31 @@ class OrdersComponent:
             shipping_options=tuple(values["storefront_shipping_options"] or ()),
         )
 
+    def mail_config(self) -> MailConfig:
+        """The storefront's SMTP settings as stored now (#5283): one query on their rows,
+        read by each send and each transition that would mail."""
+        values = self.core.settings_store.read(MAIL_SETTINGS)
+        return MailConfig(
+            host=values["storefront_mail_host"],
+            port=values["storefront_mail_port"],
+            user=values["storefront_mail_user"],
+            sender=values["storefront_mail_sender"],
+            tls=values["storefront_mail_tls"],
+        )
+
+    @property
+    def mail(self) -> StorefrontMail:
+        """The storefront's mail (#5283): the outbox's sender and the sealed SMTP
+        password. Its links use the env-only ``storefront_public_url``."""
+        if self._mail is None:
+            self._mail = StorefrontMail(
+                self.store,
+                settings_kek(self.core.settings.secret_key_file),
+                self.mail_config,
+                lambda: self.core.settings.storefront_public_url,
+            )
+        return self._mail
+
     @property
     def machine_rates(self) -> MachineRates:
         """Each registry printer's machine rate (#4625): its inputs, and Bambuddy's
@@ -154,6 +182,8 @@ class OrdersComponent:
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )
+            self._lifecycle.mail_host = lambda: self.mail_config().host
+            self._lifecycle.on_mail = self.mail.kick
         return self._lifecycle
 
 
@@ -182,6 +212,8 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
         )
     # The print path's follow (#4719): an item follows the print its attempt started.
     # §8.2: a settled print's attempt copies its Bambuddy archives.
+    # #5283: a commit that queued storefront mail sends it on this loop, off the request.
+    orders.mail.bind(asyncio.get_running_loop())
     remove = listen_for_prints(
         orders.core.events,
         orders.lifecycle,
@@ -195,6 +227,7 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
             with contextlib.suppress(asyncio.CancelledError):
                 await registering
         await remove()
+        await orders.mail.stop()
 
 
 COMPONENT = Component(ORDERS, build=_build, run=_run)

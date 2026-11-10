@@ -130,11 +130,14 @@ class Actor(BaseModel):
     """Who did it: the browser, or the agent principal (and session) a request was
     authored as, exactly as ``api/flows.py`` ``_started_by`` reads it. A ``visitor`` is a
     storefront visitor (#5282), ``storefront_visitor:<row id>``, which only the CRUD side
-    builds (``orders/storefront/visitors.py`` ``visitor_actor``)."""
+    builds (``orders/storefront/visitors.py`` ``visitor_actor``). A ``customer`` is the
+    customer of a submitted storefront order (#5283), ``customer:<customer id>`` with the
+    visitor's or account's row as ``session`` (``orders/storefront/customers.py``
+    ``customer_actor``)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["browser", "agent", "provider", "visitor"]
+    kind: Literal["browser", "agent", "provider", "visitor", "customer"]
     principal: str | None = None
     session: str | None = None
     #: The flow run the agent's call was made from (#4252, spec §7.4), when it was.

@@ -4,6 +4,7 @@ import { api } from '../../api/client'
 import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole, OrderItemDetail, Revision } from '../../api/types'
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
+import { AcceptForCustomerButton } from './AcceptForCustomer'
 import { AddItemDialog } from './AddItemDialog'
 import { addRevision, PARTLY_FULFILLED_TEXT, reviseMode, reviseWarning } from './afterAcceptance'
 import { EndAttempt } from './EndAttempt'
@@ -274,7 +275,10 @@ function RevisionRow({
   const [attempt, setAttempt] = useState('')
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [answering, setAnswering] = useState(false)
-  const [answer, setAnswer] = useState<'accepted' | 'changes_requested'>('accepted')
+  // #5283: on a storefront order the customer accepts; the shop records only their
+  // changes, and accepts for them with a reason (AcceptForCustomerButton).
+  const storefront = order.source === 'storefront'
+  const [answer, setAnswer] = useState<'accepted' | 'changes_requested'>(storefront ? 'changes_requested' : 'accepted')
   const [answerNote, setAnswerNote] = useState('')
   const [answerError, setAnswerError] = useState<string | null>(null)
   const [added, setAdded] = useState<string | null>(null)
@@ -409,8 +413,11 @@ function RevisionRow({
             </Button>
             {revision.sent_at && revision.answer === null && (
               <Button size="sm" variant="outline" aria-expanded={answering} onClick={() => setAnswering((now) => !now)}>
-                Record answer
+                {storefront ? 'Record changes asked' : 'Record answer'}
               </Button>
+            )}
+            {storefront && revision.sent_at && revision.answer === null && (
+              <AcceptForCustomerButton orderId={order.id} itemId={item.id} what="revision" targetId={revision.id} disabled={busy} onChanged={onChanged} />
             )}
             {hasSliceQuote && <PrintItem order={order} item={item} onChanged={onChanged} testRevision={revision} />}
           </div>
@@ -428,7 +435,7 @@ function RevisionRow({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent position="popper">
-                    <SelectItem value="accepted">Accepted</SelectItem>
+                    {!storefront && <SelectItem value="accepted">Accepted</SelectItem>}
                     <SelectItem value="changes_requested">Changes requested</SelectItem>
                   </SelectContent>
                 </Select>

@@ -171,7 +171,13 @@ def test_a_request_and_a_custom_item_are_added_too(shop: Shop) -> None:
     assert sorted(kinds) == ["custom", "request"]
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.add_custom_item(
-            order.id, BY, title="Rush", quantity=1, unit_price_minor=1, after_acceptance=True
+            order.id,
+            BY,
+            title="Rush",
+            quantity=1,
+            unit_price_minor=1,
+            accept=True,
+            after_acceptance=True,
         )
     assert (refused.value.slug, refused.value.unprocessable) == ("accept", True)
 

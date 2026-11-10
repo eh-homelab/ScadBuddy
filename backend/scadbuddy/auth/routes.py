@@ -116,6 +116,9 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.bank_link.create_bank_link_token",
         "scadbuddy.api.bank_link.create_bank_link",
         "scadbuddy.api.bank_link.delete_bank_link",
+        # The storefront's SMTP password (#5283): a settings write, never an agent's.
+        "scadbuddy.api.storefront.put_mail_password",
+        "scadbuddy.api.storefront.delete_mail_password",
         "scadbuddy.api.bank_link.reconnect_bank_link",
         # A suggested deposit is recorded or dismissed by the shop on the order (#4961).
         "scadbuddy.api.order_bank_deposits.record_order_bank_deposit",

@@ -651,6 +651,27 @@ describe('QuoteEditor · print setups (#4673)', () => {
   })
 })
 
+// #5283: on a storefront order the customer accepts a price; the shop accepts for them with a reason.
+describe('QuoteEditor · a storefront order (#5283)', () => {
+  beforeEach(() => resetMockState())
+
+  it('offers Accept for the customer… and records a typed price only', async () => {
+    const quote = await api.quoteOrderItem(ORDER_DRAFT, ITEM_DRAFT, { unit_price_minor: 1000 })
+    const accept = vi.spyOn(api, 'acceptOrderQuote')
+    const record = vi.spyOn(api, 'quoteOrderItem')
+    const { user } = renderPage(
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[quote]} editable onChanged={vi.fn()} storefront />,
+    )
+    expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Record and accept' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Accept for the customer…' })).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Price per unit (USD)'), '12')
+    await user.click(screen.getByRole('button', { name: 'Record' }))
+    await waitFor(() => expect(record).toHaveBeenCalledTimes(1))
+    expect(accept).not.toHaveBeenCalled()
+  })
+})
+
 // #5828 review — the page's slice request is used once: the dialog that opened for it says
 // so, and the page then passes no request, so a remount leaves the dialog closed.
 describe('QuoteEditor · a slice request is used once (#4673)', () => {

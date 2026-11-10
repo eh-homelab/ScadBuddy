@@ -5,7 +5,7 @@ import { mockModels, setMockMedia } from '../../handlers'
 import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
-import { acceptQuote, checkQuote, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, OPEN_FOR_EDITS, openForRequote, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, TAKES_ITEMS, transition, withFilaments } from './orders'
+import { acceptQuote, checkQuote, customerAccepts, event, itemOf, printInFlight, printRequestId, lock, notEnded, notOnHold, OPEN_FOR_EDITS, openForRequote, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, TAKES_ITEMS, transition, withFilaments } from './orders'
 import { depositUnpaid, retax } from './money'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
@@ -167,6 +167,32 @@ function addRevision(afterAcceptance: boolean) {
   }
 }
 
+/** `Lifecycle._answer_revision`: the answer, and on a `together` item's accept its quote's accept. */
+function answerRevision(order: Order, itemId: string, revisionId: string, answer: RevisionAnswerInput['answer'], note: string) {
+  notEnded(order)
+  const found = itemOf(order, itemId)
+  if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+  const revision = newestOf(found, revisionId)
+  if (revision.answer !== null) throw new Refused('revision_answered', `revision ${revision.number} is ${revision.answer}`)
+  if (!revision.sent_at) throw new Refused('revision_not_sent', `revision ${revision.number} was not sent`)
+  let quote
+  if (answer === 'accepted' && found.approval === 'together') {
+    quote = quoteOf(found, revision)
+    if (!quote) throw new Refused('revision_not_quoted', `revision ${revision.number} has no quote: this item is approved together`)
+    openForRequote(order, found, "an item's price")
+    notOnHold(order)
+  }
+  // Every check that can throw comes first (acceptQuote's too); the stamp follows.
+  if (quote) checkQuote(found, quote)
+  revision.answer = answer
+  revision.answer_note = note
+  revision.answered_at = now()
+  revision.answered_by = BROWSER
+  event(order, 'revision.answered', { item_id: found.id, revision_id: revision.id, answer, note })
+  if (quote) acceptQuote(order, found, quote)
+  return { revision, item: found }
+}
+
 export const handlers = [
   http.post(base, addRevision(false)),
   http.post(`${base}/after-acceptance`, addRevision(true)),
@@ -204,28 +230,37 @@ export const handlers = [
     if (body.answer === 'changes_requested' && !note.trim()) return fieldProblem(request, 'note', 'say what should change')
     return transition(request, () => {
       const order = lock(String(params.id))
-      notEnded(order)
-      const found = itemOf(order, String(params.item))
-      if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
-      const revision = newestOf(found, String(params.revision))
-      if (revision.answer !== null) throw new Refused('revision_answered', `revision ${revision.number} is ${revision.answer}`)
-      if (!revision.sent_at) throw new Refused('revision_not_sent', `revision ${revision.number} was not sent`)
-      let quote
-      if (body.answer === 'accepted' && found.approval === 'together') {
-        quote = quoteOf(found, revision)
-        if (!quote) throw new Refused('revision_not_quoted', `revision ${revision.number} has no quote: this item is approved together`)
+      if (body.answer === 'accepted') customerAccepts(order)
+      return answerRevision(order, String(params.item), String(params.revision), body.answer, note).revision
+    })
+  }),
+
+  // #5283 — "Accept for the customer" on a storefront order, with a reason kept in the history.
+  http.post('/api/v1/orders/:id/items/:item/accept-for-customer', async ({ request, params }) => {
+    const body = (await request.json()) as { what?: string; target_id?: string; reason?: string } & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['what', 'target_id', 'reason'])
+    if (extra) return extra
+    if (body.what !== 'revision' && body.what !== 'quote') return fieldProblem(request, 'what', "Input should be 'revision' or 'quote'")
+    if (!body.target_id) return fieldProblem(request, 'target_id', 'String should have at least 1 character')
+    const reason = (body.reason ?? '').trim()
+    if (!reason || reason.length > 500) return fieldProblem(request, 'reason', 'String should have at least 1 character')
+    return transition(request, () => {
+      const order = lock(String(params.id))
+      if (order.source !== 'storefront') throw new Refused('order_not_storefront', `${order.number} is not a storefront order: accept it as the shop`)
+      let found: OrderItem
+      if (body.what === 'revision') {
+        found = answerRevision(order, String(params.item), body.target_id!, 'accepted', '').item
+      } else {
+        found = itemOf(order, String(params.item))
+        notEnded(order)
         openForRequote(order, found, "an item's price")
         notOnHold(order)
+        const quote = state.quotes.find((q) => q.id === body.target_id && q.order_item_id === found.id)
+        if (!quote) throw new Refused('quote_not_found', `no quote ${body.target_id} of item ${found.id}`, [], true)
+        acceptQuote(order, found, quote)
       }
-      // Every check that can throw comes first (acceptQuote's too); the stamp follows.
-      if (quote) checkQuote(found, quote)
-      revision.answer = body.answer
-      revision.answer_note = note
-      revision.answered_at = now()
-      revision.answered_by = BROWSER
-      event(order, 'revision.answered', { item_id: found.id, revision_id: revision.id, answer: body.answer, note })
-      if (quote) acceptQuote(order, found, quote)
-      return revision
+      event(order, 'item.accepted_for_customer', { item_id: found.id, what: body.what, target_id: body.target_id, reason })
+      return found
     })
   }),
 

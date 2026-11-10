@@ -1685,7 +1685,7 @@ export const orderTools: Tool[] = [
     label: "Accept a line item's quote",
     description:
       "Pin a quote as the item's price: the item becomes approved, and the order quoted once every open item is. " +
-      'Commits the shop to that price.',
+      'Commits the shop to that price. On a storefront order only the customer accepts: refused with `customer_accepts`.',
     input: z.object({ order_id: orderId, item_id: itemId, quote_id: ID }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/accept'],

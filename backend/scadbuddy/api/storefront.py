@@ -12,15 +12,55 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import dataclasses
+from datetime import datetime
 
 from fastapi import APIRouter, Response, status
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import StateDep
+from scadbuddy.core.authorship import by_a_person
+from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.storefront.listings import publish, unpublish
+from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingOrder, ListingUpdate
+from scadbuddy.payments.credentials import KekMissingError
 
 router = APIRouter(prefix="/storefront", tags=["storefront"])
+
+PROBLEMS = "https://scadbuddy.dev/problems/storefront/"
+
+
+class MailPasswordStatus(BaseModel):
+    """Whether the storefront's SMTP password is set; never the password."""
+
+    set: bool
+
+
+class MailPassword(BaseModel):
+    password: str = Field(min_length=1, max_length=1000, repr=False)
+
+
+class MailStatusView(BaseModel):
+    """The storefront mail as the shop sees it (#5283): whether a password is set and for
+    which connection (``user@host:port``), and the last failure of the server or its
+    setup, which no mail was charged for. Never the password."""
+
+    password_set: bool
+    password_for: str | None
+    server_error: str | None
+    server_error_at: datetime | None
+
+
+def _by_a_person() -> None:
+    # Ruling R2: the password is a person's to set or forget, whatever the auth mode.
+    if not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person sets or forgets the storefront mail password.",
+            type_=PROBLEMS + "person_only",
+        )
 
 
 @router.get("/listings", response_model=list[Listing], summary="The storefront's listings")
@@ -94,3 +134,62 @@ async def delete_listing(listing_id: str, orders: OrdersDep) -> Response:
     """Remove an unpublished listing (409 ``listing_published`` while it is published)."""
     await asyncio.to_thread(orders.listings.delete, listing_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/mail", response_model=MailStatusView, summary="The storefront mail's state")
+async def get_mail(orders: OrdersDep) -> MailStatusView:
+    status_ = await asyncio.to_thread(orders.mail.status)
+    return MailStatusView(**dataclasses.asdict(status_))
+
+
+@router.get(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Whether the storefront's SMTP password is set",
+)
+async def get_mail_password(orders: OrdersDep) -> MailPasswordStatus:
+    """The password itself is never read back (#5283)."""
+    status_ = await asyncio.to_thread(orders.mail.status)
+    return MailPasswordStatus(set=status_.password_set)
+
+
+@router.put(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Set the storefront's SMTP password",
+    description=(
+        "Sealed under the CRUD service's KEK (#5283, spec 2026-11-02 §5.7), bound to the"
+        " SMTP host, port and user set now, and never read back. A person's only (403"
+        " `person_only`). 409 `kek_missing` without SCADBUDDY_SECRET_KEY_FILE; 409"
+        " `mail_connection_unset` before the host and the user are set."
+    ),
+)
+async def put_mail_password(body: MailPassword, orders: OrdersDep) -> MailPasswordStatus:
+    _by_a_person()
+    try:
+        await asyncio.to_thread(orders.mail.set_password, body.password)
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the storefront mail password needs SCADBUDDY_SECRET_KEY_FILE",
+            type_=PROBLEMS + "kek_missing",
+        ) from None
+    except MailConnectionUnsetError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "mail_connection_unset"
+        ) from None
+    # Mail that waited for the login goes now.
+    orders.mail.kick()
+    return MailPasswordStatus(set=True)
+
+
+@router.delete(
+    "/mail/password",
+    response_model=MailPasswordStatus,
+    summary="Forget the storefront's SMTP password",
+    description="A person's only (403 `person_only`).",
+)
+async def delete_mail_password(orders: OrdersDep) -> MailPasswordStatus:
+    _by_a_person()
+    await asyncio.to_thread(orders.mail.clear_password)
+    return MailPasswordStatus(set=False)

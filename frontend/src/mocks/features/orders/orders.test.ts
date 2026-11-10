@@ -420,3 +420,22 @@ describe('orders mock · duplicate and bulk fulfil (#4955)', () => {
     expect((await failure(api.fulfilOrderItems(cart.id, [{ item_id: item.id, quantity: 1 }])))?.problem.type).toBe(`${PROBLEMS}order_not_submitted`)
   })
 })
+
+describe('orders mock · storefront prices (#5283)', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses the shop\'s accept of any reprice of a storefront custom item, a quantity one too (#5283)', async () => {
+    const order = state.orders.find((o) => o.id === ORDER_DRAFT)!
+    order.source = 'storefront'
+    const item = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Box', quantity: 1, unit_price_minor: 100 })
+    expect(item.status).toBe('quoted')
+    for (const body of [{ quantity: 2, accept: true }, { unit_price_minor: 200, accept: true }]) {
+      expect((await failure(api.updateOrderItem(ORDER_DRAFT, item.id, body)))?.problem.type).toBe(`${PROBLEMS}customer_accepts`)
+    }
+    expect(state.items.find((i) => i.id === item.id)?.quantity).toBe(1)
+    // No reprice, nothing to accept: the edit goes through.
+    expect((await api.updateOrderItem(ORDER_DRAFT, item.id, { title: 'Crate', accept: true })).title).toBe('Crate')
+    // Unset, the price is left for the customer.
+    expect((await api.updateOrderItem(ORDER_DRAFT, item.id, { quantity: 3 })).status).toBe('quoted')
+  })
+})

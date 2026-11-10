@@ -88,6 +88,8 @@ def check_approval_timeout(value: int, name: str) -> int:
 
 #: SCADBUDDY_CRUD_PORT's default (#5298); `tests/conftest.py` moves it to 0.
 DEFAULT_CRUD_PORT = 8082
+#: A mail address as the storefront's sender takes it: one ``@``, no space or angle bracket.
+_ADDRESS = re.compile(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+")
 
 
 class Settings(BaseSettings):
@@ -222,6 +224,22 @@ class Settings(BaseSettings):
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
+    # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
+    # (`orders/storefront/mail.py`): the SMTP host (unset sends nothing), its port, the
+    # login user, the From address, and the connection's TLS: `starttls` (the server must
+    # offer STARTTLS), `implicit` (TLS from the first byte, usually port 465) or `none`
+    # (plain, only with no user: a LAN relay with no login; `api/settings.py` refuses a
+    # user with it). A login is never sent in plain text. The password is not a setting:
+    # it is sealed under the KEK in `storefront_mail_secret`, bound to the host, port,
+    # user and TLS mode. These are a person's to change (`api/settings.py`
+    # `MAIL_CONNECTION`). The links in a mail come from `storefront_public_url`, which
+    # stays env-only.
+    # SCADBUDDY_STOREFRONT_MAIL_HOST, _PORT, _USER, _SENDER and _TLS.
+    storefront_mail_host: str | None = None
+    storefront_mail_port: int = Field(default=587, ge=1, le=65535)
+    storefront_mail_user: str | None = None
+    storefront_mail_sender: str | None = None
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
     # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on design
     # requests and sign-ins today (submit and sign-up once those routes ship), on while the
     # site key is set. The secret is sealed at
@@ -387,6 +405,30 @@ class Settings(BaseSettings):
         # Keys are `<prefix>/<kind>/<sha>`: "p/" would make `p//piece/<sha>`. An empty
         # prefix stays empty, and a start on S3 refuses it (`store.backends`).
         return prefix.strip("/")
+
+    @field_validator("storefront_mail_host")
+    @classmethod
+    def _mail_host_is_a_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        host = value.strip()
+        if not host or any(c.isspace() for c in host) or "/" in host or "@" in host:
+            raise ValueError(
+                "SCADBUDDY_STOREFRONT_MAIL_HOST is a host name, such as smtp.example.com"
+            )
+        return host
+
+    @field_validator("storefront_mail_sender")
+    @classmethod
+    def _mail_sender_is_an_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        sender = value.strip()
+        if not _ADDRESS.fullmatch(sender):
+            raise ValueError(
+                "SCADBUDDY_STOREFRONT_MAIL_SENDER is an address, such as shop@example.com"
+            )
+        return sender
 
     @field_validator("storefront_public_url")
     @classmethod
@@ -994,6 +1036,12 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_render_concurrency": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
+        # Read from the store by each send of the storefront's mail (#5283).
+        "storefront_mail_host": "live",
+        "storefront_mail_port": "live",
+        "storefront_mail_user": "live",
+        "storefront_mail_sender": "live",
+        "storefront_mail_tls": "live",
         "storefront_turnstile_site_key": "live",
         "storefront_turnstile_secret": "live",
         # Read by each time entry and each costs read (#5326).
