@@ -65,13 +65,12 @@ describe('the sandbox sync and files past the per-file cap', () => {
     expect(hashed).toEqual(['big.txt'])
   })
 
-  it.skipIf(process.getuid?.() === 0)('gives no sha256 for a file it cannot open, and the command still runs', async () => {
+  // The sync reaches it only for a kept file, after readRegular has already given the owner
+  // back its read, so the open error is checked on the function itself.
+  it.skipIf(process.getuid?.() === 0)('gives no sha256 for a file it cannot open, never an error', async () => {
     const locked = path.join(dir, 'locked.txt')
     await writeFile(locked, 'y'.repeat(100))
     await chmod(locked, 0)
     await expect(dirFileSha256(dir, 'locked.txt')).resolves.toBeUndefined()
-    const result = await runShell(ctx, 'bash', { command: 'echo ok' })
-    expect(result.isError).toBeUndefined()
-    expect(content(result.text).stdout).toBe('ok\n')
   })
 })
