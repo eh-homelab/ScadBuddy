@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { context as otelContext, trace } from '@opentelemetry/api'
 import { SessionBlobs } from '../src/sessions/blobs.js'
-import { EAGER_ATTRIBUTE, toolCallStarter } from '../src/tools/activityProjection.js'
+import { EAGER_ATTRIBUTE, EAGER_FAILED_EVENT, toolCallStarter } from '../src/tools/activityProjection.js'
 import { PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 import { AgentWorker } from '../src/temporal/worker.js'
@@ -15,8 +15,10 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { until } from './support/until.js'
 import { testTracing } from './support/tracing.js'
 
-/** Runs `fn` under a span of its own, as a turn's call is (telemetry/turn.ts), and says what the starter set on it as `scadbuddy.eager`. */
-async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
+type CallSpan = { attributes: Record<string, unknown>; events: { name: string; attributes?: Record<string, unknown> }[] }
+
+/** Runs `fn` under a span of its own, as a turn's call is (telemetry/turn.ts), and answers with that span. */
+async function spanOf(fn: () => Promise<unknown>): Promise<CallSpan> {
   testTracing()
   const span = trace.getTracer('test').startSpan('call')
   try {
@@ -24,7 +26,12 @@ async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
   } finally {
     span.end()
   }
-  return (span as unknown as { attributes: Record<string, unknown> }).attributes[EAGER_ATTRIBUTE]
+  return span as unknown as CallSpan
+}
+
+/** What the starter set on `fn`'s call span as `scadbuddy.eager`. */
+async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
+  return (await spanOf(fn)).attributes[EAGER_ATTRIBUTE]
 }
 
 // What Temporal adds around a ToolCall's activity (#5865), on a dev server and a real AgentWorker
@@ -37,7 +44,9 @@ async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
 // Knobs: TOOL_CALL_BENCH_N (default 10) calls a case; TOOL_CALL_BENCH_MATRIX=1 adds the cases
 // without the codec or versioning; TOOL_CALL_BENCH_REPORT=1 prints each case's phases;
 // TOOL_CALL_BENCH_ASSERT=1 fails a case whose median overhead passes OVERHEAD_LIMIT_MS (off by
-// default, so a slow shared runner cannot fail a correct change; the eager start's span test runs always);
+// default, so a slow shared runner cannot fail a correct change). The benchmark cases run only
+// with TOOL_CALL_BENCH_REPORT or TOOL_CALL_BENCH_ASSERT set; the eager start's span test and the
+// superseded-build test run always;
 // TOOL_CALL_BENCH_ADDRESS runs on a server of the caller's own (one with a CPU limit, say).
 
 const N = Number(process.env.TOOL_CALL_BENCH_N ?? 10)
@@ -131,7 +140,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
       await server?.teardown()
     })
 
-    it.each(CASES)('codec $codec, versioned $versioned, eager $eager', async ({ codec, versioned, eager }) => {
+    // Off by default: 2x(N+1) codec-backed calls that check nothing the span test does not (#5879 review).
+    it.skipIf(!REPORT && !ASSERT).each(CASES)('codec $codec, versioned $versioned, eager $eager', async ({ codec, versioned, eager }) => {
       const queue = `bench-${randomUUID().slice(0, 8)}`
       const keys = codec ? new PgPayloadKeys(db.sql, { id: 'bench', key: randomBytes(32) }) : undefined
       const converter = keys ? subjectDataConverter(keys) : undefined
@@ -215,11 +225,21 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
 
     it("starts the call on the starter's client when the eager connection has failed, and the call's span says how it started", async () => {
       const queue = `bench-${randomUUID().slice(0, 8)}`
+      let held = false
+      let free = () => {}
+      const release = new Promise<void>((resolve) => (free = resolve))
       const worker = AgentWorker.start({
         address: server.address,
         namespace: server.namespace,
         taskQueue: queue,
-        activities: { 'tool:bench': async () => ({ ok: true, content: [{ type: 'text', text: 'ok' }] }) },
+        activities: {
+          'tool:bench': async () => ({ ok: true, content: [{ type: 'text', text: 'ok' }] }),
+          'tool:hold': async () => {
+            held = true
+            await release
+            return { ok: true, content: [{ type: 'text', text: 'ok' }] }
+          },
+        },
         workflows: { workflowBundle: { code } },
         retryMs: 200,
         log: () => {},
@@ -233,8 +253,13 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         const start = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => new Client({ connection: gone, namespace: server.namespace }) })
         const session = randomUUID()
         let result: unknown
-        expect(await eagerOf(async () => (result = await start({ sessionId: session, toolUseId: 'toolu_bench_gone', tool: 'bench', input: {}, signal: new AbortController().signal })))).toBe('failed')
+        const failed = await spanOf(async () => (result = await start({ sessionId: session, toolUseId: 'toolu_bench_gone', tool: 'bench', input: {}, signal: new AbortController().signal })))
+        expect(failed.attributes[EAGER_ATTRIBUTE]).toBe('failed')
         expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }] })
+        // Why it failed, once, as the error's name and message (no payload): a run of `failed` spans is diagnosable.
+        expect(failed.events).toEqual([
+          { name: EAGER_FAILED_EVENT, attributes: { 'exception.type': expect.any(String), 'exception.message': expect.any(String) }, time: expect.anything(), droppedAttributesCount: 0 },
+        ])
         // And with no worker to start on (`eager` answers undefined), on the starter's client too.
         const plain = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => undefined })
         expect(await eagerOf(async () => expect(await plain({ sessionId: session, toolUseId: 'toolu_bench_none', tool: 'bench', input: {}, signal: new AbortController().signal })).toEqual({
@@ -243,13 +268,36 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         // On the worker's own connection, the first task comes back in the start's answer.
         const eagerStart = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => new Client({ connection: worker.connection()!, namespace: server.namespace }) })
         expect(await eagerOf(() => eagerStart({ sessionId: session, toolUseId: 'toolu_bench_eager', tool: 'bench', input: {}, signal: new AbortController().signal }))).toBe('started')
+        // A re-send of a call still running finds its execution (USE_EXISTING): Temporal gives no task back.
+        const heldClient = new Client({ connection: worker.connection()!, namespace: server.namespace })
+        const startOn = heldClient.workflow.start.bind(heldClient.workflow)
+        let answered = 0
+        heldClient.workflow.start = (async (...args: Parameters<typeof startOn>) => {
+          const handle = await startOn(...args)
+          answered += 1
+          return handle
+        }) as typeof startOn
+        const heldStart = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => heldClient })
+        const call = { sessionId: session, toolUseId: 'toolu_bench_held', tool: 'hold', input: {}, signal: new AbortController().signal }
+        const first = heldStart(call)
+        await until(() => held, 30_000)
+        const resent = eagerOf(() => heldStart({ ...call, signal: new AbortController().signal }))
+        // The re-send's start has its answer while the call still runs.
+        await until(() => answered === 2, 30_000)
+        free()
+        expect(await first).toEqual({ content: [{ type: 'text', text: 'ok' }] })
+        expect(await resent).toBe('declined')
         // An unversioned worker's build is current at once: its connection is offered while it polls.
         expect(worker.connection()).toBeDefined()
+        // Never once stop() has begun: a terminating pod takes no eager calls.
+        const stopping = worker.stop()
+        expect(worker.connection()).toBeUndefined()
+        await stopping
       } finally {
+        free()
         await connection.close()
         await worker.stop()
       }
-      // Never once it has stopped.
       expect(worker.connection()).toBeUndefined()
     }, 120_000)
   },
