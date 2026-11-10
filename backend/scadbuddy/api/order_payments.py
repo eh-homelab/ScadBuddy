@@ -259,7 +259,8 @@ async def waive_balance(order_id: str, body: WaiveBody, orders: OrdersDep) -> Or
     description=(
         "Writes the order's one `shipping` charge from the option (null removes it), while"
         " draft or quoted. An option that ships needs the order's shipping address"
-        " (`shipping_address_required`); a pickup does not."
+        " (`shipping_address_required`); a pickup does not. An order not in the shop's currency"
+        " takes no option (409 `shipping_currency_mismatch`): the amounts are in the shop's."
     ),
 )
 async def set_shipping_option(

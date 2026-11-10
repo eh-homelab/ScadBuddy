@@ -62,6 +62,13 @@ export const ESTIMATE: StoreEstimate = {
   unknown_parts: 0,
 }
 
+/** The shop's shipping options (backend `storefront_shipping_options`): one ships, one does not. */
+const SHIPPING = [
+  { id: 'post', label: 'Post', amount_minor: 700, ships: true },
+  { id: 'pickup', label: 'Pick up at the workshop', amount_minor: 0, ships: false },
+]
+let orders = 0
+
 let draft: Draft | null = null
 let renders = new Map<string, { render: StoreRender; polls: number }>()
 let serial = 0
@@ -122,7 +129,7 @@ function outside(body: Body): Response | Listing {
 }
 
 function ensureDraft(): Draft {
-  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [] }
+  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
 }
 
@@ -210,6 +217,22 @@ export const handlers = [
   }),
   // The bot check is off in the mocks (#5283): no site key, no widget.
   http.get(`${base}/turnstile`, () => HttpResponse.json({ site_key: null })),
+  // The CRUD side's submit (`orders/storefront/submit.py`), as far as the page needs it.
+  http.post(`${base}/draft/submit`, async ({ request }) => {
+    const missing = keyMissing(request)
+    if (missing) return missing
+    const body = (await request.json()) as { draft_id: string; email: string; shipping_option_id?: string; address?: unknown }
+    if (!draft || draft.id !== body.draft_id) return refused(404, 'draft_not_found', 'There is no such order.')
+    if (draft.items.length === 0) return refused(409, 'draft_empty', 'Your order is empty. Add something to it first.')
+    const option = SHIPPING.find((o) => o.id === body.shipping_option_id)
+    if (!option) return refused(422, 'shipping_option_id', 'Choose how your order reaches you.')
+    if (option.ships && !body.address) return refused(409, 'shipping_address_required', 'This way of shipping needs your address.')
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) return refused(422, 'email_invalid', 'Give one email address, such as ada@example.com.')
+    const submitted = { id: draft.id, number: `ORD-2026-${++orders}`, email: body.email }
+    draft = null
+    save()
+    return HttpResponse.json(submitted)
+  }),
   http.post(`${base}/draft/requests`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -234,6 +257,7 @@ export const handlers = [
 
 export function reset(): void {
   draft = null
+  orders = 0
   renders = new Map()
   serial = 0
   try {

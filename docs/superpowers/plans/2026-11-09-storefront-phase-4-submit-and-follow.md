@@ -142,7 +142,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
   - Uses Task 2's `storefront_order_links` (`id`, `order_id`, `token_sha256` unique, `token_sealed`, `created_at`, `revoked_at`, `sent_to`, `opened_at`).
   - `SubmitInput`: `name` (1–200), `email` (an address, at most 254), `shipping_option_id: str | None`, `address: Address | None`, and `account_id`, which comes only from the CRUD side's session lookup, never from the body.
   - `Lifecycle.submit_order(order_id, body: SubmitInput, by: Actor) -> tuple[Order, str]` returns the order and the new link token, in one transaction under the order lock:
-    1. It links or makes the customer. It links an existing customer only when exactly one customer has that email as a contact. Otherwise it makes a new customer with the name and the email contact.
+    1. It makes a new customer, with the name, the email contact and the given address as its default shipping address. It never links an existing one at submit (spec §5.2: only a verified account links).
     2. It takes the number from `order_numbers`.
     3. It runs `set_shipping_option`, which refuses 409 `shipping_address_required` (`orders/lifecycle.py`, unchanged) for an option that ships with no address.
     4. It recomputes the auto tax.
@@ -155,8 +155,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 
 - [ ] **Step 1: Write the failing tests.**
   - One order, one number and one queued `order_link` row, with the key replayed twice.
-  - An existing single contact is linked.
-  - Two customers with that email give a new customer.
+  - A customer with the same email is never linked or changed.
   - A shipping option that ships, without an address, gets 409 `shipping_address_required`.
   - The deposit policy applies.
   - Another visitor's submit sees no draft (404 `draft_not_found`).

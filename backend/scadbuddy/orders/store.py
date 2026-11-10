@@ -536,15 +536,20 @@ class OrderStore:
             return None if row is None else self._customer_of(c, row)
 
     def customer(
-        self, customer_id: str, *, conn: Conn | None = None, share: bool = False
+        self,
+        customer_id: str,
+        *,
+        conn: Conn | None = None,
+        share: bool = False,
+        lock: bool = False,
     ) -> Customer | None:
         """``share`` takes the row's share lock (``FOR SHARE``, so ``conn`` must be in
-        a transaction): a writer that would archive it waits for this transaction."""
+        a transaction): a writer that would archive it waits for this transaction.
+        ``lock`` takes its update lock (``FOR UPDATE``), which writes nothing."""
+        mode = " FOR UPDATE" if lock else " FOR SHARE" if share else ""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_CUSTOMER} FROM customers WHERE id = %s"
-                + (" FOR SHARE" if share else ""),
-                (customer_id,),
+                f"SELECT {_CUSTOMER} FROM customers WHERE id = %s" + mode, (customer_id,)
             ).fetchone()
             return None if row is None else self._customer_of(c, row)
 
@@ -697,6 +702,33 @@ class OrderStore:
             return None
         customer_id = row.pop("customer_id")
         return customer_id, Address.model_validate(row)
+
+    def add_address(self, conn: Conn, customer_id: str, address: AddressInput) -> Address:
+        """``address`` appended to the customer's addresses, the others kept as they are."""
+        row = conn.execute(
+            "INSERT INTO customer_addresses (customer_id, label, recipient, lines, locality,"
+            " region, postal_code, country, phone, default_shipping, default_billing, position)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, (SELECT COALESCE(MAX(position)"
+            " + 1, 0) FROM customer_addresses WHERE customer_id = %s))"
+            f" RETURNING {_ADDRESS}",
+            (
+                customer_id,
+                address.label,
+                address.recipient,
+                list(address.lines),
+                address.locality,
+                address.region,
+                address.postal_code,
+                address.country,
+                address.phone,
+                address.default_shipping,
+                address.default_billing,
+                customer_id,
+            ),
+        ).fetchone()
+        assert row is not None
+        conn.execute("UPDATE customers SET updated_at = now() WHERE id = %s", (customer_id,))
+        return Address.model_validate(row)
 
     # -- the price book's filaments (§5.1, #4250) -------------------------------------
 
@@ -929,6 +961,40 @@ class OrderStore:
             (order_id,),
         ).fetchone()
         return row is not None
+
+    def claim_draft(
+        self,
+        conn: Conn,
+        order_id: str,
+        *,
+        customer_id: str,
+        shipping_address_id: str | None,
+        currency: str,
+    ) -> Order:
+        """The cart's customer, shipping address, currency and the year's next number
+        (#5283), in the submit's transaction: a rolled-back submit gives the number back
+        (`next_number`). ``submitted_at`` stays unset until `stamp_submitted`."""
+        number = next_number(conn, datetime.now(UTC).year)
+        row = conn.execute(
+            "UPDATE orders SET customer_id = %s, number = %s, shipping_address_id = %s,"
+            " currency = %s, updated_at = now() WHERE id = %s AND source = 'storefront'"
+            f" AND submitted_at IS NULL RETURNING {_ORDER}",
+            (customer_id, number, shipping_address_id, currency, order_id),
+        ).fetchone()
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return Order.model_validate(row)
+
+    def stamp_submitted(self, conn: Conn, order_id: str) -> Order:
+        """``submitted_at``: the cart is an order in the shop's queue (#5283, spec §5.5)."""
+        row = conn.execute(
+            "UPDATE orders SET submitted_at = clock_timestamp(), updated_at = now()"
+            f" WHERE id = %s AND submitted_at IS NULL RETURNING {_ORDER}",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            raise OrderNotFoundError(order_id)
+        return Order.model_validate(row)
 
     def order(self, order_id: str, *, conn: Conn | None = None) -> Order | None:
         with self._read(conn) as c:

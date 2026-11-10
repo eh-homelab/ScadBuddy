@@ -30,18 +30,20 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from psycopg import errors
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
+from scadbuddy.core.secrets import Kek
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
     REVISION_ROLES,
     SHOWN_IMAGES,
     TAKES_ITEMS,
     Actor,
+    AddressInput,
     AddressSnapshot,
     Approval,
     Attachment,
@@ -50,6 +52,7 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    ContactInput,
     CostEntry,
     CostEntryInput,
     Fulfilment,
@@ -69,6 +72,7 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     ShipmentItem,
+    SubmitAddress,
     TimeEntry,
     TimeEntryInput,
 )
@@ -104,7 +108,15 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.storefront.links import live_link
+from scadbuddy.orders.storefront.accounts import (
+    account_email,
+    attach_order,
+    relink_account,
+    submitting_customer,
+)
+from scadbuddy.orders.storefront.addresses import check_address
+from scadbuddy.orders.storefront.customers import customer_actor
+from scadbuddy.orders.storefront.links import create_order_link, live_link
 from scadbuddy.orders.storefront.mail import MailEvent, queue_mail, storefront_mail_covers
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
@@ -291,6 +303,21 @@ class ShipmentEdit(BaseModel):
     _lines = field_validator("items")(
         lambda items: None if items is None else _distinct_lines(items)
     )
+
+
+class SubmitInput(BaseModel):
+    """A visitor's submit of its cart (#5283, spec §5.5): who it is, where the mail goes,
+    the shipping option and, when that ships, the address. ``email`` is one address
+    (`check_address`). ``account_id`` comes only from the CRUD side's session lookup
+    (`api/crud_storefront.py` `store_account`), never from a body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    email: str = Field(max_length=254)
+    shipping_option_id: str | None = None
+    address: SubmitAddress | None = None
+    account_id: str | None = None
 
 
 class OrderEdit(BaseModel):
@@ -556,6 +583,9 @@ class Lifecycle:
         self.mail_host: Callable[[], str | None] = lambda: None
         #: Called after a commit that queued mail (`StorefrontMail.kick`).
         self.on_mail: Callable[[], None] = lambda: None
+        #: The CRUD service's KEK, which seals an order link's token (#5283); None makes
+        #: no link. Set by ``OrdersComponent``.
+        self.kek: Kek | None = None
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -806,6 +836,157 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def submit_order(
+        self,
+        order_id: str,
+        body: SubmitInput,
+        by: Actor,
+        *,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
+    ) -> tuple[Order, str]:
+        """The visitor's cart submitted as an order (#5283, spec §5.5), in one transaction
+        under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
+        the bus then): it
+
+        1. without an account, makes a new customer (`_new_customer`) with the name,
+           ``body.email`` as its primary contact and the address given as its default
+           shipping address, which is the order's. It never links or writes an existing
+           customer, whatever its contacts: a typed email proves nothing (spec §5.2; only
+           a verified account links a customer, and the shop merges customers by hand).
+           With ``body.account_id`` (from the CRUD side's session, never a body) it takes
+           the account's customer (`_account_customer`) and makes none, unless the shop
+           has archived that customer: then it makes a new one and the account links to it;
+        2. takes the year's number (`OrderStore.claim_draft`) and the shop's currency
+           (``orders_currency``): a cart holds no amount, so one made before the shop
+           changed its currency is submitted in the new one;
+        3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
+           one that ships with no address), which
+        4. recomputes the auto tax;
+        5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
+           queues no `payment_requested` mail, since no link exists yet: the order link's
+           mail leads to the page that shows it). An anonymous submit's customer is new, so
+           a ``first_order`` rule always applies to it, even when the email has ordered
+           before; the shop can change the deposit before it accepts (§8). A policy that
+           applies only in another currency sets none, and `deposit.policy_skipped` tells
+           the shop;
+        6. stamps ``submitted_at``;
+        7. makes the order link (`create_order_link`);
+        8. queues the `order_link` mail to ``body.email``;
+        9. with an account, attaches the order to it (`attach_order`), so it is in the
+           account's "Your orders" even when the cart's visitor never joined the account.
+
+        Everything after step 1 is recorded as the customer (`customer_actor`, with the
+        cart's visitor row as the session). The order and the link's token, which is
+        returned once and never stored in clear. Refusals: `order_not_found` (404) unless
+        the order is a storefront cart of ``cart_of``'s; `order_submitted` once submitted;
+        `draft_empty` with no item; 422 `shipping_option_id` with no option when the shop
+        lists some, or one it does not list; `shipping_address_required`;
+        `EmailInvalidError`; `KekMissingError` with no KEK. With an account, also
+        `order_not_found` when the cart's visitor belongs to another account."""
+        email = check_address(body.email)
+        with self.store.transaction(conn) as tx:
+            order = self._lock(tx, order_id)
+            if order.source != "storefront" or (
+                cart_of is not None and order.storefront_visitor_id != cart_of
+            ):
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            if not order.unsubmitted:
+                raise LifecycleError("order_submitted", f"order {order.label} is submitted")
+            if not any(i.status != "cancelled" for i in self.store.items(order.id, conn=tx)):
+                raise LifecycleError("draft_empty", f"{order.label} has no item")
+            rules = self.rules()
+            option_id = body.shipping_option_id
+            if option_id is None and rules.shipping_options:
+                raise LifecycleError(
+                    "shipping_option_id", "shipping_option_id: choose one", unprocessable=True
+                )
+            if option_id is not None and all(o.id != option_id for o in rules.shipping_options):
+                raise LifecycleError(
+                    "shipping_option_id",
+                    f"shipping_option_id: no shipping option {option_id}",
+                    unprocessable=True,
+                )
+            if body.account_id is None:
+                customer_id, address_id = self._new_customer(tx, body, email)
+            else:
+                customer_id, address_id = self._account_customer(tx, body, order)
+            customer = customer_actor(customer_id, order.storefront_visitor_id or "")
+            order = self.store.claim_draft(
+                tx,
+                order.id,
+                customer_id=customer_id,
+                shipping_address_id=address_id,
+                currency=rules.shop_currency,
+            )
+            self._event(tx, order, customer, "order.customer_set")
+            order = self._shipping_option(tx, order, customer, option_id, rules)
+            try:
+                self._deposit_policy(tx, order, customer, rules)
+            except LifecycleError as error:
+                if error.slug != "deposit_policy_currency":
+                    raise
+                self._event(tx, order, customer, "deposit.policy_skipped", reason=str(error))
+            order = self.store.stamp_submitted(tx, order.id)
+            self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
+            link_id, token = create_order_link(tx, self.kek, order.id, email)
+            queue_mail(
+                tx, "order_link", email, {"order": order.label, "link_id": link_id}, order.id
+            )
+            if body.account_id is not None:
+                attach_order(tx, body.account_id, order.id)
+            order = self.store.order(order.id, conn=tx) or order
+        if conn is None:
+            self._told(_Change(order))
+        return order, token
+
+    def _new_customer(self, conn: Conn, body: SubmitInput, email: str) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for an anonymous submit: a new customer with the name,
+        ``email`` as its primary contact and the given address as its default shipping
+        address. Its id, and the address's (None without one)."""
+        made = self.store.insert_customer(
+            display_name=body.name,
+            company=None,
+            notes="",
+            tags=[],
+            contacts=[ContactInput(kind="email", value=email, primary=True)],
+            addresses=[] if body.address is None else [body.address.as_input()],
+            conn=conn,
+        )
+        return made.id, made.addresses[0].id if made.addresses else None
+
+    def _account_customer(
+        self, conn: Conn, body: SubmitInput, order: Order
+    ) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for a signed-in submit: the account's customer
+        (`submitting_customer`), its name and contacts left as they are. The given address
+        is the customer's equal one (`_same_address`: case, spaces and empty lines aside),
+        and then the customer is not touched; with none, it is added, never as a default.
+        The account's row is locked first (`submitting_customer`), then the customer's, so
+        two submits at once add one row, make one new customer for an archived one, and an
+        archive waits for this submit. A customer the shop has archived takes no order, as
+        in `create_order`: the submit makes a new customer as an anonymous one does
+        (`_new_customer`, with the account's verified email as its contact), and the account
+        links to it from then on. Its id, and the address's (None without one).
+        `order_not_found` when the cart's visitor belongs to another account."""
+        assert body.account_id is not None
+        customer_id = submitting_customer(conn, body.account_id, order.storefront_visitor_id)
+        if customer_id is None:
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        customer = self.store.customer(customer_id, conn=conn, lock=True)
+        assert customer is not None
+        if customer.archived_at is not None:
+            made, address_id = self._new_customer(conn, body, account_email(conn, body.account_id))
+            relink_account(conn, body.account_id, made)
+            return made, address_id
+        if body.address is None:
+            return customer_id, None
+        given = AddressInput(**body.address.model_dump())
+        for kept in customer.addresses:
+            if _same_address(kept, given):
+                return customer_id, kept.id
+        return customer_id, self.store.add_address(conn, customer_id, given).id
+
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
         housekeeping sweep, after ``storefront_draft_ttl_days``): the candidates
@@ -991,7 +1172,9 @@ class Lifecycle:
         on ``option_id``; an option that ships needs the order's shipping address
         (`shipping_address_required`), a pickup does not. The audit row is
         ``shipping.option_set``. A cart's option is the visitor's alone
-        (`order_not_submitted`, ``check_visitors_cart``)."""
+        (`order_not_submitted`, ``check_visitors_cart``). An order not in the shop's
+        currency (``orders_currency``) takes no option: 409 `shipping_currency_mismatch`
+        (no conversion); None still removes."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_visitors_cart(order, by)
@@ -1007,41 +1190,63 @@ class Lifecycle:
                     f"order {order.label} is {order.status}: its shipping option is"
                     f" set while draft or quoted{route}",
                 )
-            rules = self.rules()
-            charges: list[ChargeInput] = [
-                charge
-                for charge in self.store.charges(order.id, conn=conn)
-                if not charge.auto and charge.kind != "shipping"
-            ]
-            if option_id is not None:
-                option = next((o for o in rules.shipping_options if o.id == option_id), None)
-                if option is None:
-                    raise LifecycleError(
-                        "option_id",
-                        f"option_id: no shipping option {option_id} (shipping_option_not_found)",
-                        unprocessable=True,
-                    )
-                if option.ships and order.shipping_address_id is None:
-                    raise LifecycleError(
-                        "shipping_address_required",
-                        f"order {order.label} has no shipping address: {option.label} ships"
-                        " it; set the address first, or choose an option that does not ship",
-                    )
-                charges.append(
-                    ChargeInput(
-                        kind="shipping",
-                        label=option.label,
-                        amount_minor=option.amount_minor,
-                        shipping_option_id=option.id,
-                    )
-                )
-            self.store.replace_charges(conn, order.id, charges)
-            self._event(conn, order, by, "shipping.option_set", option_id=option_id)
-            self._retax(conn, order, by, rules)
-            order = self._rederive(conn, order, by)
-            order = self.store.order(order.id, conn=conn) or order
+            order = self._shipping_option(conn, order, by, option_id, self.rules())
         self._told(_Change(order))
         return order
+
+    @staticmethod
+    def _shipping_in_currency(order: Order, rules: OrderRules) -> None:
+        """409 `shipping_currency_mismatch` when ``order`` is not in the shop's currency:
+        the options' amounts are in it, and none is converted."""
+        if order.currency != rules.shop_currency:
+            raise LifecycleError(
+                "shipping_currency_mismatch",
+                f"order {order.label} is in {order.currency}, but the shop's shipping options"
+                f" are priced in {rules.shop_currency}; they cannot be set on it",
+            )
+
+    def _shipping_option(
+        self, conn: Conn, order: Order, by: Actor, option_id: str | None, rules: OrderRules
+    ) -> Order:
+        """`set_shipping_option`'s write on the locked ``order``, with no check of who
+        asks or of the state: the order as the write left it. An option is priced in the
+        shop's currency and the order may be in another (a back-office order made before
+        the shop changed it); there is no conversion, so that is a 409
+        `shipping_currency_mismatch` (`_shipping_in_currency`). None removes the shipping
+        charges in any currency."""
+        charges: list[ChargeInput] = [
+            charge
+            for charge in self.store.charges(order.id, conn=conn)
+            if not charge.auto and charge.kind != "shipping"
+        ]
+        if option_id is not None:
+            self._shipping_in_currency(order, rules)
+            option = next((o for o in rules.shipping_options if o.id == option_id), None)
+            if option is None:
+                raise LifecycleError(
+                    "option_id",
+                    f"option_id: no shipping option {option_id} (shipping_option_not_found)",
+                    unprocessable=True,
+                )
+            if option.ships and order.shipping_address_id is None:
+                raise LifecycleError(
+                    "shipping_address_required",
+                    f"order {order.label} has no shipping address: {option.label} ships"
+                    " it; set the address first, or choose an option that does not ship",
+                )
+            charges.append(
+                ChargeInput(
+                    kind="shipping",
+                    label=option.label,
+                    amount_minor=option.amount_minor,
+                    shipping_option_id=option.id,
+                )
+            )
+        self.store.replace_charges(conn, order.id, charges)
+        self._event(conn, order, by, "shipping.option_set", option_id=option_id)
+        self._retax(conn, order, by, rules)
+        order = self._rederive(conn, order, by)
+        return self.store.order(order.id, conn=conn) or order
 
     def add_payment(
         self,
@@ -1313,37 +1518,43 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
-            rules = self.rules()
-            items = self.store.items(order.id, conn=conn)
-            context: dict[str, Any] = {
-                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
-                "first_order": order.customer_id is None
-                or not self.store.accepted_before(conn, order.customer_id, order.id),
-                "currency": order.currency,
-                "shop_currency": rules.shop_currency,
-            }
-            amount = deposit_for(
-                rules.deposit_policy,
-                total_minor=totals_of(self.store, conn, order.id).total_minor,
-                **context,
-            )
-            skipped = skipped_for_currency(rules.deposit_policy, **context)
-            if amount is None and skipped:
-                raise LifecycleError(
-                    "deposit_policy_currency",
-                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
-                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
-                    " by hand",
-                )
-            audit: dict[str, Any] = {"policy": True}
-            if skipped:
-                audit["skipped"] = skipped
-            updated = self._set_deposit(conn, order, by, amount, **audit)
+            updated = self._deposit_policy(conn, order, by, self.rules())
             if updated is None:
                 return order
             order = updated
         self._told(_Change(order))
         return order
+
+    def _deposit_policy(
+        self, conn: Conn, order: Order, by: Actor, rules: OrderRules
+    ) -> Order | None:
+        """`apply_deposit_policy`'s write on the locked ``order``, with no check of its
+        state: as `_set_deposit`, the order or None when nothing was written."""
+        items = self.store.items(order.id, conn=conn)
+        context: dict[str, Any] = {
+            "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+            "first_order": order.customer_id is None
+            or not self.store.accepted_before(conn, order.customer_id, order.id),
+            "currency": order.currency,
+            "shop_currency": rules.shop_currency,
+        }
+        amount = deposit_for(
+            rules.deposit_policy,
+            total_minor=totals_of(self.store, conn, order.id).total_minor,
+            **context,
+        )
+        skipped = skipped_for_currency(rules.deposit_policy, **context)
+        if amount is None and skipped:
+            raise LifecycleError(
+                "deposit_policy_currency",
+                f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                " by hand",
+            )
+        audit: dict[str, Any] = {"policy": True}
+        if skipped:
+            audit["skipped"] = skipped
+        return self._set_deposit(conn, order, by, amount, **audit)
 
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,
@@ -5404,3 +5615,19 @@ def reap_quote_holds(refs: BlobRefs, store: OrderStore, *, grace: timedelta = QU
     The grace is every row's, so a quote recorded a moment ago is never caught between
     its ref and its row. How many holders went; the blob sweep frees the bytes."""
     return refs.drop_unlisted(QUOTE_HOLDER, store.standing_quote_ids(), older_than=grace)
+
+
+def _fold(value: str | None) -> str:
+    """A field as `_same_address` compares it: spaces collapsed, case folded."""
+    return " ".join((value or "").split()).casefold()
+
+
+def _same_address(a: AddressInput, b: AddressInput) -> bool:
+    """Whether two addresses are one place for one recipient: every field the visitor
+    gives equal once case and spaces are folded and empty lines dropped. The label and the
+    default flags are the shop's and are not compared."""
+    fields = ("recipient", "locality", "region", "postal_code", "country", "phone")
+    lines = [[_fold(line) for line in x.lines if _fold(line)] for x in (a, b)]
+    return lines[0] == lines[1] and all(
+        _fold(getattr(a, name)) == _fold(getattr(b, name)) for name in fields
+    )

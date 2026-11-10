@@ -45,6 +45,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.idempotency import Replay, has_reply, idempotent_write, stored
 from scadbuddy.orders.attachments import SNIFF_BYTES, clean_filename, keep_file, sniff
 from scadbuddy.orders.component import ORDERS, OrdersComponent
+from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
@@ -61,6 +62,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftItem,
     DraftView,
     Listing,
+    PublicShippingOption,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -194,10 +196,16 @@ async def _view(state: AppState, order: Order) -> DraftView:
     orders = _orders(state)
 
     def read() -> tuple[
-        list[OrderItem], dict[str, list[str] | None], list[Attachment], list[Listing]
+        list[OrderItem],
+        dict[str, list[str] | None],
+        list[Attachment],
+        list[Listing],
+        list[PublicShippingOption],
+        str,
     ]:
         offered = orders.store.storefront_offered(order.id)
         items = orders.store.items(order.id)
+        rules = orders.lifecycle.rules()
         # The captions of the listing items' values: the listings at those items' slug
         # and commit only, in one query; none when the draft has no listing item.
         pairs = {
@@ -210,9 +218,13 @@ async def _view(state: AppState, order: Order) -> DraftView:
             offered,
             orders.store.attachments(order.id),
             orders.listings.at_commits(pairs) if pairs else [],
+            [PublicShippingOption(**option.model_dump()) for option in rules.shipping_options],
+            # A cart holds no amount, and the submit takes the shop's currency
+            # (`Lifecycle.submit_order`), so the view shows that one.
+            rules.shop_currency,
         )
 
-    rows, offered, files, listings = await asyncio.to_thread(read)
+    rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -248,9 +260,10 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
     return DraftView(
         id=order.id,
-        currency=order.currency,
-        minor_exponent=order.minor_exponent,
+        currency=currency,
+        minor_exponent=minor_exponent(currency),
         items=items,
+        shipping_options=shipping,
     )
 
 

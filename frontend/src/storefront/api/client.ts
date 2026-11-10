@@ -8,11 +8,11 @@
  * that action is sent again (`ActionKey`). The edge requires it (428 without) and forwards
  * it bound to the visitor (`backend/scadbuddy/storefront/routes.py` `_request_key`), and
  * the CRUD side keeps one answer per key, so a render, an add, a removal or a design
- * request sent again after a lost answer is done once. A refusal is a `StoreError` with the problem's
+ * request or a submit sent again after a lost answer is done once. A refusal is a `StoreError` with the problem's
  * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
  * seconds the edge says to wait.
  */
-import type { components } from './schema'
+import type { components, paths } from './schema'
 
 type Schemas = components['schemas']
 export type Listing = Schemas['PublicListing']
@@ -24,6 +24,8 @@ export type StoreEstimate = Schemas['StoreEstimate']
 export type Draft = Schemas['DraftView']
 export type DraftItem = Schemas['DraftItem']
 export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
+export type ShippingOption = Schemas['PublicShippingOption']
+export type SubmittedOrder = Schemas['SubmittedOrder']
 export type ParamValue = boolean | number | string
 // Accounts (#5283, spec §5.2).
 export type Account = Schemas['AccountView']
@@ -125,6 +127,9 @@ export interface RenderInput {
   colours: Record<string, string>
 }
 
+/** A submit of the cart the page shows: the edge's request body, from its spec. */
+export type SubmitInput = paths['/api/store/v1/draft/submit']['post']['requestBody']['content']['application/json']
+
 export const store = {
   listings: () => call<Listings>('/listings'),
   listing: (id: string) => call<Listing>(`/listings/${encodeURIComponent(id)}`),
@@ -142,6 +147,8 @@ export const store = {
     for (const file of files) form.append('files', file, file.name)
     return call<Draft>('/draft/requests', { method: 'POST', form, key, turnstile })
   },
+  submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
+    call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
   // Accounts: the session is the edge's HttpOnly cookie, never in a body. Verify is sent
   // once (a code is single-use), so it takes no Idempotency-Key.

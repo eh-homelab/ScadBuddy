@@ -44,12 +44,12 @@ def test_the_storefront_mail_password_is_write_only(client: TestClient) -> None:
     assert "hunter2" not in client.get("/api/v1/settings").text
     assert "hunter2" not in client.get("/api/v1/storefront/mail").text
     assert client.get("/api/v1/storefront/mail/password").json() == {"set": True}
-    assert client.get("/api/v1/storefront/mail").json() == {
-        "password_set": True,
-        "password_for": "shop@smtp.example.com:587 (starttls)",
-        "server_error": None,
-        "server_error_at": None,
-    }
+    shown = client.get("/api/v1/storefront/mail").json()
+    # The sender may have tried once between `connect` and the password (and noted "no
+    # SMTP password is set"), so the server's error fields are not asserted here.
+    assert set(shown) == {"password_set", "password_for", "server_error", "server_error_at"}
+    assert shown["password_set"] is True
+    assert shown["password_for"] == "shop@smtp.example.com:587 (starttls)"
     gone = client.delete("/api/v1/storefront/mail/password")
     assert gone.status_code == 200 and gone.json() == {"set": False}
     assert client.get("/api/v1/storefront/mail/password").json() == {"set": False}

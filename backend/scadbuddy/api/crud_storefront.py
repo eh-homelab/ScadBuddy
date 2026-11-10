@@ -30,7 +30,11 @@ Area ``drafts`` (`orders/storefront/drafts.py`): ``GET …/draft`` is the visito
 order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at the visitor's
 values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
 ``Idempotency-Key``, 428 without). Another visitor's item is 404 ``item_not_found``. A body
-that is not an item is 422 ``draft_body_invalid``.
+that is not an item is 422 ``draft_body_invalid``. ``POST …/draft/submit`` (``Idempotency-Key``
+required) submits the cart the body names as an order (`orders/storefront/submit.py`),
+for the session's account when signed in (`store_account`); another visitor's cart, or a
+cart whose visitor joined another account, is 404 ``draft_not_found``, a body that is not a
+submit 422 ``submit_body_invalid``.
 
 Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
 the edge refuses a request before it reads the body; with the request's
@@ -45,8 +49,8 @@ edge's checks.
 
 Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
 token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
-reads into the request's account; submit and the order page are to take the account from
-there (a later PR), never from a body. ``POST …/account/verify`` signs in by a mailed code
+reads into the request's account; submit takes the account from there, never from a
+body, and the order page is to (a later PR). ``POST …/account/verify`` signs in by a mailed code
 and sends the new session's token back in `SESSION_HEADER` (never in the body, so no
 logged or relayed JSON holds it), ending the session the browser held; one refusal, 400
 ``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``. ``POST
@@ -118,6 +122,7 @@ from scadbuddy.orders.storefront.renders import (
     start_render,
     store_render,
 )
+from scadbuddy.orders.storefront.submit import submit_draft
 from scadbuddy.orders.storefront.turnstile import (
     MAX_TOKEN_CHARS,
     TurnstileConfig,
@@ -135,6 +140,8 @@ from scadbuddy.orders.storefront.wire import (
     RenderBody,
     SignInBody,
     StoreRender,
+    SubmitBody,
+    SubmittedOrder,
 )
 from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
@@ -184,6 +191,32 @@ def store_client(request: Request) -> str:
 
 Visitor = Annotated[str, Depends(visitor_id)]
 StoreClient = Annotated[str, Depends(store_client)]
+
+
+def store_session(request: Request) -> str | None:
+    """The session token the edge took from its verified ``sb_session`` cookie, if any. Only
+    the ``storefront`` credential reaches here (`crud_router`), so no other caller sends it.
+    A token that names no live session reads as none (`account_for_session`)."""
+    return request.headers.get(SESSION_HEADER) or None
+
+
+StoreSession = Annotated[str | None, Depends(store_session)]
+
+
+async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
+    """The account of the request's session, or None. Submit takes the account from here,
+    never from a body, and so is the order page to (a later PR)."""
+    if session is None:
+        return None
+
+    def read() -> Account | None:
+        with orders.store.transaction() as conn:
+            return account_for_session(conn, session)
+
+    return await asyncio.to_thread(read)
+
+
+StoreAccount = Annotated[Account | None, Depends(store_account)]
 
 
 def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
@@ -355,6 +388,56 @@ async def draft_remove(
     return await remove_item(state, visitor, key, item_id)
 
 
+def _inlined(model: type[BaseModel]) -> dict[str, Any]:
+    """``model``'s JSON schema with each ``$defs`` entry put in place of its ``$ref``:
+    `openapi_extra` is copied into the spec verbatim, where ``#/$defs/…`` points at
+    nothing."""
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+
+    def inline(node: Any) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                return inline(defs[ref.removeprefix("#/$defs/")])
+            return {k: inline(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [inline(v) for v in node]
+        return node
+
+    inlined: dict[str, Any] = inline(schema)
+    return inlined
+
+
+@router.post(
+    "/draft/submit",
+    name="crud_storefront_draft_submit",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": _inlined(SubmitBody)}},
+        }
+    },
+)
+async def draft_submit(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    account: StoreAccount,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> SubmittedOrder:
+    """The visitor's cart submitted as an order (`orders/storefront/submit.py`
+    `submit_draft`), for the session's account when signed in. A session that names no
+    live account submits as anonymous. The ``Idempotency-Key`` is bound to who sent it:
+    replayed under another session, or with none, it is 422 ``idempotency-key-reused``."""
+    key = required_key(idempotency_key)
+    body = await _body(
+        request, SubmitBody, "submit_body_invalid", "This request is not a submit of an order."
+    )
+    return await submit_draft(state, visitor, key, body, account)
+
+
 def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
     """Whether "Ask for a design" is on, or ``key`` holds a committed request (a retry,
     answered whatever changed since)."""
@@ -497,34 +580,6 @@ async def turnstile_verify(
     config = await asyncio.to_thread(_turnstile_config, state)
     verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
     return TurnstileVerdict(verdict=verdict)
-
-
-def store_session(request: Request) -> str | None:
-    """The session token the edge took from its verified ``sb_session`` cookie, if any. Only
-    the ``storefront`` credential reaches here (`crud_router`), so no other caller sends it.
-    A token that names no live session reads as none (`account_for_session`)."""
-    return request.headers.get(SESSION_HEADER) or None
-
-
-StoreSession = Annotated[str | None, Depends(store_session)]
-
-
-async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
-    """The account of the request's session, or None. Submit and the order page are to take
-    the account from here (a later PR), never from a body. `account_for_session` runs in a
-    transaction of its own; if a route that takes it becomes hot, read it in the route's
-    transaction instead."""
-    if session is None:
-        return None
-
-    def read() -> Account | None:
-        with orders.store.transaction() as conn:
-            return account_for_session(conn, session)
-
-    return await asyncio.to_thread(read)
-
-
-StoreAccount = Annotated[Account | None, Depends(store_account)]
 
 
 @router.post(

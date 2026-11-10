@@ -8,7 +8,7 @@ test.describe('the public storefront', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack serves the page from the storefront edge')
   test.use({ viewport: { width: 390, height: 844 } })
 
-  test('browses, customizes, renders, estimates and orders on a phone', async ({ page }) => {
+  test('browses, customizes, renders, estimates, orders and submits on a phone', async ({ page }) => {
     await page.goto('/store/')
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 
@@ -29,8 +29,21 @@ test.describe('the public storefront', () => {
     await expect(page.locator('.sf-item')).toHaveCount(1)
     await expect(page.locator('.sf-item').getByText('Ada')).toBeVisible()
 
-    const width = Number(await page.evaluate('document.documentElement.scrollWidth'))
+    let width = Number(await page.evaluate('document.documentElement.scrollWidth'))
     expect(width).toBeLessThanOrEqual(390)
+
+    // Submit (#5283, spec §5.5): an option that ships asks for the address.
+    await page.getByLabel('Your name').fill('Ada')
+    await page.getByLabel('Email').fill('ada@example.com')
+    await page.getByRole('radio', { name: /Post/ }).check()
+    await page.getByLabel('Recipient').fill('Ada Lovelace')
+    await page.getByLabel('Street address').fill('1 Analytical Way')
+    await page.getByLabel('Town or city').fill('London')
+    width = Number(await page.evaluate('document.documentElement.scrollWidth'))
+    expect(width).toBeLessThanOrEqual(390)
+    await page.getByRole('button', { name: 'Send my order' }).click()
+    await expect(page.getByText('We have your order. We sent a link to ada@example.com.')).toBeVisible()
+    await expect(page.locator('.sf-item')).toHaveCount(0)
   })
 
   test('fits every page in a phone width', async ({ page }) => {

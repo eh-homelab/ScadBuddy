@@ -1049,7 +1049,8 @@ export const orderTools: Tool[] = [
       "Choose the order's shipping option (#5281) while it is draft or quoted: `option_id` is one of the shop's " +
       'shipping options, kept in Settings → Orders (read them with get_settings, `storefront_shipping_options`); null ' +
       "removes it. The option becomes the order's one `shipping` charge. An option that ships needs the order's " +
-      'shipping address (`shipping_address_required`); a pickup does not.',
+      'shipping address (`shipping_address_required`); a pickup does not. An order in another currency than ' +
+      "the shop's takes no option (`shipping_currency_mismatch`): the amounts are in the shop's currency.",
     input: z.object({
       order_id: orderId,
       option_id: z.string().min(1).max(100).nullable().describe('A shipping option id; null for none'),

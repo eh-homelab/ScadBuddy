@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
-import { ActionKey, errorText, store, type Draft, type DraftItem } from '../api/client'
+import { ActionKey, errorText, store, type Draft, type DraftItem, type SubmittedOrder } from '../api/client'
+import { SubmitForm } from '../components/SubmitForm'
 import { useDraftChanged } from '../draftCount'
 
 /**
  * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed,
  * one at a time: every Remove waits while one runs, so the answers come back in order and
  * the last one is the cart. A request's text, a file's name and each value are the
- * visitor's own, shown as text; each value is named by its label.
+ * visitor's own, shown as text; each value is named by its label. Below the items, the
+ * visitor sends the order (`SubmitForm`, spec §5.5); once sent, the page says where the
+ * link to it went.
  */
 export function DraftPage() {
   const [draft, setDraft] = useState<Draft | null>()
   const [error, setError] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState<SubmittedOrder | null>(null)
   const keys = useRef(new ActionKey())
   const draftChanged = useDraftChanged()
 
@@ -31,6 +35,18 @@ export function DraftPage() {
     }
   }, [draftChanged])
 
+  // The cart was sent from another tab: show what is there now, with the shop's answer.
+  const sentElsewhere = (message: string) => {
+    store.draft().then(
+      (answer) => {
+        setDraft(answer)
+        draftChanged(answer)
+        setError(message)
+      },
+      (caught: unknown) => setError(errorText(caught)),
+    )
+  }
+
   const remove = async (item: DraftItem) => {
     if (removing !== null) return
     setRemoving(item.id)
@@ -45,6 +61,24 @@ export function DraftPage() {
     } finally {
       setRemoving(null)
     }
+  }
+
+  const sent = (order: SubmittedOrder) => {
+    setSubmitted(order)
+    // The submitted order is no longer the visitor's cart.
+    draftChanged(null)
+  }
+
+  if (submitted) {
+    return (
+      <section>
+        <h1 className="sf-h1">Your order</h1>
+        <div className="sf-panel" role="status">
+          <p className="sf-lead">{`We have your order. We sent a link to ${submitted.email}.`}</p>
+          <p className="sf-hint">{`Your order number is ${submitted.number}. Follow the link in the mail to see your order.`}</p>
+        </div>
+      </section>
+    )
   }
 
   const items = draft?.items ?? []
@@ -109,6 +143,7 @@ export function DraftPage() {
           ))}
         </ul>
       )}
+      {draft && items.length > 0 && <SubmitForm draft={draft} onSubmitted={sent} onSent={sentElsewhere} />}
     </section>
   )
 }

@@ -565,9 +565,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Today design requests (`request`), code requests (`sign_up`)
-  and sign-ins (`sign_in`) take it; the action `submit` is kept for the submit route still
-  to come. The edge's page CSP (`storefront/static.py`) names
+  before it reads its body. Design requests (`request`), submit (`submit`), code requests
+  (`sign_up`) and sign-ins (`sign_in`) take it. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
   and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
@@ -840,7 +839,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
-  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  the address while such an option stays (`_no_option_ships`, the same slug). An order
+  not in the shop's currency (`orders_currency`) takes no option: 409
+  `shipping_currency_mismatch` (`_shipping_in_currency`; null still removes). A storefront
+  cart holds no amount, so its submit takes the shop's currency first
+  (`OrderStore.claim_draft`), and its draft view shows that currency and its options. A payment
   that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
   page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
@@ -1190,8 +1193,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
     Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
     CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
-    session, and submit and the order page are to take the account from it (a later PR),
-    never from a body.
+    session, never from a body. Submit takes the account from it (the edge sends the
+    cookie's session on): the order takes the account's customer, makes none (unless the shop archived that
+    customer: then it makes a new one and the account links to it; the account's row is
+    locked first, then the customer's, so two submits at once make one), and is
+    attached to the account (`attach_order`); a cart whose visitor joined another account
+    is 404 `draft_not_found`. The order page is to take it too (a later PR).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
     deletes the session, and the edge also gives the browser a new visitor. When the CRUD

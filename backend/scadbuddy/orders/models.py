@@ -186,6 +186,30 @@ class Address(AddressInput):
     position: int
 
 
+#: One field of an address a storefront visitor types (#5283).
+_StoreLine = Annotated[str, Field(max_length=200)]
+
+
+class SubmitAddress(BaseModel):
+    """The address a storefront visitor gives at submit (#5283, spec §5.5): an address's
+    fields with every length bounded, and no id, label or default flag, which are the
+    shop's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipient: str = Field(min_length=1, max_length=200)
+    lines: list[_StoreLine] = Field(default_factory=list, max_length=6)
+    locality: _StoreLine | None = None
+    region: _StoreLine | None = None
+    postal_code: Annotated[str, Field(max_length=40)] | None = None
+    country: Country | None = None
+    phone: Annotated[str, Field(max_length=40)] | None = None
+
+    def as_input(self) -> AddressInput:
+        """The address as a new customer's default shipping address."""
+        return AddressInput(**self.model_dump(), default_shipping=True)
+
+
 class AddressSnapshot(AddressInput):
     """An address as copied onto an order at accept, or onto a shipment (Ruling 11):
     the row's fields with its id, so a later edit to the customer never moves it."""

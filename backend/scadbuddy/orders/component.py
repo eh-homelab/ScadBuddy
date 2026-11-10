@@ -184,6 +184,7 @@ class OrdersComponent:
             )
             self._lifecycle.mail_host = lambda: self.mail_config().host
             self._lifecycle.on_mail = self.mail.kick
+            self._lifecycle.kek = settings_kek(self.core.settings.secret_key_file)
         return self._lifecycle
 
 

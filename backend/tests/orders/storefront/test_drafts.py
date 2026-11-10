@@ -40,7 +40,12 @@ from scadbuddy.orders.storefront.inputs import listing_reference
 from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingSnapshot
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.storefront import uploads
-from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
+from scadbuddy.storefront.wire import (
+    CLIENT_HEADER,
+    SESSION_HEADER,
+    STOREFRONT_PROBLEMS,
+    VISITOR_HEADER,
+)
 from tests.support.store import s3  # noqa: F401  (fixture)
 
 pytestmark = pytest.mark.requires_postgres
@@ -89,10 +94,12 @@ class CrudCaller:
         issued = ServiceCredentialStore(pool).issue("storefront", "bootstrap", rate_limited=False)
         self.bearer = {"Authorization": f"Bearer {issued.token}"}
 
-    def _headers(self, token: str, key: str | None) -> dict[str, str]:
+    def _headers(self, token: str, key: str | None, session: str | None = None) -> dict[str, str]:
         sent = {**self.bearer, VISITOR_HEADER: token, CLIENT_HEADER: "203.0.113.1"}
         if key is not None:
             sent["Idempotency-Key"] = key
+        if session is not None:
+            sent[SESSION_HEADER] = session
         return sent
 
     def get(self, path: str, *, token: str = TOKEN_A, key: str | None = None) -> Any:
@@ -108,8 +115,9 @@ class CrudCaller:
         key: str | None = None,
         data: dict[str, str] | None = None,
         files: Any = None,
+        session: str | None = None,
     ) -> Any:
-        headers = self._headers(token, key)
+        headers = self._headers(token, key, session)
         if data is not None or files is not None:
             return self.api.post(CRUD + path, data=data, files=files, headers=headers)
         if content is not None:
