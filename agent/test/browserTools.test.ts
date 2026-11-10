@@ -456,7 +456,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     chat.close()
   })
 
-  it("reads a tab as not connected once its replica's status answer is overdue, and still honours the caller's abort (#4950)", async () => {
+  it("reads a tab as not attached, with its own reason, once its replica's status answer is overdue, and still honours the caller's abort (#4950)", async () => {
     const { rows, store } = sharedRows()
     const logged: string[] = []
     // A dead or slow owner: the forward only ends when its signal aborts.
@@ -474,9 +474,13 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     rows.set('s-new', OTHER_TAB)
     const started = Date.now()
     expect((await here.sessionTab('s-new')).connected).toBe(false)
-    expect(await here.status({ principal: browser, sessionId: 's-new' })).toMatchObject({ attached: false })
+    const late = await here.status({ principal: browser, sessionId: 's-new' })
+    expect(late).toMatchObject({ attached: false })
+    // Told apart from a tab no replica holds (#5939): the tab may still be connected.
+    expect(late.attached === false && late.reason).toMatch(/^no answer from the paired ScadBuddy tab in time/)
+    expect(late.attached === false && late.reason).not.toMatch(/not connected/)
     expect(Date.now() - started).toBeLessThan(2_000)
-    expect(logged.join('\n')).toMatch(/gave no status within 50 ms/)
+    expect(logged.join('\n')).toMatch(/gave no status within 50 ms; read as not attached \(slow\)/)
 
     const stop = new AbortController()
     const slow = new TabHub({ sessionTabs: store, relay, statusProbeMs: 60_000, log: () => {} })

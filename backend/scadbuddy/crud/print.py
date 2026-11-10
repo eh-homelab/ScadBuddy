@@ -24,6 +24,17 @@ the worker's SQL until Task 29.
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
+`RemoteUploadStore` is `bambuddy/uploads.py` `BambuddyUploadStore` for the methods the
+print worker calls: its uploads and slices (Q15), its slice starts (Q17), the print
+dialog's background slices (Q16), the projects' printers, the projects without their
+folder yet and the destinations' touches (Q18) over the routes, with the same answers. A
+slice start and a background slice's record are each sent with an ``Idempotency-Key`` of
+their own, which the client sends again on each retry: the route records each once. A
+claim's key is `crud/render.py` `WriteKeys`'s: the same on a retried activity, so a
+claim the last attempt won answers true again. The copy lock (Q19) stays a session lock
+on the pool until the copy lease. The methods only the API's sweeps and routes call are
+refused here (`API_ONLY`), so none reaches SQL from the worker by mistake.
+
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a
 task on the event loop posts each to the API, which logs and NOTIFYs it once by its id.
@@ -36,22 +47,37 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import uuid
 from collections import deque
 from collections.abc import Callable, Collection, Iterable
-from datetime import timedelta
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, NoReturn
 from urllib.parse import quote, urlencode
+
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.print_links import PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    DestinationKind,
+    LibraryCopy,
+    PreviewSlice,
+    ProjectTarget,
+    SlicedCopy,
+)
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.guard import PREFIX
+from scadbuddy.crud.idempotency import KEY_PROBLEM
+from scadbuddy.crud.render import WriteKeys
 from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import PrinterRow
@@ -314,6 +340,246 @@ class RemoteReprints:
         )
 
 
+class ApiOnlyError(RuntimeError):
+    """A `BambuddyUploadStore` method only the API calls, called on the print worker."""
+
+
+#: The `BambuddyUploadStore` methods only the API's sweeps and routes call: the print
+#: worker has no route for them (#5298).
+API_ONLY = (
+    "outputs_for_files",
+    "native_slice_hashes",
+    "relocate",
+    "copies_by_use",
+    "used_since",
+    "slices_on",
+    "recorded_as",
+    "lost_starts",
+    "finish_lost_start",
+    "slice_jobs_after",
+    "prune_slice_starts",
+    "slice_jobs_recorded",
+    "delete_outputs",
+    "previews_to_sweep",
+    "take_preview",
+    "forget_preview",
+    "project_targets",
+    "forget_project_target",
+    "forget_all_project_targets",
+    "destination_touches",
+)
+
+
+class RemoteUploadStore(BambuddyUploadStore):
+    """``pool`` serves only `copy_lock`, a session lock that the copy lease replaces
+    (#5298 Task 27)."""
+
+    def __init__(self, client: CrudClient, pool: ConnectionPool[Connection[DictRow]]) -> None:
+        super().__init__(pool)
+        self._client = client
+        self._claims = WriteKeys()
+
+    async def _get(self, path: str, query: Any) -> Any:
+        url = f"{BASE}{path}?{urlencode(query, doseq=True)}"
+        return (await self._client.request("GET", url)).json()
+
+    async def _send(self, path: str, body: Any = None, method: str = "POST") -> None:
+        await self._client.request(method, f"{BASE}{path}", json=body)
+
+    async def for_output(self, output_id: str, *, native: bool = False) -> list[LibraryCopy]:
+        return (await self.for_outputs([output_id], native=native))[output_id]
+
+    async def for_outputs(
+        self, output_ids: Iterable[str], *, native: bool = False
+    ) -> dict[str, list[LibraryCopy]]:
+        wanted = list(dict.fromkeys(output_ids))
+        if not wanted:
+            return {}
+        body = await self._get("/uploads", {"output_id": wanted, "native": str(native).lower()})
+        return {
+            output_id: [LibraryCopy.model_validate(copy) for copy in copies]
+            for output_id, copies in body.items()
+        }
+
+    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+        await self._send(
+            "/uploads", {"output_id": output_id, "upload": copy.model_dump(mode="json")}
+        )
+
+    async def same_content(
+        self, folder_id: int | None, target_key: str, content_key: str
+    ) -> list[tuple[str, LibraryCopy]]:
+        query: dict[str, Any] = {"target_key": target_key, "content_key": content_key}
+        if folder_id is not None:
+            query["folder_id"] = folder_id
+        body = await self._get("/uploads/same-content", query)
+        return [(row["output_id"], LibraryCopy.model_validate(row["upload"])) for row in body]
+
+    async def shared(self, library_file_ids: Iterable[int], output_id: str) -> set[int]:
+        ids = list(library_file_ids)
+        if not ids:
+            return set()
+        return set(await self._get("/uploads/shared", {"id": ids, "output_id": output_id}))
+
+    async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
+        ids = list(library_file_ids)
+        if not ids:
+            return set()
+        return set(await self._get("/uploads/recorded", {"id": ids}))
+
+    async def recorded_files(self, library_file_ids: Iterable[int]) -> set[int]:
+        ids = list(library_file_ids)
+        if not ids:
+            return set()
+        return set(await self._get("/uploads/recorded-files", {"id": ids}))
+
+    async def touch(self, output_id: str, library_file_id: int) -> None:
+        await self._send(
+            "/uploads/touch", {"output_id": output_id, "library_file_id": library_file_id}
+        )
+
+    async def forget(self, output_id: str, library_file_id: int) -> None:
+        await self._send(
+            "/uploads/forget", {"output_id": output_id, "library_file_id": library_file_id}
+        )
+
+    async def forget_files(self, library_file_ids: Iterable[int]) -> None:
+        ids = list(library_file_ids)
+        if ids:
+            await self._send("/uploads/forget-files", {"ids": ids})
+
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        body = await self._get("/uploads/sent-between", {"output_id": output_id})
+        if body is None:
+            return None
+        first = datetime.fromisoformat(body["first_upload"])
+        return first, datetime.fromisoformat(body["last_slice"])
+
+    async def record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> None:
+        await self._send(
+            "/slices",
+            {
+                "output_id": output_id,
+                "library_file_id": library_file_id,
+                "sliced": sliced.model_dump(mode="json"),
+            },
+        )
+
+    async def slices_of(
+        self, output_id: str, library_file_id: int, preset_key: str
+    ) -> list[SlicedCopy]:
+        body = await self._get(
+            "/slices",
+            {"output_id": output_id, "library_file_id": library_file_id, "preset_key": preset_key},
+        )
+        return [SlicedCopy.model_validate(row) for row in body]
+
+    async def forget_slice(self, output_id: str, sliced_id: int) -> None:
+        await self._send(f"/slices/{sliced_id}/forget?{urlencode({'output_id': output_id})}")
+
+    async def forget_gone_slice(self, sliced_id: int) -> None:
+        await self._send(f"/slices/{sliced_id}/gone")
+
+    async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
+        await self._send(
+            f"/slices/{sliced_id}/hash",
+            {"output_id": output_id, "file_hash": file_hash},
+            method="PUT",
+        )
+
+    async def record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
+        # A plain insert: one key per call, which the client sends again on each retry.
+        await self._client.request(
+            "POST",
+            f"{BASE}/slice-starts",
+            json={"library_file_id": library_file_id, "job_id": job_id},
+            idempotency_key=uuid.uuid4().hex,
+        )
+
+    async def record_preview(self, preview: PreviewSlice) -> None:
+        # A plain insert: one key per call, which the client sends again on each retry.
+        await self._client.request(
+            "POST",
+            f"{BASE}/previews",
+            json=preview.model_dump(mode="json"),
+            idempotency_key=uuid.uuid4().hex,
+        )
+
+    async def preview(self, job_id: int, subject: str) -> PreviewSlice | None:
+        body = await self._get("/previews/find", {"job_id": job_id, "subject": subject})
+        return None if body is None else PreviewSlice.model_validate(body)
+
+    async def previews_for(self, library_file_id: int, preset_key: str) -> list[PreviewSlice]:
+        body = await self._get(
+            "/previews", {"library_file_id": library_file_id, "preset_key": preset_key}
+        )
+        return [PreviewSlice.model_validate(row) for row in body]
+
+    async def preview_sliced(self, row_id: int, sliced_file_id: int, name: str | None) -> None:
+        await self._send(
+            f"/previews/{row_id}/sliced",
+            {"sliced_file_id": sliced_file_id, "name": name},
+            method="PUT",
+        )
+
+    async def retire_preview(self, row_id: int) -> None:
+        await self._send(f"/previews/{row_id}/retire")
+
+    async def claim_preview(self, row_id: int) -> bool:
+        url = f"{BASE}/previews/{row_id}/claim"
+        try:
+            response = await self._client.request("POST", url, idempotency_key=self._claims.next())
+        except CrudRefusedError as error:
+            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                raise
+            # The last attempt of this activity claimed another slice under this
+            # ordinal (`WriteKeys`): this claim is one of its own.
+            response = await self._client.request("POST", url, idempotency_key=uuid.uuid4().hex)
+        return bool(response.json()["claimed"])
+
+    async def project_target(self, project_id: int) -> ProjectTarget | None:
+        response = await self._client.request("GET", f"{BASE}/project-targets/{project_id}")
+        body = response.json()
+        return None if body is None else ProjectTarget.model_validate(body)
+
+    async def remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
+        await self._send(
+            f"/project-targets/{project_id}", target.model_dump(mode="json"), method="PUT"
+        )
+
+    async def folderless(self, name: str, parent_id: int | None) -> list[int]:
+        query: dict[str, Any] = {"name": name}
+        if parent_id is not None:
+            query["parent_id"] = parent_id
+        return [int(project_id) for project_id in await self._get("/folderless", query)]
+
+    async def remember_folderless(self, project_id: int, name: str, parent_id: int | None) -> None:
+        await self._send(
+            f"/folderless/{project_id}", {"name": name, "parent_id": parent_id}, method="PUT"
+        )
+
+    async def forget_folderless(self, project_id: int) -> None:
+        await self._send(f"/folderless/{project_id}", method="DELETE")
+
+    async def touch_destination(self, kind: DestinationKind, target_id: int) -> None:
+        await self._send("/destination-touches", {"kind": kind, "target_id": target_id})
+
+
+def _api_only(name: str) -> Callable[..., NoReturn]:
+    def refused(self: RemoteUploadStore, *args: Any, **kwargs: Any) -> NoReturn:
+        raise ApiOnlyError(f"BambuddyUploadStore.{name} is the API's; the worker has no route")
+
+    refused.__name__ = name
+    return refused
+
+
+for _name in API_ONLY:
+    setattr(RemoteUploadStore, _name, _api_only(_name))
+
+
+#: How long one event's post may take, retries included (`RemoteEvents._drain`).
+EVENT_POST_BUDGET = 5.0
+
 #: An event and the body that posts it, encoded once by `RemoteEvents.publish`.
 Posted = tuple[Event, dict[str, Any]]
 
@@ -402,7 +668,15 @@ class RemoteEvents:
             event, body = item
             try:
                 # The event's own id makes a resend one row (`publish_once`).
-                await self._client.request("POST", f"{BASE}/events", json=body)
+                # A short budget: in an outage the drain drops this one and moves on,
+                # rather than hold every queued event behind it.
+                await self._client.request(
+                    "POST",
+                    f"{BASE}/events",
+                    json=body,
+                    timeout=EVENT_POST_BUDGET,
+                    budget=EVENT_POST_BUDGET,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
