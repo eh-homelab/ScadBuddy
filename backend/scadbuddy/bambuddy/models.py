@@ -1180,6 +1180,12 @@ class QueueItem(BambuddyModel):
     filament_used_grams: float | None = None
     filament_type: str | None = None
     filament_color: str | None = None
+    #: The build plate to mount (Bambuddy's ``bed_type``, #1281 there).
+    bed_type: str | None = None
+    #: One global AMS tray id per filament slot of the plate, ``-1`` for a slot no tray
+    #: feeds or an external spool (``printers/ams_mapping.py``); ``None`` when Bambuddy
+    #: picks the trays at dispatch.
+    ams_mapping: list[int] | None = None
     batch_name: str | None = None
     created_at: datetime | None = None
 

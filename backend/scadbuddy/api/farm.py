@@ -53,10 +53,11 @@ class FarmQueueItem(QueueItem):
 
     #: The output or library file ScadBuddy queued this item for, found only by a record
     #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
-    #: the item. Set only on a pending or printing item (`MARKED_STATUSES`).
-    #: ``None`` for a finished item, for an item queued from Bambuddy (its reprint of an
-    #: archive ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never
-    #: taken from Bambuddy's answer.
+    #: the item. In the list, set only on a pending or printing item (`MARKED_STATUSES`);
+    #: the one item's read (`get_queue_item`, #3744) looks it up in any state.
+    #: ``None`` for a finished item in the list, for an item queued from Bambuddy (its
+    #: reprint of an archive ScadBuddy linked too), or when ScadBuddy's records cannot be
+    #: read. Never taken from Bambuddy's answer.
     scadbuddy: ScadBuddyJob | None = None
 
 
@@ -80,6 +81,25 @@ async def get_queue(
         FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
         for item in items
     ]
+
+
+@router.get(
+    "/queue/{item_id}",
+    response_model=FarmQueueItem,
+    summary="One item of Bambuddy's print queue",
+    responses={404: {"description": "Bambuddy has no such queue item (any more)"}},
+)
+async def get_queue_item(
+    item_id: int, store: SettingsStoreDep, links: PrintLinksDep
+) -> FarmQueueItem:
+    """One queue item, whoever queued it, in any state (#3744): Bambuddy's own
+    ``GET /queue/{id}``, one call. A job ScadBuddy queued carries ``scadbuddy`` even
+    once it has finished, so its page can go on to the print. A 404 is an item Bambuddy
+    no longer has: deleted, or gone with its archive."""
+    async with client_for(store.load()) as client:
+        item = await client.queue_item(item_id)
+    matches = await _jobs(links, [item])
+    return FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
 
 
 async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
