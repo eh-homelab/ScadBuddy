@@ -332,7 +332,9 @@ describe('memory hooks against a fake Hindsight', () => {
   // #5866: prod's bank answered a recall in 4.2–8.8 s (p50 4.9 s), so the old 3 s
   // budget gave up on nearly every turn. A recall just past that old budget must still
   // inject its memories under the default one (3.2 s keeps the test's real wait short).
+  // The budget must also cover the slowest prod recall measured, 8.8 s.
   it('waits past the old 3 s budget by default for a slow recall (#5866)', { timeout: 15_000 }, async () => {
+    expect(RECALL_TIMEOUT_MS).toBeGreaterThanOrEqual(8_800)
     fake.respond = () => ({ delayMs: 3_200, json: { results: [{ text: 'The user prints in PETG.', type: 'world' }] } })
     const h = hooks()
     expect(h.hooks.UserPromptSubmit?.[0]?.timeout).toBeGreaterThan(RECALL_TIMEOUT_MS / 1000)
