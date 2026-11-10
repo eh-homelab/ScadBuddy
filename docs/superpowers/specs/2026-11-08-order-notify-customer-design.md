@@ -80,7 +80,7 @@ messaging plugin keeps the compose-only tool as it is.
     it. It does not depend on `orders.source` or `orders.storefront_visitor_id`.
   - The seam is `storefront_mail_covers(conn, order_id, event, *, host) -> bool`
     (`orders/storefront/mail.py`): true when the order has a live order link and a mail
-    host is set. Its events are
+    host and a sender are set. Its events are
     `order_link`, `revision_ready`, `price_ready`, `payment_requested`, `shipped`. It lands
     in scadify's branch `feat/storefront-follow` (PR 1 of #5283).
 
@@ -431,7 +431,7 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 1. **Mail not set up.** An order on a shop with no storefront mail gets none. Skipping
    there tells the customer nothing. So the rule asks whether storefront mail *will send*
-   this notice: the seam is true only when a mail host is set.
+   this notice: the seam is true only when a mail host and a sender are set.
 2. **Who gets storefront mail.** Not "a storefront visitor": every order with a live
    order link, `back_office` orders included. A revoked link stops it. A rule keyed on the
    visitor would send twice to a `back_office` order with a link, and skip wrongly for a
@@ -448,7 +448,7 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 scadify's seam (#5283, `orders/storefront/mail.py`, on main since #5923) is
 `storefront_mail_covers(conn, order_id, event, *, host) -> bool`: true when the order has
-a live order link and a mail host is set. It does not read `source` or the visitor. This
+a live order link and a mail host and a sender are set. It does not read `source` or the visitor. This
 design only consumes it (PR 5), in the CRUD service, passing the settings snapshot's
 mail host:
 
