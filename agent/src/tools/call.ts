@@ -25,13 +25,20 @@ function describe(error: unknown): string {
   return JSON.stringify(error)
 }
 
+/** The slug a problem's `type` ends in (`…/problems/orders/already_notified`), if any. */
+function problemSlug(error: unknown): string | undefined {
+  const type = typeof error === 'object' && error !== null ? (error as { type?: unknown }).type : undefined
+  const slug = typeof type === 'string' ? /([a-z_]+)$/.exec(type)?.[1] : undefined
+  return slug
+}
+
 /** The response body, or a ToolError naming `what` failed, the status and the backend's reason. */
 export async function ok<T>(pending: Promise<FetchResult<T>>, what: string): Promise<T> {
   const { data, error, response } = await pending
   if (!response.ok) {
     const reason = describe(error)
     // The reason is the backend's (or, relayed, Bambuddy's) text: untrusted (#258).
-    throw new ToolError(`${what} failed (HTTP ${response.status})`, response.status, reason || undefined)
+    throw new ToolError(`${what} failed (HTTP ${response.status})`, response.status, reason || undefined, problemSlug(error))
   }
   // 204 responses have no body; openapi-fetch gives `{}` or undefined.
   return data as T

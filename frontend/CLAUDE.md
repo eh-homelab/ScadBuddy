@@ -73,8 +73,11 @@ same way, `vite.config.ts`).
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
-  ("Mark sent", "Send again" through a preview), over the agent routes in `api/orderMessages.ts`;
-  mocks `src/mocks/features/orders/messages.ts`.
+  ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the
+  backend (`api/client.ts` `orderMessages`, `markOrderMessageSent`); the binding's check and
+  test send, and the preview and send, go through the agent's routes (`api/orderMessages.ts`).
+  An open preview keeps one `Idempotency-Key` for all its sends, so a retry after a lost
+  answer is served from the first claim. Mocks `src/mocks/features/orders/messages.ts`.
 
 ## See also
 

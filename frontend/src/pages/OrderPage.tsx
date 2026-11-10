@@ -547,7 +547,7 @@ export function OrderPage() {
           )
         )}
 
-        <OrderMessages orderId={order.id} />
+        <OrderMessages key={order.id} orderId={order.id} />
 
         <OrderFlowRuns orderId={order.id} />
 

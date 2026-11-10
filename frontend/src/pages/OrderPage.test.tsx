@@ -7,6 +7,7 @@ import { server } from '../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
+import { mockOrderMessage } from '../mocks/features/orders/messages'
 import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
@@ -116,6 +117,44 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
     expect(within(drawer).queryByTestId('print-item')).toBeNull()
     expect(within(drawer).queryByTestId('test-print-item')).toBeNull()
+  })
+
+  // #5660: the customer messages belong to the order shown. Moving to another order closes the
+  // first one's preview (OrderMessages.test.tsx covers a preview that answers after the move).
+  describe('customer messages across orders', () => {
+    function renderWithLink() {
+      return renderPage(
+        <Routes>
+          <Route
+            path="/orders/:id"
+            element={
+              <>
+                <OrderPage />
+                <Link to={`/orders/${ORDER_DRAFT}`}>Other order</Link>
+              </>
+            }
+          />
+        </Routes>,
+        { route: `/orders/${ORDER_ACCEPTED}` },
+      )
+    }
+
+    beforeEach(() => {
+      mockOrderMessage(ORDER_ACCEPTED, { status: 'failed', reason: 'transport' })
+      mockOrderMessage(ORDER_DRAFT, { status: 'failed', reason: 'transport' })
+    })
+
+    it('closes the open preview when the page moves to another order', async () => {
+      const { user } = renderWithLink()
+      await screen.findByRole('heading', { name: 'ORD-2026-2' })
+      const list = await screen.findByRole('list', { name: 'Customer messages' })
+      await user.click(within(list).getByRole('button', { name: 'Send again' }))
+      expect(await screen.findByRole('region', { name: 'Message to send' })).toHaveTextContent(ORDER_ACCEPTED)
+      await user.click(screen.getByRole('link', { name: 'Other order' }))
+      await screen.findByRole('heading', { name: 'ORD-2026-3' })
+      await screen.findByRole('list', { name: 'Customer messages' })
+      expect(screen.queryByRole('region', { name: 'Message to send' })).not.toBeInTheDocument()
+    })
   })
 
   // #4673, #5832: a slice request is used once (`onSliceOpened`). Reopening the drawer, from
