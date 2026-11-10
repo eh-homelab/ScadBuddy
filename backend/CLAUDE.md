@@ -1050,13 +1050,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     base32 less `0` and `1`), shown `XXXX-XXXX-XXXX-XXXX`; `verify_code` reads it with
     case, spaces and hyphens ignored. It does the same for every address, whether or not
     an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
-    when used or after an hour (`CODE_TTL`, the cap's window); wrong guesses never spend
-    it, and a correct live code signs in from any client. No address can be locked: requests are limited per address
-    and client (3 an hour) and per client (10), wrong guesses per client (20), never per
-    address, and a client is `core/proxies.py` `client_key` (IPv4 address, IPv6 /64).
-    The mail cap is 20 codes an hour per address: past it `request_code` returns None,
-    raises nothing, and the caller answers as usual and sends no mail. The bound is the
-    code (about 10^-17 an hour per address; the arithmetic is in the docstring).
+    when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
+    live code signs in from any client. No address can be locked: requests are limited
+    per address and client (3 an hour) and per client (10), wrong guesses per client (20),
+    never per address, and a client is `core/proxies.py` `client_key` (IPv4 address,
+    IPv6 /64). The mail cap is 20 live codes per address: past it `request_code` returns
+    None, raises nothing, and the caller answers as usual and sends no mail. A full cap
+    means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
+    it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
+    the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
     `request_code` and `verify_code` each hold transaction locks on the client, then the
     address, so call them in a transaction. The code route, a later PR, is to take
     Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a site key is set.

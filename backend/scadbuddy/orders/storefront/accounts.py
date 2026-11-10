@@ -33,22 +33,23 @@ No address can be locked: nothing one client does stops another from signing in.
   on a laptop, and every code in the inbox works, whoever asked for it.
 - Requests are limited per address and client (`CODES_PER_ADDRESS_CLIENT`, 3 an hour)
   and per client (`CODES_PER_CLIENT`, 10 an hour); each refusal is `SignInLimitedError`.
-- Mail to one address is capped (`CODES_PER_ADDRESS`, 20 an hour, counting every code
-  made for it in the window from all clients). Past the cap `request_code` answers as
-  usual, raising nothing, but makes no code and returns None, so no mail is sent. That is
-  not a lockout: a code lives exactly as long as the cap's window (`CODE_TTL` is
-  `LIMIT_WINDOW`), so whenever the cap is full, every code it counts is still live in the
-  owner's inbox, whatever anyone guesses, and each signs in from any client.
+- Mail to one address is capped (`CODES_PER_ADDRESS`, 20): the cap counts the address's
+  live codes (unused and unexpired), from all clients. Past the cap `request_code` answers
+  as usual, raising nothing, but makes no code and returns None, so no mail is sent. That
+  is not a lockout: whenever the cap is full, 20 live codes are in the owner's inbox,
+  whatever anyone guesses, and each signs in from any client. A sign-in marks every unused
+  code used, which frees the cap at once. Mail flooding stays bounded: a code lives an
+  hour (`CODE_TTL`), and only someone who read the mail can use one to free the cap, so
+  others can send at most 20 an hour.
 - There is no address-wide guess budget: it would be a lock.
 
 The guess bound. Wrong guesses are limited per client: `FAILURES_PER_CLIENT` (20) an hour
 here, by the client key above, and on the edge the bot check's failure limits (#5857: per
 IPv4 address or IPv6 /64, and per /24 or /48). A guess is compared with every live code
-of the address, and the cap bounds those too: at most 20 made in an hour, each living an
-hour, so at most 20 live. Each guess has a chance of at most 20 in 30^16 (4.3 * 10^23),
-about 4.6 * 10^-23. At G = 2 * 10^5 guesses an hour (10^4 clients each at its limit,
-solving the bot check every time), that is about 10^-17 an hour, or 8 * 10^-14 a year,
-per address.
+of the address, and the cap bounds those too: at most 20 are live. Each guess has a
+chance of at most 20 in 30^16 (4.3 * 10^23), about 4.6 * 10^-23. At G = 2 * 10^5 guesses
+an hour (10^4 clients each at its limit, solving the bot check every time), that is about
+10^-17 an hour, or 8 * 10^-14 a year, per address.
 
 The bot check: whenever a site key is set, the route that asks for a code takes
 Turnstile with action ``sign_up``, and the route that verifies one with ``sign_in`` (the
@@ -60,9 +61,10 @@ never pass a cap and a code signs in at most once. Each caller must run them ins
 transaction.
 
 Enumeration: `request_code` does the same thing for every valid address, whether or not
-an account exists. It always makes and returns a code, so the route can always queue the
-mail and answer the same way. Sign-up and sign-in are one flow: the account is made at
-the first verify.
+an account exists. Under the cap it makes and returns a code, and the route queues the
+mail; past the cap it returns None, and the route sends nothing but answers the same way.
+The cap counts codes, not accounts, so neither case says whether an account exists.
+Sign-up and sign-in are one flow: the account is made at the first verify.
 
 Sessions: the token is `secrets.token_urlsafe(32)` (256 bits). Only its sha256 is
 kept. It lives `SESSION_TTL` (30 days). A sign-in makes a new token and deletes the
@@ -101,12 +103,13 @@ CODE_LENGTH: Final = 16
 CODE_GROUP: Final = 4
 CODES_PER_ADDRESS_CLIENT: Final = 3
 CODES_PER_CLIENT: Final = 10
-#: Codes made for one address in `LIMIT_WINDOW` from all clients: the mail cap.
+#: Live codes one address may have, from all clients: the mail cap, and the most a
+#: verify compares.
 CODES_PER_ADDRESS: Final = 20
 FAILURES_PER_CLIENT: Final = 20
 LIMIT_WINDOW: Final = timedelta(hours=1)
-#: A code lives as long as the mail cap's window, so a full cap's codes are all live.
-CODE_TTL: Final = LIMIT_WINDOW
+#: How long a code lives; with the cap, others can mail an address at most 20 an hour.
+CODE_TTL: Final = timedelta(hours=1)
 #: How long a code or failure row is kept: past the limits' window.
 KEEP_ROWS: Final = timedelta(days=1)
 SESSION_TTL: Final = timedelta(days=30)
@@ -115,9 +118,11 @@ MAX_EMAIL: Final = 254
 _CODE: Final = re.compile(f"[{CODE_ALPHABET}]{{{CODE_LENGTH}}}")
 #: What a person may type around a code: spaces and hyphens, in any case.
 _CODE_SPACING: Final = re.compile(r"[\s-]")
+#: What a missing live code is compared with: no code's digest.
+_DUMMY: Final = "0" * 64
 _TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 #: One plain address: no spaces, commas, brackets or control characters, one ``@`` and a
-#: dotted domain. The code route's mail step checks it again.
+#: dotted domain. The code route's mail step (a later PR) will check it again.
 _EMAIL: Final = re.compile(r"[^\s@,;<>()\[\]\\\"]+@[^\s@,;<>()\[\]\\\"]+\.[^\s@,;<>()\[\]\\\".]+")
 
 
@@ -225,8 +230,8 @@ def request_code(conn: Conn, email: str, client: str) -> str | None:
     )
     capped = conn.execute(
         "SELECT count(*) >= %s AS full FROM storefront_sign_in_codes"
-        " WHERE email = %s AND created_at > now() - %s",
-        (CODES_PER_ADDRESS, address, LIMIT_WINDOW),
+        " WHERE email = %s AND used_at IS NULL AND expires_at > now()",
+        (CODES_PER_ADDRESS, address),
     ).fetchone()
     if capped is not None and capped["full"]:
         return None
@@ -283,16 +288,18 @@ def verify_code(
     rows = conn.execute(
         "SELECT id, code_sha256 FROM storefront_sign_in_codes"
         " WHERE email = %s AND used_at IS NULL AND expires_at > now()"
-        " ORDER BY created_at DESC, id FOR UPDATE",
-        (address,),
+        " ORDER BY created_at DESC, id LIMIT %s FOR UPDATE",
+        (address, CODES_PER_ADDRESS),
     ).fetchall()
     given = normalized_code(code)
     shaped = _CODE.fullmatch(given) is not None
     matched = False
-    for row in rows:
-        # Every live code is compared, with no early exit.
-        same = hmac.compare_digest(_code_digest(row["id"], given), row["code_sha256"])
-        matched = matched or (shaped and same)
+    # Always `CODES_PER_ADDRESS` digests and compares, live codes padded with a dummy, with
+    # no early exit: the time taken does not show how many live codes the address has.
+    for n in range(CODES_PER_ADDRESS):
+        row_id, stored = (rows[n]["id"], rows[n]["code_sha256"]) if n < len(rows) else ("", _DUMMY)
+        same = hmac.compare_digest(_code_digest(row_id, given), stored)
+        matched = matched or (shaped and same and n < len(rows))
     if not matched:
         _failed(conn, client, address)
         return None

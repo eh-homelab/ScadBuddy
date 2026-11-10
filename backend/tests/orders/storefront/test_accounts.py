@@ -5,6 +5,7 @@ sees. No address can be locked: nothing one client does stops another from signi
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
 import re
 import threading
@@ -201,14 +202,7 @@ def test_others_requests_and_guesses_never_lock_the_owner_out(conn: Conn) -> Non
 
 
 def test_a_full_caps_codes_are_live_until_the_cap_frees(conn: Conn) -> None:
-    count = math.ceil(CODES_PER_ADDRESS / CODES_PER_ADDRESS_CLIENT)
-    inbox = [
-        code
-        for n in range(count)
-        for _ in range(CODES_PER_ADDRESS_CLIENT)
-        if (code := request_code(conn, EMAIL, f"198.51.100.{n}")) is not None
-    ]
-    assert len(inbox) == CODES_PER_ADDRESS
+    inbox = fill_cap(conn)
     # 59 minutes on: the cap is still full, so the owner gets no new code ...
     conn.execute(
         "UPDATE storefront_sign_in_codes SET created_at = created_at - interval '59 minutes',"
@@ -217,6 +211,50 @@ def test_a_full_caps_codes_are_live_until_the_cap_frees(conn: Conn) -> None:
     assert request_code(conn, EMAIL, CLIENT) is None
     # ... but every code the cap counts is still live, so an inbox code signs in.
     assert verify(conn, inbox[0], client=CLIENT) is not None
+
+
+def fill_cap(conn: Conn) -> list[str]:
+    """Every code the cap allows for `EMAIL`, from as few clients as their limit lets."""
+    count = math.ceil(CODES_PER_ADDRESS / CODES_PER_ADDRESS_CLIENT)
+    inbox = [
+        code
+        for n in range(count)
+        for _ in range(CODES_PER_ADDRESS_CLIENT)
+        if (code := request_code(conn, EMAIL, f"198.51.100.{n}")) is not None
+    ]
+    assert len(inbox) == CODES_PER_ADDRESS
+    return inbox
+
+
+def test_a_sign_in_frees_the_cap(conn: Conn) -> None:
+    inbox = fill_cap(conn)
+    assert request_code(conn, EMAIL, CLIENT) is None
+    assert verify(conn, inbox[3]) is not None
+    fresh = request_code(conn, EMAIL, LAPTOP)
+    assert fresh is not None
+    assert verify(conn, fresh, client=LAPTOP) is not None
+
+
+@pytest.mark.parametrize("live", [0, 1, CODES_PER_ADDRESS])
+def test_a_verify_compares_as_many_digests_whatever_codes_are_live(
+    conn: Conn, monkeypatch: pytest.MonkeyPatch, live: int
+) -> None:
+    codes = fill_cap(conn) if live == CODES_PER_ADDRESS else [code_for(conn)] * live
+    calls: list[int] = []
+    real = hmac.compare_digest
+
+    def counted(a: str, b: str) -> bool:
+        calls.append(1)
+        return bool(real(a, b))
+
+    # `accounts` calls `hmac.compare_digest` through the module, so patch it there.
+    monkeypatch.setattr(hmac, "compare_digest", counted)
+    assert verify(conn, wrong(codes[0]) if codes else "ABCD-EFGH-JKMN-PQRS") is None
+    assert len(calls) == CODES_PER_ADDRESS
+    if codes:
+        calls.clear()
+        assert verify(conn, codes[-1], client=LAPTOP) is not None
+        assert len(calls) == CODES_PER_ADDRESS
 
 
 def test_the_mail_cap_makes_no_code_and_raises_nothing(conn: Conn) -> None:
