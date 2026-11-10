@@ -333,21 +333,21 @@ describe('memory hooks against a fake Hindsight', () => {
   // #5866: prod's bank answered a recall in 4.2–8.8 s (p50 4.9 s), so the old 3 s
   // budget gave up on nearly every turn. The default budget must cover the slowest prod
   // recall measured, 8.8 s, and the hook's own timeout must outlast it. The wait itself is
-  // checked on a scaled budget (100 ms), so the test does not sleep for seconds: a recall
-  // inside the budget injects its memories, one past it injects nothing.
+  // checked on a scaled budget (500 ms), so the test does not sleep for seconds: a recall
+  // well inside the budget injects its memories, one past it injects nothing.
   it('waits for a slow recall inside its budget, and the default budget covers prod (#5866)', async () => {
     expect(RECALL_TIMEOUT_MS).toBeGreaterThanOrEqual(8_800)
     expect(hooks().hooks.UserPromptSubmit?.[0]?.timeout).toBeGreaterThan(RECALL_TIMEOUT_MS / 1000)
     const memory = { results: [{ text: 'The user prints in PETG.', type: 'world' }] }
-    fake.respond = () => ({ delayMs: 50, json: memory })
-    const inside = await call(hooks({ recallTimeoutMs: 100 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    fake.respond = () => ({ delayMs: 20, json: memory })
+    const inside = await call(hooks({ recallTimeoutMs: 500 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
     expect(logs).toEqual([])
     expect(JSON.stringify(inside)).toContain('The user prints in PETG.')
-    fake.respond = () => ({ delayMs: 150, json: memory })
-    const past = await call(hooks({ recallTimeoutMs: 100 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    fake.respond = () => ({ delayMs: 1_000, json: memory })
+    const past = await call(hooks({ recallTimeoutMs: 500 }).hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
     expect(past).toEqual({})
     expect(logs).toHaveLength(1)
-    expect(logs[0]).toMatch(/timed out after 100 ms/)
+    expect(logs[0]).toMatch(/timed out after 500 ms/)
   })
 
   it('injects nothing and logs when recall fails, with the plugin secret redacted', async () => {
