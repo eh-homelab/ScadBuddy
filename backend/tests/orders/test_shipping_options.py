@@ -12,6 +12,7 @@ import pytest
 from scadbuddy.orders.lifecycle import LifecycleError, OrderEdit
 from scadbuddy.orders.models import ChargeInput, Order
 from scadbuddy.orders.money import OrderRules, ShippingOption
+from scadbuddy.orders.problems import refused as problem_of
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
@@ -83,6 +84,23 @@ def test_an_option_that_ships_needs_an_address(shop: RulesShop) -> None:
     assert refused.value.slug == "shipping_address_required"
     assert not refused.value.unprocessable
     assert charges(shop, order) == []
+
+
+def test_an_order_in_another_currency_than_the_shops_takes_no_option(shop: RulesShop) -> None:
+    """The options' amounts are in the shop's currency and none is converted: 500 yen
+    must never become 5.00 dollars. None still removes the shipping charges."""
+    order = shop.lifecycle.create_order(shop.customer.id, BY, currency="JPY", notes="", due_at=None)
+    assert order.currency != shop.now.shop_currency
+    for option_id in ("post", "pickup"):
+        with pytest.raises(LifecycleError) as refused:
+            shop.lifecycle.set_shipping_option(order.id, BY, option_id)
+        assert refused.value.slug == "shipping_currency_mismatch"
+        assert not refused.value.unprocessable and not refused.value.not_found
+    assert charges(shop, order) == []
+    shop.lifecycle.set_shipping_option(order.id, BY, None)
+    # The route answers it as a 409 problem.
+    error = problem_of(refused.value)
+    assert (error.status, error.type.rsplit("/", 1)[-1]) == (409, "shipping_currency_mismatch")
 
 
 def test_an_unknown_option_is_422(shop: RulesShop) -> None:

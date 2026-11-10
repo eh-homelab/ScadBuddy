@@ -820,7 +820,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
-  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  the address while such an option stays (`_no_option_ships`, the same slug). An order
+  not in the shop's currency (`orders_currency`) takes no option, in the back office and
+  in a storefront submit alike: 409 `shipping_currency_mismatch` (`_shipping_in_currency`;
+  null still removes), and its draft view lists none. A payment
   that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
   page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
@@ -1172,7 +1175,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
     session, never from a body. Submit takes the account from it (the edge sends the
     cookie's session on): the order takes the account's customer, makes none (unless the shop archived that
-    customer: then it makes a new one and the account links to it), and is
+    customer: then it makes a new one and the account links to it; the account's row is
+    locked first, then the customer's, so two submits at once make one), and is
     attached to the account (`attach_order`); a cart whose visitor joined another account
     is 404 `draft_not_found`. The order page is to take it too (a later PR).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)

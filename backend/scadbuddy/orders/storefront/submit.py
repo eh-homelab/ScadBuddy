@@ -73,6 +73,10 @@ def _refusal(error: LifecycleError) -> ApiError:
         "order_submitted": "This order is sent already.",
         "draft_empty": "Your order is empty. Add something to it first.",
         "shipping_address_required": "This way of shipping needs your address.",
+        "shipping_currency_mismatch": (
+            "The shop's prices changed currency after you started this order, so it cannot"
+            " be shipped as it is. Start a new order."
+        ),
     }
     if error.slug in texts:
         return problem(status.HTTP_409_CONFLICT, error.slug, texts[error.slug])
@@ -87,7 +91,8 @@ async def submit_draft(
     """The visitor's cart ``body.draft_id`` submitted (`Lifecycle.submit_order`). A retry
     of a committed submit (the same key) answers its reply and does nothing else.
     Refusals: 404 ``draft_not_found``, 409 ``order_submitted``, 409 ``draft_empty``, 409
-    ``shipping_address_required``, 422 ``shipping_option_id``, 422 ``email_invalid``,
+    ``shipping_address_required``, 409 ``shipping_currency_mismatch`` (the cart is not in the
+    shop's currency now), 422 ``shipping_option_id``, 422 ``email_invalid``,
     503 ``submit_unavailable`` (no KEK to seal the link with)."""
     orders: OrdersComponent = state.components.get(ORDERS)
     asked = {
