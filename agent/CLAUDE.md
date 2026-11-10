@@ -146,8 +146,8 @@ opens every one and seals it again byte for byte).
   ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
   and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
   `test/toolCallLatency.temporal.test.ts`
-  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
-  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
+  times each phase around the activity when asked (`TOOL_CALL_BENCH_REPORT=1` prints them,
+  `TOOL_CALL_BENCH_ASSERT=1` fails a median overhead over 1 s) and always checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
   below); a turn whose transcript last ran in another directory (a fork's first) is told so in
   its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
@@ -296,7 +296,8 @@ opens every one and seals it again byte for byte).
     `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
     `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
     the row that names a blob and releases after the row is gone, and `reconcile`, on the
-    sweeper's tick hourly, releases what cascades, `forgetSubject` and crashes left and holds
+    sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
+    on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay

@@ -51,7 +51,7 @@ export function previewOrderMessage(orderId: string, template: NotifyTemplate, r
   return aiRequest<MessagePreview>(`/orders/${encodeURIComponent(orderId)}/messages/preview`, post({ template, resend_of: resendOf }))
 }
 
-/** `key` is one per click, so a retry of the click is answered from its claim, never sent twice. */
+/** `key` is one per open preview, so a retry after a lost answer is answered from its claim, never sent twice. */
 export function sendOrderMessage(orderId: string, template: NotifyTemplate, resendOf: string, digest: string, key: string): Promise<MessageSent> {
   return aiRequest<MessageSent>(
     `/orders/${encodeURIComponent(orderId)}/messages/send`,
