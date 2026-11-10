@@ -108,7 +108,9 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
     {
       name: 'Monitor',
       label: 'Watch a source',
-      description: "Streams a WebSocket's frames, or a shell command's output lines, to the session as events.",
+      description:
+        "Streams a WebSocket's frames, or a shell command's output lines, to the session as events. A WebSocket asks first, as WebFetch does; " +
+        'a command runs only while Bash is on, at its tier.',
       risk: 'write',
       note: MONITOR_NOTE,
       served: true,

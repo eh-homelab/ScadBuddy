@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, BUILTIN_SOURCES, SOURCE_ITEM } from '../src/access/model.js'
-import { MONITOR_SHELL_OFF } from '../src/access/live.js'
+import { MONITOR_SHELL_NEXT_TURN, MONITOR_SHELL_OFF } from '../src/access/live.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
 import { turnRunnerForTest } from './support/turnRunner.js'
@@ -126,6 +126,6 @@ describe("the session's own built-ins in every turn", () => {
     turn.release()
     // Its server has no command queue: an approval would only run a call certain to fail.
     await rig.access.setItem(CC, 'Bash', 'write', { actor: { kind: 'browser', id: 'b' } } as never)
-    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toEqual({ off: MONITOR_SHELL_OFF })
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toEqual({ off: MONITOR_SHELL_NEXT_TURN })
   })
 })

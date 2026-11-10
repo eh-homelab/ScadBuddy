@@ -43,6 +43,10 @@ export type LiveTurn = {
 export const MONITOR_SHELL_OFF =
   "Monitor's command runs a shell where Bash runs, and Bash is off in Settings → Tools & plugins (no sandbox, #779). Watch a WebSocket (`ws`) instead."
 
+/** Why a Monitor `command` call is refused when Bash is on now but was off when the turn started (its server has no command queue). */
+export const MONITOR_SHELL_NEXT_TURN =
+  'Bash was off when this turn started, so this turn cannot run a Monitor command; one works from the next turn. Watch a WebSocket (`ws`) now instead.'
+
 /**
  * The seam's per-call read (harness/permissions.ts `LiveSeam`): a registry tool's access
  * (`off` too when `builtin:browser` is switched off, for a browser tool), a remote
@@ -87,10 +91,10 @@ export function liveAccess(
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
       if (own.name !== 'Monitor' || access === 'off') return access
       const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
-      // Bash off now, or off when the turn was assembled (its server has no command queue): refused, never asked.
-      if (command && !turn.shell) return { off: MONITOR_SHELL_OFF }
       const shell = command ? await resolver.native('Bash', bashDeclared, builtins.get('Bash') ?? []) : undefined
       if (shell === 'off') return { off: MONITOR_SHELL_OFF }
+      // Bash on now but off when the turn was assembled: its server has no command queue, so refused, never asked.
+      if (command && !turn.shell) return { off: MONITOR_SHELL_NEXT_TURN }
       return monitorAccess(access, input, shell)
     }
     const packages = builtins.get(builtin)
