@@ -14,8 +14,22 @@ import { backendNotUp } from '../api/backendUp.js'
 // a backend without SCADBUDDY_API_INTERNAL_URL or the KEK (the routes answer 503), one
 // older than the routes (404), or one that cannot be reached. Nothing is then kept in
 // plaintext.
+//
+// A blob is kept while a row names it: its holder `(ai_session_file, <workspace>/<path>)`
+// in the backend's `blob_refs`, written and dropped through the agent's CRUD routes
+// (backend api/crud_agent.py, #5299) with the service credential main.ts adds to `fetch`.
+// store.ts holds before it writes the row and releases once the row is gone.
 
 export const WORKSPACE_BLOBS = '/api/v1/internal/workspace-blobs'
+/** The agent's CRUD routes for the holds (backend api/crud_agent.py). */
+export const WORKSPACE_BLOB_REFS = '/api/v1/internal/crud/agent/workspace-blob-refs'
+/** How long a hold, release or page of holds may take. */
+export const HOLD_TIMEOUT_MS = 10_000
+/** How many holds a page lists. */
+export const HOLDS_PAGE = 500
+
+/** One workspace file's hold on its blob. */
+export type WorkspaceHold = { key: string; holderId: string }
 
 /** How long the backend's `store_backend` is kept: it changes only when the backend restarts. */
 export const BACKEND_CACHE_MS = 60_000
@@ -29,6 +43,16 @@ export interface WorkspaceBlobStore {
   put(sealed: Buffer): Promise<string>
   /** The stored bytes of `key`, as they arrive. */
   get(key: string): AsyncIterable<Uint8Array>
+  /** Holds `key` for `holderId` (`<workspace>/<path>`), again refreshing it; WorkspaceBlobError when refused. */
+  hold(key: string, holderId: string): Promise<void>
+  /**
+   * Drops `holderId`'s hold of `key`; one already gone is a success. With `olderThanSeconds`, only a
+   * hold taken longer ago than that, so a hold taken again since is kept. Whether one was dropped;
+   * WorkspaceBlobError when refused.
+   */
+  release(key: string, holderId: string, options?: { olderThanSeconds?: number }): Promise<boolean>
+  /** Every workspace file's hold taken longer ago than `olderThanSeconds`; WorkspaceBlobError when refused. */
+  listHolds(olderThanSeconds: number): Promise<WorkspaceHold[]>
 }
 
 type TransferUrl = { url: string; headers?: Record<string, string> }
@@ -71,6 +95,19 @@ export class BackendWorkspaceBlobs implements WorkspaceBlobStore {
       const why = url.startsWith(`${this.#base}/`) && backendNotUp(error) ? 'the backend is not up yet' : 'the backend could not be reached'
       throw new WorkspaceBlobError(`${why} (${step})`, { unreachable: true })
     }
+  }
+
+  /** A hold or release's answer, or WorkspaceBlobError naming the step. */
+  async #refs(step: string, path: string, body: Record<string, unknown>): Promise<Response> {
+    const response = await this.#call(step, `${this.#base}${WORKSPACE_BLOB_REFS}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(HOLD_TIMEOUT_MS),
+    })
+    if (response.ok) return response
+    const detail = await detailOf(response)
+    throw new WorkspaceBlobError(`the backend refused the workspace blob ${step} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`)
   }
 
   async #json<T>(step: string, response: Response): Promise<T> {
@@ -116,6 +153,37 @@ export class BackendWorkspaceBlobs implements WorkspaceBlobStore {
       body: JSON.stringify({ sha256: createHash('sha256').update(sealed).digest('hex'), size: sealed.length }),
     })
     return (await this.#json<{ key: string }>('finish', finished)).key
+  }
+
+  async hold(key: string, holderId: string): Promise<void> {
+    await (await this.#refs('hold', '', { key, holder_id: holderId })).body?.cancel()
+  }
+
+  async release(key: string, holderId: string, options: { olderThanSeconds?: number } = {}): Promise<boolean> {
+    const response = await this.#refs('release', '/release', {
+      key,
+      holder_id: holderId,
+      ...(options.olderThanSeconds === undefined ? {} : { older_than_seconds: options.olderThanSeconds }),
+    })
+    return ((await response.json()) as { released: boolean }).released
+  }
+
+  async listHolds(olderThanSeconds: number): Promise<WorkspaceHold[]> {
+    const holds: WorkspaceHold[] = []
+    let after: { key: string; holder_id: string } | null = null
+    do {
+      const query = new URLSearchParams({ older_than_seconds: String(olderThanSeconds), limit: String(HOLDS_PAGE) })
+      if (after) {
+        query.set('after_holder_id', after.holder_id)
+        query.set('after_key', after.key)
+      }
+      const response = await this.#call('list', `${this.#base}${WORKSPACE_BLOB_REFS}?${query}`, { signal: AbortSignal.timeout(HOLD_TIMEOUT_MS) })
+      type Page = { holds: { key: string; holder_id: string }[]; next: { key: string; holder_id: string } | null }
+      const page: Page = await this.#json<Page>('list', response)
+      for (const hold of page.holds) holds.push({ key: hold.key, holderId: hold.holder_id })
+      after = page.next
+    } while (after)
+    return holds
   }
 
   async *get(key: string): AsyncIterable<Uint8Array> {

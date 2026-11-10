@@ -1655,19 +1655,26 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   until the backend is on a blob store again; new writes go to `data`. `workspace_files`
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
-- The holder: a trigger on `ai_session_files` (migration
-  `20261027T0114Z_session_files_blobs.sql`) writes and removes each row's holder
-  `(ai_session_file, <workspace>/<path>)` in the backend's `blob_refs`, in the
-  transaction that writes or removes the row (a delete, the sweep, a session's cascade,
-  `forgetSubject`), so the blob sweep keeps a blob while a row names it. This assumes
-  **one database and one role for both services**: the agent's
-  `SCADBUDDY_DATABASE_URL` is the backend's, and its role may write `blob_refs` (the
-  agent already reads the backend's `workflow_runs` the same way). Giving the agent a
-  database or role of its own breaks every workspace write on s3.
-  `agent/test/workspaceBlobs.backend.e2e.test.ts` pins the trigger to the backend's
-  table: it migrates both services into one database, runs the real API on moto's S3
-  (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
-  change to that table the trigger does not follow fails it.
+- The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the
+  backend's `blob_refs`, so the blob sweep keeps a blob while a row names it. The agent
+  never writes that table: it holds and releases through its CRUD routes
+  (`backend/scadbuddy/api/crud_agent.py`, `/api/v1/internal/crud/agent/workspace-blob-refs`,
+  the `crud.agent` service credential; #5299, part of #5295). `SessionFiles`
+  (`agent/src/workspace/store.ts`) holds before it writes the row that names a blob
+  (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
+  is refused `unavailable` and writes no row; and it releases after the row is gone (a
+  replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
+  `reconcile`, on the sweeper's tick at most once an hour, releases every hold older than an
+  hour whose row is gone or names another blob (a session's cascade, `forgetSubject`, a
+  crash, a failed release), and holds every row no hold names. On `store_backend` local
+  nothing is held. The trigger that once did this (migration
+  `20261027T0114Z_session_files_blobs.sql`) is dropped by
+  `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
+  stay valid, and the API revokes `blob_refs` from the agent's role at every start
+  (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`).
+  `agent/test/workspaceBlobs.backend.e2e.test.ts` runs the holds against the real API on
+  moto's S3 (`backend/tests/support/workspace_backend.py`), both services migrated into one
+  database, and checks the `blob_refs` rows the routes write.
 - The working directory (plan 2026-10-13 Step 9.5, decision Q5,
   [`agent/src/workspace/directory.ts`](../../agent/src/workspace/directory.ts)): a
   session's Claude Code runs in `<SCADBUDDY_SESSION_DIR>/<session id>/` (§2), a working copy
