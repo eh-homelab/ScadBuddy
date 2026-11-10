@@ -514,6 +514,8 @@ export class TabHub implements BrowserTabs {
     if (!this.#relay) return false
     try {
       const answer = await this.#probe(tabId, undefined)
+      // A slow owner counts as not held here, on purpose: a chat attach then pairs the session
+      // with the tab the user is sending from, which is known to answer (#5962 review).
       return answer !== 'slow' && answer?.op === 'status'
     } catch (err) {
       // As for a call: a relay that cannot be asked is a tab not connected.

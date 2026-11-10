@@ -397,8 +397,9 @@ sequenceDiagram
   `dist/temporal/bridge-bundle.js`). Both queues are unversioned. The shared `agent-tools`
   is versioned, and in prod a `BridgeCall` started there waited 3.4 s for its first
   workflow task, so the status probe (then 6 s) ran out before the activity started. A call or
-  a status check between two healthy replicas now answers in well under a second
-  (`agent/test/bridgeRelay.temporal.test.ts`).
+  a status check between two healthy replicas now answers in well under a second on a dev
+  server (`agent/test/bridgeRelay.temporal.test.ts`). In prod each hop is slower while Temporal's
+  matching is CPU-throttled (eh-homelab/clusters#3418): status reads took 2.3–4.0 s on 2026-11-10.
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
   contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
   workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the

@@ -124,10 +124,12 @@ covers the same ground more briefly.
   `BridgeCall` on its own host queue, `agent-tools.<hostname>`, which only its own host worker
   polls (with `dist/temporal/bridge-bundle.js`), unversioned. In prod the shared, versioned
   `agent-tools` once took 3.4 s to hand a `BridgeCall`'s first workflow task to a poller,
-  and the status probe's 6 s ran out before the activity started (#5862). On the host queue
-  the workflow tasks run at once on the caller, and the activity at once on the owner: a
-  status check between two healthy replicas answers in well under a second
-  (`agent/test/bridgeRelay.temporal.test.ts`). The workflow's 15 s of slack
+  and the status probe (then 6 s, now 10 s) ran out before the activity started (#5862). On
+  the host queue the workflow tasks run at once on the caller, and the activity at once on the
+  owner: a status check between two healthy replicas answers in well under a second on a dev
+  server (`agent/test/bridgeRelay.temporal.test.ts`). In prod each hop is slower while
+  Temporal's matching is CPU-throttled (eh-homelab/clusters#3418): status reads took 2.3–4.0 s
+  on 2026-11-10. The workflow's 15 s of slack
   (`WORKFLOW_SLACK_MS`, [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)) now
   covers those tasks on a loaded caller and its host worker's reconnect, no longer a failed
   task on an old replica. While a replica of the build before #5862 still runs, its calls
