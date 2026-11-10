@@ -56,6 +56,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from psycopg import AsyncConnection, Connection
+from psycopg.errors import LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
@@ -72,6 +73,14 @@ ImportSource = Literal["archive", "archive_source", "library", "printer"]
 IMPORT_LOCK_CLASS = 0x5342_5049
 #: The class of `PrintLinkStore.import_lock`'s session lock, one per archive.
 IMPORT_SESSION_LOCK_CLASS = 0x5342_5053
+#: How long an import waits for another import of the same archive before it is refused
+#: (`ImportBusyError`), so requests never pile up behind a slow FTP read or new model.
+IMPORT_LOCK_WAIT_S = 30.0
+
+
+class ImportBusyError(Exception):
+    """Another import of the archive held `PrintLinkStore.import_lock` past
+    `IMPORT_LOCK_WAIT_S`."""
 
 
 class PrintLink(BaseModel):
@@ -401,15 +410,24 @@ class PrintLinkStore:
         a library copy. A session lock on a connection of its own, as
         `BambuddyUploadStore.copy_lock` takes one: the section spans Bambuddy calls and an
         operation, longer than a pooled connection should be held. Its key differs from
-        `record_import`'s transaction lock, which runs inside it on another connection."""
+        `record_import`'s transaction lock, which runs inside it on another connection.
+        Waiting longer than `IMPORT_LOCK_WAIT_S` raises `ImportBusyError`."""
         pool = self._pool
         conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
         conn = await AsyncConnection.connect(conninfo, autocommit=True)
         try:
+            # `lock_timeout` bounds an advisory lock's wait too.
             await conn.execute(
-                "SELECT pg_advisory_lock(%s, %s)",
-                (IMPORT_SESSION_LOCK_CLASS, archive_id % (2**31)),
+                "SELECT set_config('lock_timeout', %s, false)",
+                (f"{int(IMPORT_LOCK_WAIT_S * 1000)}ms",),
             )
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(%s, %s)",
+                    (IMPORT_SESSION_LOCK_CLASS, archive_id % (2**31)),
+                )
+            except LockNotAvailable as e:
+                raise ImportBusyError(archive_id) from e
             yield
         finally:
             await conn.close()

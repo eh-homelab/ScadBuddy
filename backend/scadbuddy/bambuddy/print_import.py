@@ -61,8 +61,12 @@ LIBRARY_READS = 4
 
 SLICED_SUFFIX = ".gcode.3mf"
 _SUFFIXES = (SLICED_SUFFIX, ".3mf")
-#: A printer path the import reads: absolute, no ``..``, a 3MF.
-_PRINTER_PATH = re.compile(r"^/(?:[^/\\]+/)*[^/\\]+\.3mf$", re.IGNORECASE)
+#: A printer path the import reads: absolute, no ``.`` or ``..`` segment, a 3MF. A
+#: directory segment starts with a character other than a dot, or with one dot and then
+#: another character, or with two dots and then more (no lookahead: the pattern is also
+#: the OpenAPI ``pattern``, checked by pydantic-core's Rust regex).
+_PRINTER_SEGMENT = r"(?:[^/\\.][^/\\]*|\.[^/\\.][^/\\]*|\.\.[^/\\]+)"
+_PRINTER_PATH = re.compile(rf"^/(?:{_PRINTER_SEGMENT}/)*[^/\\]+\.3mf$", re.IGNORECASE)
 
 NOT_CHECKED = (
     "not checked: reading the printer's storage reaches the printer, so it is read only "

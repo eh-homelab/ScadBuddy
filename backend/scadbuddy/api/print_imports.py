@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Self
 
 from fastapi import APIRouter, Query, Response, status
@@ -51,7 +53,13 @@ from scadbuddy.bambuddy.print_import import (
     read_source,
     suggested_slugs,
 )
-from scadbuddy.bambuddy.print_links import LinkedPrint, PrintImport, PrintLinkStore
+from scadbuddy.bambuddy.print_links import (
+    IMPORT_LOCK_WAIT_S,
+    ImportBusyError,
+    LinkedPrint,
+    PrintImport,
+    PrintLinkStore,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
@@ -184,7 +192,12 @@ async def get_sources(
         status=archive.status,
         printer_id=archive.printer_id,
         linked=_owner(linked) if linked is not None else None,
-        imported=await links.import_of(archive_id) if linked is not None else None,
+        # A run's link found after an import owns the print; the import is then no answer.
+        imported=(
+            await links.import_of(archive_id)
+            if linked is not None and linked.slug is not None
+            else None
+        ),
         sources=sources,
         suggested_models=await asyncio.to_thread(_suggestions, catalogue, archive),
     )
@@ -232,6 +245,22 @@ def _refused(archive_id: int, owner: LinkedPrint, *, made: str | None = None) ->
     )
 
 
+@asynccontextmanager
+async def _one_import(links: PrintLinkStore, archive_id: int) -> AsyncIterator[None]:
+    """`PrintLinkStore.import_lock`, its wait past `IMPORT_LOCK_WAIT_S` a 409 to send
+    again."""
+    try:
+        async with links.import_lock(archive_id):
+            yield
+    except ImportBusyError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"another import of archive {archive_id} is still running: send the same"
+            " request again shortly",
+            headers={"Retry-After": str(int(IMPORT_LOCK_WAIT_S))},
+        ) from None
+
+
 @router.post(
     "/{archive_id}",
     response_model=ImportedPrint,
@@ -247,7 +276,8 @@ def _refused(archive_id: int, owner: LinkedPrint, *, made: str | None = None) ->
         "meshes, so that is a 422; it needs an `Idempotency-Key`, 428 without one, and "
         "answers 202 while the model is still being made: send the same request again). "
         "`source` must be one `GET …/sources` lists as available (422 when it is not "
-        "listed, 409 when it cannot be used now). For the archive's and the library's "
+        "listed, 409 when it cannot be used now, or while another import of the archive "
+        "runs past 30 s: send it again). For the archive's and the library's "
         "files ScadBuddy records which file and its hash, and copies nothing; a printer "
         "file is read over FTP and kept as a Bambuddy library file in the inbox folder "
         "(one there with its name and SHA-256 already is used again), "
@@ -280,7 +310,7 @@ async def import_print(
     settings = store.load()
     # One import of an archive at a time, from the owner check to the record: two at once
     # never both make a model or keep a printer file (#4698 review).
-    async with links.import_lock(archive_id), client_for(settings) as client:
+    async with _one_import(links, archive_id), client_for(settings) as client:
         archive = await _archive(client, archive_id)
         # A print ScadBuddy made is linked to its run here, if no read linked it yet.
         await link_archive(client, uploads, links, archive)
@@ -301,15 +331,15 @@ async def import_print(
                 " choose the archive's slicer project or a library 3MF, or link the print"
                 " to a model that exists",
             )
-        read: SourceFile | None = None
-        if body.new_model is not None or source.kind == "printer":
-            read = await read_source(client, archive, source)
         if source.kind == "printer" and settings.library_folder_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 "a printer file is kept in Bambuddy's library inbox folder:"
                 " choose that folder in Settings first",
             )
+        read: SourceFile | None = None
+        if body.new_model is not None or source.kind == "printer":
+            read = await read_source(client, archive, source)
         created = False
         if body.new_model is not None:
             assert read is not None

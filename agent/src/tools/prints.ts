@@ -134,7 +134,8 @@ export const printHistoryTools: Tool[] = [
       printer: z.boolean().optional(),
     }),
     risk: 'read',
-    bambuddyScope: ['Read Status'],
+    // Control Printer only for `printer: true`, which reads the printer's storage over FTP.
+    bambuddyScope: ['Read Status', 'Control Printer'],
     routes: ['GET /api/v1/print-imports/{archive_id}/sources'],
     summarize: ({ archive_id, printer }) =>
       printer ? `Read the printer's storage for the 3MF of print ${archive_id}` : `List the sources of print ${archive_id}`,
@@ -174,7 +175,8 @@ export const printHistoryTools: Tool[] = [
         .optional(),
     }),
     risk: 'write',
-    bambuddyScope: ['Read Status'],
+    // Only a `printer` source needs the last two: read over FTP, kept in the library inbox.
+    bambuddyScope: ['Read Status', 'Control Printer', 'Manage Library'],
     routes: ['POST /api/v1/print-imports/{archive_id}'],
     summarize: ({ archive_id, source, slug: model, new_model }) =>
       `Import print ${archive_id} from its ${source.kind} file onto ${model ? `model ${model}` : `a new model "${new_model?.name ?? ''}"`}`,

@@ -1808,7 +1808,8 @@ class OrderStore:
             rows = c.execute(
                 "WITH owner AS (SELECT subject, queue_item_id FROM print_links"
                 "  WHERE archive_id = %(a)s"
-                "  ORDER BY (subject LIKE 'library:%%'), first_seen, subject, queue_item_id"
+                "  ORDER BY (subject LIKE 'model:%%'), (subject LIKE 'library:%%'), first_seen,"
+                "  subject, queue_item_id"
                 "  LIMIT 1),"
                 " run AS (SELECT s.subject, s.run_id FROM print_sends s JOIN owner o"
                 "  ON s.subject = o.subject AND s.queue_item_id = o.queue_item_id"

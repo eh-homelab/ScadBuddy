@@ -13,10 +13,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import print_links
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
@@ -611,3 +613,61 @@ def test_a_printer_file_already_in_the_inbox_is_reused(client: TestClient, model
     assert response.status_code == 201, response.text
     assert response.json()["imported"]["library_file_id"] == 56
     assert not upload.called, "a retry's copy is the first one's"
+
+
+@respx.mock
+def test_a_run_s_link_found_after_an_import_hides_the_import(
+    client: TestClient, model: str
+) -> None:
+    """#4698 review: once a run's link owns the print, the sources name it alone."""
+    configure(client)
+    bambuddy()
+    assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
+    output_id = make_output(client, model)
+    link(client, output_id, ARCHIVE)
+
+    body = sources(client)
+
+    assert body["linked"]["output_id"] == output_id
+    assert body["imported"] is None
+
+
+@respx.mock
+def test_a_printer_file_is_not_read_without_the_inbox_folder(
+    client: TestClient, model: str
+) -> None:
+    configure(client, library_folder_id=None)
+    bambuddy(
+        printer_files={
+            "path": "/cache",
+            "files": [{"name": FILE, "path": f"/cache/{FILE}", "size": 4242}],
+            "warnings": [],
+        }
+    )
+    download = respx.get(f"{API}/printers/1/files/download")
+
+    response = import_print(
+        client, {"source": {"kind": "printer", "path": f"/cache/{FILE}"}, "slug": model}
+    )
+
+    assert response.status_code == 409, response.text
+    assert not download.called
+
+
+@respx.mock
+def test_an_import_waiting_on_another_is_refused_in_time(
+    client: TestClient, model: str, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4698 review: a second import of one archive waits `IMPORT_LOCK_WAIT_S`, then 409."""
+    monkeypatch.setattr(print_links, "IMPORT_LOCK_WAIT_S", 0.2)
+    configure(client)
+    bambuddy()
+    with psycopg.connect(pg_conninfo, autocommit=True) as held:
+        held.execute(
+            "SELECT pg_advisory_lock(%s, %s)", (print_links.IMPORT_SESSION_LOCK_CLASS, ARCHIVE)
+        )
+        response = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert response.status_code == 409, response.text
+    assert "still running" in response.json()["detail"]
+    assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
