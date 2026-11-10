@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Public host `michaels-workshop.nullreference.io`; `SCADBUDDY_STOREFRONT_PUBLIC_URL=https://michaels-workshop.nullreference.io` (the owner, 2026-11-07, #5284).
-- The storefront pod holds no `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or Temporal address (#5295; `storefront/settings.py` `check_environment` refuses to start with any of them).
+- The storefront pod holds no `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or `SCADBUDDY_TEMPORAL_ADDRESS` (#5295). Today `storefront/settings.py` `FORBIDDEN_ENV` holds the first four only; Task 1 adds `SCADBUDDY_TEMPORAL_ADDRESS`, so `check_environment` refuses all five. The egress policy (Task 2) keeps Temporal unreachable as well.
 - The back office host does not change: `scadbuddy.internal.nullreference.io` (LAN) and `scadbuddy.sso.nullreference.io` (Pomerium).
 - No back-office route is reachable from the public host, except the prefix `/api/v1/payments/webhooks/` on the API (#4957 "Deployment").
 - GitOps only: every cluster change is a PR in eh-homelab/clusters, never `kubectl apply`. Follow that repo's CLAUDE.md (kustomize render, kubeconform, the Gateway API defaulted fields written out, the route on the `public` ListenerSet with `cloudflare-proxied: "true"`).
@@ -30,23 +30,26 @@
 
 ---
 
-### Task 1: The deploy workflow pins the storefront (ScadBuddy)
+### Task 1: The deploy workflow pins the storefront; the edge refuses a Temporal address (ScadBuddy)
 
 **Files:**
-- Modify: `.github/workflows/deploy.reusable.yml` (a `MANIFEST_STOREFRONT` entry for `applications/scadbuddy/scadbuddy-storefront.yaml`, rewritten with the others, under the same `expect_one` guard), `.github/scripts/scadbuddy-deploy-fastpath.sh`, `.github/scripts/scadbuddy-prime-digests.sh`, `.github/workflows/scadbuddy-verify-deploy.yml`, and the tests of those scripts (`.github/scripts/*.test.sh`)
-- Modify: `README.md` "Deploying": a Storefront section (the Deployment, its environment, no database secret, the host, the webhook prefix, the two network policies, the cookie key item, how to roll the key)
+- Modify: `.github/workflows/deploy.reusable.yml`: a `MANIFEST_STOREFRONT: applications/scadbuddy/scadbuddy-storefront.yaml` env entry beside `MANIFEST_PRINT` (lines 108–136), and a pin block like `MANIFEST_PRINT`'s (`if [ -f "$MANIFEST_STOREFRONT" ]; then pin "$MANIFEST_STOREFRONT" scadbuddy-storefront; manifests+=(…); else ::notice:: …`, about line 782), which already skips a file clusters does not have yet
+- Modify: `.github/scripts/deploy-pin.test.sh` (export `MANIFEST_STOREFRONT` and a case that writes a storefront manifest and expects it pinned, and one without it that expects the notice)
+- Modify: `backend/scadbuddy/storefront/settings.py` (`FORBIDDEN_ENV` gains `SCADBUDDY_TEMPORAL_ADDRESS`), and its test in `backend/tests/storefront/`
+- Modify: `README.md` "Deploying": a Storefront section (the Deployment, its environment, no database secret or Temporal address, the host, the webhook prefix, the two network policies, the cookie key item, how to roll the key)
 
 **Interfaces:** the deploy PR rewrites the storefront manifest's image and its `scadbuddy.eh-homelab.io/{version,revision,source}` annotations like every other ScadBuddy manifest.
 
-- [ ] **Step 1:** In the scripts' test suites, add a case with a storefront manifest; watch it fail.
-- [ ] **Step 2:** Add the manifest to each list; the deploy workflow treats a missing storefront file as an error only once it exists on clusters' main (until Task 2 merges, it is skipped with a notice, so the next deploy does not fail).
-- [ ] **Step 3:** Run `bash .github/scripts/*.test.sh`, actionlint and shellcheck (the `lint` job).
+- [ ] **Step 1:** Write the failing tests: the `deploy-pin.test.sh` cases above, and a storefront settings test that `check_environment` refuses `SCADBUDDY_TEMPORAL_ADDRESS`. Watch both fail.
+- [ ] **Step 2:** Add the env entry, the pin block and the `FORBIDDEN_ENV` entry.
+- [ ] **Step 3:** Run `bash .github/scripts/deploy-pin.test.sh`, the storefront settings test, actionlint and shellcheck (the `lint` job).
 - [ ] **Step 4:** Commit `ci(deploy): pin the storefront Deployment's image (#5284)`; PR, auto-merge.
 
 ### Task 2: The storefront Deployment and its host (eh-homelab/clusters)
 
 **Files (clusters):**
 - Create: `applications/scadbuddy/scadbuddy-storefront.yaml` (Deployment and Service), `applications/scadbuddy/pdb-storefront.yaml`, `applications/scadbuddy/networkpolicy-storefront.yaml`, `clusters/prod/scadbuddy/onepassworditem-storefront-cookie-key.yaml`, `clusters/prod/scadbuddy/httproute-storefront.yaml`, the host's TLS Secret source (a `Certificate` like `clusters/prod/scadbuddy/certificate.yaml`, or the Cloudflare origin cert, whichever that repo's CLAUDE.md requires for a Cloudflare-proxied public host), and its `ReferenceGrant` for `kind: ListenerSet`
+- Modify: `.github/workflows/scadbuddy-verify-deploy.yml` (it checks the pinned Deployments after a deploy; add `scadbuddy-storefront` wherever it lists the others)
 - Modify: `applications/scadbuddy/serviceaccounts.yaml` (`scadbuddy-storefront`, `automountServiceAccountToken: false`), `applications/scadbuddy/kustomization.yaml`, `clusters/prod/scadbuddy/kustomization.yaml`, the API's ingress NetworkPolicy (port 8082 also admits `app.kubernetes.io/name: scadbuddy-storefront`), `applications/envoy-gateway-config/listenerset-public.yaml` (a listener `https-michaels-workshop` for the host), and the API Deployment `applications/scadbuddy/scadbuddy.yaml` (`SCADBUDDY_STOREFRONT_PUBLIC_URL`, which the CRUD service uses to build mail links)
 
 **Interfaces and values:**
@@ -61,7 +64,7 @@
 - [ ] **Step 1:** Create the 1Password item (the one action outside git; record the item's name, not its value, on #5284).
 - [ ] **Step 2:** Write the manifests; run the repo's render and validation (`./scripts/validate-rendered-manifests.sh`, kubeconform).
 - [ ] **Step 3:** PR `feat(scadbuddy): the storefront on michaels-workshop.nullreference.io (eh-homelab/ScadBuddy#5284)`, auto-merge; fix every review finding.
-- [ ] **Step 4:** After ArgoCD syncs: the pods are Ready; `curl -sI https://michaels-workshop.nullreference.io/` answers 200 with the storefront's CSP; `/api/v1/orders` answers the storefront's 404; `https://michaels-workshop.nullreference.io/api/v1/payments/webhooks/fake` reaches the API (its 4xx, not the storefront's 404); the back office hosts answer as before. Record each command and answer on #5284.
+- [ ] **Step 4:** After ArgoCD syncs: the pods are Ready; `curl -sI https://michaels-workshop.nullreference.io/` answers 200 with the storefront's CSP; `/api/v1/orders` and `/settings` both answer the storefront's own answer (its 404 for the API path, `storefront.html` for the SPA path, never the back office's `index.html`); `curl -sI https://michaels-workshop.nullreference.io/api/v1/payments/webhooks/fake` answers the API's 405 (the route is POST-only, so a 405 proves it reached the API; the storefront would answer 404); the back office hosts answer as before. Record each command and answer on #5284.
 
 ### Task 3: The live check with the fake provider
 
