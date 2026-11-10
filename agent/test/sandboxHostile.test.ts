@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Agent, fetch as undiciFetch, getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { JSON_MAX_BYTES, SandboxClient, SandboxError, syncBack, syncIn } from '../src/sandbox/client.js'
+import { ERROR_BODY_MAX_BYTES, JSON_MAX_BYTES, SandboxClient, SandboxError, syncBack, syncIn } from '../src/sandbox/client.js'
 import { reapStrays } from '../src/sandbox/server.js'
 import { writeDirFile } from '../src/workspace/directory.js'
 
@@ -14,7 +14,7 @@ import { writeDirFile } from '../src/workspace/directory.js'
 // server answers. These tests stand in for a sandbox that lies.
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex')
-const none = () => ({ files: new Map<string, string>(), unsynced: new Set<string>() })
+const none = () => ({ files: new Map<string, string>(), unsynced: new Set<string>(), notSent: [] })
 
 type Fake = { manifest: unknown; files: Record<string, Buffer>; deleted: string[]; got: string[] }
 
@@ -86,7 +86,7 @@ describe('a sandbox that lies', () => {
     expect([...before.files.keys()]).toEqual([])
     // syncBack: a bad path in `before` that the sandbox no longer lists is never removed here.
     fake.manifest = { files: [], truncated: false }
-    const back = await syncBack(client(box.url), dir, { files: new Map([['../outside/victim.txt', 'a'.repeat(64)]]), unsynced: new Set<string>() }, limits)
+    const back = await syncBack(client(box.url), dir, { files: new Map([['../outside/victim.txt', 'a'.repeat(64)]]), unsynced: new Set<string>(), notSent: [] }, limits)
     expect(back.removed).toEqual([])
     expect(await readFile(path.join(outside, 'victim.txt'), 'utf8')).toBe('keep me')
   })
@@ -189,6 +189,31 @@ describe('an exec answer', () => {
     await expect(manifest.manifest()).rejects.toThrow(/past/)
     const list = await answering(() => '[]')
     await expect(list.manifest()).rejects.toThrow(/not an object/)
+  })
+})
+
+describe('an error answer', () => {
+  it('reads only the head of an error body that never ends, and fails at once', async () => {
+    let timer: NodeJS.Timeout | undefined
+    const server = createServer((req, res) => {
+      req.resume()
+      res.writeHead(500, { 'content-type': 'text/plain' })
+      timer = setInterval(() => res.write('a'.repeat(64 * 1024)), 5)
+      res.on('close', () => clearInterval(timer))
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    try {
+      const client = new SandboxClient({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token: 't' }, AbortSignal.timeout(30_000))
+      const started = Date.now()
+      const err = await client.delete('x.txt').catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(SandboxError)
+      expect((err as Error).message).toMatch(new RegExp(`answered 500 to DELETE /v1/files/x.txt: a{${ERROR_BODY_MAX_BYTES}}$`))
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      clearInterval(timer)
+      server.closeAllConnections()
+      await new Promise((r) => server.close(() => r(undefined)))
+    }
   })
 })
 

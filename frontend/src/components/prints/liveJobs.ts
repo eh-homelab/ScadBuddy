@@ -84,7 +84,9 @@ export function startedOn(printerId: string, key: string): StartedJob {
  * job that had no archive on its printer then (`printer:<id>`) and has one now:
  * ScadBuddy linked it, so it is the same job. A job that ended and another that started
  * with an archive between two reads of the printers looks the same, and its queue item
- * then leaves at the queue's next poll.
+ * then leaves at the queue's next poll. Each list holds at most one job per printer, as
+ * {@link liveJobs} makes one working entry per card: `before` is keyed by printer, so
+ * a second job for one printer would replace the first (#5949).
  */
 export function newStart(now: readonly StartedJob[], before: readonly StartedJob[]): boolean {
   const was = new Map(before.map((job) => [job.printerId, job.key]))

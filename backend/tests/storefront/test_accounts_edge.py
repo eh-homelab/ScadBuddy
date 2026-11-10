@@ -5,15 +5,20 @@ only and refuse another site's page; a cookie the edge did not sign is never sen
 from __future__ import annotations
 
 import json
+import logging
+import time
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.storefront.accounts import SESSION_COOKIE, sign, verify
 from scadbuddy.storefront.app import create_app
+from scadbuddy.storefront.sign_out import SIGN_OUT_INCOMPLETE, SignOutRetries
 from scadbuddy.storefront.turnstile import BOT_CHECK_FAILED
 from scadbuddy.storefront.visitors import VISITOR_COOKIE
 from scadbuddy.storefront.wire import SESSION_HEADER, TURNSTILE_HEADER
@@ -29,6 +34,14 @@ PUBLIC_URL = "https://shop.example.com"
 CRUD_ACCOUNT = "/api/v1/internal/crud/storefront/account"
 STORE = "/api/store/v1/account"
 TOKEN = "t" * 43
+#: The edge's two 503 ``sign_out_incomplete`` bodies, which the storefront page's own
+#: test (``frontend/src/storefront/pages/AccountPage.test.tsx``) serves and shows (#5283,
+#: review of #5955): these tests keep it what the real edge answers.
+INCOMPLETE = json.loads(
+    (
+        Path(__file__).resolve().parents[3] / "test-fixtures/storefront/sign-out-incomplete.json"
+    ).read_text()
+)
 SIGN_IN = {"email": "ada@example.com", "code": "ABCD2345"}
 
 
@@ -169,6 +182,97 @@ def test_sign_out_ends_the_session_clears_the_cookie_and_starts_a_new_visitor(
     calls = crud_mock["account"].call_count
     assert edge.get(STORE).json() is None
     assert crud_mock["account"].call_count == calls
+
+
+def refused(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("refused", request=request)
+
+
+def test_a_sign_out_the_crud_side_did_not_answer_is_incomplete_and_queued(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5953: the device is signed out (cookie cleared, a new visitor), but the
+    answer is 503 ``sign_out_incomplete``, never success, and the revocation is queued."""
+    sign_in(edge)
+    before = edge.cookies.get(VISITOR_COOKIE)
+    retries: SignOutRetries = edge.app.state.sign_out_retries  # type: ignore[attr-defined]
+    crud_mock["sign_out"].side_effect = refused
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.routes"):
+        r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 503
+    assert r.json()["type"] == SIGN_OUT_INCOMPLETE
+    assert "signed out on this device" in r.json()["detail"]
+    cookies = set_cookies(r)
+    (cleared,) = [c for c in cookies if c.startswith(f"{SESSION_COOKIE}=")]
+    assert "max-age=0" in cleared.lower()
+    assert len([c for c in cookies if c.startswith(f"{VISITOR_COOKIE}=")]) == 1
+    assert edge.cookies.get(VISITOR_COOKIE) != before
+    assert retries.pending == 1
+    assert any("sign-out" in record.getMessage() for record in caplog.records)
+    assert r.json() == INCOMPLETE["queued"]
+
+
+def test_a_sign_out_the_full_queue_cannot_take_promises_no_retry(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review of #5953: with the queue full, nothing is queued, the log says so, and the
+    answer says the session ends on its own instead of promising retries."""
+    app = edge.app
+    app.state.sign_out_retries = SignOutRetries(  # type: ignore[attr-defined]
+        app.state.crud.account_sign_out,  # type: ignore[attr-defined]
+        limit=0,
+    )
+    sign_in(edge)
+    crud_mock["sign_out"].side_effect = refused
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.routes"):
+        r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 503
+    assert r.json()["type"] == SIGN_OUT_INCOMPLETE
+    assert r.json() == INCOMPLETE["not_queued"]
+    assert r.json()["detail"].endswith("it ends on its own within 30 days.")
+    (cleared,) = [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
+    assert "max-age=0" in cleared.lower()
+    assert app.state.sign_out_retries.pending == 0  # type: ignore[attr-defined]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("not queued" in m for m in messages)
+    assert not any("; queued" in m for m in messages)
+
+
+def test_a_queued_sign_out_ends_the_session_once_the_crud_side_answers(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    app = edge.app
+    app.state.sign_out_retries = SignOutRetries(  # type: ignore[attr-defined]
+        app.state.crud.account_sign_out,  # type: ignore[attr-defined]
+        delays=(0.05, 0.05, 0.05, 0.05, 0.05),
+    )
+    sign_in(edge)
+    down = True
+    answered = 0
+
+    def until_back(request: httpx.Request) -> httpx.Response:
+        nonlocal answered
+        if down:
+            raise httpx.ConnectError("refused", request=request)
+        answered += 1
+        return httpx.Response(204, headers=CRUD)
+
+    crud_mock["sign_out"].side_effect = until_back
+    r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 503
+    down = False  # the CRUD side is back
+    for _ in range(500):
+        if answered and app.state.sign_out_retries.pending == 0:  # type: ignore[attr-defined]
+            break
+        time.sleep(0.01)
+    assert answered == 1
+    assert app.state.sign_out_retries.pending == 0  # type: ignore[attr-defined]
+    assert crud_mock["sign_out"].calls.last.request.headers[SESSION_HEADER] == TOKEN
 
 
 def test_sign_out_with_no_visitor_cookie_sets_one_visitor(

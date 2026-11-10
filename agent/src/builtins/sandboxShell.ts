@@ -59,7 +59,10 @@ const where =
   'command only at a path whose every name is letters, digits, "_", "." and "-", does not start with ".", and is at most 4 ' +
   'levels deep, outside node_modules and __pycache__, and only within the workspace caps. Any other file stays in the sandbox ' +
   'pod while the pod lasts, and the result lists it under files_left_in_sandbox (node_modules and __pycache__ are not listed); ' +
-  "a new pod (after 15 idle minutes, or 4 hours) starts from the session's files alone. The " +
+  "a new pod (after 15 idle minutes, or 4 hours) starts from the session's files alone. A session file past the workspace's " +
+  'per-file cap is not in the sandbox, and the result lists it under files_not_in_sandbox, unless the sandbox keeps its own ' +
+  'copy at that path (one an earlier command left there, listed then under files_left_in_sandbox), which stays and is not ' +
+  'listed. The ' +
   'network reaches only public hosts on ports 80 and 443, through an HTTPS proxy (HTTPS_PROXY is set; plain http:// and other ' +
   `protocols are refused). The timeout is ${DEFAULT_TIMEOUT_MS / 1000} s by default, at most ${MAX_TIMEOUT_MS / 1000} s. ` +
   `Output past ${OUTPUT_MAX_CHARS} characters is cut.`
@@ -84,12 +87,14 @@ export async function runShell(ctx: ShellContext, shell: Shell, input: ShellInpu
   }
   const tool = shell === 'bash' ? 'Bash' : 'PowerShell'
   let run
+  let limits: SyncLimits
   try {
-    run = await runInSandbox({ ...ctx, limits: await ctx.limits() }, shell, input.command, input.timeout ?? DEFAULT_TIMEOUT_MS)
+    limits = await ctx.limits()
+    run = await runInSandbox({ ...ctx, limits }, shell, input.command, input.timeout ?? DEFAULT_TIMEOUT_MS)
   } catch (err) {
     return { text: `${tool} could not run: the session's sandbox failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
   }
-  const { result, back } = run
+  const { result, back, notSent } = run
   const out = cut(result.stdout, OUTPUT_MAX_CHARS)
   const errText = cut(result.stderr, OUTPUT_MAX_CHARS - out.text.length)
   const body = {
@@ -107,6 +112,14 @@ export async function runShell(ctx: ShellContext, shell: Shell, input: ShellInpu
     ...(back.written.length ? { files_changed: back.written } : {}),
     ...(back.removed.length ? { files_removed: back.removed } : {}),
     ...(back.left.length ? { files_left_in_sandbox: back.left } : {}),
+    ...(notSent.length
+      ? {
+          files_not_in_sandbox: notSent.map((path) => ({
+            path,
+            reason: `it is past the workspace's per-file cap of ${limits.fileMaxBytes} bytes, so it was not sent to the sandbox and the command did not see it`,
+          })),
+        }
+      : {}),
   }
   return { text: wrapUntrustedText(tool, 'the session sandbox', JSON.stringify(body)), ...(result.exit_code === 0 ? {} : { isError: true }) }
 }
