@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { backendNotUp } from '../api/backendUp.js'
 
 // Where a workspace file's sealed bytes are kept (#4789): a blob of the backend's content
 // store (`store_backend` s3 or bambuddy), named `workspace-<sha256 of the sealed bytes>`.
@@ -35,6 +36,13 @@ type TransferUrl = { url: string; headers?: Record<string, string> }
 /** A refusal of the blob routes; its message names the step and why, never a URL. */
 export class WorkspaceBlobError extends Error {
   override name = 'WorkspaceBlobError'
+  /** Whether the backend did not answer at all (not up yet, #5868, or unreachable): worth asking again. */
+  readonly unreachable: boolean
+
+  constructor(message: string, options: { unreachable?: boolean } = {}) {
+    super(message)
+    this.unreachable = options.unreachable ?? false
+  }
 }
 
 /** The `detail` of a problem response, or ''. */
@@ -58,8 +66,10 @@ export class BackendWorkspaceBlobs implements WorkspaceBlobStore {
   async #call(step: string, url: string, init?: RequestInit): Promise<Response> {
     try {
       return await this.#fetch(url, init)
-    } catch {
-      throw new WorkspaceBlobError(`the backend could not be reached (${step})`)
+    } catch (error) {
+      // A presigned S3 URL is not the backend: only a refused backend URL is "not up yet".
+      const why = url.startsWith(`${this.#base}/`) && backendNotUp(error) ? 'the backend is not up yet' : 'the backend could not be reached'
+      throw new WorkspaceBlobError(`${why} (${step})`, { unreachable: true })
     }
   }
 
