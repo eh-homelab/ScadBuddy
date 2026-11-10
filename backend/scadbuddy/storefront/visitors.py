@@ -26,9 +26,15 @@ VERSION: Final = "v1"
 _B64_32: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
-def _mac(visitor_id: str, key: bytes) -> str:
-    digest = hmac.new(key, f"{VERSION}.{visitor_id}".encode(), hashlib.sha256).digest()
+def cookie_mac(version: str, value: str, key: bytes) -> str:
+    """HMAC-SHA256 over ``<version>.<value>`` under the edge's cookie key, URL-safe base64
+    unpadded: the mac of the visitor cookie and of the session cookie."""
+    digest = hmac.new(key, f"{version}.{value}".encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _mac(visitor_id: str, key: bytes) -> str:
+    return cookie_mac(VERSION, visitor_id, key)
 
 
 def sign(visitor_id: str, key: bytes) -> str:

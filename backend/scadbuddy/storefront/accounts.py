@@ -13,13 +13,13 @@ as the session (`SESSION_MAX_AGE`). A sign-in replaces it, and a sign-out clears
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import hmac
 import re
 from typing import Final
 
 from fastapi import Request, Response
+
+from scadbuddy.storefront.visitors import cookie_mac
 
 SESSION_COOKIE: Final = "sb_session"
 #: The CRUD side's `SESSION_TTL`: 30 days.
@@ -30,8 +30,7 @@ _B64_32: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _mac(token: str, key: bytes) -> str:
-    digest = hmac.new(key, f"{VERSION}.{token}".encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return cookie_mac(VERSION, token, key)
 
 
 def sign(token: str, key: bytes) -> str:
