@@ -459,16 +459,18 @@ const workspaceBytesStatus = workspace
 // Once migrations have applied and the backend answers: say where the files go (once, the cause
 // when refused), and move the files written before #4789 (or while the backend kept no blobs) to
 // blobs; what is left is retried at the next start. The API pod's sidecar can start before the
-// backend container answers (#5868): until /healthz answers this waits, logged once, with
-// back-off (backendUp.ts); writes and reads ask the backend each time and need no wait.
+// backend container answers (#5868): until /healthz answers this waits with back-off
+// (backendUp.ts), logged once as waiting, or as an error once per kind when the backend does not
+// answer for another reason (#5889); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
       if (!ready) return
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
-        unreachable: (err) => err instanceof WorkspaceBlobError && err.unreachable,
+        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachable : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
+        error: (message) => console.error(`workspace files: ${message}`),
       })
       // A status read while the backend was down would be served for up to a minute.
       workspaceBytes = undefined

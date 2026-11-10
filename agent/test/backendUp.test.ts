@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Sql } from 'postgres'
 import { afterEach, describe, expect, it } from 'vitest'
-import { backendNotUp, untilBackendAnswers, WAIT_FIRST_MS, WAIT_MAX_MS } from '../src/api/backendUp.js'
+import { backendNotUp, NOT_UP, transportKind, untilBackendAnswers, WAIT_FIRST_MS, WAIT_MAX_MS } from '../src/api/backendUp.js'
 import { BackendWorkspaceBlobs, WorkspaceBlobError } from '../src/workspace/blobs.js'
 import type { WorkspaceSealing } from '../src/workspace/sealing.js'
 import { SessionFiles } from '../src/workspace/store.js'
@@ -63,12 +63,13 @@ describe('untilBackendAnswers', () => {
     const answer = await untilBackendAnswers(
       async () => {
         tries += 1
-        if (tries < 8) throw new WorkspaceBlobError('the backend is not up yet (/healthz)', { unreachable: true })
+        if (tries < 8) throw new WorkspaceBlobError('the backend is not up yet (/healthz)', { unreachable: NOT_UP })
         return 's3'
       },
       {
-        unreachable: (error) => error instanceof WorkspaceBlobError && error.unreachable,
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
         log: (message) => logs.push(message),
+        error: () => expect.unreachable(),
         sleep: async (ms) => {
           sleeps.push(ms)
         },
@@ -79,12 +80,41 @@ describe('untilBackendAnswers', () => {
     expect(sleeps).toEqual([WAIT_FIRST_MS, 2_000, 4_000, 8_000, 16_000, WAIT_MAX_MS, WAIT_MAX_MS])
   })
 
+  it('logs any other transport error as an error, once per kind, and keeps trying (#5889)', async () => {
+    const logs: string[] = []
+    const errors: string[] = []
+    const kinds = ['ENOTFOUND', 'ENOTFOUND', NOT_UP, 'ETIMEDOUT', 'ENOTFOUND', NOT_UP]
+    let tries = 0
+    const answer = await untilBackendAnswers(
+      async () => {
+        const kind = kinds[tries++]
+        if (kind === undefined) return 's3'
+        const why = kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'
+        throw new WorkspaceBlobError(`${why} (/healthz)`, { unreachable: kind })
+      },
+      {
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
+        log: (message) => logs.push(message),
+        error: (message) => errors.push(message),
+        sleep: async () => undefined,
+      },
+    )
+    expect(answer).toBe('s3')
+    expect(tries).toBe(7)
+    expect(logs).toEqual(['waiting for the backend: the backend is not up yet (/healthz)'])
+    expect(errors).toEqual([
+      'the backend could not be reached (/healthz): ENOTFOUND; trying again until it answers',
+      'the backend could not be reached (/healthz): ETIMEDOUT; trying again until it answers',
+    ])
+  })
+
   it('throws any other error at once', async () => {
     const refusal = new WorkspaceBlobError("the backend's /healthz names no store backend (HTTP 500)")
     await expect(
       untilBackendAnswers(() => Promise.reject(refusal), {
-        unreachable: (error) => error instanceof WorkspaceBlobError && error.unreachable,
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
         log: () => expect.unreachable(),
+        error: () => expect.unreachable(),
         sleep: async () => expect.unreachable(),
       }),
     ).rejects.toBe(refusal)
@@ -96,8 +126,9 @@ describe('untilBackendAnswers', () => {
     const logs: string[] = []
     let slept = 0
     const answer = await untilBackendAnswers(() => store.backend(), {
-      unreachable: (error) => error instanceof WorkspaceBlobError && error.unreachable,
+      kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
       log: (message) => logs.push(message),
+      error: () => expect.unreachable(),
       sleep: async () => {
         slept += 1
         if (slept === 2) await startBackend(port)
@@ -116,7 +147,7 @@ describe('the workspace before the backend is up', () => {
     const error = await store.backend().catch((err: unknown) => err)
     expect(error).toBeInstanceOf(WorkspaceBlobError)
     expect((error as WorkspaceBlobError).message).toBe('the backend is not up yet (/healthz)')
-    expect((error as WorkspaceBlobError).unreachable).toBe(true)
+    expect((error as WorkspaceBlobError).unreachable).toBe(NOT_UP)
 
     // The count of blob rows: none.
     const sql = (() => Promise.resolve([{ n: 0 }])) as unknown as Sql
@@ -128,6 +159,16 @@ describe('the workspace before the backend is up', () => {
     expect(await files.bytesStatus()).toEqual({ store: 'blobs', backend: 's3' })
   })
 
+  it('names the kind of a backend URL that does not answer (#5889)', async () => {
+    const lookupFailed = (async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('getaddrinfo ENOTFOUND backendd'), { code: 'ENOTFOUND' }) })
+    }) as typeof fetch
+    const error = await new BackendWorkspaceBlobs('http://backendd:8080', { fetch: lookupFailed }).backend().catch((err: unknown) => err)
+    expect((error as WorkspaceBlobError).message).toBe('the backend could not be reached (/healthz)')
+    expect((error as WorkspaceBlobError).unreachable).toBe('ENOTFOUND')
+    expect(transportKind(new DOMException('timed out', 'TimeoutError'))).toBe('TimeoutError')
+  })
+
   it('names no presigned URL as the backend not up', async () => {
     const backendPort = await freePort()
     await startBackend(backendPort)
@@ -135,5 +176,7 @@ describe('the workspace before the backend is up', () => {
     const error = await new BackendWorkspaceBlobs(`http://127.0.0.1:${backendPort}`).put(Buffer.from('x')).catch((err: unknown) => err)
     expect(error).toBeInstanceOf(WorkspaceBlobError)
     expect((error as WorkspaceBlobError).message).toBe('the backend could not be reached (PUT)')
+    // Not the backend: nothing that waits for the backend reads it (#5889).
+    expect((error as WorkspaceBlobError).unreachable).toBeUndefined()
   })
 })
