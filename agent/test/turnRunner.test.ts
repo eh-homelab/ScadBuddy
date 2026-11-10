@@ -1,5 +1,5 @@
 import type { HookCallbackMatcher, HookEvent, HookInput } from '@anthropic-ai/claude-agent-sdk'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { ApprovalRequest } from '../src/harness/permissions.js'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { createTurnSlot, slotHooks, slotHttpContext, type TurnContext } from '../src/sessions/turnSlot.js'
@@ -8,7 +8,7 @@ import { TurnTrace } from '../src/telemetry/turn.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { harnessTierOf } from '../src/harness/run.js'
 import { TOOL_SEARCH } from '../src/harness/toolSearch.js'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
@@ -74,6 +74,7 @@ describe('TurnRunner', () => {
   ])("records a remote plugin's and an allowed package's tools at the gate's tier, %s (#5895)", async (_, turnTools) => {
     // An allowed package (`allow_refused`) that names Bash, so the turn loads its copy and offers Bash.
     const dir = await mkdtemp(path.join(os.tmpdir(), 'runner-tier-pkg-'))
+    onTestFinished(() => rm(dir, { recursive: true, force: true }))
     await mkdir(path.join(dir, '.claude-plugin'))
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'shell' }))
     await mkdir(path.join(dir, 'skills', 'run'), { recursive: true })
