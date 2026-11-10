@@ -390,9 +390,10 @@ export async function dirFileSha256(dir: string, rel: string): Promise<string | 
   let handle
   try {
     handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
-  } catch (err) {
-    if (missing(err) || (err as NodeJS.ErrnoException).code === 'ELOOP') return undefined
-    throw err
+  } catch {
+    // Gone, a link (ELOOP), or not readable (EACCES): no sha256 for this one file, never a
+    // failure of the call that asked (the sandbox's sync records it as `large`).
+    return undefined
   }
   try {
     if (!(await handle.stat()).isFile()) return undefined
