@@ -60,7 +60,7 @@ describe("the session's own built-ins in every turn", () => {
     const turn = await assemble({ access: [row('ScheduleWakeup', 'off')] })
     expect(turn.fingerprintParts.servedBuiltins).not.toContain('ScheduleWakeup')
     expect(turn.fingerprintParts.servedBuiltins).toContain('CronCreate')
-    expect(await turn.run.live!.access('mcp__builtin__ScheduleWakeup', { delaySeconds: 60 })).toBeUndefined()
+    expect(await turn.run.live!.access('mcp__builtin__ScheduleWakeup', { delaySeconds: 60 })).toBe('off')
     const named = await assemble({ access: [row('WebFetch', 'off')], packages: await allowed('fetcher', ['WebFetch']) })
     expect(named.fingerprintParts.servedBuiltins).not.toContain('WebFetch')
     // Nor Claude Code's own in its place.
@@ -102,6 +102,22 @@ describe("the session's own built-ins in every turn", () => {
     expect(await shell.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('outward')
     expect(shell.eventTierOf('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('outward')
     expect(shell.run.systemPromptAppend).not.toContain('which is off here')
+  })
+
+  it('runs a Monitor command at write when an admin set Bash on at write', async () => {
+    const turn = await assemble({ access: [row('Bash', 'write')] })
+    expect(turn.run.nativeTools?.find((t) => t.name === 'Bash')).toEqual({ name: 'Bash', tier: 'write' })
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('write')
+    expect(turn.eventTierOf('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('write')
+    // A WebSocket still asks first.
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', ws: { url: 'wss://example.com' } })).toBe('outward')
+  })
+
+  it("answers off for one of the session's own the turn does not serve, even when a package names it", async () => {
+    const turn = await assemble({ access: [row('WebFetch', 'off')], packages: await allowed('fetcher', ['WebFetch']) })
+    expect(await turn.run.live!.access('mcp__builtin__WebFetch', { url: 'https://example.com', prompt: 'p' })).toBe('off')
+    const flow = await assemble({ background: false })
+    expect(await flow.run.live!.access('mcp__builtin__CronCreate', { cron: '1 * * * *', prompt: 'p' })).toBe('off')
   })
 
   it('refuses a Monitor command, never asking, when Bash is switched on after the turn was assembled', async () => {

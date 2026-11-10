@@ -4,7 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
-import { monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS } from './nativeBuiltins.js'
+import { monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS, SESSION_NAMES } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -81,6 +81,8 @@ export function liveAccess(
     if (declared !== undefined) return resolver.native(harnessName, declared, builtins.get(harnessName) ?? [])
     // The session's own: its item too; a Monitor's by its source as well (nativeBuiltins.ts `monitorAccess`).
     const own = served.get(harnessName)
+    // One of the session's own the turn does not serve (its item was off when it was assembled, or a flow's background one): off, as its item.
+    if (!own && turn.served && harnessName.startsWith(SERVED_PREFIX) && SESSION_NAMES.has(harnessName.slice(SERVED_PREFIX.length))) return 'off'
     if (own) {
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
       if (own.name !== 'Monitor' || access === 'off') return access

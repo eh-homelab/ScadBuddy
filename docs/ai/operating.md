@@ -287,9 +287,9 @@ main on 2026-11-01:
     goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
     ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
     tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
-    A session whose plugin package names Claude Code built-ins that the session serves also
-    gets the note on those, after the fixed part; it is per turn, so not in
-    `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
+    Every session turn also gets a note on the session's own built-ins it serves (`WebFetch`,
+    `WebSearch` and, outside a flow, the background ones; #5870), after the fixed part; it is
+    per turn, so not in `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
     before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
     static and its cache is shared across sessions
     ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
