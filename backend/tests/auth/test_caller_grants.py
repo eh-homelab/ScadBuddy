@@ -171,7 +171,8 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
             asyncio.run(run())
         with store.pool.connection() as conn:
             # Its uploads, slices, slice starts, background slices, folderless projects
-            # and destination touches too (#5298 Tasks 25, 26).
+            # and destination touches too (#5298 Tasks 25, 26), and its print links, sends
+            # and outputs' last prints (Task 28).
             for table in (
                 "print_outcomes",
                 "events",
@@ -181,6 +182,9 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
                 "print_preview_slices",
                 "folderless_projects",
                 "destination_touches",
+                "print_links",
+                "print_sends",
+                "output_last_prints",
             ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))

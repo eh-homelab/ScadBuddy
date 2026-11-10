@@ -16,8 +16,8 @@ const EMPTY_ADDRESS = { recipient: '', street: '', street2: '', locality: '', re
 
 /**
  * Submit (spec 2026-11-02 §5.5): a name, an email, one of the shop's shipping options (priced in the
- * shop's currency, which the draft names apart from the cart's) and, when that option
- * ships, the address. The shop mails a link to the order to the email.
+ * draft's currency: the draft lists none when the shop's has changed since the cart was made) and,
+ * when that option ships, the address. The shop mails a link to the order to the email.
  * One `Idempotency-Key` per submit: sent again after a failure, the same form is the
  * same submit to the shop, which makes one order and sends one mail. The bot check
  * (§5.8) shows its widget while it is on, and each send takes a new token. A cart sent
@@ -144,7 +144,7 @@ export function SubmitForm({ draft, onSubmitted, onSent }: Props) {
             {options.map((option) => (
               <label key={option.id} className="sf-choice">
                 <RadioGroupItem value={option.id} />
-                {` ${option.label} — ${formatMoney(option.amount_minor, draft.shipping_currency, draft.shipping_minor_exponent)}`}
+                {` ${option.label} — ${formatMoney(option.amount_minor, draft.currency, draft.minor_exponent)}`}
               </label>
             ))}
           </RadioGroup>
