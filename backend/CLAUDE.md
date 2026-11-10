@@ -533,7 +533,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   address, IPv6 /64) with `FAILED_CHECKS` (10) failed checks in 10 minutes, or any client
   of a prefix (IPv4 /24, IPv6 /48) with 100, is refused with no Siteverify call
   (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
-  without tracking them, never refusing them). A
+  without tracking them, never refusing them). A send with no token is refused but not
+  counted: it costs no Siteverify call. A
   design request checks its upload allowance first, and only a passed check spends it.
   The edge asks for the verdict once, never retried, with 15 s to answer; no answer is
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
@@ -542,7 +543,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   before it reads its body. Today only design requests (`request`) take it; the actions
   `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
   routes still to come. The edge's page CSP (`storefront/static.py`) names
-  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
+  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
+  and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the

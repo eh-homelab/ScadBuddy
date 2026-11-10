@@ -783,6 +783,15 @@ class SettingsPatch(BaseModel):
     #: clears it, and saving one needs the KEK (`api/settings.py`).
     storefront_turnstile_site_key: str | None = Field(default=None, max_length=200)
     storefront_turnstile_secret: str | None = Field(default=None, max_length=200)
+
+    @field_validator("storefront_turnstile_site_key")
+    @classmethod
+    def _site_key_not_blank(cls, value: str | None) -> str | None:
+        """A site key of only spaces is refused: it would read as unset (#5283)."""
+        if value is not None and value and not value.strip():
+            raise ValueError("the bot check's site key is blank; clear it with null instead")
+        return value
+
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None
