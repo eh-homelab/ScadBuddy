@@ -1210,8 +1210,8 @@ class Lifecycle:
     ) -> Order:
         """`set_shipping_option`'s write on the locked ``order``, with no check of who
         asks or of the state: the order as the write left it. An option is priced in the
-        shop's currency and the order may be in another (a cart made before the shop
-        changed it); there is no conversion, so that is a 409
+        shop's currency and the order may be in another (a back-office order made before
+        the shop changed it); there is no conversion, so that is a 409
         `shipping_currency_mismatch` (`_shipping_in_currency`). None removes the shipping
         charges in any currency."""
         charges: list[ChargeInput] = [
