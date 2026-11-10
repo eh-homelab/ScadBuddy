@@ -1604,6 +1604,20 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(await pending).toEqual({ back: false, message: expect.stringMatching(/carry on without the tab/) })
   })
 
+  it('says the call stopped when its own signal aborts while its slow check runs (#5991 review)', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    const call = new AbortController()
+    const waited = await waitForTab(gate, never, noop)({
+      tool: 'browser_snapshot',
+      toolUseId: 'toolu_1',
+      signal: call.signal,
+      isBack: gone,
+      slow: () => (call.abort(), Promise.resolve('slow, try again')),
+    })
+    expect(waited).toEqual({ back: false, message: 'The call stopped before it waited for the tab.' })
+    expect(asked).toHaveLength(0)
+  })
+
   it('stops asking a slow owner after as many tries as the turn has waits, and latches the turn', async () => {
     const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
     let slowAsked = 0
