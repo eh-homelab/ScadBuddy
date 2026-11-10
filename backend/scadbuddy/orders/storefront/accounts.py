@@ -479,14 +479,28 @@ def account_owns_order(conn: Conn, account_id: str, order_id: str) -> bool:
     return bool(row and row["owns"])
 
 
-def attach_order(conn: Conn, account_id: str, order_id: str) -> None:
-    """The order joins the account: its link was opened while signed in (§5.2), or it was
-    submitted while signed in. The caller checked the link or the cart. A second attach
-    does nothing."""
+def submitted(conn: Conn, order_id: str) -> bool:
+    """Whether the order was submitted (a cart was not): only that has an order page."""
+    row = conn.execute(
+        "SELECT submitted_at IS NOT NULL AS done FROM orders WHERE id = %s", (order_id,)
+    ).fetchone()
+    return bool(row and row["done"])
+
+
+def attach_order(conn: Conn, account_id: str, order_id: str, link_id: str | None = None) -> None:
+    """The order joins the account: its link was opened while signed in (§5.2, pass the
+    link's id as ``link_id``), or it was submitted while signed in (no ``link_id``). The
+    caller checked the link or the cart.
+
+    A row that exists is never changed, so ``link_id`` is never set or replaced: a submit's
+    row (``link_id`` NULL) always wins over a later link's, and a link-made row stays bound
+    to the link that made it. A link-made row goes only with its link: revoking link A
+    removes A's row (`links.revoke_order_links`), and a later view through a live link B
+    attaches the order again. An expiry removes nothing; only a revoke does."""
     conn.execute(
-        "INSERT INTO storefront_account_orders (account_id, order_id) VALUES (%s, %s)"
-        " ON CONFLICT DO NOTHING",
-        (account_id, order_id),
+        "INSERT INTO storefront_account_orders (account_id, order_id, link_id)"
+        " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+        (account_id, order_id, link_id),
     )
 
 

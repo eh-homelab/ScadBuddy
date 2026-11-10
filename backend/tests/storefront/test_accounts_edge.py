@@ -187,7 +187,7 @@ def test_sign_out_with_no_visitor_cookie_sets_one_visitor(
     "cookie",
     [
         f"s1.{TOKEN}.{'A' * 43}",  # a mac the edge did not make
-        f"s1.{TOKEN}.{'A' * 43}",
+        f"v1.{TOKEN}.{'A' * 43}",  # a version the edge does not make
         "not-a-cookie",
     ],
 )

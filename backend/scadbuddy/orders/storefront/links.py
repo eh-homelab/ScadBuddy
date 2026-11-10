@@ -66,7 +66,17 @@ def create_order_link(conn: Conn, kek: Kek | None, order_id: str, to: str) -> tu
 
 
 def revoke_order_links(conn: Conn, order_id: str) -> int:
-    """Revoke every live link of the order, dropping each one's sealed token. How many."""
+    """Revoke every live link of the order, dropping each one's sealed token. How many.
+
+    The account attachments those links made (`accounts.attach_order`'s ``link_id``) go in
+    the same transaction, so a revoked link leaves no way in for the account that opened
+    it; a submit-made attachment (no link) stays. A later view through another live link
+    attaches again."""
+    conn.execute(
+        "DELETE FROM storefront_account_orders WHERE link_id IN"
+        " (SELECT id FROM storefront_order_links WHERE order_id = %s AND revoked_at IS NULL)",
+        (order_id,),
+    )
     return conn.execute(
         "UPDATE storefront_order_links SET revoked_at = clock_timestamp(), token_sealed = NULL,"
         " dek_sealed = NULL, kek_id = NULL WHERE order_id = %s AND revoked_at IS NULL",

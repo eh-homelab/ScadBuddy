@@ -70,7 +70,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import Conn
-from scadbuddy.orders.storefront.accounts import account_owns_order, attach_order
+from scadbuddy.orders.storefront.accounts import account_owns_order, attach_order, submitted
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import link_by_token, mark_opened, token_sha256
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
@@ -197,6 +197,8 @@ def resolve(conn: Conn, reader: Reader) -> Access | None:
             return None
         if not account_owns_order(conn, reader.account_id, reader.order_id):
             return None
+        if not submitted(conn, reader.order_id):
+            return None  # A cart is not an order page.
         return Access(
             order_id=reader.order_id, session=f"account:{reader.account_id}", link_id=None
         )
@@ -500,9 +502,12 @@ async def _build(state: AppState, rows: _Rows) -> CustomerOrderView:
     )
 
 
-async def view(state: AppState, reader: Reader) -> CustomerOrderView | None:
+async def view(state: AppState, reader: Reader, *, attach: bool = True) -> CustomerOrderView | None:
     """The order ``reader`` opens, as its customer reads it; None when it opens none. The
-    first view stamps the link's ``opened_at``."""
+    first view stamps the link's ``opened_at``. A link opened while signed in attaches the
+    order to the account, bound to that link (`accounts.attach_order`), only when
+    ``attach``: the view that answers a write passes False, so only an explicit view
+    attaches."""
     orders = _orders(state)
 
     def read() -> _Rows | None:
@@ -512,9 +517,9 @@ async def view(state: AppState, reader: Reader) -> CustomerOrderView | None:
                 return None
             if access.link_id is not None:
                 mark_opened(conn, access.link_id)
-                if isinstance(reader, ByLink) and reader.account_id is not None:
+                if attach and isinstance(reader, ByLink) and reader.account_id is not None:
                     # A link opened while signed in joins that account (spec §5.2).
-                    attach_order(conn, reader.account_id, access.order_id)
+                    attach_order(conn, reader.account_id, access.order_id, access.link_id)
             return _read(conn, orders, access.order_id)
 
     rows = await asyncio.to_thread(read)
@@ -629,7 +634,7 @@ async def _write(
         return None
     except LifecycleError as error:
         raise _refusal(error) from None
-    return await view(state, reader)
+    return await view(state, reader, attach=False)
 
 
 def _actor(access: Access, order: Order) -> Actor:

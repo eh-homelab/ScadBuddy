@@ -28,7 +28,7 @@ from scadbuddy.orders.lifecycle import Lifecycle, ManualQuoteInput, NewModelItem
 from scadbuddy.orders.models import Actor, Order, OrderItem, Revision
 from scadbuddy.orders.numbers import next_number
 from scadbuddy.orders.storefront import order_page
-from scadbuddy.orders.storefront.accounts import SignedIn, account_owns_order
+from scadbuddy.orders.storefront.accounts import SignedIn, account_owns_order, attach_order
 from scadbuddy.orders.storefront.links import revoke_order_links
 from scadbuddy.orders.storefront.mail import issue_link
 from scadbuddy.orders.storefront.order_page import ITEM_WORDS, ORDER_WORDS, customer_file_key
@@ -450,7 +450,7 @@ def test_the_last_acceptance_accepts_the_order_as_the_customer(
     assert by.session == f"link:{link['id']}"
 
 
-@pytest.mark.xfail(reason="closing helper lands with #5923", strict=True)
+@pytest.mark.xfail(reason="closing helper lands with #5923", strict=True, raises=AssertionError)
 def test_the_customers_last_accept_closes_an_open_deposit_requests_page(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -802,3 +802,115 @@ def test_an_account_answers_and_accepts_as_the_orders_customer(
     [by] = [e.by for e in accepted]
     assert by.principal == f"customer:{made.order.customer_id}"
     assert by.session == f"account:{me.account.id}"
+
+
+def test_a_cart_the_account_owns_is_an_empty_404(api: TestClient, crud: CrudCaller) -> None:
+    me = signed_in(api)
+    orders = _orders(api)
+    found = VisitorStore(_state(api).projection.pool).ensure("c" * 43)
+    cart = orders.lifecycle.ensure_draft(found.id, visitor_actor(found), currency="USD")
+    with orders.store.transaction() as conn:
+        attach_order(conn, me.account.id, cart.id)
+    assert owns(api, me.account.id, cart.id)
+    reader = Reader(crud, order_id=cart.id, session=me.session_token)
+    for r in (reader.view(), reader.cancel(key="k1")):
+        assert (r.status_code, r.content) == (404, b"")
+
+
+def test_one_key_of_two_accounts_never_replays_the_others_reply(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    a_made = make_order(api, crud, visitor="a")
+    b_made = make_order(api, crud, visitor="b")
+    a, b = signed_in(api), signed_in(api, "bob@example.com")
+    Reader(crud, a_made.token, session=a.session_token).view()
+    Reader(crud, b_made.token, session=b.session_token).view()
+    ra = Reader(crud, order_id=a_made.order.id, session=a.session_token)
+    rb = Reader(crud, order_id=b_made.order.id, session=b.session_token)
+    first = ra.cancel("changed my mind", key="shared")
+    assert first.status_code == 200, first.text
+    second = rb.cancel("changed my mind", key="shared")
+    assert second.status_code != 200 or second.json() != first.json()
+    assert _orders(api).store.order(b_made.order.id).status != "cancelled"  # type: ignore[union-attr]
+
+
+def link_rows(api: TestClient, account_id: str) -> list[dict[str, Any]]:
+    return rows(
+        api,
+        "SELECT order_id, link_id FROM storefront_account_orders WHERE account_id = %s",
+        account_id,
+    )
+
+
+def live_link_id(api: TestClient, order_id: str) -> str:
+    [row] = rows(
+        api,
+        "SELECT id FROM storefront_order_links WHERE order_id = %s AND revoked_at IS NULL",
+        order_id,
+    )
+    return str(row["id"])
+
+
+def test_a_revoke_removes_a_link_made_attachment(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    Reader(crud, made.token, session=me.session_token).view()
+    assert link_rows(api, me.account.id) == [
+        {"order_id": made.order.id, "link_id": live_link_id(api, made.order.id)}
+    ]
+    with _orders(api).store.transaction() as conn:
+        revoke_order_links(conn, made.order.id)
+    assert link_rows(api, me.account.id) == []
+    gone = Reader(crud, order_id=made.order.id, session=me.session_token).view()
+    assert (gone.status_code, gone.content) == (404, b"")
+
+
+def test_a_submit_made_attachment_survives_a_revoke(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    with _orders(api).store.transaction() as conn:
+        attach_order(conn, me.account.id, made.order.id)
+    with _orders(api).store.transaction() as conn:
+        revoke_order_links(conn, made.order.id)
+    assert link_rows(api, me.account.id) == [{"order_id": made.order.id, "link_id": None}]
+    assert Reader(crud, order_id=made.order.id, session=me.session_token).view().status_code == 200
+
+
+def test_a_submit_row_is_not_overwritten_by_a_later_link_attach(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    with _orders(api).store.transaction() as conn:
+        attach_order(conn, me.account.id, made.order.id)
+    assert Reader(crud, made.token, session=me.session_token).view().status_code == 200
+    assert link_rows(api, me.account.id) == [{"order_id": made.order.id, "link_id": None}]
+    with _orders(api).store.transaction() as conn:
+        revoke_order_links(conn, made.order.id)
+    assert owns(api, me.account.id, made.order.id)
+
+
+def test_after_a_link_is_revoked_a_view_through_another_link_attaches_again(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    Reader(crud, made.token, session=me.session_token).view()
+    orders = _orders(api)
+    with orders.store.transaction() as conn:
+        token_b = issue_link(conn, orders.lifecycle.kek, made.order.id, made.order.label, "a@b.co")
+    assert link_rows(api, me.account.id) == []  # Link A is revoked; so is its attachment.
+    assert Reader(crud, made.token, session=me.session_token).view().status_code == 404
+    assert Reader(crud, token_b, session=me.session_token).view().status_code == 200
+    assert link_rows(api, me.account.id) == [
+        {"order_id": made.order.id, "link_id": live_link_id(api, made.order.id)}
+    ]
+
+
+def test_the_view_that_answers_a_write_does_not_attach(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    me = signed_in(api)
+    r = Reader(crud, made.token, session=me.session_token).cancel(key="k1")
+    assert r.status_code == 200, r.text
+    assert link_rows(api, me.account.id) == []
+    assert not owns(api, me.account.id, made.order.id)

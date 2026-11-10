@@ -1166,7 +1166,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     token's sha256.
   - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
     The order page attaches an order whose link was opened while signed in, in its own
-    transaction.
+    transaction, and only for an explicit view (never the view that answers a write). A
+    link-made `storefront_account_orders` row holds its link's id (`link_id`, FK with
+    ON DELETE CASCADE); a submit's row has none. `attach_order` is INSERT … ON CONFLICT
+    DO NOTHING, so a row is never changed: a submit row always wins. `revoke_order_links`
+    deletes the link-made rows of the links it revokes, in its transaction; a later view
+    through another live link attaches again. Only a revoke removes such a row, never an
+    expiry. `/o?order=<id>` also needs a submitted order: a cart is the same empty 404.
   - Old code and failure rows are pruned as new rows are written, and every expired
     session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
     joined an account.

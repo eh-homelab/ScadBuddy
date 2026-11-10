@@ -466,7 +466,7 @@ async def order_accept(quote_id: str, request: Request, crud: Crud, visitor_id: 
 
 @visitor_router.post("/order/cancel")
 async def order_cancel(request: Request, crud: Crud, visitor_id: Visitor) -> Any:
-    """The customer cancels the order while nothing is approved."""
+    """The customer cancels the order while nothing is approved and nothing is paid."""
     key = _request_key(request, visitor_id)
     body = await _body(request, "order_body_invalid")
     return await _order(request, crud, "cancel", body, key)
