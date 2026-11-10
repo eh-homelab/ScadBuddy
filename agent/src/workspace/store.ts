@@ -930,8 +930,9 @@ export class SessionFiles {
     if (!store) return { released: 0, held: 0 }
     if (!this.locks) return this.#reconcile(store, graceMs)
     // One replica at a time: the lock is held on a lock-client connection (db.ts
-    // `createLockClient`), never one of the stores'. With every lock connection out, or the
-    // lock held by another replica, this one skips; the next tick tries again.
+    // `createLockClient`), never one of the stores'. With every lock connection out this one
+    // skips `no_connection`, and the sweeper tries again at its next tick; with the lock held
+    // by another replica it skips `held`, since that replica runs it this hour.
     const lease = await this.locks.take()
     if (!lease) return { released: 0, held: 0, skipped: 'no_connection' }
     // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
@@ -978,7 +979,8 @@ export class SessionFiles {
 
   /**
    * Sweeps every `everyMs` once `ready` says the database is, and reconciles the holds on the
-   * first tick past RECONCILE_EVERY_MS since the last; the returned function stops it.
+   * first tick past RECONCILE_EVERY_MS since the last; a reconcile that skipped
+   * `no_connection` or failed is tried again at the next tick. The returned function stops it.
    */
   startSweeper(everyMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
@@ -989,8 +991,15 @@ export class SessionFiles {
           await this.sweep()
           if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
           this.#reconciledAt = Date.now()
-          // No replica ran it this hour when no lock connection was free: try at the next tick.
-          if ((await this.reconcile()).skipped === 'no_connection') this.#reconciledAt = 0
+          // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
+          let skipped: ReconcileSkipped | undefined
+          try {
+            skipped = (await this.reconcile()).skipped
+          } catch (err) {
+            this.#reconciledAt = 0
+            throw err
+          }
+          if (skipped === 'no_connection') this.#reconciledAt = 0
         })
         .catch(options.onError ?? (() => {}))
     }
