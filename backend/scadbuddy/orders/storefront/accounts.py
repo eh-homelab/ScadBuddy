@@ -18,8 +18,10 @@ Codes:
   may lack, so the salt is the choice.
 - The digests are compared in constant time (`hmac.compare_digest`), against every live
   code, with no early exit. A correct live code always signs in.
-- A verify holds a transaction lock per address (`pg_advisory_xact_lock`) before it reads
-  the codes, so guesses at once cannot spend more than a code's `CODE_TRIES`.
+- A code request and a verify each hold a transaction lock per address
+  (`pg_advisory_xact_lock`, `_lock_address`) before they count or read the codes, so
+  requests at once cannot pass `CODES_PER_ADDRESS` and guesses at once cannot spend more
+  than a code's `CODE_TRIES`. Each caller must run them inside a transaction.
 - Limits:
   - `CODES_PER_ADDRESS` codes an hour per address, and `CODES_PER_CLIENT` per client
     address. Over either is `SignInLimitedError` with the seconds to wait.
@@ -30,8 +32,10 @@ Codes:
   hour from any number of clients, each with a chance of at most `LIVE_CODES` in 30^8
   (about 2^39). A success then takes about 30^8 / (3 * 25), about 8.7 * 10^9 hours.
   Failures are kept by address too, for the logs only.
-- The route that asks for a code takes the bot check (Turnstile, action ``sign_up``)
-  whenever a site key is set (`storefront/turnstile.py` `require_turnstile`).
+- Whenever a site key is set, the route that asks for a code takes the bot check
+  (Turnstile, action ``sign_up``), and the route that verifies one takes it too (action
+  ``sign_in``), so automated guessing needs a challenge (`storefront/turnstile.py`
+  `require_turnstile`).
 
 Enumeration: `request_code` does the same thing for every valid address, whether or not
 an account exists. It always makes and returns a code, so the route can always queue the
@@ -145,6 +149,14 @@ def _limit(conn: Conn, table: str, column: str, value: str, at: str, most: int) 
         raise SignInLimitedError(max(1, math.ceil(wait)))
 
 
+def _lock_address(conn: Conn, address: str) -> None:
+    """The address's sign-in lock, held to the end of the caller's transaction: code
+    requests and verifies of one address run one at a time."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"storefront_signin:{address}",)
+    )
+
+
 def request_code(conn: Conn, email: str, client: str) -> str:
     """A new code for ``email``, asked from ``client``, to mail to it.
 
@@ -154,6 +166,8 @@ def request_code(conn: Conn, email: str, client: str) -> str:
     address's live codes stay good, up to `LIVE_CODES`; only the oldest beyond that is
     voided."""
     address = normalized_email(email)
+    # Requests at once for one address are counted one at a time, so none passes the cap.
+    _lock_address(conn, address)
     conn.execute("DELETE FROM storefront_sign_in_codes WHERE created_at < now() - %s", (KEEP_ROWS,))
     _limit(conn, "storefront_sign_in_codes", "email", address, "created_at", CODES_PER_ADDRESS)
     _limit(conn, "storefront_sign_in_codes", "client", client, "created_at", CODES_PER_CLIENT)
@@ -212,9 +226,7 @@ def verify_code(
         _failed(conn, client, None)
         return None
     # One verify of an address at a time, so guesses at once never overspend a code.
-    conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"storefront_signin:{address}",)
-    )
+    _lock_address(conn, address)
     rows = conn.execute(
         "SELECT id, code_sha256 FROM storefront_sign_in_codes"
         " WHERE email = %s AND used_at IS NULL AND expires_at > now() AND attempts < %s"

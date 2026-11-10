@@ -205,6 +205,26 @@ def test_guesses_at_once_never_overspend_a_code(conn: Conn, pg_conninfo: str) ->
     assert row is not None and row["attempts"] == CODE_TRIES
 
 
+def test_requests_at_once_never_pass_the_address_cap(conn: Conn, pg_conninfo: str) -> None:
+    requests = 10
+    start = threading.Barrier(requests)
+
+    def ask(n: int) -> bool:
+        try:
+            with psycopg.connect(pg_conninfo, row_factory=dict_row) as own, own.transaction():
+                start.wait()
+                request_code(own, EMAIL, f"198.51.100.{n}")
+        except SignInLimitedError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(requests) as pool:
+        issued = sum(pool.map(ask, range(requests)))
+    assert issued == CODES_PER_ADDRESS
+    row = conn.execute("SELECT count(*) AS n FROM storefront_sign_in_codes").fetchone()
+    assert row is not None and row["n"] == CODES_PER_ADDRESS
+
+
 def test_codes_are_limited_per_address_and_per_client(conn: Conn) -> None:
     for _ in range(CODES_PER_ADDRESS):
         request_code(conn, EMAIL, CLIENT)
