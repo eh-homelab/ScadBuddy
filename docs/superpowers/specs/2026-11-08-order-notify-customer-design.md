@@ -475,8 +475,9 @@ def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | No
   comes back `skipped` (the storefront began to mail between the check and the claim)
   sends nothing and says so in its answer's `warning`.
 - `also_when_storefront_mails: true` sends anyway. The approval summary says "the
-  storefront mail also sends this". It exists for a second channel (an SMS nudge); a flow
-  never sets it.
+  storefront mail also sends this". It exists for a second channel (an SMS nudge), and for
+  a person on the order page who answers yes to "Send it here too?" or presses "Send here
+  too" on a skipped row (§7.2); a flow never sets it.
 - A skip is a `skipped` row with `reason: storefront_mail` and an audit row, so the order
   shows why no plugin message went.
 

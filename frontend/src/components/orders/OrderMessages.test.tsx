@@ -49,6 +49,37 @@ describe('OrderMessages (#5660)', () => {
     expect(messages[0]).toMatchObject({ status: 'sent', resend_of: first.id })
   })
 
+  it('serves a retry after a lost answer from its first claim, after the storefront began to mail it', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'failed', reason: 'transport' })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    mockLoseNextSendAnswer()
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    mockStorefrontMails()
+    await user.click(within(screen.getByRole('region', { name: 'Message to send' })).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    expect(screen.queryByRole('region', { name: 'Storefront mail' })).not.toBeInTheDocument()
+    expect(mockSendKeys()).toHaveLength(1)
+    expect(await api.orderMessages(ORDER_ACCEPTED)).toHaveLength(2)
+  })
+
+  it('previews a skipped message with the flag when "Send here too" is pressed', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'skipped', reason: 'storefront_mail' })
+    const bodies: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/messages/preview')) void request.clone().json().then((b) => bodies.push(b))
+    })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send here too' }))
+    await screen.findByRole('region', { name: 'Message to send' })
+    server.events.removeAllListeners()
+    expect(bodies).toEqual([expect.objectContaining({ also_when_storefront_mails: true })])
+  })
+
   it('sends nothing when the person says no to the storefront question', async () => {
     mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'failed', reason: 'transport' })
     mockStorefrontMails()

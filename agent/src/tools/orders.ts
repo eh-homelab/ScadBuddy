@@ -215,14 +215,20 @@ async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
 /**
  * What the backend's read-only check refuses before anything parks (§5.2): `already_notified`
  * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
- * template's news to the order's customer itself) unless `also_when_storefront_mails`.
+ * template's news to the order's customer itself) unless `also_when_storefront_mails`. With
+ * `key`, a key that already claimed a message refuses nothing: its claim answers that row (a
+ * retry after a lost answer is served from the first claim, never refused).
  */
-async function refuseIfTold(ctx: SendContext, args: SendArgs): Promise<void> {
+async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<void> {
   const { order_id, template } = args
+  const header = key === undefined ? {} : { header: { 'Idempotency-Key': key } }
   const check = await ok(
-    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', { params: { path: { order_id }, query: { template } } }),
+    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', {
+      params: { path: { order_id }, query: { template }, ...header },
+    }),
     `check order ${order_id}'s messages`,
   )
+  if (check.claimed) return
   const told = check.already_notified
   if (told && args.resend_of === undefined) {
     throw new ToolError(
@@ -382,7 +388,8 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
     )
   }
   // The preview's refusals stand at the send too: the storefront may have begun to mail it since.
-  await refuseIfTold(ctx, args)
+  // Under the claim's own key: a retry of a send already claimed is answered from that claim.
+  await refuseIfTold(ctx, args, idempotencyKey(ctx))
   return sendMessage(ctx, args, planned)
 }
 

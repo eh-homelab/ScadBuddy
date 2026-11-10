@@ -21,7 +21,9 @@ import type { RouteModule } from './module.js'
 //
 // The browser names the template, `resend_of` and the digest it saw; it never supplies the
 // text. A template the storefront mails itself is refused 409 `storefront_mail` by both, unless
-// the body has `also_when_storefront_mails` (the person said yes to sending it here too). Both come only from the UI (guard.ts `uiRequestProblem`) with a person's signed-in
+// the body has `also_when_storefront_mails` (the person said yes to sending it here too); a send
+// whose key already claimed a message is answered from that claim and refused nothing. Both
+// come only from the UI (guard.ts `uiRequestProblem`) with a person's signed-in
 // session (auth/browserSession.ts `requestSession`), as the binding's test send: no tool, no
 // flow and no /mcp client reaches them. A send is claimed and recorded in `order_messages` as
 // the tool's are (tools/orders.ts `personSend`), under the request's `Idempotency-Key`.

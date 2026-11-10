@@ -32,6 +32,7 @@ from scadbuddy.orders.problems import refused
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 ClaimKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=200)]
+CheckKey = Annotated[str | None, Header(alias="Idempotency-Key", min_length=1, max_length=200)]
 
 
 class MessageCheck(BaseModel):
@@ -42,6 +43,9 @@ class MessageCheck(BaseModel):
     #: The storefront mails this template's news to the order's customer itself (spec §8),
     #: so a claim without `also_when_storefront_mails` would be recorded `skipped`.
     storefront_mail: bool
+    #: The message the request's `Idempotency-Key` already claimed, if any. Then the other two
+    #: are null and false: a claim under that key answers this row and refuses nothing.
+    claimed: OrderMessage | None
 
 
 def _messages(orders: OrdersComponent) -> OrderMessages:
@@ -83,15 +87,26 @@ async def list_order_messages(order_id: str, orders: OrdersDep) -> list[OrderMes
         "true when the storefront mails this template's news to the order's customer itself "
         "(`quoted` and `shipped`, on an order with a live order link while a mail host is "
         "set), so a claim without `also_when_storefront_mails` would be recorded `skipped`. "
-        "409 `order_not_submitted` for a cart."
+        "With an `Idempotency-Key` that already claimed a message, `claimed` is that "
+        "message and neither refusal is answered, as the claim under that key would answer "
+        "its row; a key of another order is 409 `idempotency_key_reused`. 409 "
+        "`order_not_submitted` for a cart."
     ),
 )
 async def check_order_message(
-    order_id: str, orders: OrdersDep, template: Annotated[NotifyTemplate, Query()]
+    order_id: str,
+    orders: OrdersDep,
+    template: Annotated[NotifyTemplate, Query()],
+    idempotency_key: CheckKey = None,
 ) -> MessageCheck:
-    check_path(order_id)
-    told, mails = await _run(lambda: _messages(orders).check(order_id, template))
-    return MessageCheck(already_notified=told, storefront_mail=mails)
+    if idempotency_key is None:
+        check_path(order_id)
+    else:
+        check_path(order_id, idempotency_key)
+    told, mails, claimed = await _run(
+        lambda: _messages(orders).check(order_id, template, idempotency_key)
+    )
+    return MessageCheck(already_notified=told, storefront_mail=mails, claimed=claimed)
 
 
 @router.post(

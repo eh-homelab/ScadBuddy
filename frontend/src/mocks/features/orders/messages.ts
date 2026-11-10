@@ -152,11 +152,12 @@ export const handlers = [
         { status: 409 },
       )
     }
-    const refused = storefrontRefusal(body)
-    if (refused) return refused
+    // As the agent's: a key that already claimed is answered from its claim before any refusal.
     const key = request.headers.get('idempotency-key') ?? ''
     const claimed = claims.get(key)
     if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
+    const refused = storefrontRefusal(body)
+    if (refused) return refused
     const message = composed(String(params.id), template)
     const sent = mockOrderMessage(String(params.id), {
       template,
