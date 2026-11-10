@@ -36,13 +36,34 @@ function when(iso: string | null | undefined): string | null {
 }
 
 /**
- * A global tray id of Bambuddy's `ams_mapping` as Bambuddy names the tray: `ams_id * 4 +
- * slot` for an AMS, the AMS-HT's own id (128 and up, one slot), and -1 for an external
- * spool or a slot no tray feeds (`backend/scadbuddy/printers/ams_mapping.py`).
+ * The unit Bambuddy shows the A2L's AMS-Lite as: it reports unit 16 and Bambuddy folds
+ * it to 6 (`backend/scadbuddy/printers/status.py` `_A2L_BITS`), which
+ * {@link amsUnitLabel} names "AMS Lite".
  */
-function trayOfGlobalId(id: number): string {
+const AMS_LITE_UNIT = 6
+
+/**
+ * Whether the item prints on an A2L, the one printer with an AMS-Lite: by the model the
+ * file was sliced for, else the model the item waits for. Bambuddy names it "A2L" (the
+ * printer code N9, `backend/scadbuddy/bambuddy/filaments3mf.py`); a full name such as
+ * "Bambu Lab A2L" ends with it.
+ */
+function onA2l(item: QueueItem): boolean {
+  return [item.sliced_for_model, item.target_model].some((model) => /(^|\s)A2L$/i.test(model?.trim() ?? ''))
+}
+
+/**
+ * A global tray id of Bambuddy's `ams_mapping` as Bambuddy names the tray, by the rules
+ * of `backend/scadbuddy/printers/ams_mapping.py` (`_slot`): `ams_id * 4 + slot` for an
+ * AMS, the AMS-HT's own id (128 and up, one slot), the A2L's AMS-Lite (`AMS_LITE_ID`
+ * 16) by its local slot 0-3, and -1 for an external spool or a slot no tray feeds. The
+ * flat id alone cannot tell the AMS-Lite's slots from the first AMS's, so `a2l` says
+ * which printer the item is for.
+ */
+function trayOfGlobalId(id: number, a2l: boolean): string {
   if (id < 0) return 'External spool, or no tray'
   if (id >= 128) return `${amsUnitLabel(id)} · slot 1`
+  if (a2l && id < 4) return `${amsUnitLabel(AMS_LITE_UNIT)} · slot ${id + 1}`
   return `${amsUnitLabel(Math.floor(id / 4))} · slot ${(id % 4) + 1}`
 }
 
@@ -112,10 +133,12 @@ function ItemView({ item }: { item: QueueItem }) {
   const base = bambuddyBase()
   const job = item.scadbuddy ?? null
   // The output ScadBuddy queued, read once for its name, revision, parameters and colours.
-  const output = useAsync(
-    async () => (job?.output_id ? await api.getOutput(job.output_id).catch(() => null) : null),
+  // A failed read is said in its section, with a retry; the rest of the page stands.
+  const outputRead = useAsync(
+    async () => (job?.output_id ? await api.getOutput(job.output_id) : null),
     [job?.output_id],
-  ).data
+  )
+  const output = outputRead.data
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
@@ -145,9 +168,16 @@ function ItemView({ item }: { item: QueueItem }) {
 
         <div className="grid gap-4 lg:grid-cols-2">
           <QueueSection item={item} />
-          {job && <ScadBuddySection job={job} output={output ?? null} />}
+          {job && (
+            <ScadBuddySection
+              job={job}
+              output={output ?? null}
+              error={outputRead.error ?? null}
+              onRetry={() => outputRead.refresh()}
+            />
+          )}
           {item.ams_mapping && item.ams_mapping.length > 0 && (
-            <SlotsSection item={item} colours={output?.colors ?? []} />
+            <SlotsSection item={item} colours={output?.colors ?? []} a2l={onA2l(item)} />
           )}
         </div>
       </div>
@@ -258,11 +288,36 @@ function QueueSection({ item }: { item: QueueItem }) {
   )
 }
 
-/** What ScadBuddy queued: the output (its template, revision and parameters) or the library file. */
-function ScadBuddySection({ job, output: data }: { job: ScadBuddyJob; output: Output | null }) {
+/**
+ * What ScadBuddy queued: the output (its template, revision and parameters) or the
+ * library file. When the output cannot be read, the section says so and offers to read
+ * it again, rather than show no parameters.
+ */
+function ScadBuddySection({
+  job,
+  output: data,
+  error,
+  onRetry,
+}: {
+  job: ScadBuddyJob
+  output: Output | null
+  error: Error | null
+  onRetry: () => void
+}) {
   const link = 'font-medium text-primary underline underline-offset-4'
   return (
     <Section title="From ScadBuddy">
+      {error && (
+        <Alert role="alert" className="mb-3 border-warn/40 bg-warn/10 text-warn">
+          <TriangleAlertIcon aria-hidden="true" />
+          <AlertDescription className="text-warn">
+            <p>The output could not be read: {error.message}</p>
+            <Button variant="outline" size="sm" className="mt-2" onClick={onRetry}>
+              Try again
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
         {job.output_id && (
           <Fact
@@ -326,7 +381,7 @@ function ScadBuddySection({ job, output: data }: { job: ScadBuddyJob; output: Ou
  * The tray each filament slot of the plate draws from, as the item's `ams_mapping`
  * names it, beside the output's colour for that slot when ScadBuddy made it.
  */
-function SlotsSection({ item, colours }: { item: QueueItem; colours: readonly string[] }) {
+function SlotsSection({ item, colours, a2l }: { item: QueueItem; colours: readonly string[]; a2l: boolean }) {
   return (
     <Section title="Filament slots">
       <ol className="space-y-1 text-[13px]">
@@ -340,7 +395,7 @@ function SlotsSection({ item, colours }: { item: QueueItem; colours: readonly st
               />
             )}
             <span className="text-muted-foreground">Slot {index + 1}</span>
-            <span className="sb-num">{trayOfGlobalId(tray)}</span>
+            <span className="sb-num">{trayOfGlobalId(tray, a2l)}</span>
           </li>
         ))}
       </ol>

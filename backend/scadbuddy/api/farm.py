@@ -191,7 +191,7 @@ async def get_printer_cover(
     responses={404: {"description": "Bambuddy has no such queue item (any more)"}},
 )
 async def get_queue_item(
-    item_id: int, store: SettingsStoreDep, links: PrintLinksDep
+    item_id: Annotated[int, Path(ge=1)], store: SettingsStoreDep, links: PrintLinksDep
 ) -> FarmQueueItem:
     """One queue item, whoever queued it, in any state (#3744): Bambuddy's own
     ``GET /queue/{id}``, one call. A job ScadBuddy queued carries ``scadbuddy`` even

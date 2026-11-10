@@ -636,6 +636,17 @@ def test_a_gone_queue_item_is_a_404(client: TestClient) -> None:
 
 
 @respx.mock
+def test_a_queue_item_id_below_one_is_refused_before_bambuddy(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/queue/0").mock(return_value=httpx.Response(200, json=_item(205)))
+
+    response = client.get("/api/v1/farm/queue/0")
+
+    assert response.status_code == 422
+    assert not route.called
+
+
+@respx.mock
 def test_reading_one_queue_item_needs_read_status(client: TestClient) -> None:
     """``GET /queue/{id}`` needs ``queue:read_all`` or ``queue:read_own``
     (``print_queue.py`` lines 1858-1862 at f9080d1), which an API key holds with

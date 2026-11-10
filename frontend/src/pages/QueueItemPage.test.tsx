@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as embed from '../lib/embed'
 import { openExternal } from '../lib/embed'
 import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
+import type { QueueItem } from '../api/types'
 import { outputs } from '../mocks/fixtures'
+import { QUEUE_ITEM_ONLY } from '../mocks/features/printQueue'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { QueueItemPage } from './QueueItemPage'
@@ -26,6 +28,11 @@ function render(id: number | string) {
     </Routes>,
     { route: `/prints/queue/${id}` },
   )
+}
+
+/** Bambuddy answers `item` for its id. */
+function serve(item: QueueItem) {
+  server.use(http.get(`/api/v1/farm/queue/${item.id}`, () => HttpResponse.json(item)))
 }
 
 function Landed({ name }: { name: string }) {
@@ -94,6 +101,59 @@ describe('QueueItemPage (#3744)', () => {
       expect.stringContaining('AMS-A · slot 1'),
       expect.stringContaining('AMS-B · slot 2'),
     ])
+  })
+
+  it("names an A2L's trays by its AMS Lite, which the flat array gives by local slot", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, sliced_for_model: 'A2L', ams_mapping: [2] })
+    render(265)
+
+    const slots = within(await screen.findByRole('region', { name: 'Filament slots' })).getAllByRole('listitem')
+    expect(slots.map((slot) => slot.textContent)).toEqual([expect.stringContaining('AMS Lite · slot 3')])
+  })
+
+  it('names the same id on any other printer by its AMS', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, sliced_for_model: 'H2C', ams_mapping: [2] })
+    render(265)
+
+    const slots = within(await screen.findByRole('region', { name: 'Filament slots' })).getAllByRole('listitem')
+    expect(slots.map((slot) => slot.textContent)).toEqual([expect.stringContaining('AMS-A · slot 3')])
+  })
+
+  it('says when the output ScadBuddy queued cannot be read, rather than show no parameters', async () => {
+    server.use(
+      http.get(
+        '/api/v1/outputs/:id',
+        () =>
+          HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'The output store did not answer' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        { once: true },
+      ),
+    )
+    const { user } = render(265)
+
+    const ours = await screen.findByRole('region', { name: 'From ScadBuddy' })
+    expect(await within(ours).findByRole('alert')).toHaveTextContent('The output store did not answer')
+    expect(within(ours).queryByRole('table', { name: 'Parameters' })).toBeNull()
+
+    // A second read that answers shows the parameters.
+    await user.click(within(ours).getByRole('button', { name: 'Try again' }))
+    expect(await within(ours).findByRole('table', { name: 'Parameters' })).toHaveTextContent('Reagan')
+    expect(within(ours).queryByRole('alert')).toBeNull()
+  })
+
+  it("says a ScadBuddy item's print page opens once ScadBuddy links its archive", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, status: 'completed', archive_id: 140 })
+    render(265)
+
+    const printed = await screen.findByRole('status', { name: 'Printed' })
+    expect(printed).toHaveTextContent('archive 140')
+    expect(printed).toHaveTextContent('opens once ScadBuddy links the archive')
+    expect(screen.queryByTestId('landed')).toBeNull()
   })
 
   it('goes on to the print once ScadBuddy linked its archive', async () => {
