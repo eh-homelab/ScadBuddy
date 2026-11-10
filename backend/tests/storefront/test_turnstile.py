@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -309,6 +310,27 @@ def test_an_expired_block_behind_a_later_one_is_swept() -> None:
         failures.failed("192.0.2.3")
     assert failures.blocked("192.0.2.3")
     assert failures.blocked("203.0.113.1")
+
+
+async def test_a_slow_read_holds_page_loads_for_at_most_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scadbuddy.storefront.turnstile.SITE_KEY_BUDGET", 0.2)
+    reads = 0
+
+    class Crud:
+        async def turnstile_site_key(self) -> str | None:
+            nonlocal reads
+            reads += 1
+            await asyncio.Event().wait()  # never answers
+            return "key"
+
+    site_key = SiteKey()
+    started = time.monotonic()
+    loads = [site_key.get(Crud()) for _ in range(5)]  # type: ignore[arg-type]
+    assert await asyncio.gather(*loads) == [None] * 5
+    assert time.monotonic() - started < 1.0
+    assert reads == 1
 
 
 async def test_loads_at_once_after_the_ttl_share_one_read() -> None:

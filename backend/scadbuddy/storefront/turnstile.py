@@ -14,16 +14,17 @@ the form's ``action``, to ``POST …/storefront/turnstile/verify``, which answer
 - ``unavailable`` (a site key with no secret the CRUD side can read, or Cloudflare not
   answering) is 503 ``…/storefront/bot_check_unavailable``. The check fails closed.
 
-A token longer than Cloudflare's bound fails here, before any call, and so does a client
-with `FAILED_CHECKS` failed checks in `FAILED_WINDOW`, or one of a prefix with
-`PREFIX_FAILED_CHECKS` (`FailedChecks`). The verdict is asked once, never retried, with
-`TURNSTILE_VERIFY_SECONDS` to answer; a transport failure or a timeout is 503 and is not
-counted as a failed check. `SiteKey` is the CRUD side's site key, read at most once per
-`SITE_KEY_TTL` (30 s) per replica: the page's widget (`GET /api/store/v1/turnstile`) and
-the page's CSP (`static.py`) both read it, so the CSP names Cloudflare only while the
-check is on. While a read within that time found no key, `require_turnstile` passes with
-no call, so a key the shop sets takes effect within 30 s. Siteverify itself stays on the
-CRUD side.
+Unless the check is known off (below), a token longer than Cloudflare's bound fails here,
+before any call, and so does a client with `FAILED_CHECKS` failed checks in
+`FAILED_WINDOW`, or one of a prefix with `PREFIX_FAILED_CHECKS` (`FailedChecks`). The
+verdict is asked once, never retried, with `TURNSTILE_VERIFY_SECONDS` to answer; a
+transport failure or a timeout is 503 and is not counted as a failed check. `SiteKey` is
+the CRUD side's site key, read at most once per `SITE_KEY_TTL` (30 s) per replica: the
+page's widget (`GET /api/store/v1/turnstile`) and the page's CSP (`static.py`) both read
+it, so the CSP names Cloudflare only while a site key is set, and until the edge's first
+site-key read succeeds (`SiteKey.ever_read`). While a read within that time found no key,
+`require_turnstile` passes with no call, so a key the shop sets takes effect within 30 s.
+Siteverify itself stays on the CRUD side.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from starlette.requests import Request
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address, client_key
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
-from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.crud.storefront import SITE_KEY_BUDGET, StorefrontCrud
 from scadbuddy.storefront.wire import (
     MAX_TURNSTILE_TOKEN_CHARS,
     STOREFRONT_PROBLEMS,
@@ -176,7 +177,8 @@ class FailedChecks:
     an IPv6 /48) with `PREFIX_FAILED_CHECKS` failures in the window, so rotating across
     /64s does not escape the bound either. The price of that bound: honest neighbours in
     the prefix are refused too, but only after 100 failures in 10 minutes from it. A
-    refusal is 403 ``bot_check_failed`` with no Siteverify call.
+    refusal is 403 ``bot_check_failed`` with no Siteverify call. A send with no token is
+    refused 403 too but never counted: the CRUD side makes no Siteverify call for it.
 
     Each tier tracks at most `MAX_FAILING_CLIENTS` keys. A new key evicts the least
     recently failed unblocked key; a blocked key is never evicted. When every tracked key
@@ -280,6 +282,10 @@ class SiteKey:
         return False, None
 
     async def get(self, crud: StorefrontCrud) -> str | None:
+        """The site key, or None while the check is off. Loads at once share one read,
+        which gives up after `SITE_KEY_BUDGET` whatever the CRUD side does, so a slow
+        read holds page loads behind it for at most that long; they then get the last
+        value."""
         hit, key = self._cached(self._clock())
         if hit:
             return key
@@ -293,8 +299,8 @@ class SiteKey:
 
     async def _fetch(self, crud: StorefrontCrud, now: float) -> str | None:
         try:
-            key = await crud.turnstile_site_key()
-        except (CrudUnavailableError, CrudRefusedError) as error:
+            key = await asyncio.wait_for(crud.turnstile_site_key(), SITE_KEY_BUDGET)
+        except (CrudUnavailableError, CrudRefusedError, TimeoutError) as error:
             logger.warning("could not read the bot check's site key (%s)", type(error).__name__)
             self._failed_at = now
             return self._last()
