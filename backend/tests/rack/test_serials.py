@@ -233,10 +233,23 @@ def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() 
         return made
 
     for message in sorted(RACK_STORE_FALLBACKS):
-        expected = [record(message, name) for name in ("QueryCanceled", "PoolTimeout")]
+        # The print worker's store is the CRUD service's client (#5298 Task 30): an API
+        # that does not answer is infrastructure too; a refusal (a 4xx) is not.
+        expected = [
+            record(message, name)
+            for name in ("QueryCanceled", "PoolTimeout", "CrudUnavailableError")
+        ]
         assert foreign_rack_errors(expected) == [], message
-        bugs = [record(message, name) for name in ("UndefinedColumn", "KeyError", "TypeError")]
-        assert foreign_rack_errors(bugs) == ["UndefinedColumn", "KeyError", "TypeError"], message
+        bugs = [
+            record(message, name)
+            for name in ("UndefinedColumn", "KeyError", "TypeError", "CrudRefusedError")
+        ]
+        assert foreign_rack_errors(bugs) == [
+            "UndefinedColumn",
+            "KeyError",
+            "TypeError",
+            "CrudRefusedError",
+        ], message
     bambuddy = ("ApiError", "ConnectError", "TimeoutError")
     assert foreign_rack_errors([record(RACK_SETTLE_FALLBACK, name) for name in bambuddy]) == []
     for message in sorted(RACK_STORE_FALLBACKS - {RACK_SETTLE_FALLBACK}):

@@ -38,11 +38,16 @@ start, from the follow (`lan_settle_hook`), ``lan_wait`` and the printer's watch
 no pool. A LAN start's picks replace an earlier pick of that start (deletes and inserts),
 so they are one route, one transaction on the API (plan D6). ``seen`` is natural. Every
 other write answers the rows it wrote, which a resend would not repeat, so each takes an
-``Idempotency-Key``: `WriteKeys` ``rack`` inside an activity (a retried attempt's same
-write answers as the lost one did; one whose body differs is refused 422 and sent again
-under a new key, as `RemoteBlobIndex` does), and a new UUID per call for a LAN start's
-picks, which a retried attempt ranks again: the newer pick must replace the earlier one,
-never replay it. ``spool_history`` is the API's (the rack usage route).
+``Idempotency-Key``. A queue item's picks and a run's settle (`settle_lan`, whose body a
+retried attempt sends again unchanged) take `WriteKeys` ``rack`` inside an activity: a
+retried attempt's same write answers as the lost one did, and one whose body differs is
+refused 422 and sent again under a new key, as `RemoteBlobIndex` does. The others take a
+new UUID per call, which the client sends again on its retries: a LAN start's picks,
+which a retried attempt ranks again (the newer pick must replace the earlier one, never
+replay it), a settled archive's rows, whose body carries the settle's ``now()``, and the
+watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys across
+attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
+API's (the rack usage route).
 
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
@@ -1010,6 +1015,18 @@ PRINTERS_COMPOSED = ("require", "ensure_bambuddy")
 _refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
 
 
+#: The retry budget of each CRUD call the printer watch makes between two heartbeats (a
+#: report's `put` or `touch`, a start's `settle_lan_ended`), and each try's timeout. A
+#: call ends within about their sum (a try started just before the budget ends runs its
+#: timeout), so a report's write and its settle take at most about 8 s, well inside the
+#: watch's 30 s heartbeat timeout (`workflows/printer_watch.py` `WATCH_HEARTBEAT`) with
+#: its 10 s quiet wait (`HEARD_EVERY`). Each is advisory there: a report not written is
+#: written at the next quiet tick, and a missed settle is closed by ``lan_wait``, the
+#: run's follow or the pick's age.
+WATCH_CALL_BUDGET = 2.0
+WATCH_CALL_TIMEOUT = 2.0
+
+
 def _report(printer_id: str) -> str:
     return f"{BASE}/reports/{quote(printer_id, safe='')}"
 
@@ -1022,7 +1039,9 @@ class RemoteReports(PrinterReportStore):
     of its own, a new UUID, which the client sends again on each retry: the route
     answers a resend the first write's end and start. The watch writes from one
     loop for as long as its connection lasts, so an activity's ordinal would not name
-    one write. `touch` is natural: it never moves ``seen_at`` back."""
+    one write. `touch` is natural: it never moves ``seen_at`` back. Only the watch writes
+    (`advance`, `touch`), between two of its heartbeats, so each write is bounded by
+    `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, not the client's own budget."""
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
@@ -1042,6 +1061,8 @@ class RemoteReports(PrinterReportStore):
             _report(printer_id),
             json={"report": report, "seen_at": seen_at.isoformat()},
             idempotency_key=uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         ).json()
         ended = answer["ended"]
         return Advance(
@@ -1052,7 +1073,11 @@ class RemoteReports(PrinterReportStore):
         if printer_uuid(printer_id) is None:
             return
         self._client.request(
-            "POST", f"{_report(printer_id)}/touch", json={"seen_at": seen_at.isoformat()}
+            "POST",
+            f"{_report(printer_id)}/touch",
+            json={"seen_at": seen_at.isoformat()},
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         )
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
@@ -1197,7 +1222,13 @@ class RemoteRackUsage(RackUsageStore):
             "print_seconds": print_seconds,
             "grams": grams,
         }
-        return int((await self._keyed("/prints", body))["written"])
+        # A new UUID per call, which the client sends again on its retries: the body
+        # carries the settle's ``now()``, so a retried attempt's write is never the same
+        # request and an activity's key would only cost a 422 round trip.
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/prints", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
 
     async def record_lan_picks(
         self,
@@ -1236,7 +1267,18 @@ class RemoteRackUsage(RackUsageStore):
             "ended_at": ended_at.isoformat(),
             "timed": timed,
         }
-        return int((await self._keyed("/settle-lan-ended", body))["written"])
+        # Only the watch calls this, between two heartbeats: a new UUID per call (its one
+        # long activity repeats `WriteKeys`' keys across attempts), sent again on the
+        # client's retries within `WATCH_CALL_BUDGET`.
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/rack/settle-lan-ended",
+            json=body,
+            idempotency_key=uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
+        )
+        return int(response.json()["written"])
 
 
 def _when(value: str | None) -> datetime | None:

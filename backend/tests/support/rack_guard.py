@@ -12,6 +12,7 @@ import psycopg_pool  # noqa: F401  (PoolTimeout, counted below whatever else imp
 
 from scadbuddy.bambuddy.print_run import RACK_FALLBACKS, RACK_USAGE_FALLBACK
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.rack.usage import RACK_SETTLE_FALLBACK, RACK_STORE_FALLBACKS
 
 #: The error type names a rack pick may legitimately fall back on: Bambuddy's answers
@@ -39,6 +40,9 @@ def _subclass_names(root: type[Exception]) -> set[str]:
 _POSTGRES = (
     _subclass_names(psycopg.OperationalError)  # QueryCanceled and PoolTimeout too
     | _subclass_names(psycopg.InterfaceError)
+    # The print worker's store is the CRUD service's client (#5298 Task 30): an API that
+    # does not answer within the budget is an outage too. A refusal (a 4xx) is not.
+    | {CrudUnavailableError.__name__}
 )
 
 #: The usage read is a Postgres call made inside a pick that also reads Bambuddy. The

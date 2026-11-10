@@ -136,6 +136,7 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
     | {
         "print_follows_running",
         "rack_watch_settle_failed",
+        "printer_watch_write_failed",
         "crud_client_seconds",
     },
     "projects": _WORKER_COMMON | {"crud_client_seconds"},
@@ -337,6 +338,13 @@ class Metrics:
             "LAN prints whose rack picks the printer watch could not settle as the printer "
             "ended them (#5138). Not retried: lan_wait or the run's follow may settle them, "
             "else they stay pending until PENDING_PICK_MAX_AGE.",
+            registry=r,
+        )
+        self.printer_watch_write_failed = Counter(
+            "scadbuddy_printer_watch_write_failed",
+            "LAN reports the printer watch could not write, or touches it could not make "
+            "(#5298). The watch goes on: an unwritten report is written at the next quiet "
+            "tick, and the row's seen_at ages until a write succeeds.",
             registry=r,
         )
         self.queue_wait = Histogram(

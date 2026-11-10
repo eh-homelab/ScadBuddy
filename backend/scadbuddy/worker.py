@@ -1473,6 +1473,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
                 settings.temporal_task_queue_library,
                 settings.temporal_task_queue_bambuddy,
             ).nudge,
+            write_failed=metrics.printer_watch_write_failed,
         ).printer_watch,
     )
 

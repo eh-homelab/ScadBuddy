@@ -254,9 +254,9 @@ async def test_each_keyed_write_answers_its_rows_once_per_key(
             answer = await crud.request("POST", url, json=body, idempotency_key=f"k-{path}")
             assert answer.json() == {"written": 1}, path
         once = _all_rows(store)
-        assert (await crud.request("POST", url, json=body, idempotency_key="new")).json() == {
-            "written": 0
-        }
+        assert (
+            await crud.request("POST", url, json=body, idempotency_key=f"new-{path}")
+        ).json() == {"written": 0}
         assert _all_rows(store) == once
         with pytest.raises(CrudRefusedError) as keyless:
             await crud.request("POST", url, json=body)

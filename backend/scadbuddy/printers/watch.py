@@ -14,7 +14,10 @@ against ``pushall`` more than every 5 minutes). A dropped connection raises, the
 attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
 ``/printers/now`` shows the printer offline (`status.STALE_AFTER`). A worker shutting
 down ends the attempt at once, as `FollowActivities` does, so a stop never waits out
-its graceful timeout per printer.
+its graceful timeout per printer. A report the store could not write, or a touch it could
+not make, is logged and counted (`WATCH_WRITE_FAILED`) and the watch goes on; the report
+is written at the next quiet tick or report. On the print worker each write is a CRUD call
+bounded well inside the heartbeat timeout (`crud/print.py` `WATCH_CALL_BUDGET`).
 
 A write that shows the print the printer was running has ended (`reports.advance_print`)
 settles that start's rack picks up to the report's time (#5138, #5142): the run's own
@@ -59,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 #: How often a quiet connection touches ``seen_at`` and heartbeats.
 HEARD_EVERY = 10.0
+#: Logged, with the write (``put`` or ``touch``) and the error's type, when the watch
+#: could not write a report or touch its row; counted on `Metrics.printer_watch_write_failed`.
+WATCH_WRITE_FAILED = "a printer watch could not write its report"
 #: How far back an open connection proves the printer was there: paho closes a link
 #: with no inbound traffic within two keepalives, so a touch stamps ``now`` less this
 #: (never before the connect), and the card goes offline `STALE_AFTER` after the last
@@ -100,6 +106,7 @@ class WatchActivities:
         rack: LanUsage | None = None,
         settle_failed: Counter | None = None,
         nudge: Nudge | None = None,
+        write_failed: Counter | None = None,
     ) -> None:
         self.printers = printers
         self.reports = reports
@@ -113,6 +120,8 @@ class WatchActivities:
         self.settle_failed = settle_failed
         #: Each job start, to the print watcher's LAN nudge (#4699 phase 3).
         self.nudge = nudge
+        #: The count of reports not written and touches not made (`WATCH_WRITE_FAILED`).
+        self.write_failed = write_failed
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
     async def printer_watch(self, input: PrinterWatchInput) -> str:
@@ -185,13 +194,14 @@ class WatchActivities:
                     item = await asyncio.wait_for(queue.get(), HEARD_EVERY)
                 except TimeoutError:
                     if pending is not None:
-                        await self._write(printer_id, pending, nudges)
-                        pending, last_write = None, self.clock()
+                        if await self._write(printer_id, pending, nudges):
+                            pending = None
+                        last_write = self.clock()
                     elif connected_at is not None:
                         proven = max(
                             connected_at, datetime.now(UTC) - timedelta(seconds=LINK_PROOF)
                         )
-                        await asyncio.to_thread(self.reports.touch, printer_id, proven)
+                        await self._touch(printer_id, proven)
                     continue
                 if item is None:
                     return
@@ -199,8 +209,9 @@ class WatchActivities:
                     raise item
                 changed = shown(item.print) != last_shown
                 if changed or self.clock() - last_write >= self.write_every:
-                    await self._write(printer_id, item, nudges)
-                    pending, last_write = None, self.clock()
+                    # Not written: kept, and written at the next quiet tick or report.
+                    pending = None if await self._write(printer_id, item, nudges) else item
+                    last_write = self.clock()
                 else:
                     pending = item
                 if changed:
@@ -227,12 +238,35 @@ class WatchActivities:
                 exc_info=True,
             )
 
+    def _failed(self, what: str, printer_id: str, error: Exception) -> None:
+        if self.write_failed is not None:
+            self.write_failed.inc()
+        logger.warning(
+            WATCH_WRITE_FAILED,
+            extra={"printer_id": printer_id, "write": what, "error": type(error).__name__},
+        )
+
+    async def _touch(self, printer_id: str, proven: datetime) -> None:
+        """The row's ``seen_at``; a failure is logged and counted, and the row ages."""
+        try:
+            await asyncio.to_thread(self.reports.touch, printer_id, proven)
+        except Exception as error:
+            self._failed("touch", printer_id, error)
+
     async def _write(
         self, printer_id: str, report: LanReport, nudges: set[asyncio.Task[None]]
-    ) -> None:
-        advance = await asyncio.to_thread(
-            self.reports.advance, printer_id, report.print, report.received_at
-        )
+    ) -> bool:
+        """Whether ``report`` was written. A failed write is logged and counted, and the
+        watch goes on: a stalled API never fails the attempt, which would redial the
+        printer. On the print worker each call is bounded (`crud/print.py`
+        `WATCH_CALL_BUDGET`)."""
+        try:
+            advance = await asyncio.to_thread(
+                self.reports.advance, printer_id, report.print, report.received_at
+            )
+        except Exception as error:
+            self._failed("put", printer_id, error)
+            return False
         if advance.started is not None and self.nudge is not None:
             # A task of its own (#6034), held in ``nudges`` until it ends: the loop's next
             # heartbeat and report, and the settle below, never wait for it.
@@ -249,10 +283,11 @@ class WatchActivities:
         if ended is not None:
             # The print's rack picks, up to the report that ended it: the run's follow
             # may read it late, or no longer read it at all (a newer run of the subject).
-            # Awaited inline on purpose: one insert per print end, so the next report
-            # waits at most that long. Move it to a tracked background task (kept in a
-            # set, awaited or cancelled on shutdown) only if it shows on the watch's
-            # latency (#5261).
+            # Awaited inline, once per print end. On the print worker it is a CRUD call
+            # bounded by `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, so with the put
+            # the next report waits at most about 8 s, inside the heartbeat timeout. Move
+            # it to a tracked background task (kept in a set, awaited or cancelled on
+            # shutdown) only if it shows on the watch's latency (#5261).
             await settle_lan_end(
                 self.rack,
                 printer_id,
@@ -261,3 +296,4 @@ class WatchActivities:
                 timed=ended.timed,
                 failed=self.settle_failed,
             )
+        return True

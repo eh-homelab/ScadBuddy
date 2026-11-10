@@ -1612,6 +1612,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             settings.temporal_task_queue_library,
             settings.temporal_task_queue_bambuddy,
         ).nudge,
+        write_failed=state.metrics.printer_watch_write_failed,
     )
     content = state.store.content
     lan = LanDeps(
