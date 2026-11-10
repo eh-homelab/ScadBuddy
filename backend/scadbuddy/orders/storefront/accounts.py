@@ -289,7 +289,11 @@ def verify_code(
     (wrong, expired, used, or no code at all): one answer, so a
     caller says nothing more. `SignInLimitedError` once ``client`` guessed wrong
     `FAILURES_PER_CLIENT_ADDRESS` times at this address, or `FAILURES_PER_CLIENT` times at
-    all addresses, in the window."""
+    all addresses, in the window.
+
+    A code is used once and never replayed, so no code hands out a session twice. The
+    trade: when the sign-in commits and its answer is lost on the way back, the person is
+    still signed out and the code is spent, so they ask for a new code."""
     try:
         address: str | None = normalized_email(email)
     except EmailInvalidError:

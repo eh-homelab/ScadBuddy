@@ -104,9 +104,16 @@ type Pod = {
 
 const ready = (pod: Pod) => pod.status?.phase === 'Running' && !!pod.status.podIP && !!pod.status.conditions?.some((c) => c.type === 'Ready' && c.status === 'True')
 const ended = (pod: Pod) => pod.status?.phase === 'Succeeded' || pod.status?.phase === 'Failed'
-/** The oldest first, then by name: every replica orders a session's pods the same way. */
-const oldestFirst = (a: Pod, b: Pod) =>
-  (a.metadata.creationTimestamp ?? '').localeCompare(b.metadata.creationTimestamp ?? '') || a.metadata.name.localeCompare(b.metadata.name)
+const createdAt = (pod: Pod) => pod.metadata.creationTimestamp ?? ''
+/**
+ * The oldest first, then by name (unique in the namespace), compared by code unit: a total order
+ * that every replica computes the same way. creationTimestamp has whole seconds only, so two pods
+ * made in the same second are ordered by their random generateName suffixes (see #oldest).
+ */
+const oldestFirst = (a: Pod, b: Pod) => {
+  const at = createdAt(a) < createdAt(b) ? -1 : createdAt(a) > createdAt(b) ? 1 : 0
+  return at || (a.metadata.name < b.metadata.name ? -1 : a.metadata.name > b.metadata.name ? 1 : 0)
+}
 const tokenOf = (pod: Pod) => pod.spec.containers.find((c) => c.name === 'sandbox')?.env?.find((e) => e.name === 'SCADBUDDY_SANDBOX_TOKEN')?.value
 
 /** The pod a session's sandbox runs in. Every field the cluster's admission policy checks is set here. */
@@ -250,21 +257,36 @@ export class KubernetesSandboxes implements Sandboxes {
       const token = randomBytes(32).toString('hex')
       const res = await this.#api('POST', this.#pods(), sandboxPod(this.#config, sessionId, token, await this.#resolveProxy()))
       if (res.status !== 201 && res.status !== 200) throw new Error(`creating the sandbox pod answered ${res.status}: ${JSON.stringify(res.body).slice(0, 500)}`)
-      // Another replica may have made one at the same time: both keep the older, so they settle on one.
-      pod = (await this.#oldest(sessionId)) ?? (res.body as Pod)
+      // Another replica may have made one at the same time: each keeps the first pod in oldestFirst
+      // order, which usually settles the race on one pod but can leave two in use until the extra
+      // one idles out (see #oldest).
+      const made = res.body as Pod
+      pod = (await this.#oldest(sessionId, made.metadata.name)) ?? made
     }
     const endpoint = await this.#waitReady(pod.metadata.name, signal)
     this.#known.set(sessionId, endpoint)
     return endpoint
   }
 
-  /** The session's oldest live pod; any younger one (two replicas raced) is deleted, never the one another replica uses. */
-  async #oldest(sessionId: string): Promise<Pod | undefined> {
+  /**
+   * The session's first live pod (oldestFirst); a pod two replicas' race left over is deleted,
+   * never one another replica or this one uses (acquire calls it only for a session this replica
+   * holds no pod for, so none of the listed pods is one it uses). A pod made in a later second
+   * than the first is deleted by any replica: whoever chose it listed after it was made, so saw the older one too.
+   * A pod made in the same second as the first may be in use by the replica that made it, if its
+   * listing came before the first existed; so only that replica deletes it (`mine`, right after
+   * it made it), and only when its own listing shows another pod first. The race then settles on
+   * one pod, or at worst leaves two in use until the extra one idles out.
+   */
+  async #oldest(sessionId: string, mine?: string): Promise<Pod | undefined> {
     const pods = (await this.#list(`${APP_LABEL}=${APP},${SESSION_LABEL}=${sessionId}`))
       .filter((p) => !p.metadata.deletionTimestamp && !ended(p))
       .sort(oldestFirst)
-    const [first, ...younger] = pods
-    for (const pod of younger) await this.#delete(pod.metadata.name).catch(() => {})
+    const [first, ...rest] = pods
+    for (const pod of rest) {
+      if (createdAt(pod) === createdAt(first!) && pod.metadata.name !== mine) continue
+      await this.#delete(pod.metadata.name).catch(() => {})
+    }
     return first
   }
 
