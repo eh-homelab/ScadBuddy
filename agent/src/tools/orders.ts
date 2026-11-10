@@ -997,6 +997,26 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_mail_list',
+    label: "List an order's customer mail",
+    description:
+      "The storefront mail of an order (#5283), newest first: each `event` (`order_link`, `revision_ready`, " +
+      '`price_ready`, `payment_requested`, `shipped`), `to`, `created_at`, `sent_at`, `failed_at`, `attempts`, ' +
+      '`last_error` and `next_attempt_at`. A row with no `sent_at` and no `failed_at` is queued or waiting for its next ' +
+      'try. Never the body, a link or a token. A sign-in code is not listed. Not the messaging plugin: see order_messages_list.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: "the mail server's error text, which a recipient's server writes",
+    routes: ['GET /api/v1/orders/{order_id}/mail'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/mail', { params: { path: { order_id } } }),
+          `list the customer mail of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_customer_link_send',
     label: 'Send the customer an order link',
     description:

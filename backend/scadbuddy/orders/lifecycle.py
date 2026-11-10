@@ -117,7 +117,13 @@ from scadbuddy.orders.storefront.links import (
     live_link,
     revoke_order_links,
 )
-from scadbuddy.orders.storefront.mail import MailEvent, issue_link, queue_mail
+from scadbuddy.orders.storefront.mail import (
+    MailEvent,
+    OrderMail,
+    issue_link,
+    order_mail,
+    queue_mail,
+)
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
@@ -963,6 +969,14 @@ class Lifecycle:
             if self.store.order(order_id, conn=conn) is None:
                 raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
             return link_state(conn, order_id)
+
+    def order_mail(self, order_id: str) -> list[OrderMail]:
+        """The order's customer mail, newest first (spec §5.7). A plain read: it takes no
+        lock, and never the body, the context or a link."""
+        with self.store.transaction() as conn:
+            if self.store.order(order_id, conn=conn) is None:
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            return order_mail(conn, order_id)
 
     def send_customer_link(self, order_id: str, by: Actor, to: str | None) -> LinkState:
         """The shop sends the order a new customer link (spec §5.2 "Order link"), under the

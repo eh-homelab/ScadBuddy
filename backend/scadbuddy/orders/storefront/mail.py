@@ -56,6 +56,8 @@ from datetime import datetime
 from email.message import EmailMessage
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import MAIL_QUEUED, Conn, OrderStore
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
@@ -79,6 +81,7 @@ __all__ = [
     "MailConnectionUnsetError",
     "MailEvent",
     "MailStatus",
+    "OrderMail",
     "StorefrontMail",
     "check_address",
     "issue_link",
@@ -160,6 +163,43 @@ class _FixedFailureError(Exception):
 
 def secret_aad(row_id: str, host: str, port: int, user: str, tls: MailTls) -> str:
     return f"storefront_mail_secret:{row_id}:{host}:{port}:{user}:{tls}"
+
+
+class OrderMail(BaseModel):
+    """One outbox row as the shop sees it (`order_mail`): the event, the address and the
+    state. Never the body, the context, a code, a link, a token or a link id."""
+
+    event: MailEvent
+    to: str
+    created_at: datetime
+    sent_at: datetime | None
+    failed_at: datetime | None
+    attempts: int
+    last_error: str | None
+    next_attempt_at: datetime
+
+
+def order_mail(conn: Conn, order_id: str) -> list[OrderMail]:
+    """The order's outbox rows, newest first. A sign-in code has no order, so none shows."""
+    found = conn.execute(
+        "SELECT template, to_address, created_at, sent_at, failed_at, attempts, last_error,"
+        " next_attempt_at FROM storefront_mail WHERE order_id = %s"
+        " ORDER BY created_at DESC, id DESC",
+        (order_id,),
+    ).fetchall()
+    return [
+        OrderMail(
+            event=r["template"],
+            to=r["to_address"],
+            created_at=r["created_at"],
+            sent_at=r["sent_at"],
+            failed_at=r["failed_at"],
+            attempts=r["attempts"],
+            last_error=r["last_error"],
+            next_attempt_at=r["next_attempt_at"],
+        )
+        for r in found
+    ]
 
 
 def queue_mail(

@@ -18,6 +18,7 @@ import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
 import { OrderMessages } from '../components/orders/OrderMessages'
 import { CustomerLink } from '../components/orders/CustomerLink'
+import { CustomerMail } from '../components/orders/CustomerMail'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { itemAnchor } from '../components/orders/itemLink'
@@ -109,6 +110,8 @@ export function OrderPage() {
   // #5282: a storefront cart has no customer until it is submitted.
   const customerId = detail?.order.customer_id
   const customer = useAsync(() => (customerId ? api.customer(customerId) : Promise.resolve(undefined)), [customerId])
+  // #5283: moves when the shop sends or revokes the customer link, which the mail list re-reads.
+  const [linkVersion, setLinkVersion] = useState(0)
   const [refusal, setRefusal] = useState<{ text: string; items: string[] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [search, setSearch] = useSearchParams()
@@ -551,7 +554,17 @@ export function OrderPage() {
         {!isCart(order) && (
           <Card size="sm">
             <CardContent>
-              <CustomerLink key={order.id} orderId={order.id} onChanged={reload} />
+              <div className="flex flex-col gap-4">
+                <CustomerLink
+                  key={order.id}
+                  orderId={order.id}
+                  onChanged={() => {
+                    setLinkVersion((v) => v + 1)
+                    reload()
+                  }}
+                />
+                <CustomerMail key={order.id} orderId={order.id} version={linkVersion} />
+              </div>
             </CardContent>
           </Card>
         )}
