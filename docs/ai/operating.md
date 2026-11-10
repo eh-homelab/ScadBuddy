@@ -1102,6 +1102,16 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.
+- A fork's working directory is its own, so its first turn resumes a transcript that names
+  the parent's directory. When the transcript's newest entry ran in another directory than
+  this turn's (a fork's first turn, or a moved `SCADBUDDY_SESSION_DIR`), the turn's prompt
+  starts with a note that names the new directory, says the old one is gone, and asks for the
+  same relative paths there (#5867, `agent/src/sessions/turnRunner.ts` `directoryNote`).
+  Claude Code itself says only "Primary working directory: <new> (was <old>)", and with that
+  alone the model read the parent's path first and the seam refused it. One path for every
+  session, such as `/workspace`, cannot be made: the pod's sessions share one filesystem, a
+  per-process mount is refused (below), and Claude Code takes the real cwd, so a link would
+  not hide it.
 - `Bash` and `PowerShell` are `off` because Claude Code's sandbox cannot run in the worker
   pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
   --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change

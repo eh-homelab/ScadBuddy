@@ -8,6 +8,7 @@
 // assembly with it; each turn that process serves sets that assembly's slot
 // before it pushes its prompt (sessions/warmTurn.ts) and clears it when it ends.
 
+import { realpath } from 'node:fs/promises'
 import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
@@ -85,10 +86,29 @@ export type TurnRunnerDeps = Pick<
   | 'stderr'
 > & {
   /** The transcript mirror (store.ts): the run's `sessionStore`, and whether a session has a transcript to resume. */
-  store: SessionStore & Pick<PostgresSessionStore, 'exists'>
+  store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
   files: SessionFiles
+}
+
+/** How the directory note starts (`directoryNote`). */
+export const DIRECTORY_NOTE_MARK = "[System note] This session's working directory is now"
+
+/**
+ * What a turn's prompt starts with when the transcript it resumes last ran in another directory
+ * (#5867): a fork's first turn (its parent's entries name the parent's directory), or a session
+ * whose sessions root moved. Every session's cwd is its own `<root>/<id>/` (harness/stateDirs.ts
+ * `sessionWorkDir`). One path for every session (`/workspace`) cannot be made: the warm sessions
+ * on a worker pod share its filesystem, a per-process mount needs a mount namespace, which
+ * AppArmor refuses there (`unshare --mount`, measured 2026-11-01, docs/ai/operating.md "Claude Code's own built-ins"), and
+ * Claude Code takes `process.cwd()`, the real path (harness/confine.ts), so a link would not hide
+ * the session's own directory either. Claude Code itself adds only "Primary working directory:
+ * <new> (was <old>)" on such a turn (measured on the bundled CLI, test/forkCow.pg.test.ts); with
+ * that alone the model still read the old absolute path first, and the seam refused it.
+ */
+export function directoryNote(from: string, to: string): string {
+  return `${DIRECTORY_NOTE_MARK} ${to}. ${from}, the directory earlier messages name, is gone: this session was forked from another one or moved. Use the same relative paths under ${to}.`
 }
 
 /** Everything fixed at spawn that decides whether a warm process may serve a turn (spec §5.3 "Reuse rule"). */
@@ -176,6 +196,8 @@ export type AssembledTurn = {
   observe(message: SDKMessage): Promise<void>
   /** The turn's automatic memory hooks, recalled against `userText`; only when a Hindsight plugin is loaded. */
   memory?: (userText: string, turnId: string) => MemoryHooks
+  /** What the turn's prompt starts with when the transcript it resumes ran in another directory (`directoryNote`, #5867). */
+  directoryNote?: string
   /**
    * Ends the upstream MCP sessions the plugins' routes saw, then releases the routes: Claude
    * Code sends no session DELETE when its process ends (spec 2026-10-13 §5.3 E7), so the
@@ -550,6 +572,11 @@ export class TurnRunner {
           this.deps.settings ? readToolLoadings(this.deps.settings) : {},
         ]),
       )
+      // The directory the transcript last ran in, against this one as Claude Code records it (its
+      // real path): a fork's first turn is told its parent's is gone (#5867).
+      const ranIn = resume ? await this.deps.store.lastCwd(id) : undefined
+      const here = ranIn === undefined ? cwd : await realpath(cwd)
+      const movedNote = ranIn !== undefined && ranIn !== here ? directoryNote(ranIn, here) : undefined
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
       if (nativeTools.some((t) => TASK_TOOLS.has(t.name))) await linkTaskList(this.deps.paths, cwd, id)
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
@@ -837,6 +864,7 @@ export class TurnRunner {
         shownTierOf,
         observe: pluginCheck,
         ...(memory ? { memory: memory.hooks } : {}),
+        ...(movedNote ? { directoryNote: movedNote } : {}),
         terminate: async () => {
           await Promise.all([forwarded?.terminate(), packageServers?.terminate()])
         },

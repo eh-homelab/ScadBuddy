@@ -176,6 +176,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),
+      lastCwd: () => Promise.resolve(undefined),
       append: () => Promise.resolve(),
       load: () => Promise.resolve(null),
     },
