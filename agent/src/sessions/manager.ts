@@ -1096,8 +1096,10 @@ export class SessionManager {
   revalidateWarm(): Promise<void> {
     return this.warm.revalidate(async (entry) => {
       // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
+      // The session's own background_tools, not the last turn's `turn_flow` (#5870): an idle
+      // process is checked against the shape the session's next own turn has.
       const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
-        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${BACKGROUND_TOOLS}, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
         [entry.sessionId],
       )
       if (!row) return undefined
