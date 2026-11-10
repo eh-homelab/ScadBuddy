@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useParams } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,7 @@ import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
 import type { QueueItem } from '../api/types'
 import { outputs } from '../mocks/fixtures'
 import { QUEUE_ITEM_ONLY } from '../mocks/features/printQueue'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { QueueItemPage } from './QueueItemPage'
@@ -129,7 +130,51 @@ describe('QueueItemPage (#3744)', () => {
 
     const region = await screen.findByRole('region', { name: 'Filament slots' })
     expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
-    expect(read).toBe(1)
+    // Read, and maybe again once the registry's topic is subscribed (#5914).
+    expect(read).toBeGreaterThanOrEqual(1)
+  })
+
+  it("reads the printer's model again when the registry changes while the page is open (#5914)", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let model = 'H2C'
+    server.use(
+      http.get('/api/v1/printers', () =>
+        HttpResponse.json([{ id: 'p-7', serial: 'S7', name: 'Seven', model, bambuddy_printer_id: 7 }]),
+      ),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS-A · slot 3')).toBeInTheDocument()
+
+    // Someone sets the printer's model to A2L in another tab: the registry's own event.
+    model = 'A2L'
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', 'printer:p-7'], {})
+      expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
+    })
+  })
+
+  it('takes no A2L from a registry that cannot be read (#5914)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'The registry did not answer' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    await waitFor(() => expect(read).toBeGreaterThanOrEqual(1))
+    expect(await within(region).findByText('AMS-A · slot 3')).toBeInTheDocument()
+    expect(within(region).queryByText(/AMS Lite/)).toBeNull()
   })
 
   it('reads no printers when the item names its model', async () => {
