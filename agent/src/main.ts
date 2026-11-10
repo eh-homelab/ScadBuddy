@@ -1405,6 +1405,8 @@ async function stop(): Promise<void> {
     closeDatabase: database
       ? async () => {
           // The pinned host worker's running activities, bounded by its 8 s force time, before the pool closes.
+          // Bounded, not prevented: an activity that ignores its cancel is abandoned at the force time but
+          // runs on in-process, so it may still meet the closed pool (and fail) before process.exit.
           await pinnedStopped
           sessionEvents?.close()
           await database.close()
