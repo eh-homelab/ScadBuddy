@@ -269,12 +269,12 @@ def _picture(attachment: Attachment) -> bool:
     return (
         (attachment.kind == "image" and attachment.media_type in SHOWN_IMAGES)
         or (attachment.kind == "video" and attachment.media_type in _VIDEOS)
-        or attachment.media_type == PREVIEW_3D
+        or (attachment.role in REVISION_ROLES and attachment.media_type == PREVIEW_3D)
     )
 
 
 def _picture_kind(attachment: Attachment) -> Literal["image", "video", "model"]:
-    if attachment.media_type == PREVIEW_3D:
+    if attachment.role in REVISION_ROLES and attachment.media_type == PREVIEW_3D:
         return "model"
     return "video" if attachment.kind == "video" else "image"
 
