@@ -112,6 +112,20 @@ describe('a sandbox that lies', () => {
     await expect(readFile(path.join(dir, 'big.txt'))).rejects.toThrow()
   })
 
+  it('keeps only a file refused for a cap, never one whose read failed', async () => {
+    const body = Buffer.from('fine')
+    const fake: Fake = { manifest: { files: [{ path: 'flaky.txt', sha256: sha(body), size: 4 }], truncated: false }, files: {}, deleted: [], got: [] }
+    box = await hostile(fake)
+    const flaky = client(box.url)
+    flaky.get = async () => {
+      throw new Error('the connection reset')
+    }
+    const kept = new Map<string, string | undefined>()
+    const back = await syncBack(flaky, dir, none(), limits, kept)
+    expect(back.left[0]).toMatchObject({ path: 'flaky.txt', reason: expect.stringContaining('could not be read back') })
+    expect(kept.size).toBe(0)
+  })
+
   it("counts the directory's own bytes against the workspace cap", async () => {
     await writeFile(path.join(dir, 'already.bin'), Buffer.alloc(4_800))
     const body = Buffer.alloc(900, 'b')

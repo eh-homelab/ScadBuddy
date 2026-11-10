@@ -140,6 +140,15 @@ describe('sandbox pods on Kubernetes', () => {
     expect(kube.created).toHaveLength(2)
   })
 
+  it('forgets a pod that is gone, whoever deleted it', async () => {
+    await sandboxes.acquire(SESSION, AbortSignal.timeout(5_000))
+    // Deleted by someone else (another replica's sweep, an operator): the next sweep forgets it here.
+    kube.pods.clear()
+    expect(await sandboxes.sweep()).toBe(0)
+    await sandboxes.acquire(SESSION, AbortSignal.timeout(5_000))
+    expect(kube.created).toHaveLength(2)
+  })
+
   it('makes a pod with no secret, no token, no DNS, its own user namespace and limits', () => {
     const pod = sandboxPod(config, SESSION, 't'.repeat(64), 'http://10.43.0.20:3128') as {
       metadata: { labels: Record<string, string> }

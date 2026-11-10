@@ -4,9 +4,12 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, readdir, readFile, rename, rm, unlink } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import path from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import {
   type ExecRequest,
   type ExecResult,
+  type KeptRecord,
+  keptValue,
   MANIFEST_MAX_ENTRIES,
   type Manifest,
   type ManifestEntry,
@@ -123,8 +126,12 @@ function argv(shell: ExecRequest['shell'], command: string, maxProcesses: number
   return ['-c', `${cap}exec "$@"`, 'sandbox', ...inner]
 }
 
-/** Runs one command; never rejects. */
-export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses' | 'reapUid'>, request: ExecRequest): Promise<ExecResult> {
+/** Runs one command; never rejects. An abort of `signal` (the caller went away) kills it as the deadline would. */
+export function runCommand(
+  options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses' | 'reapUid'>,
+  request: ExecRequest,
+  signal?: AbortSignal,
+): Promise<ExecResult> {
   const started = Date.now()
   return new Promise((resolve) => {
     const child = spawn('bash', argv(request.shell, request.command, options.maxProcesses), {
@@ -163,14 +170,18 @@ export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' |
       timedOut = true
       killAll()
     }, request.timeout_ms)
+    const onAbort = () => killAll()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
     let spawnError: Error | undefined
     child.on('error', (err) => (spawnError = err))
     // What the command left running in its group goes as soon as the shell exits: it would hold
     // the pipes open, and its output would arrive after the result.
     child.on('exit', killAll)
-    child.on('close', (code, signal) => {
+    child.on('close', (code, exitSignal) => {
       clearTimeout(timer)
-      void finish(code, signal)
+      signal?.removeEventListener('abort', onAbort)
+      void finish(code, exitSignal)
     })
     const finish = async (code: number | null, signal: NodeJS.Signals | null) => {
       // Nothing of the command runs on once its result is out: a second sweep after the pipes closed.
@@ -354,9 +365,24 @@ function parseExec(body: unknown): ExecRequest | string {
   return { shell: shell as ExecRequest['shell'], command, timeout_ms }
 }
 
+/** A PUT /v1/kept body, checked: sync paths only, each with a KeptRecord value; else a reason. */
+function parseKept(body: unknown): KeptRecord | string {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return 'the body must be a JSON object'
+  const entries = Object.entries(body as Record<string, unknown>)
+  if (entries.length > MANIFEST_MAX_ENTRIES) return `at most ${MANIFEST_MAX_ENTRIES} paths`
+  const out: KeptRecord = {}
+  for (const [rel, value] of entries) {
+    if (!syncPath(rel) || !keptValue(value)) return `${JSON.stringify(rel).slice(0, 200)} is not a kept entry`
+    out[rel] = value
+  }
+  return out
+}
+
 /** The exec server; listen on it yourself. */
 export function sandboxServer(options: SandboxServerOptions): Server {
   const cache: ShaCache = new Map()
+  // What the workers' syncs left here (client.ts Kept): in this process's memory, outside /work.
+  let kept: KeptRecord = {}
   let running = 0
   let idle: NodeJS.Timeout | undefined
   const touch = () => {
@@ -375,6 +401,22 @@ export function sandboxServer(options: SandboxServerOptions): Server {
       if (!authorized(req, options.token)) return json(res, 401, { error: 'unauthorized' })
       touch()
       if (req.method === 'GET' && url.pathname === '/v1/manifest') return json(res, 200, await manifestOf(options.work, cache))
+      if (url.pathname === '/v1/kept') {
+        if (req.method === 'GET') return json(res, 200, kept)
+        if (req.method === 'PUT') {
+          const raw = await readBody(req, 4 * 1024 * 1024)
+          let parsed: KeptRecord | string
+          try {
+            parsed = raw ? parseKept(JSON.parse(raw.toString('utf8'))) : 'the body is too large'
+          } catch {
+            parsed = 'the body is not JSON'
+          }
+          if (typeof parsed === 'string') return json(res, 400, { error: parsed })
+          kept = parsed
+          return json(res, 200, { paths: Object.keys(kept).length })
+        }
+        return json(res, 405, { error: 'method not allowed' })
+      }
       if (url.pathname.startsWith('/v1/files/')) {
         const rel = decodeURIComponent(url.pathname.slice('/v1/files/'.length))
         if (!syncPath(rel)) return json(res, 400, { error: `${JSON.stringify(rel)} is not a path that syncs` })
@@ -404,13 +446,12 @@ export function sandboxServer(options: SandboxServerOptions): Server {
           try {
             const st = await handle.stat()
             if (!st.isFile()) return json(res, 404, { error: 'no such file' })
-            const bytes = await handle.readFile()
-            res.writeHead(200, {
-              'content-type': 'application/octet-stream',
-              'content-length': bytes.length,
-              [SHA_HEADER]: createHash('sha256').update(bytes).digest('hex'),
-            })
-            res.end(bytes)
+            // Streamed, never held whole: one pass for the sha256 the header carries, a second for
+            // the body. A file that changes between them fails the client's check of that sha256.
+            const hash = createHash('sha256')
+            for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk as Buffer)
+            res.writeHead(200, { 'content-type': 'application/octet-stream', [SHA_HEADER]: hash.digest('hex') })
+            await pipeline(handle.createReadStream({ autoClose: false, start: 0 }), res)
             return
           } finally {
             await handle.close()
@@ -430,8 +471,14 @@ export function sandboxServer(options: SandboxServerOptions): Server {
         // One command at a time: the sweep after each would kill another's processes.
         if (running > 0) return json(res, 409, { error: 'a command is running in this sandbox' })
         running++
+        // The caller went away (its call cancelled, or its timeout): the command goes too, so the
+        // session's next call is not refused for up to MAX_TIMEOUT_MS.
+        const gone = new AbortController()
+        res.on('close', () => {
+          if (!res.writableFinished) gone.abort()
+        })
         try {
-          return json(res, 200, await runCommand(options, parsed))
+          return json(res, 200, await runCommand(options, parsed, gone.signal))
         } finally {
           running--
           touch()

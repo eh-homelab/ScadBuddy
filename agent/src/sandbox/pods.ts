@@ -277,9 +277,11 @@ export class KubernetesSandboxes implements Sandboxes {
     let n = 0
     for (const pod of pods.filter(ended)) {
       await this.#delete(pod.metadata.name)
-      for (const [session, known] of this.#known) if (known.pod === pod.metadata.name) this.#known.delete(session)
       n++
     }
+    // Forget every pod that is gone or ended, so a long-lived worker keeps no entry per session it ever served.
+    const live = new Set(pods.filter((p) => !ended(p) && !p.metadata.deletionTimestamp).map((p) => p.metadata.name))
+    for (const [session, known] of this.#known) if (!live.has(known.pod)) this.#known.delete(session)
     return n
   }
 }

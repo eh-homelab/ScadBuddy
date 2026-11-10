@@ -831,7 +831,7 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   takes a bearer token that the agent made for that pod. It runs each command in `/work` with
   `bash -c` or `pwsh -NonInteractive -Command`, with an environment of its own (`PATH`,
   `HOME`, `LANG`, `TERM`, the proxy), `ulimit -u 512`, and its own process group. It runs one
-  command at a time. At the deadline (default 120 s, at most 600 s) and when the shell exits,
+  command at a time, and kills it when its caller goes away (the request's socket closes). At the deadline (default 120 s, at most 600 s) and when the shell exits,
   it kills that group and then every other process of the sandbox's uid but itself and PID 1
   (`reapStrays`), so a process that left the group (`setsid`, a double fork) does not outlive
   its command. A PID namespace per command would be cleaner, but the pod cannot make one:
@@ -854,19 +854,23 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   The result names up to 50 other paths a command made (`files_left_in_sandbox`). Each file
   is read as a stream and stopped past `workspace_file_max_bytes` or past what
   `workspace_max_bytes` leaves after the directory's own bytes, whatever size the pod claims.
-  Such a file stays in the pod and the result says so: until the session's own copy at that
-  path changes, the sync before the next command neither deletes nor overwrites it. That
-  record is the worker's, for that pod: a new pod, or the session's next turn on another
-  worker, makes the pod match the session directory again. The exec server streams each file
-  it is sent to disk, at most 256 MiB, and keeps it only when its sha256 matches. The turn's
-  write-back then records the directory in `SessionFiles`, as it does for `Write`.
+  Such a file stays in the pod while the pod lasts, and the result says so: until the
+  session's own copy at that path changes, the sync before each command neither deletes nor
+  overwrites it. The exec server keeps that record (`/v1/kept`, in its memory, outside
+  `/work`), so a later turn on another worker sees it too; a new pod starts from the session
+  directory alone. The record is untrusted like the rest of what the pod says, and it only
+  decides what the pod keeps, never what the session directory gets. A file that could not
+  be read back for any other reason is not kept, and the next command's sync removes it from
+  the pod. The exec server streams each file to disk and back, at most 256 MiB, and keeps a
+  file it is sent only when its sha256 matches. The turn's write-back then records the
+  directory in `SessionFiles`, as it does for `Write`.
 - **Egress.** The pod reaches only the egress proxy
   ([`agent/src/sandbox/egressProxy.ts`](../../agent/src/sandbox/egressProxy.ts)), a Deployment
   of the same image. It takes `CONNECT` to ports 80 and 443 only. It runs WebFetch's check on
   each target (`assertHostAllowed`: link-local and cloud metadata refused; loopback refused),
   refuses every private and shared address too, and connects to the address it checked. Plain
   `http://` through the proxy and every other protocol are refused. It holds at most 256
-  tunnels at once, 32 from one pod. It logs one JSON line per tunnel. Its own NetworkPolicy
+  tunnels at once, 32 from one pod, and frees a slot as soon as its client leaves. It logs one JSON line per tunnel. Its own NetworkPolicy
   allows only public addresses on 80 and 443.
 - **Results** are untrusted data (`untrusted_data`, tool `Bash` or `PowerShell`, source "the
   session sandbox").

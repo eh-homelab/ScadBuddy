@@ -92,6 +92,17 @@ describe('Bash in the session sandbox', () => {
     expect(next.stdout).toBe('100\n100\n')
     expect(next.files_removed).toBeUndefined()
     expect(await readFile(path.join(dir, 'grown.txt'), 'utf8')).toBe('small')
+    // Another worker (nothing of this one's memory): the pod's own record keeps the files all the same.
+    const elsewhere = await runInSandbox({ sandboxes, sessionId: SESSION, dir, limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 }, signal: AbortSignal.timeout(30_000) }, 'bash', 'wc -c < big.bin', 5_000)
+    expect(elsewhere.result.stdout).toBe('100\n')
+    // A new pod starts from the session's files alone.
+    const fresh = new LocalSandboxes()
+    try {
+      const run = await runInSandbox({ sandboxes: fresh, sessionId: SESSION, dir, limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 }, signal: AbortSignal.timeout(30_000) }, 'bash', 'ls; cat grown.txt', 5_000)
+      expect(run.result.stdout).toBe('grown.txt\nsmall')
+    } finally {
+      await fresh.close()
+    }
     // Once the session writes its own copy, that copy counts again.
     await writeFile(path.join(dir, 'grown.txt'), 'mine')
     const after = content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text)

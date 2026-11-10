@@ -383,8 +383,9 @@ opens every one and seals it again byte for byte).
     `bgtask-<session>-<id>` whose `BackgroundFire` sends the prompt when the session is idle
     (`background/temporal.ts`, plan Step 9.8, its older jobs converted at start by
     `convertCronTasks`), and a wakeup or a one-shot cron one `BackgroundTask` workflow on
-    `agent-tools`; a Monitor's source
-    runs where the session's Bash runs, the replica's own queue, its events in
+    `agent-tools`; a Monitor's command
+    runs on the replica that ran the turn, its own queue, and never where a sandbox is set up
+    (#5864: its description there offers `ws` only), its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
     (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; every turn

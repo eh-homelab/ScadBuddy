@@ -109,6 +109,14 @@ export function egressProxy(options: EgressProxyOptions): Server {
         else bySource.delete(source)
       }
     }
+    // Registered before the check and the connect: a client gone meanwhile frees its slot at once.
+    let upstream: Duplex | undefined
+    let gone = false
+    client.on('close', () => {
+      gone = true
+      if (upstream) upstream.destroy()
+      else release()
+    })
     void (async () => {
       let addresses: string[]
       try {
@@ -124,14 +132,19 @@ export function egressProxy(options: EgressProxyOptions): Server {
           return refuse('403 Forbidden', host, port, `host ${host} resolves to ${address}, a ${why} address`)
         }
       }
+      if (gone) return
       const address = addresses[0]!
-      const upstream = options.connect ? options.connect(address, port) : netConnect({ host: plainAddress(address), port })
-      upstream.setTimeout(CONNECT_TIMEOUT_MS)
+      const socket = options.connect ? options.connect(address, port) : netConnect({ host: plainAddress(address), port })
+      upstream = socket
+      socket.setTimeout(CONNECT_TIMEOUT_MS)
       let bytesOut = 0
       let bytesIn = 0
       let opened = false
+      let logged = false
       const finish = (outcome: EgressLog['outcome'], reason?: string) => {
         release()
+        if (logged) return
+        logged = true
         options.log({
           at: new Date().toISOString(),
           source,
@@ -144,33 +157,32 @@ export function egressProxy(options: EgressProxyOptions): Server {
           ...(reason ? { reason } : {}),
         })
       }
-      upstream.once('connect', () => {
+      socket.once('connect', () => {
         opened = true
-        upstream.setTimeout(TUNNEL_IDLE_MS)
+        socket.setTimeout(TUNNEL_IDLE_MS)
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
         if (head.length) {
           bytesOut += head.length
-          upstream.write(head)
+          socket.write(head)
         }
         client.on('data', (chunk: Buffer) => (bytesOut += chunk.length))
-        upstream.on('data', (chunk: Buffer) => (bytesIn += chunk.length))
-        client.pipe(upstream)
-        upstream.pipe(client)
+        socket.on('data', (chunk: Buffer) => (bytesIn += chunk.length))
+        client.pipe(socket)
+        socket.pipe(client)
       })
-      upstream.on('timeout', () => upstream.destroy(new Error(opened ? 'idle' : 'connect timed out')))
-      upstream.on('error', (err) => {
+      socket.on('timeout', () => socket.destroy(new Error(opened ? 'idle' : 'connect timed out')))
+      socket.on('error', (err) => {
         if (!opened) {
           finish('failed', err.message)
           client.end('HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\n\r\n')
         } else client.destroy()
       })
-      upstream.on('close', () => {
+      socket.on('close', () => {
         if (opened) {
           finish('connected')
           client.destroy()
-        }
+        } else finish('failed', 'the client went away before the connect')
       })
-      client.on('close', () => upstream.destroy())
     })()
   })
   return server

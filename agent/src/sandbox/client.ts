@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { dirBytes, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
-import { type ExecResult, type Manifest, SHA_HEADER, type Shell, syncPath, UNSYNCED_MAX } from './protocol.js'
+import { type ExecResult, type KeptRecord, keptValue, type Manifest, SHA_HEADER, type Shell, syncPath, UNSYNCED_MAX } from './protocol.js'
 
 // The agent's side of a session's sandbox (#5864, issue comment "Design" §2-§3): the client of the
 // exec server (server.ts) and the sync between the session's directory on this worker (its cwd,
@@ -122,6 +122,22 @@ export class SandboxClient {
     return bytes
   }
 
+  /** The pod's Kept (protocol.ts KeptRecord), its entries checked: a command controls what the pod says. */
+  async kept(): Promise<Kept> {
+    const raw = (await (await this.#call('GET', '/v1/kept')).json()) as unknown
+    const out: Kept = new Map()
+    if (typeof raw !== 'object' || raw === null) return out
+    for (const [rel, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (syncPath(rel) && keptValue(value)) out.set(rel, value ?? undefined)
+    }
+    return out
+  }
+
+  async setKept(kept: Kept): Promise<void> {
+    const record: KeptRecord = Object.fromEntries([...kept].map(([rel, was]) => [rel, was ?? null]))
+    await this.#call('PUT', '/v1/kept', { body: JSON.stringify(record), headers: { 'content-type': 'application/json' } })
+  }
+
   async delete(rel: string): Promise<void> {
     await this.#call('DELETE', `/v1/files/${encodeURI(rel)}`)
   }
@@ -143,10 +159,11 @@ export type SyncLimits = { fileMaxBytes: number; workspaceMaxBytes: number }
 export type SyncBack = { written: string[]; removed: string[]; left: { path: string; reason: string }[] }
 
 /**
- * The files a sync back left in the pod (past a cap), by path: what the session directory held
+ * The files a sync back left in the pod past a cap, by path: what the session directory held
  * at that path then (its sha256, `large` past the per-file cap, or undefined for none). Until
  * the session directory's copy changes, a sync in neither sends nor deletes such a path, so
- * the file stays in the pod for the next command (the pod's own lifetime allowing).
+ * the file stays in the pod for as long as the pod lasts. The pod itself keeps the record
+ * (GET and PUT /v1/kept), so a sync in on any worker sees it; a new pod starts with none.
  */
 export type Kept = Map<string, string | undefined>
 
@@ -236,16 +253,18 @@ export async function syncBack(client: SandboxClient, dir: string, before: Synce
     try {
       bytes = await client.get(file.path, max)
     } catch (err) {
-      const reason =
-        err instanceof SandboxTooLarge
-          ? max === limits.fileMaxBytes
+      if (err instanceof SandboxTooLarge) {
+        const cap =
+          max === limits.fileMaxBytes
             ? `it is past the workspace's per-file cap of ${limits.fileMaxBytes} bytes`
             : `it would take the session directory past the workspace's cap of ${limits.workspaceMaxBytes} bytes`
-          : err instanceof Error
-            ? err.message
-            : String(err)
-      out.left.push({ path: file.path, reason: `${reason}; it stays in the sandbox for the next commands while the sandbox lasts` })
-      kept.set(file.path, await localState(dir, file.path, limits))
+        out.left.push({ path: file.path, reason: `${cap}; ${KEPT_NOTE}` })
+        kept.set(file.path, await localState(dir, file.path, limits))
+      } else {
+        // Not kept: the next command's sync in makes the pod match the session directory again.
+        const why = err instanceof Error ? err.message : String(err)
+        out.left.push({ path: file.path, reason: `it could not be read back (${why}); the next command's sync removes it from the sandbox` })
+      }
       continue
     }
     budget -= bytes.length
@@ -265,18 +284,20 @@ export async function syncBack(client: SandboxClient, dir: string, before: Synce
   return out
 }
 
+/** What becomes of a file left in the sandbox past a cap. */
+export const KEPT_NOTE =
+  "it stays in the sandbox pod while the pod lasts (until the session's own copy at that path changes); a new pod starts from the session's files"
+
 /** Why a path the sandbox names in `unsynced` is not in the session. */
 export const UNSYNCED_REASON =
   'its path never comes back to the session: only names of letters, digits, "_", "." and "-" that do not start with ".", ' +
-  'at most 4 levels deep and outside node_modules and __pycache__, sync; it stays in the sandbox while the sandbox lasts'
+  'at most 4 levels deep and outside node_modules and __pycache__, sync; it stays in the sandbox pod while the pod lasts'
 
 /** One command's run, with its sync. */
 export type ShellRun = { result: ExecResult; back: SyncBack }
 
 /** Each session's calls, one at a time on this worker: a sync never runs into another. */
 const chains = new Map<string, Promise<unknown>>()
-/** Each session's Kept on this worker, for the pod (its URL) it was recorded against. */
-const keptBySession = new Map<string, { url: string; kept: Kept }>()
 
 function serial<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
   const run = (chains.get(sessionId) ?? Promise.resolve()).then(work, work)
@@ -301,14 +322,11 @@ export function runInSandbox(
     for (let attempt = 0; ; attempt++) {
       const endpoint = await options.sandboxes.acquire(options.sessionId, options.signal)
       const client = new SandboxClient(endpoint, options.signal)
-      let state = keptBySession.get(options.sessionId)
-      if (state?.url !== endpoint.url) {
-        state = { url: endpoint.url, kept: new Map() }
-        keptBySession.set(options.sessionId, state)
-      }
+      let kept: Kept
       let before: SyncedIn
       try {
-        before = await syncIn(client, options.dir, options.limits, state.kept)
+        kept = await client.kept()
+        before = await syncIn(client, options.dir, options.limits, kept)
       } catch (err) {
         if (!(err instanceof SandboxError)) throw err
         options.sandboxes.release?.(options.sessionId, endpoint)
@@ -317,8 +335,8 @@ export function runInSandbox(
       }
       try {
         const result = await client.exec(shell, command, timeoutMs)
-        const back = await syncBack(client, options.dir, before, options.limits, state.kept)
-        if (state.kept.size === 0) keptBySession.delete(options.sessionId)
+        const back = await syncBack(client, options.dir, before, options.limits, kept)
+        await client.setKept(kept)
         return { result, back }
       } catch (err) {
         if (err instanceof SandboxError) options.sandboxes.release?.(options.sessionId, endpoint)

@@ -14,7 +14,7 @@ import { AuditLog } from '../src/audit/log.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
-import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
+import { type BuiltinContext, builtinServer, classicBuiltinServer, MONITOR_WS_ONLY } from '../src/builtins/server.js'
 import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
 import { confineGuard } from '../src/harness/confine.js'
@@ -512,6 +512,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     }
     expect(watch.isError).toBe(true)
     expect(watch.content[0]!.text).toContain('cannot run monitor commands')
+    // Its description offers only a ws source, so the model is not told otherwise.
+    const monitorTool = (await turnClient.listTools()).tools.find((t) => t.name === 'Monitor')!
+    expect(monitorTool.description).toBe(MONITOR_WS_ONLY)
     await turnClient.close()
     sandboxed.abortAll()
   })

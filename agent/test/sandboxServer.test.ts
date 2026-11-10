@@ -110,6 +110,35 @@ describe('the sandbox exec server', () => {
     expect((await readdir(box.work)).sort()).toEqual(['fits.bin'])
   })
 
+  it('kills a command whose caller went away, so the next call is not refused', async () => {
+    const { box } = await start()
+    const gone = new AbortController()
+    const leaving = new SandboxClient(box.endpoint, gone.signal).exec('bash', 'sleep 2; echo late > late.txt', 30_000).catch(() => 'aborted')
+    await new Promise((r) => setTimeout(r, 300))
+    gone.abort()
+    expect(await leaving).toBe('aborted')
+    // Not refused (409) while the old command would still sleep.
+    await expect
+      .poll(() => new SandboxClient(box.endpoint, AbortSignal.timeout(10_000)).exec('bash', 'echo next', 5_000).catch((e: Error) => e.message), { timeout: 1_500 })
+      .toMatchObject({ stdout: 'next\n' })
+    await new Promise((r) => setTimeout(r, 2_500))
+    await expect(readFile(path.join(box.work, 'late.txt'))).rejects.toThrow()
+  })
+
+  it('keeps the record of kept files, sync paths only', async () => {
+    const { box, client } = await start()
+    expect(await client.kept()).toEqual(new Map())
+    await client.setKept(new Map([['big.bin', 'large'], ['new.bin', undefined]]))
+    expect(await client.kept()).toEqual(new Map([['big.bin', 'large'], ['new.bin', undefined]]))
+    const bad = await fetch(`${box.endpoint.url}/v1/kept`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${box.endpoint.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ '../x': null }),
+    })
+    expect(bad.status).toBe(400)
+    expect(await client.kept()).toEqual(new Map([['big.bin', 'large'], ['new.bin', undefined]]))
+  })
+
   it('refuses a file whose sha256 does not match', async () => {
     const { box } = await start()
     const res = await fetch(`${box.endpoint.url}/v1/files/a.txt`, {

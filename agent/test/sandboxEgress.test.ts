@@ -118,6 +118,36 @@ describe('the sandbox egress proxy', () => {
     }
   })
 
+  it('frees the slot of a client that leaves during the check', async () => {
+    const echo = netServer((sock) => sock.pipe(sock))
+    const echoPort = await listen(echo)
+    const proxy = egressProxy({
+      resolve: () => new Promise((r) => setTimeout(() => r(['93.184.216.34']), 200)),
+      log: () => {},
+      connect: () => connect(echoPort, '127.0.0.1'),
+    })
+    const port = await listen(proxy)
+    // Every slot of this source asked for, then left before the slow check answered.
+    await Promise.all(
+      Array.from(
+        { length: MAX_TUNNELS_PER_SOURCE },
+        () =>
+          new Promise<void>((resolve) => {
+            const socket = connect(port, '127.0.0.1', () => {
+              socket.write('CONNECT example.com:443 HTTP/1.1\r\nhost: example.com:443\r\n\r\n')
+              setTimeout(() => socket.destroy(), 20)
+            })
+            socket.on('close', () => resolve())
+            socket.on('error', () => {})
+          }),
+      ),
+    )
+    await new Promise((r) => setTimeout(r, 500))
+    const { status, socket } = await tunnel(port, 'example.com:443')
+    socket.destroy()
+    expect(status).toBe('HTTP/1.1 200 Connection Established')
+  })
+
   it('refuses plain absolute-form http requests', async () => {
     const proxy = egressProxy({ log: () => {} })
     const port = await listen(proxy)

@@ -58,7 +58,8 @@ const where =
   '(the same files Read, Write and Edit see). Files it creates, changes or deletes there come back to the session after the ' +
   'command only at a path whose every name is letters, digits, "_", "." and "-", does not start with ".", and is at most 4 ' +
   'levels deep, outside node_modules and __pycache__, and only within the workspace caps. Any other file stays in the sandbox ' +
-  'while it lasts, and the result lists it under files_left_in_sandbox (node_modules and __pycache__ are not listed). The ' +
+  'pod while the pod lasts, and the result lists it under files_left_in_sandbox (node_modules and __pycache__ are not listed); ' +
+  "a new pod (after 15 idle minutes, or 4 hours) starts from the session's files alone. The " +
   'network reaches only public hosts on ports 80 and 443, through an HTTPS proxy (HTTPS_PROXY is set; plain http:// and other ' +
   `protocols are refused). The timeout is ${DEFAULT_TIMEOUT_MS / 1000} s by default, at most ${MAX_TIMEOUT_MS / 1000} s. ` +
   `Output past ${OUTPUT_MAX_CHARS} characters is cut.`

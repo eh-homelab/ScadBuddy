@@ -1186,9 +1186,10 @@ task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs se
 the session's data key; archiving the chat or marking it done ends its tasks, and
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
-A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
-where the session's Bash runs: a command in the session's directory on
-the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
+A `Monitor` is a task of the same kind whose source runs as one heartbeating activity: a
+command in the session's directory on the replica that ran the turn
+(`agent-tools.<hostname>`, `background/monitor.ts`), never where a sandbox is set up (#5864:
+there the session's Bash runs in its pod, and Monitor's description offers only `ws`), a
 WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
 dropped, and so is a batch, so a command that never writes a newline holds no more. The

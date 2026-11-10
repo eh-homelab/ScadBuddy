@@ -94,8 +94,8 @@ export const BUILTINS: Record<string, Builtin> = {
   },
   Monitor: {
     description:
-      "Claude Code's Monitor: starts a background watch that streams events. With `command`, a shell script (bash, in the same " +
-      'directory as this session\'s Bash) whose stdout lines are the events, batched within 200 ms, and whose exit ends the watch; ' +
+      "Claude Code's Monitor: starts a background watch that streams events. With `command`, a bash script run in this session's " +
+      'directory, whose stdout lines are the events, batched within 200 ms, and whose exit ends the watch; ' +
       'filter it to the lines you would act on (grep --line-buffered), covering failures as well as success. With `ws`, a WebSocket ' +
       'whose text frames are the events. It expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than ' +
       '200 events is stopped. Events reach you as a new message once the session is idle. Use TaskStop to cancel it early. For one ' +
@@ -201,6 +201,16 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
  */
 export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
 
+/**
+ * Monitor's description where the turn gives it no command queue (a sandbox, #5864: the session's
+ * Bash runs in its pod, and a command would run on the worker): `ws` only.
+ */
+export const MONITOR_WS_ONLY =
+  "Claude Code's Monitor: starts a background watch that streams events from a WebSocket (`ws`), whose text frames are the " +
+  'events. `command` is not available in this session: its Bash runs in a sandbox pod, and a monitor command would not. It ' +
+  'expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than 200 events is stopped. Events reach ' +
+  'you as a new message once the session is idle. Use TaskStop to cancel it early.'
+
 /** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
 export function classicBuiltinServer(
   names: readonly string[],
@@ -212,7 +222,8 @@ export function classicBuiltinServer(
       .filter((n) => CLASSIC_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
       .map((name) => {
         const builtin = BUILTINS[name]!
-        return tool(name, builtin.description, (builtin.input as z.ZodObject).shape, async (args, extra) => {
+        const description = name === 'Monitor' && context.background && !context.background.commandQueue ? MONITOR_WS_ONLY : builtin.description
+        return tool(name, description, (builtin.input as z.ZodObject).shape, async (args, extra) => {
           // The call's own signal, when the SDK gives one: a call Claude Code gives up on stops its command too.
           const signal = (extra as { signal?: AbortSignal } | undefined)?.signal
           const ctx = signal ? stoppable(context as BuiltinContext, signal) : (context as BuiltinContext)
