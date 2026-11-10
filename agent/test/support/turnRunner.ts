@@ -54,6 +54,8 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** The sessions' sandbox pods (#5864); none when undefined. */
+  sandbox?: TurnRunnerDeps['sandbox']
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -173,6 +175,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),

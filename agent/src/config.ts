@@ -1,4 +1,5 @@
 import { OriginConfigError, originPolicy } from './http/origins.js'
+import type { SandboxConfig } from './sandbox/pods.js'
 
 // The agent service's whole environment surface. Design spec §9
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): "There are no
@@ -91,6 +92,12 @@ export type Config = {
   serviceTokenFile?: string | undefined
   /** SCADBUDDY_SERVICE_BOOTSTRAP_FILE (§7.2): its bootstrap secret outside Kubernetes. Never with the above. */
   serviceBootstrapFile?: string | undefined
+  /**
+   * The sandbox pods Bash and PowerShell run in (#5864, sandbox/pods.ts): SCADBUDDY_SANDBOX_NAMESPACE,
+   * _IMAGE, _EGRESS_PROXY, _KUBE_TOKEN_FILE and _KUBE_CA_FILE, all set or none. None → no sandbox,
+   * and Bash and PowerShell stay `off`.
+   */
+  sandbox?: SandboxConfig | undefined
 }
 
 export const AUTH_MODES = ['off', 'observe', 'enforce'] as const
@@ -123,6 +130,11 @@ export const ENV_VARS = [
   'SCADBUDDY_AUTH_MODE',
   'SCADBUDDY_SERVICE_TOKEN_FILE',
   'SCADBUDDY_SERVICE_BOOTSTRAP_FILE',
+  'SCADBUDDY_SANDBOX_NAMESPACE',
+  'SCADBUDDY_SANDBOX_IMAGE',
+  'SCADBUDDY_SANDBOX_EGRESS_PROXY',
+  'SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE',
+  'SCADBUDDY_SANDBOX_KUBE_CA_FILE',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -238,7 +250,42 @@ export function loadConfig(env: Env = process.env): Config {
     agentRole: agentRole(present(env.SCADBUDDY_AGENT_ROLE)),
     authMode: authMode(present(env.SCADBUDDY_AUTH_MODE)),
     ...serviceProof(present(env.SCADBUDDY_SERVICE_TOKEN_FILE), present(env.SCADBUDDY_SERVICE_BOOTSTRAP_FILE)),
+    ...sandboxConfig(env),
   }
+}
+
+/** The sandbox's five variables: all set, or none (#5864). */
+function sandboxConfig(env: Env): Pick<Config, 'sandbox'> {
+  const values = {
+    namespace: present(env.SCADBUDDY_SANDBOX_NAMESPACE),
+    image: present(env.SCADBUDDY_SANDBOX_IMAGE),
+    egressProxy: present(env.SCADBUDDY_SANDBOX_EGRESS_PROXY),
+    tokenFile: absoluteDir('SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE', present(env.SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE)),
+    caFile: absoluteDir('SCADBUDDY_SANDBOX_KUBE_CA_FILE', present(env.SCADBUDDY_SANDBOX_KUBE_CA_FILE)),
+  }
+  const set = Object.values(values).filter((v) => v !== undefined).length
+  if (set === 0) return {}
+  if (set < 5) {
+    throw new ConfigError(
+      'Set all of SCADBUDDY_SANDBOX_NAMESPACE, _IMAGE, _EGRESS_PROXY, _KUBE_TOKEN_FILE and _KUBE_CA_FILE, or none of them',
+    )
+  }
+  for (const [name, value] of Object.entries(values)) {
+    if (/\s/.test(value!)) throw new ConfigError(`the sandbox's ${name} must not contain whitespace`)
+  }
+  if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(values.namespace!)) {
+    throw new ConfigError(`SCADBUDDY_SANDBOX_NAMESPACE is not a namespace name: ${JSON.stringify(values.namespace)}`)
+  }
+  let proxy: URL
+  try {
+    proxy = new URL(values.egressProxy!)
+  } catch {
+    throw new ConfigError(`SCADBUDDY_SANDBOX_EGRESS_PROXY is not a valid URL: ${values.egressProxy}`)
+  }
+  if (proxy.protocol !== 'http:' || !proxy.port || proxy.pathname !== '/' || proxy.username || proxy.search) {
+    throw new ConfigError(`SCADBUDDY_SANDBOX_EGRESS_PROXY must be http://<host>:<port>, not ${values.egressProxy}`)
+  }
+  return { sandbox: values as SandboxConfig }
 }
 
 /** One proof of who the agent is, never both (spec 2026-11-05 §7.2): both set is a start error. */

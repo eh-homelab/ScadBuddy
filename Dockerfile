@@ -293,6 +293,78 @@ CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
+# ── sandbox: a session's Bash and PowerShell, and their egress proxy (#5864) ───
+# One image, two roles (agent/src/sandbox/main.ts): SCADBUDDY_SANDBOX_ROLE=exec is a
+# session's sandbox pod, which the agent worker creates in its own namespace with no
+# secret, no service-account token and no DNS (agent/src/sandbox/pods.ts); `egress` is the
+# sandbox pods' CONNECT proxy, which checks each target as WebFetch does and refuses
+# private addresses (agent/src/sandbox/egressProxy.ts). Only Node's built-ins run here:
+# the sandbox files and http/egress.ts, compiled in `agent-build`, and no node_modules.
+#
+# PowerShell is Microsoft's release tarball, pinned by version, sha256 and REST asset id
+# (the fallback when the release URL fails, #5706; release-asset-pins.sh checks it weekly).
+# amd64 only: no CI job builds arm64. Bump the three ARGs together.
+FROM node:24-bookworm-slim AS sandbox
+
+ARG POWERSHELL_VERSION=7.6.9
+ARG POWERSHELL_SHA256_AMD64=1da6d6d6035d651f20e70ddee7c4c15ac6ab8b9fb40ee92240d91263f28a884b
+ARG POWERSHELL_ASSET_AMD64=675638183
+
+# What a command is likely to need: a shell's tools, git and curl (through the proxy),
+# python3, jq, and PowerShell's own libraries (libicu, libssl).
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       tini bash ca-certificates curl git jq less procps python3 python3-venv unzip xz-utils zip \
+       libicu72 libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/pwsh
+# The single quotes are PowerShell's: `$PSVersionTable` is its variable, not the shell's.
+# hadolint ignore=SC2016
+RUN { curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+        --output pwsh.tar.gz \
+        "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
+      || curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+        --header "Accept: application/octet-stream" --output pwsh.tar.gz \
+        "https://api.github.com/repos/PowerShell/PowerShell/releases/assets/${POWERSHELL_ASSET_AMD64}"; } \
+    && printf '%s  pwsh.tar.gz\n' "$POWERSHELL_SHA256_AMD64" > pwsh.sha256 \
+    && sha256sum --check --strict pwsh.sha256 \
+    && mkdir -p /opt/microsoft/powershell/7 \
+    && tar -xzf pwsh.tar.gz -C /opt/microsoft/powershell/7 \
+    && chmod 0755 /opt/microsoft/powershell/7/pwsh \
+    && ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh \
+    && rm -rf /tmp/pwsh \
+    && HOME=/tmp POWERSHELL_TELEMETRY_OPTOUT=1 pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+
+# uid 10001 like every ScadBuddy image. /work (the session's files) and /tmp are the pod's
+# emptyDirs; the root filesystem is read-only.
+RUN groupadd --gid 10001 sandbox \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp/home --shell /bin/bash sandbox \
+    && install -d -o 10001 -g 10001 /work
+
+WORKDIR /app
+COPY --from=agent-build /src/agent/dist/sandbox ./dist/sandbox
+COPY --from=agent-build /src/agent/dist/http/egress.js /src/agent/dist/http/origins.js ./dist/http/
+# ESM: dist/*.js are modules, as agent/package.json's "type" says.
+RUN printf '{"type":"module"}\n' > package.json
+
+ENV NODE_ENV=production \
+    SCADBUDDY_SANDBOX_WORK=/work \
+    SCADBUDDY_SANDBOX_HOME=/tmp/home \
+    POWERSHELL_TELEMETRY_OPTOUT=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+USER 10001:10001
+EXPOSE 8090 3128
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/sandbox/main.js"]
+
 # ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
 # Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
 # (plan 2026-10-13 Step 8.1): the process serves /healthz and runs no worker until a

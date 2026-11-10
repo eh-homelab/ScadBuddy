@@ -54,6 +54,7 @@ import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import { sandboxShellTools, SHELL_BUILTINS } from '../builtins/sandboxShell.js'
 
 /** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
 const TURN_TOOLS_LIST_MS = 30_000
@@ -80,6 +81,7 @@ export type TurnRunnerDeps = Pick<
   | 'httpRequest'
   | 'sql'
   | 'background'
+  | 'sandbox'
   | 'nestedQueries'
   | 'audit'
   | 'stderr'
@@ -446,7 +448,10 @@ export class TurnRunner {
       }))
       // Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every one not off under
       // `builtin:claude-code`, which a package that names one can only switch on.
-      const nativeTools = await nativeBuiltinTools(access, callBuiltins)
+      const allNative = await nativeBuiltinTools(access, callBuiltins)
+      // Bash and PowerShell in the session's sandbox pod where one is set up (#5864), never here.
+      const shellTools = this.deps.sandbox ? await sandboxShellTools(access, callBuiltins) : []
+      const nativeTools = this.deps.sandbox ? allNative.filter((t) => !SHELL_BUILTINS.includes(t.name)) : allNative
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).
       packageServers =
@@ -467,6 +472,7 @@ export class TurnRunner {
               plugins: callPlugins,
               builtins: callBuiltins,
               native: true,
+              sandboxShell: this.deps.sandbox !== undefined,
             }),
             ledger,
           }
@@ -639,11 +645,12 @@ export class TurnRunner {
           this.deps.stderr?.(`session ${id}: its plugin and http tools could not be listed, so they run in this turn's process: ${err instanceof Error ? err.message : String(err)}\n`)
         }
       }
-      const served = allowedPluginPaths.length
+      const packageServed = allowedPluginPaths.length
         ? (packages?.builtinTools ?? []).filter(
             (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
           )
         : []
+      const served = [...packageServed, ...shellTools.map((t) => t.name)]
       const run: AssembledTurn['run'] = {
         paths: this.deps.paths,
         cwd,
@@ -684,7 +691,7 @@ export class TurnRunner {
           : {}),
         // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
         // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
-        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(served)] : []), turnSettings.system_prompt_append.trim()]
+        systemPromptAppend: [systemAppend(), ...(packageServed.length ? [classicBuiltinNote(packageServed)] : []), turnSettings.system_prompt_append.trim()]
           .filter((part) => part !== '')
           .join('\n\n'),
         systemPromptBase: turnSettings.system_prompt_base,
@@ -723,6 +730,19 @@ export class TurnRunner {
                 ...(served.length
                   ? {
                       [BUILTIN_SERVER]: classicBuiltinServer(served, {
+                        ...(this.deps.sandbox
+                          ? {
+                              shell: {
+                                sandboxes: this.deps.sandbox,
+                                sessionId: id,
+                                dir: cwd,
+                                limits: () => this.deps.files.limits(),
+                                get signal() {
+                                  return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
+                                },
+                              },
+                            }
+                          : {}),
                         ...(this.deps.background
                           ? {
                               background: {

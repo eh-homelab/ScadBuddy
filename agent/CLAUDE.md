@@ -338,7 +338,15 @@ opens every one and seals it again byte for byte).
     session's own `tool-results` directory in the Claude Code config dir, where Claude Code
     saves an oversized tool result (#5542, `projectDirName`). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
-    2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
+    2026-11-01). Where the deployment sets `SCADBUDDY_SANDBOX_*` (all five or none, `config.ts`
+    `sandbox`), every turn gets the session's own `Bash` and `PowerShell` instead
+    (`mcp__builtin__Bash`, `builtins/sandboxShell.ts`, `outward` by default under the same two
+    items), each command run in the session's sandbox pod (#5864, `src/sandbox/`: `pods.ts` makes
+    one pod per session through the Kubernetes API and sweeps the ended ones, `client.ts` syncs
+    the session directory in and out around each command, `server.ts` is the pod's exec server
+    and `egressProxy.ts` the pods' CONNECT proxy, both the Dockerfile's `sandbox` target, which
+    carries only Node's built-ins; `docs/ai/security.md`, "Bash and PowerShell in a sandbox
+    pod"). Tests run the exec server in-process (`test/support/sandbox.ts`). An allowed package's `builtinTools`
     only switch on one that is `off` by default, at its package tier (`outward` by default),
     never one a person switched off (the source, or the item's row); they no longer decide
     what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured

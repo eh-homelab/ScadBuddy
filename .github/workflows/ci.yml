@@ -829,9 +829,44 @@ jobs:
             exit 1
           fi
 
+      # The sessions' shell sandbox (#5864): built on the agent's stages, so it reads
+      # the agent's cache and writes none. Run as its pod runs it (read-only root,
+      # /work and /tmp writable), then one bash and one pwsh command through its API.
+      - name: Build the sandbox image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: sandbox
+          load: true
+          tags: scadbuddy-sandbox:ci
+          cache-from: type=gha,scope=agent
+
+      - name: Run a bash and a PowerShell command in the sandbox container
+        run: |
+          set -euo pipefail
+          token="$(openssl rand -hex 32)"
+          docker run -d --name scadbuddy-sandbox-ci --read-only \
+            --tmpfs /tmp:uid=10001,gid=10001 --tmpfs /work:uid=10001,gid=10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -e SCADBUDDY_SANDBOX_TOKEN="$token" -p 18090:8090 scadbuddy-sandbox:ci
+          for _ in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:18090/healthz >/dev/null && break
+            sleep 1
+          done
+          run() {
+            curl --fail --silent --show-error -H "authorization: Bearer $token" \
+              -H 'content-type: application/json' --data "$1" http://127.0.0.1:18090/v1/exec
+          }
+          bash_out="$(run '{"shell":"bash","command":"echo hi > a.txt && cat a.txt && id -u","timeout_ms":30000}')"
+          echo "$bash_out"
+          jq -e '.exit_code == 0 and .stdout == "hi\n10001\n"' <<<"$bash_out" >/dev/null
+          pwsh_out="$(run '{"shell":"pwsh","command":"Get-Content a.txt; 1 + 2","timeout_ms":60000}')"
+          echo "$pwsh_out"
+          jq -e '.exit_code == 0 and .stdout == "hi\n3\n"' <<<"$pwsh_out" >/dev/null
+
       - name: Tear down
         if: always()
-        run: docker rm -f scadbuddy-agent-ci || true
+        run: docker rm -f scadbuddy-agent-ci scadbuddy-sandbox-ci || true
 
   agent-durable:
     name: Agent-durable lint, test, image

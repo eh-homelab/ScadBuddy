@@ -11,8 +11,11 @@ import { type AccessRow, BUILTIN_SOURCES, type ToolAccess } from './model.js'
 // --map-root-user --pid --fork` works, but with `--mount` it fails with "cannot change root
 // filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`, enforce),
 // and the image has no bwrap. Without a sandbox, Bash reads what the worker can (the KEK mount,
-// every session's directory). A sandbox pod (#779) is the follow-up. An `allow_refused`
-// package that names one still switches it on (`nativeBuiltinTools`), at `outward`.
+// every session's directory). An `allow_refused` package that names one still switches it on
+// (`nativeBuiltinTools`), at `outward`. Where the deployment sets up sandbox pods (#5864,
+// config.ts `sandbox`), the turn never gets the native ones: the same two items govern the
+// session's own Bash and PowerShell, which run in its sandbox pod (builtins/sandboxShell.ts),
+// `outward` by default (SANDBOXED_ACCESS).
 //
 // WebFetch and WebSearch stay ScadBuddy's egress-checked ones (decision Q2, builtins/web.ts);
 // CronCreate, ScheduleWakeup, Monitor, Workflow and TaskStop stay the session's own
@@ -36,15 +39,21 @@ export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
     name: 'Bash',
     access: 'off',
     label: 'Run a shell command',
-    description: 'Runs a shell command in the worker pod. Off: no sandbox can run there yet (#779), so it could read every session and the key.',
+    description:
+      "Runs a shell command in the session's sandbox pod, where one is set up (#5864); there, outward by default. Off where none is: in the worker pod it could read every session and the key.",
   },
   {
     name: 'PowerShell',
     access: 'off',
     label: 'Run a PowerShell command',
-    description: 'Runs a PowerShell command in the worker pod. Off, as Bash is.',
+    description: "Runs a PowerShell command in the session's sandbox pod, where one is set up (#5864), as Bash does. Off where none is.",
   },
 ]
+
+/** The access Bash and PowerShell default to where they run in a sandbox pod (#5864): each call parks for a person. */
+export const SANDBOXED_ACCESS: ToolAccess = 'outward'
+/** The built-ins that run in a session's sandbox pod where one is set up (#5864, builtins/sandboxShell.ts). */
+export const SHELL_BUILTINS: readonly string[] = ['Bash', 'PowerShell']
 
 export const NATIVE_NAMES: ReadonlySet<string> = new Set(NATIVE_BUILTINS.map((b) => b.name))
 

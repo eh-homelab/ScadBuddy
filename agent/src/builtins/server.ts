@@ -8,6 +8,7 @@ import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, sche
 import { MAX_ACTIVE } from '../background/store.js'
 import { WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import { CALL_ID_META } from './callId.js'
+import { runShell, SHELL_BUILTINS, SHELL_DESCRIPTIONS, ShellInput, type ShellContext } from './sandboxShell.js'
 
 // The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
 // WebSearch and the background ones, as one MCP server named `builtin`. Each takes
@@ -23,11 +24,14 @@ export type BuiltinContext = {
   background?: BackgroundContext | undefined
   /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
   callId?: string | undefined
+  /** The session's sandbox, for Bash and PowerShell (#5864); absent where none is set up. */
+  shell?: ShellContext | undefined
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
 export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 
+const noSandbox = (): BuiltinResult => ({ text: 'This session has no sandbox to run commands in.', isError: true })
 const noTasks = (): BuiltinResult => ({ text: 'This session cannot keep background tasks.', isError: true })
 const withTasks =
   <I>(run: (ctx: BackgroundContext, input: I) => Promise<BuiltinResult>) =>
@@ -124,6 +128,16 @@ export const BUILTINS: Record<string, Builtin> = {
     }),
     run: withTasks(workflow),
   },
+  Bash: {
+    description: SHELL_DESCRIPTIONS.Bash!,
+    input: ShellInput,
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'bash', input) : noSandbox()),
+  },
+  PowerShell: {
+    description: SHELL_DESCRIPTIONS.PowerShell!,
+    input: ShellInput,
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'pwsh', input) : noSandbox()),
+  },
   TaskStop: {
     description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
@@ -146,9 +160,10 @@ function toResult(result: BuiltinResult): CallToolResult {
 
 /** `context` whose web work also stops when the call's caller gives up on it (its request timed out or was cancelled, #3199). */
 function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext {
+  const shell = context.shell ? { shell: { ...context.shell, signal: AbortSignal.any([context.shell.signal, signal]) } } : {}
   // A context with no web work (a test's of only the background built-ins) has nothing to stop.
-  if (!(context.web as WebContext | undefined)) return context
-  return { ...context, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
+  if (!(context.web as WebContext | undefined)) return { ...context, ...shell }
+  return { ...context, ...shell, web: { ...context.web, signal: AbortSignal.any([context.web.signal, signal]) } }
 }
 
 /** An MCP server offering `names` (those of BUILTINS), each run with `context()`. */
@@ -186,20 +201,23 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
  */
 export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
 
-/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`. */
+/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
 export function classicBuiltinServer(
   names: readonly string[],
-  context: { background?: BackgroundContext | undefined; web?: WebContext | undefined },
+  context: { background?: BackgroundContext | undefined; web?: WebContext | undefined; shell?: ShellContext | undefined },
 ): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: BUILTIN_SERVER,
     tools: names
-      .filter((n) => CLASSIC_BUILTINS.includes(n))
+      .filter((n) => CLASSIC_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
       .map((name) => {
         const builtin = BUILTINS[name]!
-        return tool(name, builtin.description, (builtin.input as z.ZodObject).shape, async (args) =>
-          toResult(await builtin.run(context as BuiltinContext, args as never)),
-        )
+        return tool(name, builtin.description, (builtin.input as z.ZodObject).shape, async (args, extra) => {
+          // The call's own signal, when the SDK gives one: a call Claude Code gives up on stops its command too.
+          const signal = (extra as { signal?: AbortSignal } | undefined)?.signal
+          const ctx = signal ? stoppable(context as BuiltinContext, signal) : (context as BuiltinContext)
+          return toResult(await builtin.run(ctx, args as never))
+        })
       }),
   })
 }

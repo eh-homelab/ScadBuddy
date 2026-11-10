@@ -372,6 +372,19 @@ export function writeDirFile(dir: string, rel: string, bytes: Uint8Array): Promi
   return writeInside(dir, rel, bytes)
 }
 
+/** The regular files at workspace paths in a session's directory, by path, never through a link (the sandbox's sync, #5864). */
+export async function dirFiles(dir: string): Promise<Map<string, string>> {
+  return (await walk(dir)).files
+}
+
+/** Removes a regular file at `rel` from a session's directory, only while its directory resolves inside it; never a link's target. */
+export async function removeDirFile(dir: string, rel: string): Promise<void> {
+  const abs = path.join(dir, rel)
+  if (!(await within(dir, path.dirname(abs)).catch(() => false))) return
+  const st = await lstat(abs).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
+  if (st?.isFile()) await rm(abs, { force: true })
+}
+
 /** The directory itself, a real one: a link or a file in its place is removed first. */
 async function ensureDir(dir: string): Promise<void> {
   const st = await lstat(dir).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))

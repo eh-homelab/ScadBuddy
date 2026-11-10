@@ -4,7 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
-import { NATIVE_BUILTINS } from './nativeBuiltins.js'
+import { NATIVE_BUILTINS, SANDBOXED_ACCESS, SHELL_BUILTINS } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -33,6 +33,8 @@ export type LiveTurn = {
   builtins: readonly { name: string; packages: readonly string[] }[]
   /** Whether the turn offers Claude Code's own built-ins (nativeBuiltins.ts, Step 9.6): each call reads `builtin:claude-code`. */
   native?: boolean
+  /** Whether its Bash and PowerShell are the session's own in a sandbox pod (#5864): each call reads its item, `outward` by default. */
+  sandboxShell?: boolean
 }
 
 /** The prefix of the built-ins a classic turn serves itself (builtins/server.ts `BUILTIN_SERVER`, `mcp__builtin__<Name>`). */
@@ -71,6 +73,9 @@ export function liveAccess(
     // Claude Code's own: its item, which a package that names it can only switch on.
     const declared = native.get(harnessName)
     if (declared !== undefined) return resolver.native(harnessName, declared, builtins.get(harnessName) ?? [])
+    if (turn.sandboxShell && harnessName !== builtin && SHELL_BUILTINS.includes(builtin)) {
+      return resolver.native(builtin, SANDBOXED_ACCESS, builtins.get(builtin) ?? [])
+    }
     const packages = builtins.get(builtin)
     if (packages) return resolver.builtin(builtin, packages)
     if (namesItem(harnessName)) return undefined
