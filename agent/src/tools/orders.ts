@@ -228,6 +228,9 @@ function approvalLine(message: ApprovedMessage): string {
   return `Send${subject} to ${to} through ${message.source}:\n${message.text}`
 }
 
+/** The backend's `STALE_SENDING_MINUTES` (`orders/messages.py`): a `sending` row older reads `unknown`. */
+const STALE_SENDING_MINUTES = 15
+
 /** What a send answers: the recorded message, and whether the plugin reached the customer. */
 export type SendAnswer = { sent: boolean; message: OrderMessage; warning?: string }
 
@@ -272,8 +275,9 @@ async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Pr
         sent: false,
         message,
         warning:
-          'this message is being sent by an earlier call right now; nothing was sent again. Check the order’s ' +
-          'messages (order_messages_list) for its outcome',
+          `this message was claimed by an earlier call and may still be in flight; nothing was sent again. It reads ` +
+          `unknown after ${STALE_SENDING_MINUTES} minutes with no outcome. Check the order’s messages ` +
+          '(order_messages_list) for its outcome',
       }
     }
     const resendable = fresh || keyed
@@ -1004,7 +1008,7 @@ export const orderTools: Tool[] = [
     description:
       "The messages sent, or tried, to an order's customer through the messaging plugin (#5660), newest first, " +
       'as the order page lists them: each id, template, recipients, text and status (`sending`, `sent`, ' +
-      '`failed`, `unknown`, `skipped`; a `sending` one older than 15 minutes reads `unknown`). An id here is ' +
+      `\`failed\`, \`unknown\`, \`skipped\`; a \`sending\` one older than ${STALE_SENDING_MINUTES} minutes reads \`unknown\`). An id here is ` +
       "what order_notify_customer_send's `resend_of` takes.",
     input: z.object({ order_id: orderId }),
     risk: 'read',
