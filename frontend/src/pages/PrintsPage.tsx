@@ -1,73 +1,93 @@
-import type { ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
-import { ChevronDownIcon } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import { NowPrinting } from '../components/prints/NowPrinting'
-import { PrintQueue } from '../components/prints/PrintQueue'
+import { LiveJobItem } from '../components/prints/LiveJobItem'
+import { liveJobs, queueTail, type LiveJob } from '../components/prints/liveJobs'
+import { PrinterStrip, usePrintersNow } from '../components/prints/NowPrinting'
+import { QueueNotes, usePrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
 import { modelPath } from '../lib/deeplink'
 import { nativeBackends } from '../lib/printerRegistry'
+import { parsePrintsQuery, readStoredPrintsView } from '../lib/printsQuery'
 import { useAsync } from '../lib/useAsync'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Button } from '@/components/ui/button'
 
 /**
- * #4629 — a panel that reads Bambuddy only once opened: its content mounts, and so asks,
- * when the trigger opens it (Radix unmounts closed content).
- */
-function OnOpen({ title, testId, children }: { title: string; testId: string; children: ReactNode }) {
-  return (
-    <Collapsible className="group/panel mb-6" data-testid={testId}>
-      <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-        <span className="flex-1">{title}</span>
-        <ChevronDownIcon
-          aria-hidden="true"
-          className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/panel:rotate-180"
-        />
-      </CollapsibleTrigger>
-      <CollapsibleContent className="pt-2">{children}</CollapsibleContent>
-    </Collapsible>
-  )
-}
-
-/**
- * #310 — every print of every template (`/prints`, plan §2.7). On the hot path's backends
- * (#3818 tier A, `nativeBackends`) the queue and the archive history are Bambuddy's, so
- * they are read only once opened (#4629): opening the page asks Bambuddy nothing, and the
- * printer cards are the LAN reports' (`get_printers_now`). Until Settings answer neither
- * is shown, so a native page never asks first; a failed Settings read shows both, as before.
+ * #310 — every print of every template (`/prints`, plan §2.7), and (#3745) every print
+ * with no outcome yet, in one list: each print once, its row going from queued to
+ * printing to finished in place (`liveJobs`, `printRows`). Above it, the printers'
+ * own state (`PrinterStrip`). The page makes the reads it made before: the printers
+ * (`usePrintersNow`), Bambuddy's queue (`usePrintQueue`) and the history's pages.
+ *
+ * On the hot path's backends (#3818 tier A, `nativeBackends`) the queue and the archive
+ * history are Bambuddy's, so they are read only once asked for (#4629): opening the
+ * page asks Bambuddy nothing, and the printers and their jobs are the LAN reports'
+ * (`get_printers_now`). Until Settings answer neither is read, so a native page never
+ * asks first; a failed Settings read reads both, as before.
  */
 export function PrintsPage() {
   const settings = useAsync(() => api.getSettings(), [])
   const settled = settings.data !== undefined || settings.error !== undefined
   const lazy = nativeBackends(settings.data)
+  const [asked, setAsked] = useState(false)
+  const bambuddy = settled && (!lazy || asked)
+  const now = usePrintersNow()
+  const working = useMemo(() => (now.cards === null ? null : liveJobs(now.cards, [])), [now.cards])
+  const queue = usePrintQueue(
+    bambuddy,
+    useMemo(() => working?.map((job) => job.key) ?? null, [working]),
+  )
+  const jobs = useMemo(() => liveJobs(now.cards ?? [], queue.items ?? []), [now.cards, queue.items])
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
         <div className="mb-5">
-          <h1 className="text-lg font-semibold tracking-tight">Print history</h1>
+          <h1 className="text-lg font-semibold tracking-tight">Prints</h1>
           <p className="mt-0.5 text-[13px] text-subtle">
-            Every print of a ScadBuddy output, as Bambuddy archived it.
+            What waits in Bambuddy's queue, what prints now, and every print of a ScadBuddy output, as Bambuddy
+            archived it.
           </p>
         </div>
-        <NowPrinting />
+        <PrinterStrip now={now} />
         {settled &&
-          (lazy ? (
+          (bambuddy ? (
             <>
-              <OnOpen title="Bambuddy's print queue" testId="print-queue-panel">
-                <PrintQueue />
-              </OnOpen>
-              <OnOpen title="Bambuddy's print history" testId="print-history-panel">
-                <PrintHistory />
-              </OnOpen>
+              <QueueNotes queue={queue} tail={queueTail(queue.items ?? [])} />
+              <PrintHistory live={jobs} />
             </>
           ) : (
             <>
-              <PrintQueue />
-              <PrintHistory />
+              <WorkingOnly jobs={jobs} />
+              <Button variant="outline" onClick={() => setAsked(true)} data-testid="print-bambuddy-lists">
+                Show Bambuddy's queue and print history
+              </Button>
             </>
           ))}
       </div>
     </div>
+  )
+}
+
+/**
+ * #4629, #3745 — the list before Bambuddy's queue and history are asked for: the
+ * printers' working jobs only, from the read the page already made.
+ */
+function WorkingOnly({ jobs }: { jobs: LiveJob[] }) {
+  const [params] = useSearchParams()
+  const view = params.has('view') ? parsePrintsQuery(params).view : (readStoredPrintsView() ?? 'cards')
+  if (jobs.length === 0) return null
+  return (
+    <ul
+      aria-label="Prints"
+      data-view={view}
+      className={
+        view === 'cards' ? 'mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'mb-4 flex flex-col gap-2'
+      }
+    >
+      {jobs.map((job) => (
+        <LiveJobItem key={job.key} job={job} view={view} />
+      ))}
+    </ul>
   )
 }
 

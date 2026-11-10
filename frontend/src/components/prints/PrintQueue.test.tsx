@@ -7,7 +7,30 @@ import { PRINT_QUEUE, setPrintQueue } from '../../mocks/features/printQueue'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type * as Embed from '../../lib/embed'
-import { PrintQueue, QUEUE_POLL_MS, QUEUE_SHOWN } from './PrintQueue'
+import { LiveJobItem } from './LiveJobItem'
+import { liveJobs, QUEUE_SHOWN, queueTail } from './liveJobs'
+import { QUEUE_POLL_MS, QueueNotes, usePrintQueue } from './PrintQueue'
+
+/**
+ * #3745 — the queue as the Prints page reads it: its notes, and its pending items as
+ * rows of a list. `started` stands for the printers' working jobs.
+ */
+function PrintQueue({ started = null }: { started?: string[] | null }) {
+  const queue = usePrintQueue(true, started)
+  const jobs = liveJobs([], queue.items ?? [])
+  return (
+    <>
+      <QueueNotes queue={queue} tail={queueTail(queue.items ?? [])} />
+      {jobs.length > 0 && (
+        <ol aria-label="Waiting to print">
+          {jobs.map((job) => (
+            <LiveJobItem key={job.key} job={job} view="list" />
+          ))}
+        </ol>
+      )}
+    </>
+  )
+}
 
 const frame = vi.hoisted(() => ({ embedded: false }))
 vi.mock('../../lib/embed', async (original) => ({
@@ -173,7 +196,7 @@ describe('PrintQueue (#2351)', () => {
     expect(totals).not.toHaveTextContent('spent')
   })
 
-  it('stays out of the way when Bambuddy is not configured, which Now printing says (#2919)', async () => {
+  it('stays out of the way when Bambuddy is not configured, which the printer strip says (#2919)', async () => {
     server.use(
       http.get('/api/v1/farm/queue', () =>
         HttpResponse.json(
@@ -245,6 +268,28 @@ describe('PrintQueue (#2351)', () => {
       document.dispatchEvent(new Event('visibilitychange'))
     })
     await waitFor(() => expect(reads).toBe(before + 1))
+  })
+
+  it('reads again at once when a printer starts a new job, and only then (#3745)', async () => {
+    let reads = 0
+    const listener = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === '/api/v1/farm/queue') reads += 1
+    }
+    server.events.on('request:start', listener)
+    const { rerender } = renderPage(<PrintQueue started={null} />)
+    await screen.findByTestId('queue-item-259')
+    expect(reads).toBe(1)
+    // The printers' first read is no news, nor a job that ends.
+    rerender(<PrintQueue started={['archive:90']} />)
+    rerender(<PrintQueue started={[]} />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(reads).toBe(1)
+    // A job that starts reads the queue now, not a poll later.
+    rerender(<PrintQueue started={['archive:37']} />)
+    await waitFor(() => expect(reads).toBe(2))
+    server.events.removeListener('request:start', listener)
   })
 
   it('says a failed read', async () => {

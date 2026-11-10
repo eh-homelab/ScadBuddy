@@ -1,8 +1,11 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import type { Output, PrintPage, PrintProgress } from '../api/types'
+import type { Output, PrinterNow, PrintPage, PrintProgress, PrintSummary } from '../api/types'
+import { NOW_POLL_MS } from '../components/prints/NowPrinting'
+import { PRINTERS_NOW, setPrintersNow } from '../mocks/features/printersNow'
+import { PRINT_QUEUE, setPrintQueue } from '../mocks/features/printQueue'
 import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { server } from '../mocks/server'
@@ -75,11 +78,23 @@ async function shown(): Promise<string[]> {
     .filter(Boolean)
 }
 
+/**
+ * #3745 — no printer working and nothing queued: the list is the history alone, so a
+ * printing archive keeps its own state and progress read.
+ */
+function noLiveJobs() {
+  setPrintersNow(PRINTERS_NOW.filter((printer) => printer.activity === 'idle'))
+  setPrintQueue([])
+}
+
+/** A print's row, once the history has loaded it: the list shows the live jobs before (#3745). */
 async function item(archiveId: number): Promise<HTMLElement> {
   await list()
-  const found = document.querySelector(`[data-print="${archiveId}"]`)
-  if (!(found instanceof HTMLElement)) throw new Error(`no print ${archiveId}`)
-  return found
+  return waitFor(() => {
+    const found = document.querySelector(`[data-print="${archiveId}"]`)
+    if (!(found instanceof HTMLElement)) throw new Error(`no print ${archiveId}`)
+    return found
+  })
 }
 
 afterEach(() => {
@@ -88,9 +103,9 @@ afterEach(() => {
 })
 
 describe('PrintsPage (#310): the global print history', () => {
-  it('lists every print newest first, the deleted one included', async () => {
+  it('lists every print newest first, the deleted one included, after the one printing now (#3745)', async () => {
     render()
-    await waitFor(async () => expect(await shown()).toEqual(['38', '37', '36', '35']))
+    await waitFor(async () => expect(await shown()).toEqual(['37', '38', '36', '35']))
     expect(await item(35)).toHaveTextContent('Succeeded')
     expect(await item(36)).toHaveTextContent('Failed')
     expect(await item(37)).toHaveTextContent('Printing')
@@ -125,6 +140,7 @@ describe('PrintsPage (#310): the global print history', () => {
   })
 
   it('names a printing print’s printer once, even unnamed (#2363)', async () => {
+    noLiveJobs()
     server.use(
       http.get('/api/v1/prints', () =>
         HttpResponse.json({
@@ -280,6 +296,7 @@ describe('PrintsPage (#310): the global print history', () => {
   })
 
   it('says when nothing has been printed yet', async () => {
+    noLiveJobs()
     server.use(
       http.get('/api/v1/prints', () => HttpResponse.json({ items: [], next_cursor: null } satisfies PrintPage)),
     )
@@ -332,9 +349,9 @@ describe('PrintsPage (#310): the global print history', () => {
       }),
     )
     const { user } = render()
-    await waitFor(async () => expect(await shown()).toEqual(['38', '37']))
+    await waitFor(async () => expect(await shown()).toEqual(['37', '38']))
     await user.click(screen.getByRole('button', { name: 'Load more' }))
-    await waitFor(async () => expect(await shown()).toEqual(['38', '37', '36', '35']))
+    await waitFor(async () => expect(await shown()).toEqual(['37', '38', '36', '35']))
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
   })
 
@@ -434,6 +451,7 @@ describe('PrintsPage (#310): the global print history', () => {
   })
 
   it('shows where a print in progress is, from the progress read', async () => {
+    noLiveJobs()
     server.use(
       http.get('/api/v1/print/outputs/:id/progress', () =>
         HttpResponse.json({
@@ -597,6 +615,7 @@ describe("a library file's print, as an output's (#1751)", () => {
   })
 
   it('shows where it is while it prints, from its own progress read (F7)', async () => {
+    noLiveJobs()
     const read: string[] = []
     server.use(
       only([libraryPrint({ status: 'printing', printer_name: null })]),
@@ -865,27 +884,124 @@ function summaryOf(archiveId: number): PrintPage['items'][number] {
   return summary
 }
 
-describe('now printing (#977)', () => {
-  it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
+/** Every row of the list in order: a print's archive id, or a live job's key. */
+async function rows(): Promise<string[]> {
+  return within(await list())
+    .getAllByRole('listitem')
+    .map((row) => row.getAttribute('data-print') ?? row.getAttribute('data-job') ?? '')
+    .filter(Boolean)
+}
+
+describe('one list (#3745): the printers above, each print once below', () => {
+  it('lists the working jobs, then the queue, then the history, each print once', async () => {
     render()
-    const strip = await screen.findByRole('region', { name: 'Now printing' })
-    expect(await within(strip).findByTestId('printer-now-1')).toHaveTextContent('Bracket')
-    expect(await list()).toBeInTheDocument()
+    // Printer 1's job Bambuddy started (archive 90, no ScadBuddy print), printer 2's job
+    // the history's printing print 37, Bambuddy's three pending items, then the history.
+    await waitFor(async () =>
+      expect(await rows()).toEqual(['archive:90', '37', 'queue:259', 'queue:260', 'queue:263', '38', '36', '35']),
+    )
+    expect(document.querySelectorAll('[data-print="37"]')).toHaveLength(1)
+  })
+
+  it('says each live state in words: queued with its place, printing with its progress, paused with why', async () => {
+    render()
+    expect(await item(37)).toHaveTextContent('Printing 66% · 54m left')
+    // The archive's own "Printing" badge gives way to the job's live state.
+    expect(within(await item(37)).queryByText('Printing', { exact: true })).toBeNull()
+    expect(within(await item(37)).getByRole('progressbar', { name: '3DP-77A-114 progress' })).toBeInTheDocument()
+    expect(within(await item(37)).getByText('Queued from ScadBuddy')).toBeInTheDocument()
+    expect(screen.getByTestId('printer-job-1')).toHaveTextContent('Paused: Spaghetti detected: check the print.')
+    expect(screen.getByTestId('queue-item-259')).toHaveTextContent('Queued · position 1')
+    expect(screen.getByTestId('queue-item-263')).toHaveTextContent('Queued · position 3')
+  })
+
+  it("gives a job Bambuddy queued from elsewhere #3741-#3743's label, picture and link", async () => {
+    render()
+    const bambuddy = await screen.findByTestId('printer-job-1')
+    expect(within(bambuddy).queryByText('Queued from ScadBuddy')).toBeNull()
+    expect(within(bambuddy).getByTestId('job-picture').querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/farm/printers/1/cover?archive=90',
+    )
+    expect(within(bambuddy).getByRole('link', { name: 'Bracket, in Bambuddy' })).toHaveAttribute(
+      'href',
+      'http://bambuddy.local/archives/90',
+    )
+    const queued = await screen.findByTestId('queue-item-260')
+    expect(within(queued).getByRole('link', { name: 'Bracket.gcode.3mf' })).toHaveAttribute('href', '/prints/queue/260')
+  })
+
+  it('keeps the printer-level state on the strip: idle, HMS errors, the camera', async () => {
+    render()
+    const strip = await screen.findByRole('region', { name: 'Printers' })
+    expect(await within(strip).findByTestId('printer-now-3')).toHaveTextContent('Idle')
+    expect(within(strip).getByTestId('printer-now-hms-1')).toHaveTextContent('Spaghetti detected')
+    expect(within(strip).getByRole('button', { name: 'Camera of 3DP-77A-114' })).toBeInTheDocument()
+    // The jobs are not repeated there.
+    expect(within(strip).queryByText('Nova')).toBeNull()
+    expect(strip.compareDocumentPosition(await list()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('moves a row from queued to printing to finished in place, never two rows at once', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const keychain = PRINT_QUEUE.find((entry) => entry.id === 259)!
+    // Only ScadBuddy's item waits, and only printer 1 is working.
+    setPrintQueue([keychain])
+    setPrintersNow(PRINTERS_NOW.filter((printer) => printer.printer_id !== 2))
+    const history = (items: PrintSummary[]) =>
+      server.use(http.get('/api/v1/prints', () => HttpResponse.json({ items, next_cursor: null } satisfies PrintPage)))
+    history([summaryOf(35)])
+    render()
+    await waitFor(async () => expect(await rows()).toEqual(['archive:90', 'queue:259', '35']))
+
+    // It starts on printer 2 as archive 41, and Bambuddy no longer lists it as pending.
+    const printing: PrinterNow = {
+      ...PRINTERS_NOW[1]!,
+      job_name: 'Luna keychain',
+      archive_id: 41,
+      linked: false,
+      scadbuddy: { ...keychain.scadbuddy!, archive_id: null },
+    }
+    setPrintersNow([PRINTERS_NOW[0]!, printing, PRINTERS_NOW[2]!])
+    setPrintQueue([])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    await waitFor(async () => expect(await rows()).toEqual(['archive:90', 'archive:41', '35']))
+    expect(screen.getByTestId('printer-job-2')).toHaveTextContent('Printing 66% · 54m left')
+
+    // ScadBuddy links its archive: the history is read again, and row 41 is that print,
+    // still with its live state.
+    history([{ ...summaryOf(37), archive_id: 41, status: 'printing' }, summaryOf(35)])
+    setPrintersNow([PRINTERS_NOW[0]!, { ...printing, linked: true }, PRINTERS_NOW[2]!])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    await waitFor(async () => expect(await rows()).toEqual(['archive:90', '41', '35']))
+    expect(await item(41)).toHaveTextContent('Printing 66% · 54m left')
+
+    // Finished: the history is read again, and the same row has the archive's outcome.
+    history([{ ...summaryOf(37), archive_id: 41, status: 'completed' }, summaryOf(35)])
+    setPrintersNow([PRINTERS_NOW[0]!, { ...printing, linked: true, activity: 'finished' }, PRINTERS_NOW[2]!])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    await waitFor(async () => expect(await item(41)).toHaveTextContent('Succeeded'))
+    expect(await rows()).toEqual(['archive:90', '41', '35'])
+  })
+
+  it('narrows only the archived prints when filtered, with a working one\'s live state in place', async () => {
+    render('/prints?status=printing')
+    await waitFor(async () => expect(await rows()).toEqual(['37']))
+    expect(await item(37)).toHaveTextContent('Printing 66% · 54m left')
   })
 })
 
-describe('up next (#2351)', () => {
-  it("shows Bambuddy's queue between what is printing and the history", async () => {
-    render()
-    const queue = await screen.findByRole('region', { name: 'Up next' })
-    expect(within(queue).getByTestId('queue-item-259')).toHaveTextContent('Luna keychain')
-    const now = await screen.findByRole('region', { name: 'Now printing' })
-    expect(now.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  })
-})
-
-describe("Bambuddy's panels on the hot path (#4629)", () => {
-  it('reads the queue and the history only once each is opened', async () => {
+describe("Bambuddy's lists on the hot path (#4629)", () => {
+  it('shows the working jobs at once, and reads the queue and the history only once asked', async () => {
     setHotPath(true)
     const asked: string[] = []
     const listener = ({ request }: { request: Request }) => {
@@ -897,14 +1013,28 @@ describe("Bambuddy's panels on the hot path (#4629)", () => {
       server.events.removeListener('request:start', listener)
     })
     const { user } = render()
-    const history = await screen.findByRole('button', { name: "Bambuddy's print history" })
-    expect(screen.getByRole('button', { name: "Bambuddy's print queue" })).toBeInTheDocument()
+    const show = await screen.findByRole('button', { name: "Show Bambuddy's queue and print history" })
+    // The hot path's H2C, idle: the printers' read answers, and asks Bambuddy nothing.
+    expect(await screen.findByTestId(/^printer-now-/)).toHaveTextContent('Idle')
     expect(asked).toEqual([])
 
-    await user.click(history)
-    expect(await list()).toBeInTheDocument()
-    expect(asked).toEqual(['/api/v1/prints'])
-    await user.click(screen.getByRole('button', { name: "Bambuddy's print queue" }))
-    await waitFor(() => expect(asked).toEqual(expect.arrayContaining(['/api/v1/farm/queue', '/api/v1/farm/stats'])))
+    await user.click(show)
+    await waitFor(() =>
+      expect(asked).toEqual(expect.arrayContaining(['/api/v1/prints', '/api/v1/farm/queue', '/api/v1/farm/stats'])),
+    )
+    expect(screen.queryByRole('button', { name: "Show Bambuddy's queue and print history" })).toBeNull()
+  })
+
+  it('lists a working job before Bambuddy is asked, from the printers read (#3745)', async () => {
+    setHotPath(true)
+    server.use(
+      http.get('/api/v1/print/printers/now', () =>
+        HttpResponse.json({ printers: [{ ...PRINTERS_NOW[1]!, path: 'native' as const }] }),
+      ),
+    )
+    render()
+    await screen.findByRole('button', { name: "Show Bambuddy's queue and print history" })
+    await waitFor(async () => expect(await rows()).toEqual(['archive:37']))
+    expect(screen.getByTestId('printer-job-2')).toHaveTextContent('Printing 66% · 54m left')
   })
 })

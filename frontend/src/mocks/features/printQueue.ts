@@ -5,7 +5,7 @@ import { outputs } from '../fixtures'
 /**
  * #2351 — Bambuddy's queue and the farm's totals: three waiting items (one for a
  * printer that ScadBuddy queued, #3741; one for any H2C, short of filament; one with no
- * picture, #3742) and finished history, which the panel never asks for.
+ * picture, #3742) and finished history, which /prints never asks for (it reads pending only).
  */
 export const PRINT_QUEUE: QueueItem[] = [
   {

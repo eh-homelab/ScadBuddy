@@ -307,7 +307,7 @@ def test_a_native_run_makes_no_bambuddy_call(
         output, choices, filaments, run = _dialog_and_run(native_app, model, row)
         assert run["status"] == "succeeded", run
         progress = follow_until_settled(native_app, output)
-        # Now printing (AC6): every printer is native, so the strip asks Bambuddy nothing.
+        # The printers read (AC6): every printer is native, so it asks Bambuddy nothing.
         now = native_app.get("/api/v1/print/printers/now")
         assert now.status_code == 200, now.text
 
