@@ -1,7 +1,9 @@
 import { TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
+import { STATUS_PROBE_MS } from '../src/bridge/hub.js'
+import { BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
 import type { TabOwnerStore } from '../src/bridge/tabOwners.js'
+import { BRIDGE_CALL_WORKFLOW } from '../src/temporal/bridgeCall.js'
 
 // TemporalTabRelay's own rules, without Temporal or Postgres (#4780, #4806 review). The
 // calls across replicas are bridgeRelay.temporal.test.ts; the Postgres store's own rules,
@@ -198,6 +200,21 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
     expect(await relay.forward('tab-none', call, options())).toBeUndefined()
     expect(await relay.forward('tab-here', call, options())).toBeUndefined()
+  })
+
+  it('starts BridgeCall with a workflow task timeout short enough that a lost task is retried inside the status probe (#5939)', async () => {
+    const owners = memoryOwners()
+    owners.rows.set('tab-1', 'agent-tools.b')
+    const { sealing, start } = refusingClient()
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: sealing, log: () => {} })
+    await relay.forward('tab-1', { op: 'status' }, options())
+    expect(start).toHaveBeenCalledWith(
+      BRIDGE_CALL_WORKFLOW,
+      expect.objectContaining({ taskQueue: 'agent-tools.a', workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS }),
+    )
+    // Temporal's default is 10 s: a task the cluster records as started and never delivers
+    // held the call that long, and a status read gave up at 6 s. The retry needs the rest.
+    expect(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS).toBeLessThanOrEqual(STATUS_PROBE_MS / 2)
   })
 
   it("answers no_answer, and logs, when the owner's row cannot be read: the tool never throws", async () => {
