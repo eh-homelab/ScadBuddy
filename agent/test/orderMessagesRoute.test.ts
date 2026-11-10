@@ -192,6 +192,24 @@ describe('the order page’s Send again (#5660)', () => {
     expect(sends).toEqual([])
   })
 
+  it('answers the backend’s 500 on the claim as 502 upstream_error', async () => {
+    const { hono, race, sends } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    race.refusal = { status: 500, body: { title: 'Internal Server Error', detail: 'the database went away' } }
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const failed = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0007' })
+      expect(failed.status).toBe(502)
+      const body = (await failed.json()) as { type: string; detail: string }
+      expect(body.type).toBe('upstream_error')
+      expect(body.detail).not.toMatch(/database/)
+      expect(logged).toHaveBeenCalledWith(expect.stringMatching(/HTTP 500/))
+    } finally {
+      logged.mockRestore()
+    }
+    expect(sends).toEqual([])
+  })
+
   it('takes no text from the browser and needs a key to send', async () => {
     const { hono } = app(signedIn())
     const withText = await post(hono, 'send', { ...AGAIN, digest: 'a'.repeat(64), text: 'mine' }, { ...COOKIE, 'idempotency-key': 'click-0003' })
