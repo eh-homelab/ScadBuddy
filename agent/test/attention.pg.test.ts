@@ -1598,13 +1598,13 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     let slowAsked = 0
     const slow = () => (slowAsked++, Promise.resolve('slow, try again'))
     const wait = waitForTab(gate, never, noop)
-    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+    for (let i = 0; i < TAB_WAITS_PER_TURN - 1; i++) {
       expect(await wait({ tool: 'browser_snapshot', toolUseId: `toolu_${i}`, signal: never, isBack: gone, slow })).toEqual({ back: false, message: 'slow, try again' })
     }
-    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual({
-      back: false,
-      message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/),
-    })
+    // The call that reaches the cap says the turn carries on, and so does every later one.
+    const latched = { back: false, message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/) }
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_cap', signal: never, isBack: gone, slow })).toEqual(latched)
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual(latched)
     expect(slowAsked).toBe(TAB_WAITS_PER_TURN)
     expect(asked).toHaveLength(0)
   })

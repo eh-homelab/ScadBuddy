@@ -588,6 +588,33 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect(text(result)).not.toMatch(/reconnected/)
   })
 
+  it("forgets a slow answer whose check was cancelled, so a later reconnect is checked afresh (#5981 review)", async () => {
+    const { rows, store } = sharedRows()
+    rows.set('s1', OTHER_TAB)
+    const { relay, seen } = slowAfter(0)
+    const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
+    const tabs = hub.forSession('s1')
+    // The first check's wait is withdrawn just as its slow answer comes back.
+    const first = new AbortController()
+    const status = tabs.status.bind(tabs)
+    tabs.status = async (t, options) => {
+      const answer = await status(t, options)
+      if (options?.signal === first.signal) first.abort()
+      return answer
+    }
+    await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(tabs, browser),
+      gate: 'harness',
+      waitForTab: async ({ isBack }) => {
+        await isBack(first.signal)
+        await isBack(new AbortController().signal)
+        return { back: true, why: 'reconnected' as const }
+      },
+    })
+    // The second check asked the replica itself: the cancelled check's answer was not reused.
+    expect(seen.statuses).toBeGreaterThanOrEqual(2)
+  })
+
   it('a write call whose wait a slow owner ended says to snapshot and call again, not that the tab reconnected', async () => {
     const { rows, store } = sharedRows()
     rows.set('s1', OTHER_TAB)
