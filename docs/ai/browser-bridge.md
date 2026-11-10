@@ -250,7 +250,10 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   once (`WaitForTab`'s `slow`, #5981): when the tab's replica is only slow to answer, no wait is
   opened (it would show no card and still use up the turn's and the user's tab waits), and
   the call fails with "… so the user was not asked to reopen it: take a snapshot, then call
-  again." (`WHY_SLOW_NO_WAIT`, #5974 review). A replica that turns slow during the wait
+  again." (`WHY_SLOW_NO_WAIT`, #5974 review). After 3 such calls in a turn
+  (`TAB_WAITS_PER_TURN`), the turn carries on without the tab. Past the user's cross-session
+  limit of tab waits, a slow owner still gets this message, not "The user was not asked for the
+  tab: …"; both are true. A replica that turns slow during the wait
   counts as back: a read runs once more (if it still finds no tab it fails with "The
   session's tab may be connected … take a snapshot, then call again.", `WHY_SLOW_READ`),
   the call that opened the wait does not ask for the slow answer again (a call that joined

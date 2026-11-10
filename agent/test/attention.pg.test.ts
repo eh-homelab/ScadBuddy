@@ -1593,6 +1593,22 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toHaveLength(0)
   })
 
+  it('stops asking a slow owner after as many tries as the turn has waits, and latches the turn', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    let slowAsked = 0
+    const slow = () => (slowAsked++, Promise.resolve('slow, try again'))
+    const wait = waitForTab(gate, never, noop)
+    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+      expect(await wait({ tool: 'browser_snapshot', toolUseId: `toolu_${i}`, signal: never, isBack: gone, slow })).toEqual({ back: false, message: 'slow, try again' })
+    }
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual({
+      back: false,
+      message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/),
+    })
+    expect(slowAsked).toBe(TAB_WAITS_PER_TURN)
+    expect(asked).toHaveLength(0)
+  })
+
   it("never lets a slow owner's advice override the turn's carry-on latch or its spent waits", async () => {
     let slowAsked = 0
     const slow = () => (slowAsked++, Promise.resolve('slow, try again'))

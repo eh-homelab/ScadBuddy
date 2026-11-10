@@ -168,7 +168,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
             // owner already seen is not probed a second time (#5981 review).
             if (sawSlow) return true
             const status = await tabs(ctx).status(target(ctx), { signal })
-            if (!status.attached && status.slow === true) sawSlow = true
+            // Remembered only for a check the wait still uses: one whose signal had aborted
+            // ended nothing, and a later real reconnect must be checked afresh (#5981 review).
+            if (!status.attached && status.slow === true && !signal.aborted) sawSlow = true
             return status.attached || status.slow === true
           },
         })

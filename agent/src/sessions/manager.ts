@@ -189,6 +189,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
   // finds no tab fails at once. The latch lasts until the turn ends, never less.
   let gaveUp: string | undefined
   let started = 0
+  // Calls that found the tab's replica only slow and opened no wait (#5981 review): bounded
+  // like the waits, so a model that keeps retrying stops paying a status read per call.
+  let slowSeen = 0
   return async ({ tool, toolUseId, signal, isBack, slow }) => {
     const stopped = (): TabWait | undefined => {
       // A call already stopped opens nothing: no row, no card, no use of the turn's waits.
@@ -201,7 +204,14 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
     // Only once the latch and the limit allow a new wait (#5981 review): a slow owner opens none.
     if (!open && started < TAB_WAITS_PER_TURN && slow) {
       const message = await slow(signal).catch(() => undefined)
-      if (message !== undefined) return { back: false, message }
+      if (message !== undefined) {
+        if (++slowSeen >= TAB_WAITS_PER_TURN && gaveUp === undefined) {
+          gaveUp =
+            `The tab's agent replica was slow to answer ${TAB_WAITS_PER_TURN} times this turn. Carry on without the tab ` +
+            'for the rest of this turn.'
+        }
+        return { back: false, message }
+      }
       const late = stopped()
       if (late) return late
     }
