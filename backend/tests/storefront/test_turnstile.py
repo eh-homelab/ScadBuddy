@@ -20,8 +20,11 @@ from scadbuddy.storefront.static import STOREFRONT_CSP, TURNSTILE_CSP, TURNSTILE
 from scadbuddy.storefront.turnstile import (
     BOT_CHECK_FAILED,
     BOT_CHECK_UNAVAILABLE,
+    FAILED_CHECKS,
+    FAILED_WINDOW,
     SITE_KEY_RETRY,
     SITE_KEY_TTL,
+    FailedChecks,
     SiteKey,
 )
 from scadbuddy.storefront.wire import CLIENT_HEADER, TURNSTILE_HEADER, VISITOR_HEADER
@@ -98,17 +101,63 @@ def test_a_failed_or_unavailable_check_stops_the_request_before_its_body(
     assert not crud_mock["request"].called
 
 
-def test_failed_checks_spend_the_allowance_so_siteverify_calls_are_bounded(
+def neighbour(edge: TestClient, address: str) -> TestClient:
+    """Another browser on the same edge, from ``address``."""
+    return TestClient(edge.app, base_url="https://testserver", client=(address, 50001))
+
+
+def test_failed_checks_spend_no_allowance_so_a_neighbour_still_uploads(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    bot = neighbour(edge, "2001:db8:1::1")
+    customer = neighbour(edge, "2001:db8:1::2")  # the same /48: one upload allowance
+    crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
+    for _ in range(REQUEST_UPLOADS + FAILED_CHECKS):
+        assert ask(bot).status_code == 403  # type: ignore[attr-defined]
+    crud_mock["turnstile"].respond(200, json={"verdict": "pass"}, headers=CRUD)
+    r = ask(customer)
+    assert r.status_code == 200, r.text  # type: ignore[attr-defined]
+
+
+def test_the_failure_limit_stops_further_siteverify_calls(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
 ) -> None:
     crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
-    for _ in range(REQUEST_UPLOADS):
+    for _ in range(FAILED_CHECKS):
         assert ask(edge).status_code == 403  # type: ignore[attr-defined]
     calls = crud_mock["turnstile"].call_count
     r = ask(edge)
-    assert r.status_code == 429  # type: ignore[attr-defined]
+    assert r.status_code == 403  # type: ignore[attr-defined]
+    assert r.json()["type"] == BOT_CHECK_FAILED  # type: ignore[attr-defined]
     assert crud_mock["turnstile"].call_count == calls
+    # Another client, even in the same /48, is not held back.
+    assert ask(neighbour(edge, "2001:db8:1::9")).status_code == 403  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == calls + 1
+
+
+def test_a_client_out_of_allowance_costs_no_siteverify_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "pass"}, headers=CRUD)
+    for _ in range(REQUEST_UPLOADS):
+        assert ask(edge).status_code == 200  # type: ignore[attr-defined]
+    calls = crud_mock["turnstile"].call_count
+    assert ask(edge).status_code == 429  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == calls
+
+
+def test_failures_age_out_of_the_window() -> None:
+    now = [0.0]
+    failures = FailedChecks(clock=lambda: now[0])
+    for _ in range(FAILED_CHECKS):
+        failures.failed("203.0.113.9")
+    assert failures.blocked("203.0.113.9")
+    assert not failures.blocked("203.0.113.10")
+    now[0] += FAILED_WINDOW
+    assert not failures.blocked("203.0.113.9")
 
 
 def test_an_unavailable_check_spends_no_allowance(

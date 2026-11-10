@@ -51,7 +51,7 @@ from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
 from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
 from scadbuddy.storefront.static import StorefrontStatic
-from scadbuddy.storefront.turnstile import SiteKey
+from scadbuddy.storefront.turnstile import FailedChecks, SiteKey
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
 
@@ -124,6 +124,7 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     app.state.requests_enabled = RequestsEnabled()
     # The bot check's site key (#5283), for the page's config and its CSP.
     app.state.turnstile_site_key = SiteKey()
+    app.state.turnstile_failures = FailedChecks()
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)

@@ -14,7 +14,9 @@ the form's ``action``, to ``POST …/storefront/turnstile/verify``, which answer
 - ``unavailable`` (a site key with no secret the CRUD side can read, or Cloudflare not
   answering) is 503 ``…/storefront/bot_check_unavailable``. The check fails closed.
 
-A token longer than Cloudflare's bound fails here, before any call. `SiteKey` is the
+A token longer than Cloudflare's bound fails here, before any call, and so does a client
+with `FAILED_CHECKS` failed checks in `FAILED_WINDOW` (`FailedChecks`, by its exact
+address). `SiteKey` is the
 CRUD side's site key, read at most once per `SITE_KEY_TTL` per replica: the page's
 widget (`GET /api/store/v1/turnstile`) and the page's CSP (`static.py`) both read it, so
 the CSP names Cloudflare only while the check is on.
@@ -23,7 +25,9 @@ the CSP names Cloudflare only while the check is on.
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Final
 
@@ -76,19 +80,68 @@ def _client(request: Request) -> str:
     return address
 
 
+#: Failed checks one client may have in `FAILED_WINDOW` before the edge stops asking.
+FAILED_CHECKS: Final = 10
+FAILED_WINDOW: Final = 600.0
+#: The most clients `FailedChecks` holds; past it, the one whose last failure is oldest
+#: is dropped. Never a shared bucket: one client's failures never refuse another.
+MAX_FAILING_CLIENTS: Final = 50_000
+
+
+class FailedChecks:
+    """Each client's failed checks, keyed by its exact address (never an IPv6 /48 or an
+    overflow entry, which would let one bot refuse its neighbours). A client with
+    `FAILED_CHECKS` failures in `FAILED_WINDOW` is refused 403 without a Siteverify call,
+    so failed checks cost the CRUD side at most that many calls per client. One per edge
+    replica."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures: dict[str, deque[float]] = {}
+
+    def _recent(self, client: str, now: float) -> deque[float] | None:
+        failures = self._failures.get(client)
+        while failures and failures[0] <= now - FAILED_WINDOW:
+            failures.popleft()
+        if failures is not None and not failures:
+            del self._failures[client]
+            return None
+        return failures
+
+    def blocked(self, client: str) -> bool:
+        with self._lock:
+            failures = self._recent(client, self._clock())
+            return failures is not None and len(failures) >= FAILED_CHECKS
+
+    def failed(self, client: str) -> None:
+        now = self._clock()
+        with self._lock:
+            if client not in self._failures and len(self._failures) >= MAX_FAILING_CLIENTS:
+                oldest = min(self._failures, key=lambda k: self._failures[k][-1])
+                del self._failures[oldest]
+            self._failures.setdefault(client, deque()).append(now)
+
+
 async def require_turnstile(request: Request, action: TurnstileAction) -> None:
     """Passes when the check is off or the browser's token passes; raises 403
-    `BOT_CHECK_FAILED` or 503 `BOT_CHECK_UNAVAILABLE` otherwise (module docstring)."""
+    `BOT_CHECK_FAILED` or 503 `BOT_CHECK_UNAVAILABLE` otherwise (module docstring). A
+    client past `FAILED_CHECKS` (`FailedChecks`) is refused 403 with no call."""
     token = request.headers.get(TURNSTILE_HEADER) or None
     if token is not None and len(token) > MAX_TURNSTILE_TOKEN_CHARS:
         raise bot_check_failed()
+    client = _client(request)
+    failures: FailedChecks = request.app.state.turnstile_failures
+    if failures.blocked(client):
+        raise bot_check_failed()
     crud: StorefrontCrud = request.app.state.crud
     verdict = await crud.turnstile_verify(
-        token, action, visitor_id=request.state.visitor_id, client=_client(request)
+        token, action, visitor_id=request.state.visitor_id, client=client
     )
     if verdict in ("off", "pass"):
         return
     if verdict == "fail":
+        failures.failed(client)
         raise bot_check_failed()
     if verdict != "unavailable":
         logger.error("the CRUD service gave an unknown bot check verdict")
