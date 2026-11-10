@@ -260,7 +260,20 @@ async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Pr
     if (!fresh && (message.status === 'sent' || message.status === 'failed' || message.status === 'skipped')) {
       return { sent: message.status === 'sent', message }
     }
-    const resendable = fresh || plan.binding.args.idempotency_key != null
+    const keyed = plan.binding.args.idempotency_key != null
+    // A replayed claim still `sending` and fresh is another call's send in flight: without a dedupe
+    // key it is neither sent again nor given an outcome here (#5858 review). Past the stale limit
+    // the backend reads it `unknown`, and that is recorded below.
+    if (!fresh && message.status === 'sending' && !keyed) {
+      return {
+        sent: false,
+        message,
+        warning:
+          'this message is being sent by an earlier call right now; nothing was sent again. Check the order’s ' +
+          'messages (order_messages_list) for its outcome',
+      }
+    }
+    const resendable = fresh || keyed
     const outcome = resendable
       ? await connection.send(
           messageArguments(plan.binding, { to: plan.approved.to, subject: plan.approved.subject, text: plan.approved.text, key: message.id }),
@@ -950,6 +963,26 @@ export const orderTools: Tool[] = [
     },
   }),
   defineTool({
+    name: 'order_messages_list',
+    label: 'List the messages sent to an order’s customer',
+    description:
+      "The messages sent, or tried, to an order's customer through the messaging plugin (#5660), newest first, " +
+      'as the order page lists them: each id, template, recipients, text and status (`sending`, `sent`, ' +
+      '`failed`, `unknown`, `skipped`; a `sending` one older than 15 minutes reads `unknown`). An id here is ' +
+      "what order_notify_customer_send's `resend_of` takes.",
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: ['GET /api/v1/orders/{order_id}/messages'],
+    handler: async ({ order_id }, ctx) =>
+      json(
+        await ok(
+          ctx.backend.GET('/api/v1/orders/{order_id}/messages', { params: { path: { order_id } } }),
+          `list order ${order_id}'s messages`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_notify_customer_send',
     label: 'Send a message to an order’s customer',
     description:
@@ -967,7 +1000,9 @@ export const orderTools: Tool[] = [
       order_id: orderId,
       template: z.enum(NOTIFY_TEMPLATES),
       note: z.string().min(1).max(2000).optional().describe('A line added after the template’s text'),
-      resend_of: ID.optional().describe('An earlier message of this order to send again, as the order page lists it'),
+      resend_of: ID.optional().describe(
+        'An earlier message of this order to send again, as order_messages_list (and the order page) lists it',
+      ),
       approved: APPROVED_MESSAGE.optional().describe('Filled by the approval: what the person approved. Leave it out.'),
     }),
     risk: 'outward',
@@ -976,7 +1011,6 @@ export const orderTools: Tool[] = [
       'GET /api/v1/orders/{order_id}/messages/check',
       'POST /api/v1/orders/{order_id}/messages',
       'POST /api/v1/orders/{order_id}/messages/{message_id}/outcome',
-      'GET /api/v1/orders/{order_id}/messages',
     ],
     title: ({ template }) => `Send the "${template}" message`,
     summarize: ({ order_id, template }) => `Send the "${template}" message of order ${order_id}`,

@@ -102,16 +102,23 @@ def test_a_key_another_order_takes_at_the_same_time_is_refused(
             " '[]', 'x', 'sending', 'k1', '{\"kind\": \"browser\"}')",
             (other["id"],),
         )
+        rival_pid = rival.info.backend_pid
         racing = threading.Thread(target=lambda: answers.append(claim(client, order_id, "k1")))
         racing.start()
+        # Only a backend the rival's uncommitted key blocks counts: the claim's insert, waiting.
         with psycopg.connect(pg_conninfo, autocommit=True) as watch:
             for _ in range(200):
                 waiting = watch.execute(
-                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'"
+                    "SELECT count(*) FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (rival_pid,),
                 ).fetchone()
                 if waiting is not None and waiting[0] > 0:
                     break
                 time.sleep(0.05)
+            else:
+                rival.rollback()
+                racing.join(timeout=10)
+                pytest.fail("the claim never waited on the rival's key, so the race was not run")
         rival.commit()
         racing.join(timeout=10)
 
