@@ -48,13 +48,15 @@ export const CALL_TIMEOUT_MS = 30_000
 /**
  * How long a status read of a tab on another replica waits for that replica's answer
  * (#4950): the relay's ack timeout (relay.ts ACK_TIMEOUT_MS, 3 s) and the owner's
- * immediate reply. Past it the tab reads as not connected, so a dead or slow owner
- * cannot hold a probe for the whole BridgeCall workflow (about 21 s). With both replicas
- * healthy a read answers in well under a second: the workflow's tasks run on this replica's
- * own host queue, never the versioned `agent-tools`, whose routing once took 3.4 s of these
- * 6 s before the activity was even scheduled (#5862).
+ * immediate reply. Past it the tab reads as not attached, with `SLOW_OWNER` as the reason, so
+ * a dead or slow owner cannot hold a probe for the whole BridgeCall workflow (about 21 s).
+ * Prod's Temporal takes 0.2–1.3 s for each hop of a BridgeCall (eh-homelab/clusters#3418):
+ * reads that answered took 2.3–4.0 s, and one with a workflow task Temporal never delivered
+ * waits out BRIDGE_WORKFLOW_TASK_TIMEOUT_MS (3 s) on top (BridgeCall histories, 2026-11-10
+ * 14:34 UTC). At 6 s two of five status reads in one turn were cut off while the same tab
+ * answered every navigate and snapshot (#5939).
  */
-export const STATUS_PROBE_MS = 6_000
+export const STATUS_PROBE_MS = 10_000
 /** How often connected tabs are sent the pairing requests, when they changed. */
 export const PAIRINGS_POLL_MS = 3_000
 /** Calls one tab may have waiting at once. */
@@ -116,6 +118,10 @@ function failure(code: HubErrorCode, message: string): CallOutcome {
   return { ok: false, error: { code, message } }
 }
 
+const SLOW_OWNER =
+  'no answer from the paired ScadBuddy tab in time: the tab is held by another agent replica, which did not ' +
+  'answer the status read within its time limit. The tab may still be connected; a browser call may still ' +
+  'reach it, so try the call before asking the user to reopen ScadBuddy.'
 const NO_SESSION_TAB =
   'no browser attached: no ScadBuddy tab is paired with this session. A chat session pairs with the tab the user ' +
   'sends its messages from; ask the user to open ScadBuddy and send a message from the assistant panel there.'
@@ -507,7 +513,8 @@ export class TabHub implements BrowserTabs {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
     try {
-      return (await this.#probe(tabId, undefined))?.op === 'status'
+      const answer = await this.#probe(tabId, undefined)
+      return answer !== 'slow' && answer?.op === 'status'
     } catch (err) {
       // As for a call: a relay that cannot be asked is a tab not connected.
       this.logError(err)
@@ -662,6 +669,7 @@ export class TabHub implements BrowserTabs {
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {
       const answer = await this.#probe(resolved.tabId, signal)
+      if (answer === 'slow') return { attached: false, reason: SLOW_OWNER }
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer
     }
@@ -675,10 +683,11 @@ export class TabHub implements BrowserTabs {
   }
 
   /**
-   * A status read of `tabId` on another replica, cut short after `STATUS_PROBE_MS`: undefined
-   * then, as for a tab no replica holds. Rejects with the abort error only when `signal` aborts.
+   * A status read of `tabId` on another replica, cut short after `STATUS_PROBE_MS`: `slow`
+   * then, told apart from undefined, a tab no replica holds. Rejects with the abort error only
+   * when `signal` aborts.
    */
-  async #probe(tabId: string, signal: AbortSignal | undefined): Promise<RelayAnswer | undefined> {
+  async #probe(tabId: string, signal: AbortSignal | undefined): Promise<RelayAnswer | 'slow' | undefined> {
     const bound = AbortSignal.timeout(this.#statusProbeMs)
     try {
       return await this.#relay!.forward(tabId, { op: 'status' }, {
@@ -688,8 +697,8 @@ export class TabHub implements BrowserTabs {
     } catch (err) {
       if (signal?.aborted) throw abortError()
       if (!bound.aborted) throw err
-      this.#log(`bridge: tab ${tabId}'s replica gave no status within ${this.#statusProbeMs} ms; read as not connected`)
-      return undefined
+      this.#log(`bridge: tab ${tabId}'s replica gave no status within ${this.#statusProbeMs} ms; read as not attached (slow)`)
+      return 'slow'
     }
   }
 

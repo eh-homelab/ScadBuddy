@@ -396,7 +396,7 @@ sequenceDiagram
   `agent-tools.<A>`, which only the caller's host worker polls (with `BridgeCall` alone,
   `dist/temporal/bridge-bundle.js`). Both queues are unversioned. The shared `agent-tools`
   is versioned, and in prod a `BridgeCall` started there waited 3.4 s for its first
-  workflow task, so the 6 s status probe ran out before the activity started. A call or
+  workflow task, so the status probe (then 6 s) ran out before the activity started. A call or
   a status check between two healthy replicas now answers in well under a second
   (`agent/test/bridgeRelay.temporal.test.ts`).
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
@@ -428,11 +428,16 @@ sequenceDiagram
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
-  tab's route and live tools, but waits at most 6 s for the answer (`STATUS_PROBE_MS`,
-  #4950), as does the check behind a chat attach: past it the tab reads "not connected".
-  Those 6 s are the ack (3 s) plus the status activity's start-to-close (3 s), with none of
-  the workflow's slack: a probe whose workflow tasks are slow on the caller reads
-  "not connected" once they run out, and does not wait for the slack (#5421).
+  tab's route and live tools, but waits at most 10 s for the answer (`STATUS_PROBE_MS`,
+  #4950), as does the check behind a chat attach. Past it `browser_status` answers not
+  attached with its own reason: the tab's replica did not answer in time, the tab may still
+  be connected, and a call may still reach it. It does not say "not connected", which is
+  kept for a tab no replica holds. The 10 s cover the ack (3 s), the status activity's
+  start-to-close (3 s), and one workflow task that Temporal never delivered and that is
+  retried after `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS` (3 s). At 6 s, prod cut off two of five
+  status reads in one turn while the same tab answered every navigate and snapshot
+  (2026-11-10, #5939, eh-homelab/clusters#3418). The probe still does not wait for the
+  workflow's slack (#5421).
   A workflow that ends on its own execution timeout is logged as one ("timed out as a
   workflow (is this replica's host worker … polling?)"), apart from an owner's failure: its
   15 s of slack covers the workflow tasks on a loaded caller and its host worker's
