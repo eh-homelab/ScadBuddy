@@ -9,7 +9,7 @@ import smtplib
 import ssl
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from email.message import EmailMessage
 from typing import Any
 
@@ -60,6 +60,7 @@ class FakeSMTP:
         self.fail = fail
         self.delay = delay
         self.no_starttls = False
+        self.starttls_error: Exception | None = None
         self.connect_error: Exception | None = None
 
     def __call__(self, host: str, port: int, timeout: float) -> FakeSMTP:
@@ -82,10 +83,14 @@ class FakeSMTP:
     def starttls(self, context: Any = None) -> None:
         if self.no_starttls:
             raise smtplib.SMTPNotSupportedError("STARTTLS extension not supported by server.")
+        if self.starttls_error is not None:
+            raise self.starttls_error
         verifying(context)
         self.log.append(("starttls",))
 
     def login(self, user: str, password: str) -> None:
+        # smtplib's AUTH PLAIN and LOGIN encode the user and password as ASCII.
+        f"\0{user}\0{password}".encode("ascii")
         self.log.append(("login", user, password))
 
     def send_message(self, message: EmailMessage) -> None:
@@ -429,6 +434,192 @@ def test_a_server_failure_never_counts_and_backs_off_the_process(
     assert mail.status().server_error is None
 
 
+def test_a_certificate_the_server_cannot_prove_is_a_server_failure(
+    rows: OrderStore, log: list[Any], failures: list[Exception], clock: Clock
+) -> None:
+    """`ssl.SSLCertVerificationError` is also a `ValueError`: it never fails a row."""
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    fake = FakeSMTP(log, failures)
+    fake.starttls_error = ssl.SSLCertVerificationError(1, "certificate has expired")
+    mail = outbox(rows, HOST, log, failures, clock, fake=fake)
+    mail.set_password("pw")
+    assert mail.send_queued() == 0
+    the_server_failed(rows, mail, log, clock, "SSLCertVerificationError")
+
+
+def test_a_password_that_is_not_ascii_is_a_server_failure(
+    rows: OrderStore, log: list[Any], failures: list[Exception], clock: Clock
+) -> None:
+    """smtplib's login raises `UnicodeEncodeError` (a `ValueError`): it never fails a row."""
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    mail = outbox(rows, HOST, log, failures, clock)
+    mail.set_password("pässwort")
+    assert mail.send_queued() == 0
+    the_server_failed(rows, mail, log, clock, "UnicodeEncodeError")
+
+
+def the_server_failed(
+    rows: OrderStore, mail: StorefrontMail, log: list[Any], clock: Clock, error: str
+) -> None:
+    """Both rows let go and uncharged, the error kept for the shop, and the process in
+    its backoff."""
+    for row in mail_rows(rows):
+        assert row["failed_at"] is None and row["lease_until"] is None
+        assert row["attempts"] == 0 and row["last_error"] is None
+        assert {"code", "link"} <= row["context"].keys()
+    assert error in (mail.status().server_error or "")
+    tried = len(log)
+    clock.now += 59
+    assert mail.send_queued() == 0 and len(log) == tried
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        smtplib.SMTPDataError(550, b"5.1.1 <ada@example.com>: mailbox unavailable"),
+        smtplib.SMTPDataError(552, b"5.2.2 mailbox full"),
+        smtplib.SMTPDataError(553, b"mailbox name not allowed"),
+        smtplib.SMTPDataError(554, b"5.6.0 message content rejected"),
+        smtplib.SMTPDataError(554, b"Transaction failed"),
+    ],
+)
+def test_a_data_refusal_of_this_mail_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], error: Exception
+) -> None:
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    failures.append(error)
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    # The first row is charged; the next is sent in the same pass.
+    assert mail.send_queued() == 1
+    first, second = mail_rows(rows)
+    assert first["attempts"] == 1 and "SMTPDataError" in first["last_error"]
+    assert second["sent_at"] is not None
+    assert mail.status().server_error is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Amazon SES's answer for an unverified sender: the sender named, no status code.
+        smtplib.SMTPDataError(
+            554,
+            b"Message rejected: Email address is not verified. The following identities"
+            b" failed the check in region US-EAST-1: shop@example.com",
+        ),
+        smtplib.SMTPDataError(554, b"5.7.1 Sender address rejected: not owned by user"),
+        smtplib.SMTPDataError(550, b"5.1.8 Bad sender's mailbox address syntax"),
+        smtplib.SMTPDataError(554, b"5.3.0 mail system misconfigured"),
+        smtplib.SMTPDataError(554, b"The sender is not authorised to send from this domain"),
+        smtplib.SMTPDataError(451, b"try again later"),
+    ],
+)
+def test_a_data_refusal_of_the_sender_or_setup_is_a_server_failure(
+    rows: OrderStore, log: list[Any], failures: list[Exception], clock: Clock, error: Exception
+) -> None:
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    failures.append(error)
+    mail = outbox(rows, HOST, log, failures, clock)
+    mail.set_password("pw")
+    assert mail.send_queued() == 0
+    the_server_failed(rows, mail, log, clock, "SMTPDataError")
+
+
+def charged_and_passed(
+    rows: OrderStore, log: list[Any], failures: list[Exception], to: str, error: Exception
+) -> StorefrontMail:
+    """``to``'s row refused with ``error``: charged to it, and the next row sent in the
+    same pass with no server failure."""
+    code(rows, to, "1")
+    code(rows, "b@example.com", "2")
+    failures.append(error)
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    assert mail.send_queued() == 1
+    first, second = mail_rows(rows)
+    assert first["attempts"] == 1 and first["failed_at"] is None
+    assert second["sent_at"] is not None
+    assert mail.status().server_error is None
+    return mail
+
+
+@pytest.mark.parametrize("to", ["relay-verify@example.com", "Verified.Relay@example.com"])
+def test_a_refusal_naming_a_recipient_with_setup_words_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], to: str
+) -> None:
+    """The recipient is the customer's to choose: words in it never stall the sender."""
+    error = smtplib.SMTPDataError(550, f"{to.lower()}: no such user".encode())
+    charged_and_passed(rows, log, failures, to, error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"5.1.1 <workshop@example.com>: no such user",
+        b"workshop@example.com: mailbox name not allowed",
+        b"mailbox unavailable for xshop@example.com.invalid",
+    ],
+)
+def test_a_recipient_that_contains_the_sender_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], reply: bytes
+) -> None:
+    """The sender (shop@example.com) is matched as a whole address, never inside one."""
+    error = smtplib.SMTPDataError(553, reply)
+    charged_and_passed(rows, log, failures, "workshop@example.com", error)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"5.7.1 <ada@example.com>: Recipient address rejected: Access denied",
+        b"5.7.1 Message rejected as spam",
+    ],
+)
+def test_a_policy_refusal_that_does_not_name_the_sender_is_charged_to_the_row(
+    rows: OrderStore, log: list[Any], failures: list[Exception], reply: bytes
+) -> None:
+    charged_and_passed(rows, log, failures, "ada@example.com", smtplib.SMTPDataError(554, reply))
+
+
+def test_a_row_in_three_server_failures_in_a_row_is_charged_and_backed_off(
+    rows: OrderStore, log: list[Any], failures: list[Exception], clock: Clock
+) -> None:
+    """A server failure the server answered to this row's mail counts on the row: at the
+    third in a row the row is charged one attempt and backed off, so it no longer holds
+    the head of the queue."""
+    code(rows, "a@example.com", "1")
+    code(rows, "b@example.com", "2")
+    mail = outbox(rows, HOST, log, failures, clock)
+    mail.set_password("pw")
+    for failure in range(1, 4):
+        failures.append(smtplib.SMTPDataError(554, b"5.3.0 mail system misconfigured"))
+        assert mail.send_queued() == 0
+        first, second = mail_rows(rows)
+        assert second["sent_at"] is None and second["attempts"] == 0
+        assert "SMTPDataError" in (mail.status().server_error or "")
+        if failure < 3:
+            assert (first["attempts"], first["server_failures"]) == (0, failure)
+            assert first["failed_at"] is None and first["lease_until"] is None
+        clock.now += 3600
+    first, second = mail_rows(rows)
+    assert (first["attempts"], first["server_failures"]) == (1, 0)
+    assert first["failed_at"] is None and "SMTPDataError" in first["last_error"]
+    with rows.transaction() as conn:
+        wait = conn.execute(
+            "SELECT extract(epoch FROM next_attempt_at - clock_timestamp()) AS s"
+            " FROM storefront_mail WHERE id = %s",
+            (first["id"],),
+        ).fetchone()
+    assert wait is not None and round(float(wait["s"]) / 60) == 1
+    # The next row is sent while the first waits.
+    assert mail.send_queued() == 1
+    assert [m["To"] for m in sends(log)] == ["b@example.com"]
+
+
 def test_a_fixed_failure_fails_at_once(
     rows: OrderStore, shop: Shop, log: list[Any], failures: list[Exception]
 ) -> None:
@@ -520,6 +711,70 @@ def test_a_pass_stops_at_its_budget(rows: OrderStore, log: list[Any], clock: Clo
     mail.set_password("pw")
     assert mail.send_queued(budget=50) == 1
     assert mail.send_queued(budget=50) == 1
+
+
+def test_a_pass_asked_for_meanwhile_gets_only_what_is_left_of_the_budget(
+    rows: OrderStore, log: list[Any], clock: Clock
+) -> None:
+    for i in range(3):
+        code(rows, f"c{i}@example.com", str(i))
+    kicked: list[int] = []
+
+    class Slow(FakeSMTP):
+        def send_message(self, message: EmailMessage) -> None:
+            clock.now += 100
+            if not kicked:
+                # A kick while this pass runs: it finds the pass running and asks for one
+                # more after it.
+                kicked.append(mail.send_queued(budget=150))
+            super().send_message(message)
+
+    mail = outbox(rows, HOST, log, [], clock, fake=Slow(log, []))
+    mail.set_password("pw")
+    # Two rows spend the budget; the pass asked for meanwhile does not get a fresh one.
+    assert mail.send_queued(budget=150) == 2
+    assert kicked == [0]
+    # It stays asked for: the next call sends the last row.
+    assert mail._rerun
+    assert mail.send_queued(budget=150) == 1
+    assert len(sends(log)) == 3
+
+
+class KickAtRelease:
+    """The pass lock, with a kick that lands after the holder's last look for a pass
+    asked for meanwhile and before its release."""
+
+    def __init__(self, kick: Callable[[], None]) -> None:
+        self._lock = threading.Lock()
+        self._kick: Callable[[], None] | None = kick
+
+    def acquire(self, blocking: bool = True) -> bool:
+        return self._lock.acquire(blocking)
+
+    def release(self) -> None:
+        kick, self._kick = self._kick, None
+        if kick is not None:
+            kick()
+        self._lock.release()
+
+
+def test_a_kick_at_the_release_is_not_lost(
+    rows: OrderStore, log: list[Any], failures: list[Exception]
+) -> None:
+    code(rows, "a@example.com", "1")
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    kicked: list[int] = []
+
+    def kick() -> None:
+        # A transition commits a mail and kicks while the pass still holds the lock.
+        code(rows, "b@example.com", "2")
+        kicked.append(mail.send_queued())
+
+    mail._pass = KickAtRelease(kick)  # type: ignore[assignment]
+    assert mail.send_queued() == 2
+    assert kicked == [0]
+    assert [m["To"] for m in sends(log)] == ["a@example.com", "b@example.com"]
 
 
 # -- the sealed password ------------------------------------------------------------------
