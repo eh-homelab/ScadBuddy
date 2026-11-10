@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { decide } from '../src/harness/permissions.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { EXTRACTORS } from '../src/sessions/touched.js'
 import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import { effectiveTool, runTool, type Tool, type ToolContext, type ToolOverrides } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -157,5 +158,21 @@ describe('get_print_sources and import_print (#4698)', () => {
       ctx(),
     )
     expect(result.isError).toBe(true)
+  })
+})
+
+describe('the touched list of an import (#5979)', () => {
+  const extract = EXTRACTORS.import_print as NonNullable<(typeof EXTRACTORS)['import_print']>
+  const made = { ...IMPORTED, slug: 'trophy', created_model: true }
+
+  it('records the new model on the request that made the import', () => {
+    const touches = extract({ archive_id: 193 }, { ...made, made_now: true })
+    expect(touches.some((t) => t.action === 'created')).toBe(true)
+  })
+
+  it('records no new model on a repeat, which answers the stored created_model', () => {
+    const touches = extract({ archive_id: 193 }, { ...made, made_now: false })
+    expect(touches.some((t) => t.action === 'created')).toBe(false)
+    expect(touches).toEqual([{ type: 'print_archive', id: '193', action: 'modified' }])
   })
 })

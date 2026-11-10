@@ -410,12 +410,13 @@ def test_a_new_model_is_made_from_the_slicer_project(client: TestClient, model: 
 
     assert response.status_code == 201, response.text
     made = response.json()
-    assert (made["slug"], made["created_model"]) == ("trophy", True)
+    assert (made["slug"], made["created_model"], made["made_now"]) == ("trophy", True, True)
     assert made["imported"]["source"] == "archive_source"
     assert client.get("/api/v1/models/trophy/scene").status_code == 200
     assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["slug"] == "trophy"
     again = import_print(client, body, **key)
     assert (again.status_code, again.json()["slug"]) == (200, "trophy")
+    assert (again.json()["created_model"], again.json()["made_now"]) == (True, False)
 
 
 @respx.mock
@@ -671,3 +672,48 @@ def test_an_import_waiting_on_another_is_refused_in_time(
     assert response.status_code == 409, response.text
     assert "still running" in response.json()["detail"]
     assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
+
+
+@respx.mock
+def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5979: a first request makes the model but records no import; its retry with the
+    same key reads the source again, now other bytes, as a printer file overwritten in
+    between would be. The retry links nothing, and names the model only while it exists."""
+    from scadbuddy.api import print_imports as route
+    from tests.api.test_mesh_models import painted_3mf
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    content = {"bytes": painted_3mf()}
+    respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        side_effect=lambda request: httpx.Response(200, content=content["bytes"])
+    )
+    record = route._record
+
+    async def lost(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the answer never arrived")
+
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
+    key = press()
+    monkeypatch.setattr(route, "_record", lost)
+    with pytest.raises(RuntimeError):
+        import_print(client, body, **key)
+    monkeypatch.setattr(route, "_record", record)
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    content["bytes"] = a_3mf()
+
+    made = import_print(client, body, **key)
+
+    assert made.status_code == 409, made.text
+    assert "the model 'trophy' was made from" in made.json()["detail"]
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+    assert client.delete("/api/v1/models/trophy", headers=press()).status_code == 204
+    gone = import_print(client, body, **key)
+
+    assert gone.status_code == 409, gone.text
+    assert "that request made the model 'trophy', which was deleted since" in gone.json()["detail"]
+    assert gone.json()["operation_id"] == made.json()["operation_id"]
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
