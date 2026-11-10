@@ -914,3 +914,37 @@ def test_the_view_that_answers_a_write_does_not_attach(api: TestClient, crud: Cr
     assert r.status_code == 200, r.text
     assert link_rows(api, me.account.id) == []
     assert not owns(api, me.account.id, made.order.id)
+
+
+def test_an_attach_through_a_revoked_link_inserts_nothing(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """Security review: an attach that lost the race with a revoke finds the link revoked
+    under its FOR SHARE lock and attaches nothing."""
+    made = make_order(api, crud)
+    me = signed_in(api)
+    link = live_link_id(api, made.order.id)
+    with _orders(api).store.transaction() as conn:
+        revoke_order_links(conn, made.order.id)
+    with _orders(api).store.transaction() as conn:
+        attach_order(conn, me.account.id, made.order.id, link)
+    assert link_rows(api, me.account.id) == []
+    assert not owns(api, me.account.id, made.order.id)
+
+
+def test_a_row_whose_link_is_revoked_owns_nothing(api: TestClient, crud: CrudCaller) -> None:
+    """Security review: even a link-made row left behind reads as not owned once its link
+    is revoked."""
+    made = make_order(api, crud)
+    me = signed_in(api)
+    link = live_link_id(api, made.order.id)
+    with _orders(api).store.transaction() as conn:
+        attach_order(conn, me.account.id, made.order.id, link)
+        conn.execute(
+            "UPDATE storefront_order_links SET revoked_at = clock_timestamp() WHERE id = %s",
+            (link,),
+        )
+    assert link_rows(api, me.account.id) == [{"order_id": made.order.id, "link_id": link}]
+    assert not owns(api, me.account.id, made.order.id)
+    gone = Reader(crud, order_id=made.order.id, session=me.session_token).view()
+    assert (gone.status_code, gone.content) == (404, b"")

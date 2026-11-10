@@ -71,17 +71,26 @@ def revoke_order_links(conn: Conn, order_id: str) -> int:
     The account attachments those links made (`accounts.attach_order`'s ``link_id``) go in
     the same transaction, so a revoked link leaves no way in for the account that opened
     it; a submit-made attachment (no link) stays. A later view through another live link
-    attaches again."""
-    conn.execute(
-        "DELETE FROM storefront_account_orders WHERE link_id IN"
-        " (SELECT id FROM storefront_order_links WHERE order_id = %s AND revoked_at IS NULL)",
-        (order_id,),
-    )
-    return conn.execute(
-        "UPDATE storefront_order_links SET revoked_at = clock_timestamp(), token_sealed = NULL,"
-        " dek_sealed = NULL, kek_id = NULL WHERE order_id = %s AND revoked_at IS NULL",
-        (order_id,),
-    ).rowcount
+    attaches again.
+
+    The links are revoked first, which locks their rows; the attachments go after. An
+    attach running at the same time takes the link's row ``FOR SHARE``
+    (`accounts.attach_order`), so it waits for this revoke and then finds the link
+    revoked and attaches nothing."""
+    revoked = [
+        str(row["id"])
+        for row in conn.execute(
+            "UPDATE storefront_order_links SET revoked_at = clock_timestamp(),"
+            " token_sealed = NULL, dek_sealed = NULL, kek_id = NULL"
+            " WHERE order_id = %s AND revoked_at IS NULL RETURNING id",
+            (order_id,),
+        ).fetchall()
+    ]
+    if revoked:
+        conn.execute(
+            "DELETE FROM storefront_account_orders WHERE link_id = ANY(%s::text[])", (revoked,)
+        )
+    return len(revoked)
 
 
 def live_link(conn: Conn, order_id: str) -> LiveLink | None:

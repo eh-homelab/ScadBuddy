@@ -457,6 +457,9 @@ _OWNED: Final = (
     " JOIN storefront_visitors v ON v.id = o.storefront_visitor_id WHERE v.account_id = %(a)s"
     " UNION SELECT o.id, o.created_at FROM orders o"
     " JOIN storefront_account_orders ao ON ao.order_id = o.id WHERE ao.account_id = %(a)s"
+    # A link-made attachment counts only while its link is live (`attach_order`).
+    " AND (ao.link_id IS NULL OR EXISTS (SELECT 1 FROM storefront_order_links l"
+    " WHERE l.id = ao.link_id AND l.revoked_at IS NULL))"
 )
 
 
@@ -496,10 +499,24 @@ def attach_order(conn: Conn, account_id: str, order_id: str, link_id: str | None
     row (``link_id`` NULL) always wins over a later link's, and a link-made row stays bound
     to the link that made it. A link-made row goes only with its link: revoking link A
     removes A's row (`links.revoke_order_links`), and a later view through a live link B
-    attaches the order again. An expiry removes nothing; only a revoke does."""
+    attaches the order again. An expiry removes nothing; only a revoke does.
+
+    A link-made attach inserts only while the link is live, and takes the link's row
+    ``FOR SHARE`` to check it: a revoke running at the same time locks the row first
+    (`links.revoke_order_links`), so this waits for it, then sees the link revoked and
+    inserts nothing. ``account_owns_order`` also ignores a row whose link is revoked."""
+    if link_id is None:
+        conn.execute(
+            "INSERT INTO storefront_account_orders (account_id, order_id, link_id)"
+            " VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING",
+            (account_id, order_id),
+        )
+        return
     conn.execute(
         "INSERT INTO storefront_account_orders (account_id, order_id, link_id)"
-        " VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+        " SELECT %s, %s, l.id FROM storefront_order_links l"
+        " WHERE l.id = %s AND l.revoked_at IS NULL FOR SHARE OF l"
+        " ON CONFLICT DO NOTHING",
         (account_id, order_id, link_id),
     )
 
