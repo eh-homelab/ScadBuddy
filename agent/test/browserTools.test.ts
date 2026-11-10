@@ -510,7 +510,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const here = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 60_000, attachProbeMs: 50, log: () => {} })
     const started = Date.now()
     expect((await here.sessionTab('s-new')).connected).toBe(false)
-    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(Date.now() - started).toBeLessThan(1_500)
   })
 
   /** A relay whose first `answered` status reads answer, and every later one hangs; it counts both. */

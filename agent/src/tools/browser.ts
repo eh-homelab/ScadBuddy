@@ -149,7 +149,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
         const before = await statusHere(ctx, 'before')
         if (before?.attached === false && before.slow === true) throw new ToolError(`${outcome.error.message} ${WHY_SLOW_NO_WAIT}`)
         // Whether a check during the wait found the owner slow: then no reconnect happened, and the
-        // checks below need not ask the same slow replica again.
+        // checks below need not ask the same slow replica again. Only the call that opened the wait
+        // runs its isBack (sessions/manager.ts keeps the opener's), so a call that joined it checks
+        // once more after the wait.
         let sawSlow = false
         const waited = await ctx.waitForTab({
           tool: `browser_${spec.tool}`,

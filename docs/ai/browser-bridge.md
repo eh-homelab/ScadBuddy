@@ -252,7 +252,8 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   again." (`WHY_SLOW_NO_WAIT`, #5974 review). A replica that turns slow during the wait
   counts as back: a read runs once more (if it still finds no tab it fails with "The
   session's tab may be connected … take a snapshot, then call again.", `WHY_SLOW_READ`),
-  the slow answer is not asked for again, and the turn may still wait for its tab later. Across the user's sessions at most 10 tab waits are opened in 10 minutes
+  the call that opened the wait does not ask for the slow answer again (a call that joined
+  that wait checks once more), and the turn may still wait for its tab later. Across the user's sessions at most 10 tab waits are opened in 10 minutes
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
   fails at once with "The user was not asked for the tab: …". Every wait opened counts,
   including ones withdrawn because their calls stopped.
