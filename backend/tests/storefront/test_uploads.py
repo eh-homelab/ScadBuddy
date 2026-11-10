@@ -243,3 +243,12 @@ async def test_the_text_is_checked_as_its_part_ends() -> None:
 
     error = await refused(request(receive_once), UploadGate())
     assert (error.status, slug(error)) == (422, "request_text")
+
+
+def test_an_escaped_file_name_decodes_in_either_case() -> None:
+    # Review of #5829: browsers send upper case, but a lower-case escape decodes the same.
+    from scadbuddy.storefront.wire import unescape_filename
+
+    assert unescape_filename("a%22b.jpg") == 'a"b.jpg'
+    assert unescape_filename("a%5cb%0a.jpg") == "a\\b\n.jpg"
+    assert unescape_filename("50%25.jpg") == "50%25.jpg"

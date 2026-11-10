@@ -890,7 +890,8 @@ the agent reads it with `order_costs`.
 
 ### 7.1 Events and the trigger
 
-Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`) and
+Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`; a
+storefront cart the draft sweep deleted also carries `deleted: true`, storefront spec §5.4) and
 `order_item.changed` (`order_id`, `item_id`, `status`, `attempt`). **A trigger's event
 kind is the bus event's own name.** The existing two kinds are renamings
 (`render.finished` for `job.done`, `model.changed` for `version.committed`, F12); the
