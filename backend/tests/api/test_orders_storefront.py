@@ -142,6 +142,10 @@ def test_a_storefront_custom_price_waits_for_the_customer(
     assert patched.status_code == 200, patched.text
     assert patched.json()["status"] == "quoted"
     problem(client.patch(url, json={"unit_price_minor": 2500, "accept": True}), "customer_accepts")
+    # An explicit true is refused with no price too: it would otherwise change nothing.
+    problem(client.patch(url, json={"accept": True}), "customer_accepts")
+    found = client.get(f"/api/v1/orders/{order.id}").json()["items"]
+    assert {i["id"]: i["status"] for i in found}[added.json()["id"]] == "quoted"
     copy = client.post(f"{url}/duplicate", json={})
     assert copy.status_code == 201, copy.text
     assert copy.json()["status"] == "quoted"
