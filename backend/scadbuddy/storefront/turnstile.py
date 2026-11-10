@@ -15,8 +15,8 @@ the form's ``action``, to ``POST …/storefront/turnstile/verify``, which answer
   answering) is 503 ``…/storefront/bot_check_unavailable``. The check fails closed.
 
 A token longer than Cloudflare's bound fails here, before any call, and so does a client
-with `FAILED_CHECKS` failed checks in `FAILED_WINDOW` (`FailedChecks`, by its exact
-address). `SiteKey` is the
+with `FAILED_CHECKS` failed checks in `FAILED_WINDOW`, or one of a prefix with
+`PREFIX_FAILED_CHECKS` (`FailedChecks`). `SiteKey` is the
 CRUD side's site key, read at most once per `SITE_KEY_TTL` per replica: the page's
 widget (`GET /api/store/v1/turnstile`) and the page's CSP (`static.py`) both read it, so
 the CSP names Cloudflare only while the check is on.
@@ -24,17 +24,18 @@ the CSP names Cloudflare only while the check is on.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from typing import Final
 
 from starlette.requests import Request
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.core.proxies import client_address
+from scadbuddy.core.proxies import client_address, client_key
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.wire import (
@@ -80,47 +81,131 @@ def _client(request: Request) -> str:
     return address
 
 
-#: Failed checks one client may have in `FAILED_WINDOW` before the edge stops asking.
+#: Failed checks one client (`client_key`: an IPv4 address, an IPv6 /64) may have in
+#: `FAILED_WINDOW` before the edge stops asking Siteverify for it.
 FAILED_CHECKS: Final = 10
+#: Failed checks one prefix (an IPv4 /24, an IPv6 /48) may have in `FAILED_WINDOW`.
+PREFIX_FAILED_CHECKS: Final = 100
 FAILED_WINDOW: Final = 600.0
-#: The most clients `FailedChecks` holds; past it, the one whose last failure is oldest
-#: is dropped. Never a shared bucket: one client's failures never refuse another.
+#: The most clients, and the most prefixes, `FailedChecks` tracks.
 MAX_FAILING_CLIENTS: Final = 50_000
+#: How often a full table of blocked entries is logged.
+FULL_WARNING_EVERY: Final = 60.0
+
+
+def _prefix(client: str) -> str:
+    """``client``'s IPv4 /24 or IPv6 /48; anything else as it is."""
+    try:
+        ip = ipaddress.ip_address(client_key(client).split("/")[0])
+    except ValueError:
+        return client
+    bits = 24 if isinstance(ip, ipaddress.IPv4Address) else 48
+    return str(ipaddress.ip_network((ip, bits), strict=False))
+
+
+class _Tier:
+    """One key's failures: the unblocked keys in an LRU (least recently failed first),
+    the blocked ones apart with the time their block ends, so eviction is O(1) and never
+    drops a block."""
+
+    def __init__(self, most: int, size: int) -> None:
+        self.most = most
+        self.size = size
+        self.open: OrderedDict[str, deque[float]] = OrderedDict()
+        self.blocked: OrderedDict[str, float] = OrderedDict()
+
+    def _sweep(self, now: float) -> None:
+        while self.blocked:
+            key, until = next(iter(self.blocked.items()))
+            if until > now:
+                return
+            del self.blocked[key]
+
+    def is_blocked(self, key: str, now: float) -> bool:
+        until = self.blocked.get(key)
+        if until is None:
+            return False
+        if until > now:
+            return True
+        del self.blocked[key]
+        return False
+
+    def fail(self, key: str, now: float) -> bool:
+        """Count a failure of ``key``; False when the table is full of blocked keys and
+        ``key`` is not tracked."""
+        self._sweep(now)
+        if self.is_blocked(key, now):
+            return True
+        failures = self.open.get(key)
+        if failures is None:
+            if len(self.open) + len(self.blocked) >= self.size:
+                if not self.open:
+                    return False
+                self.open.popitem(last=False)
+            failures = self.open[key] = deque()
+        else:
+            self.open.move_to_end(key)
+        while failures and failures[0] <= now - FAILED_WINDOW:
+            failures.popleft()
+        failures.append(now)
+        if len(failures) >= self.most:
+            # A blocked key is never asked about, so it gets no newer failures: its block
+            # ends when the oldest failure that makes it ages out.
+            self.blocked[key] = failures[-self.most] + FAILED_WINDOW
+            del self.open[key]
+        return True
 
 
 class FailedChecks:
-    """Each client's failed checks, keyed by its exact address (never an IPv6 /48 or an
-    overflow entry, which would let one bot refuse its neighbours). A client with
-    `FAILED_CHECKS` failures in `FAILED_WINDOW` is refused 403 without a Siteverify call,
-    so failed checks cost the CRUD side at most that many calls per client. One per edge
-    replica."""
+    """Failed bot checks, so the edge stops calling Siteverify for whoever keeps failing.
+    One per edge replica.
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    Two tiers. A client (`core/proxies.py` `client_key`: an IPv4 address, an IPv6 /64,
+    since a host owns at least a /64 and may rotate inside it) with `FAILED_CHECKS`
+    failures in `FAILED_WINDOW` is refused. So is every client of a prefix (an IPv4 /24,
+    an IPv6 /48) with `PREFIX_FAILED_CHECKS` failures in the window, so rotating across
+    /64s does not escape the bound either. The price of that bound: honest neighbours in
+    the prefix are refused too, but only after 100 failures in 10 minutes from it. A
+    refusal is 403 ``bot_check_failed`` with no Siteverify call.
+
+    Each tier tracks at most `MAX_FAILING_CLIENTS` keys. A new key evicts the least
+    recently failed unblocked key; a blocked key is never evicted. When every tracked key
+    is blocked, a new one is checked as usual but not tracked, and a warning is logged at
+    most once per `FULL_WARNING_EVERY`: a Siteverify call costs little, and refusing
+    unknown clients would let an attacker shut every customer out."""
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        size: int = MAX_FAILING_CLIENTS,
+    ) -> None:
         self._clock = clock
         self._lock = threading.Lock()
-        self._failures: dict[str, deque[float]] = {}
-
-    def _recent(self, client: str, now: float) -> deque[float] | None:
-        failures = self._failures.get(client)
-        while failures and failures[0] <= now - FAILED_WINDOW:
-            failures.popleft()
-        if failures is not None and not failures:
-            del self._failures[client]
-            return None
-        return failures
+        self._clients = _Tier(FAILED_CHECKS, size)
+        self._prefixes = _Tier(PREFIX_FAILED_CHECKS, size)
+        self._warned_at: float | None = None
 
     def blocked(self, client: str) -> bool:
+        now = self._clock()
         with self._lock:
-            failures = self._recent(client, self._clock())
-            return failures is not None and len(failures) >= FAILED_CHECKS
+            return self._clients.is_blocked(client_key(client), now) or (
+                self._prefixes.is_blocked(_prefix(client), now)
+            )
 
     def failed(self, client: str) -> None:
         now = self._clock()
         with self._lock:
-            if client not in self._failures and len(self._failures) >= MAX_FAILING_CLIENTS:
-                oldest = min(self._failures, key=lambda k: self._failures[k][-1])
-                del self._failures[oldest]
-            self._failures.setdefault(client, deque()).append(now)
+            tracked = self._clients.fail(client_key(client), now)
+            tracked = self._prefixes.fail(_prefix(client), now) and tracked
+            if not tracked and (
+                self._warned_at is None or now - self._warned_at >= FULL_WARNING_EVERY
+            ):
+                self._warned_at = now
+                logger.warning(
+                    "the failed bot check table is full of blocked clients;"
+                    " new failing clients are checked but not tracked"
+                )
 
 
 async def require_turnstile(request: Request, action: TurnstileAction) -> None:

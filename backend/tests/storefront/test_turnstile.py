@@ -5,6 +5,7 @@ CSP names Cloudflare only while the check is on."""
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,6 +23,8 @@ from scadbuddy.storefront.turnstile import (
     BOT_CHECK_UNAVAILABLE,
     FAILED_CHECKS,
     FAILED_WINDOW,
+    FULL_WARNING_EVERY,
+    PREFIX_FAILED_CHECKS,
     SITE_KEY_RETRY,
     SITE_KEY_TTL,
     FailedChecks,
@@ -111,9 +114,10 @@ def test_failed_checks_spend_no_allowance_so_a_neighbour_still_uploads(
     crud_mock: respx.Router,  # noqa: F811
 ) -> None:
     bot = neighbour(edge, "2001:db8:1::1")
-    customer = neighbour(edge, "2001:db8:1::2")  # the same /48: one upload allowance
+    customer = neighbour(edge, "2001:db8:1::2")  # the same /64: one upload allowance
     crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
-    for _ in range(REQUEST_UPLOADS + FAILED_CHECKS):
+    assert REQUEST_UPLOADS + 1 < FAILED_CHECKS
+    for _ in range(REQUEST_UPLOADS + 1):
         assert ask(bot).status_code == 403  # type: ignore[attr-defined]
     crud_mock["turnstile"].respond(200, json={"verdict": "pass"}, headers=CRUD)
     r = ask(customer)
@@ -132,7 +136,7 @@ def test_the_failure_limit_stops_further_siteverify_calls(
     assert r.status_code == 403  # type: ignore[attr-defined]
     assert r.json()["type"] == BOT_CHECK_FAILED  # type: ignore[attr-defined]
     assert crud_mock["turnstile"].call_count == calls
-    # Another client, even in the same /48, is not held back.
+    # Another client is not held back.
     assert ask(neighbour(edge, "2001:db8:1::9")).status_code == 403  # type: ignore[attr-defined]
     assert crud_mock["turnstile"].call_count == calls + 1
 
@@ -158,6 +162,86 @@ def test_failures_age_out_of_the_window() -> None:
     assert not failures.blocked("203.0.113.10")
     now[0] += FAILED_WINDOW
     assert not failures.blocked("203.0.113.9")
+
+
+def test_rotating_addresses_inside_a_64_does_not_escape_the_limit(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
+    for n in range(FAILED_CHECKS):
+        assert ask(neighbour(edge, f"2001:db8:1:2::{n + 1:x}")).status_code == 403  # type: ignore[attr-defined]
+    calls = crud_mock["turnstile"].call_count
+    r = ask(neighbour(edge, "2001:db8:1:2:ffff::1"))
+    assert r.status_code == 403  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == calls
+
+
+@pytest.mark.parametrize(
+    ("member", "inside", "outside"),
+    [
+        ("2001:db8:7:{n:x}::1", "2001:db8:7:ffff::1", "2001:db8:8::1"),  # IPv6 /48
+        ("198.51.100.{n}", "198.51.100.250", "198.51.101.1"),  # IPv4 /24
+    ],
+)
+def test_a_prefix_with_a_hundred_failures_is_blocked(
+    member: str, inside: str, outside: str
+) -> None:
+    failures = FailedChecks(clock=lambda: 0.0)
+    # Each client stays under its own limit; together they reach the prefix's.
+    clients = [member.format(n=n) for n in range(PREFIX_FAILED_CHECKS // (FAILED_CHECKS - 1) + 1)]
+    spent = 0
+    for client in clients:
+        for _ in range(FAILED_CHECKS - 1):
+            if spent < PREFIX_FAILED_CHECKS:
+                failures.failed(client)
+                spent += 1
+    assert spent == PREFIX_FAILED_CHECKS
+    assert failures.blocked(inside)
+    assert not failures.blocked(outside)
+
+
+def test_eviction_drops_the_least_recently_failed_and_never_a_block() -> None:
+    failures = FailedChecks(clock=lambda: 0.0, size=3)
+    for _ in range(FAILED_CHECKS):
+        failures.failed("203.0.113.1")  # blocked
+    failures.failed("198.51.100.2")
+    failures.failed("192.0.2.3")
+    failures.failed("198.51.100.2")  # now more recent than 192.0.2.3
+    failures.failed("203.0.114.4")  # full: evicts 192.0.2.3, not the block
+    assert failures.blocked("203.0.113.1")
+    # 198.51.100.2 kept its two failures: eight more block it.
+    for _ in range(FAILED_CHECKS - 2):
+        failures.failed("198.51.100.2")
+    assert failures.blocked("198.51.100.2")
+    # 192.0.2.3 lost its one: nine more do not.
+    for _ in range(FAILED_CHECKS - 1):
+        failures.failed("192.0.2.3")
+    assert not failures.blocked("192.0.2.3")
+
+
+def warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "scadbuddy.storefront.turnstile"]
+
+
+def test_a_table_full_of_blocks_checks_new_clients_and_warns_once_a_minute(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [0.0]
+    failures = FailedChecks(clock=lambda: now[0], size=2)
+    for client in ("203.0.113.1", "198.51.100.2"):
+        for _ in range(FAILED_CHECKS):
+            failures.failed(client)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.turnstile"):
+        for _ in range(FAILED_CHECKS + 1):
+            failures.failed("192.0.2.3")
+        # Not tracked, so never refused: the check still runs for it.
+        assert not failures.blocked("192.0.2.3")
+        assert failures.blocked("203.0.113.1") and failures.blocked("198.51.100.2")
+        assert len(warnings(caplog)) == 1
+        now[0] += FULL_WARNING_EVERY
+        failures.failed("192.0.2.3")
+        assert len(warnings(caplog)) == 2
 
 
 def test_an_unavailable_check_spends_no_allowance(

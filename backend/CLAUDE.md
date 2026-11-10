@@ -529,9 +529,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `require_turnstile(request, action)` forwards the page's `X-Turnstile-Token` to `POST
   …/crud/storefront/turnstile/verify` (area `turnstile`) and refuses 403
   `bot_check_failed` or 503 `bot_check_unavailable`. It fails closed: a site key with no
-  secret this process can open is `unavailable`, never a pass. A client with
-  `FAILED_CHECKS` (10) failed checks in 10 minutes is refused with no Siteverify call
-  (`FailedChecks`, keyed by its exact address, never a shared /48 or overflow bucket). A
+  secret this process can open is `unavailable`, never a pass. A client (IPv4
+  address, IPv6 /64) with `FAILED_CHECKS` (10) failed checks in 10 minutes, or any client
+  of a prefix (IPv4 /24, IPv6 /48) with 100, is refused with no Siteverify call
+  (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
+  without tracking them, never refusing them). A
   design request checks its upload allowance first, and only a passed check spends it.
   A form route awaits it
   before it reads its body. Today only design requests (`request`) take it; the actions
