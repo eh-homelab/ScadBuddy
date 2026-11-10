@@ -1758,6 +1758,8 @@ function printOf(
     },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
     part_settings: null,
+    // #4698: a print a person imported onto a model; none here.
+    imported: null,
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
   }
