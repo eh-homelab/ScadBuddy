@@ -23,8 +23,9 @@ early by #4625: a merge it makes runs on the API, which may write every table
 `PRINTER_REFERENCES` names) and a virtual-printer write's sync (`upsert_virtual`,
 `mark_virtual_listed`, from `bambuddy/virtual_printers.py`). Those two answer what the
 write changed, which a resend would not repeat, so each takes an ``Idempotency-Key``
-(`WriteKeys`'). `RemoteReports` is `printers/reports.py` `PrinterReportStore` (Q26), for
-the watch, the native follow and the LAN path. Neither holds a pool, and the store
+of its own per call, sent again on that call's retries. `RemoteReports` is
+`printers/reports.py` `PrinterReportStore` (Q26), for the watch, the native follow and
+the LAN path. Neither holds a pool, and the store
 refuses the methods only the API calls (`PRINTERS_API_ONLY`), `link_bambuddy` among them.
 
 `RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
@@ -460,7 +461,7 @@ class RemoteUploadStore(BambuddyUploadStore):
 
     def __init__(self, client: CrudClient) -> None:
         self._client = client
-        self._claims = WriteKeys()
+        self._claims = WriteKeys("previews")
         self._leases = RemoteCopyLeases(client)
 
     @property
@@ -853,7 +854,6 @@ class RemotePrinterStore(PrinterStore):
         self.previous_kek = previous_kek
         #: The API announces a merge; the worker announces nothing of the registry's.
         self.events = None
-        self._keys = WriteKeys()
 
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
@@ -920,19 +920,14 @@ class RemotePrinterStore(PrinterStore):
 
     def _keyed(self, method: str, path: str, body: Any) -> Any:
         """A write whose answer a resend would not repeat, under an ``Idempotency-Key``
-        (plan D5): `WriteKeys`', so a retried activity is answered as its last attempt
-        was, or a new key when the ledger holds another request under that one."""
-        url = f"{BASE}{path}"
-        try:
-            response = self._client.request(
-                method, url, json=body, idempotency_key=self._keys.next()
-            )
-        except CrudRefusedError as error:
-            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
-                raise
-            response = self._client.request(
-                method, url, json=body, idempotency_key=uuid.uuid4().hex
-            )
+        (plan D5) of its own: a new UUID per call, which the client sends again on each
+        retry of that call, as `RemoteUploadStore.record_slice_start` does. Not
+        `WriteKeys`': an upsert's body carries the view's fresh ``seen_at``, so a retried
+        activity's key would almost never replay; and a replayed listed mark would skip a
+        write the registry may need again after a change made between two attempts."""
+        response = self._client.request(
+            method, f"{BASE}{path}", json=body, idempotency_key=uuid.uuid4().hex
+        )
         return response.json()
 
     def upsert_virtual(

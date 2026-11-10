@@ -846,6 +846,10 @@ async def put_report(
 ) -> ReportWritten:
     """The watch's write. Only the write that shows a print ended answers that end, so
     once per ``Idempotency-Key``: a resend after a lost answer answers the same end."""
+    # One ledger row per report written: the watch puts about once a `watch.py`
+    # `write_every` (1 s) while a printer reports, and at once on a shown change, so up
+    # to tens of thousands of rows a day per printer. `crud/idempotency.py` `prune` drops
+    # each after `RETENTION` (24 h), which bounds them.
     key = required_key(idempotency_key)
     reports = printers.reports
 
