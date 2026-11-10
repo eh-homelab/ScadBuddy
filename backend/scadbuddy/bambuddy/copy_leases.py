@@ -10,11 +10,11 @@ a holder that died frees the key within `COPY_LEASE_TTL`. Every call is natural 
 token: an acquire sent again by its holder answers it held, a renew or release sent again
 renews or deletes what the first did.
 
-Until #5298 Task 35 an old print pod still takes the session advisory lock
-``COPY_LOCK_PREFIX + key``. Each acquire probes it in its own transaction
-(``pg_try_advisory_xact_lock``, released at commit), and a held one is busy. The API's
-own holders also take the session lock after the lease (`uploads.py` `copy_lock`), so they
-exclude old pods both ways.
+Until #5298 Task 35, and during a roll, an old print pod and an old API replica still
+take only the session advisory lock ``COPY_LOCK_PREFIX + key``. Each acquire probes it in
+its own transaction (``pg_try_advisory_xact_lock``, released at commit), and a held one is
+busy. The new API's own holders also take the session lock after the lease (`uploads.py`
+`copy_lock`), so they exclude old print pods and old API replicas both ways.
 
 `CopyLeases` is the API's SQL. The print worker's is `crud/print.py` `RemoteCopyLeases`,
 over ``…/crud/print/copy-leases/{key}``; both are a `LeaseCalls`.
@@ -180,10 +180,18 @@ async def hold_lease(
 ) -> AsyncIterator[CopyLease]:
     """Hold ``key``'s lease for the section: wait for it as long as it takes, renew it
     every ``renew_every`` seconds, release it on the way out, however the section ends.
-    A release that fails is logged; the lease then frees itself at its expiry."""
+    A release that fails is logged; the lease then frees itself at its expiry.
+
+    An acquire that is cancelled or fails may have been granted all the same (its answer
+    lost on the way back), so it is released too: the token is this call's own, so the
+    release deletes nothing another holder has."""
     lease = CopyLease(key=key, token=str(uuid.uuid4()))
-    while await leases.acquire(key, lease.token, ttl, MAX_WAIT) is None:
-        pass
+    try:
+        while await leases.acquire(key, lease.token, ttl, MAX_WAIT) is None:
+            pass
+    except BaseException:
+        await _release_quietly(leases, lease)
+        raise
     renewer = asyncio.create_task(_renewing(leases, lease, ttl, renew_every))
     try:
         yield lease
@@ -191,7 +199,13 @@ async def hold_lease(
         renewer.cancel()
         # `wait`, not `await renewer`: a cancel of this task still propagates.
         await asyncio.wait({renewer})
-        try:
-            await leases.release(key, lease.token)
-        except Exception:
-            logger.warning("could not release a copy lease", exc_info=True)
+        await _release_quietly(leases, lease)
+
+
+async def _release_quietly(leases: LeaseCalls, lease: CopyLease) -> None:
+    """Release ``lease``, logging a failure rather than raising it over the error or
+    cancellation that ends the section."""
+    try:
+        await leases.release(lease.key, lease.token)
+    except Exception:
+        logger.warning("could not release a copy lease", exc_info=True)

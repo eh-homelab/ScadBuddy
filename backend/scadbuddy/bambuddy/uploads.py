@@ -158,8 +158,8 @@ class BambuddyUploadStore:
         lease it yields to `record`, which refuses once another holder took it.
 
         Until #5298 Task 35 the API also holds the old session advisory lock after the
-        lease, so an old print pod that still takes only that lock waits for it too
-        (`_session_lock`).
+        lease, so an old print pod or an old API replica, which during a roll still takes
+        only that lock, waits for it too (`_session_lock`).
         """
         async with hold_lease(CopyLeases(self._pool), key) as lease, self._session_lock(key):
             yield lease
