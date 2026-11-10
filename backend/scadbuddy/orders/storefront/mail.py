@@ -8,17 +8,22 @@ sweep `housekeeping_send_storefront_mail` sends what is left.
 A pass claims one row at a time with a short transaction that leases it (`LEASE`,
 ``FOR UPDATE SKIP LOCKED``), commits, sends with no connection held, then stamps the
 result in another short transaction: another sender skips a leased row, and no
-transaction is open over SMTP. One pass runs at a time in a process, within `PASS_BUDGET`.
+transaction is open over SMTP. One pass runs at a time in a process. A pass asked for
+while one runs is run by the holder after it, and a `send_queued` call, with those passes,
+stops claiming at `PASS_BUDGET` from its start.
 
 Failures (review I2):
-- of the server or its setup (connect, TLS, login, sender refused, a timeout, a password
-  saved for another connection, no password or no key): never charged to a row. The row
-  is let go, the process waits (`SERVER_BACKOFF_FIRST`, doubling to `SERVER_BACKOFF_MAX`)
-  and the error is kept in `storefront_mail_server` for the shop;
-- of the recipient (``SMTPRecipientsRefused``, a 5xx ``SMTPDataError``): charged to the
-  row, which waits 1, 2, 4 ... minutes (at most an hour) and is given up after
-  `MAX_ATTEMPTS`;
-- fixed (a template that cannot be built, a revoked link): the row fails at once.
+- of the server or its setup (anything the SMTP session raises that is not the
+  recipient's: connect, TLS and its certificate, login and a password smtplib cannot
+  encode, sender refused, a timeout; and a password saved for another connection, no
+  password or no key): never charged to a row. The row is let go, the process waits
+  (`SERVER_BACKOFF_FIRST`, doubling to `SERVER_BACKOFF_MAX`) and the error is kept in
+  `storefront_mail_server` for the shop;
+- of the recipient or this message (``SMTPRecipientsRefused``, or an ``SMTPDataError``
+  `_recipients_fault` reads as about them): charged to the row, which waits 1, 2, 4 ...
+  minutes (at most an hour) and is given up after `MAX_ATTEMPTS`;
+- fixed (a message that cannot be built: a template, a header, a revoked link): the row
+  fails at once.
 
 One setting, ``storefront_mail_tls``, picks the connection: ``starttls`` (the server
 must offer STARTTLS; without it that is a server failure, never a fall back to plain),
@@ -45,6 +50,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import smtplib
 import ssl
 import threading
@@ -187,11 +193,47 @@ def _text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"[:_ERROR_MAX]
 
 
-def _recipients_fault(error: Exception) -> bool:
-    """Whether the server refused this mail's recipient or content for good."""
+#: An RFC 3463 enhanced status code in a reply: ``5.<subject>.<detail>``.
+_ENHANCED = re.compile(rb"\b5\.(\d{1,3})\.(\d{1,3})\b")
+#: Words in a reply with no telling status code that point at the sender or the setup.
+_SETUP_WORDS = re.compile(rb"sender|\bfrom\b|verif|authori[sz]|authenticat|relay", re.I)
+
+
+def _recipients_fault(error: Exception, sender: str | None) -> bool:
+    """Whether the server refused this mail's recipient or content for good, so the row
+    is charged; anything else is a server failure.
+
+    ``SMTPRecipientsRefused`` (the answer to RCPT TO) is the recipient's. An
+    ``SMTPDataError`` (the answer to DATA, which smtplib reaches only after RCPT TO was
+    accepted) is the row's only when it is a 5xx and says it is about the recipient or
+    the message:
+    - a reply that names the sender address is the setup's (an unverified sender);
+    - with an RFC 3463 code ``5.S.D`` (S not 0): ``5.1.D`` (addressing) is the row's
+      except 5.1.7 and 5.1.8 (the sender's address); ``5.2.D`` (the mailbox), 5.3.4 (too
+      big) and ``5.6.D`` (the content) are the row's; the rest (5.3 the mail system, 5.4
+      routing, 5.5 the protocol, 5.7 security and policy) are the setup's;
+    - with no such code: a reply that names the sender, a login, a verification or a
+      relay is the setup's; 550 to 554 (RFC 5321's mailbox and transaction refusals) are
+      the row's, any other 5xx the setup's.
+    ``SMTPSenderRefused`` (the answer to MAIL FROM) is always the setup's."""
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         return True
-    return isinstance(error, smtplib.SMTPDataError) and error.smtp_code >= 500
+    if not isinstance(error, smtplib.SMTPDataError) or error.smtp_code < 500:
+        return False
+    reply = error.smtp_error
+    if isinstance(reply, str):
+        reply = reply.encode(errors="replace")
+    if sender and sender.lower().encode(errors="replace") in reply.lower():
+        return False
+    code = _ENHANCED.search(reply)
+    if code is not None and int(code[1]) != 0:
+        subject, detail = int(code[1]), int(code[2])
+        if subject == 1:
+            return detail not in (7, 8)
+        return subject in (2, 6) or (subject, detail) == (3, 4)
+    if _SETUP_WORDS.search(reply):
+        return False
+    return 550 <= error.smtp_code <= 554
 
 
 @dataclass(frozen=True)
@@ -340,29 +382,39 @@ class StorefrontMail:
     # -- the send -----------------------------------------------------------------------
 
     def send_queued(self, limit: int = 50, *, budget: float = PASS_BUDGET) -> int:
-        """Send up to ``limit`` due rows, oldest first, for at most ``budget`` seconds; how
-        many were sent. A pass already running in this process takes this one on after
-        it. Late sign-in codes expire first, whatever the settings. With no host or
-        sender, or in the server's backoff, nothing is sent."""
-        if not self._pass.acquire(blocking=False):
-            self._rerun = True
-            return 0
-        try:
-            self._expire_codes()
-            sent = self._send(limit, budget)
-            while self._rerun:
-                self._rerun = False
-                sent += self._send(limit, budget)
-            return sent
-        finally:
-            self._pass.release()
+        """Send up to ``limit`` due rows a pass, oldest first; how many were sent. A pass
+        already running in this process takes this one on after it. The call, with every
+        pass it takes on, stops claiming ``budget`` seconds after it started; a pass still
+        asked for then is left to the next call. Late sign-in codes expire first,
+        whatever the settings. With no host or sender, or in the server's backoff,
+        nothing is sent."""
+        deadline = self._clock() + budget
+        sent = 0
+        first = True
+        while True:
+            if not self._pass.acquire(blocking=False):
+                self._rerun = True
+                return sent
+            try:
+                if first:
+                    first = False
+                    self._expire_codes()
+                    sent += self._send(limit, deadline)
+                while self._rerun and self._clock() <= deadline:
+                    self._rerun = False
+                    sent += self._send(limit, deadline)
+            finally:
+                self._pass.release()
+            # A pass asked for after the last look and before the release found the lock
+            # held and left: take it on, while the budget lasts.
+            if not self._rerun or self._clock() > deadline:
+                return sent
 
-    def _send(self, limit: int, budget: float) -> int:
+    def _send(self, limit: int, deadline: float) -> int:
         config = self.config()
         if not config.ready:
             return 0
-        started = self._clock()
-        if started < self._retry_at:
+        if self._clock() < self._retry_at:
             return 0
         public_url = self._public_url()
         try:
@@ -372,14 +424,13 @@ class StorefrontMail:
             return 0
         sent = 0
         for _ in range(limit):
-            if self._clock() - started > budget:
+            if self._clock() > deadline:
                 break
             claimed = self._claim(links=public_url is not None)
             if claimed is None:
                 break
             try:
                 message = self._message(config, claimed, public_url)
-                self._deliver(config, password, message)
             except _FixedFailureError as error:
                 self._failed_now(claimed.id, str(error))
                 continue
@@ -391,8 +442,12 @@ class StorefrontMail:
                 # A message that cannot be built (a template, a header): no retry mends it.
                 self._failed_now(claimed.id, _text(error))
                 continue
+            try:
+                self._deliver(config, password, message)
             except Exception as error:
-                if _recipients_fault(error):
+                # Never a fixed failure: a certificate error and a password smtplib cannot
+                # encode are ValueErrors too, and are the setup's.
+                if _recipients_fault(error, config.sender):
                     self._refused(claimed.id, _text(error))
                     continue
                 self._release(claimed.id)

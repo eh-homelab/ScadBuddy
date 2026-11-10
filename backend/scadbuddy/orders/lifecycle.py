@@ -105,7 +105,7 @@ from scadbuddy.orders.store import (
     revision_subject,
 )
 from scadbuddy.orders.storefront.links import live_link
-from scadbuddy.orders.storefront.mail import MailEvent, queue_mail
+from scadbuddy.orders.storefront.mail import MailEvent, queue_mail, storefront_mail_covers
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
@@ -681,10 +681,10 @@ class Lifecycle:
         host, #5283); otherwise nothing, and it stays #5660's plugin's job. The mail goes
         to the link's address and names the link, whose token it carries. Sent after the
         commit (``on_mail``)."""
-        # The link first: an order no customer follows reads no settings.
-        link = live_link(conn, order.id)
-        if link is None or not self.mail_host():
+        if not storefront_mail_covers(conn, order.id, event, host=self.mail_host()):
             return
+        link = live_link(conn, order.id)
+        assert link is not None
         queue_mail(
             conn,
             event,
