@@ -1,8 +1,9 @@
 """The print worker holds no Postgres pool (#5298 Task 31): every store it reads or writes
-goes through the API's CRUD routes. It starts with ``SCADBUDDY_DATABASE_URL`` unset when
-it has a proof to exchange, and builds its stores with every way to open Postgres
-refused. The URL, when set, is read only for its credential's view, the fallback of a
-worker with no proof (`token_source`); with neither it refuses to start."""
+goes through the API's CRUD routes, and it builds its stores with every way to open
+Postgres refused. With a proof it exchanges that proof alone (`exchange_source`, no view
+fallback), whether or not ``SCADBUDDY_DATABASE_URL`` is set. Only with no proof and a URL
+set does it read its sealed credential from its view (`token_source`, until #5298 Task
+34). With neither it refuses to start."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import faulthandler
 from pathlib import Path
 from typing import Any, NoReturn
 
+import httpx
 import psycopg
 import psycopg_pool
 import pytest
@@ -131,6 +133,28 @@ async def test_a_native_slice_starts_through_the_api(
     try:
         [kwargs] = built
         assert isinstance(kwargs["native_slices"], RemoteNativeSlices)
+    finally:
+        await deps.aclose()
+
+
+async def test_with_a_proof_and_a_url_it_only_exchanges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The URL is ignored once a proof is set: an exchange answered 404 gives no token,
+    never a read of the view."""
+    _no_database(monkeypatch)
+    connects: list[object] = []
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: connects.append(a))
+    settings = _settings(
+        tmp_path, service_bootstrap_file=_proof(tmp_path), database_url=UNUSED_DATABASE_URL
+    )
+    deps = await asyncio.to_thread(build_print_deps, settings)
+    try:
+        reader = deps.crud._auth._reader
+        assert isinstance(reader, ExchangeReader) and reader._fallback is None
+        reader._transport = httpx.MockTransport(lambda request: httpx.Response(404))
+        assert await asyncio.to_thread(reader.token) is None
+        assert connects == []
     finally:
         await deps.aclose()
 

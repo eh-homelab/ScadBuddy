@@ -14,22 +14,33 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from psycopg.types.json import Jsonb
 
+from scadbuddy.api import crud_print
+from scadbuddy.api.components import getter_for
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.auth.caller_grants import GRANTS, PRINT_GRANTS, PRINT_SEQUENCES, SEQUENCES
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.bambuddy.models import LocalPresetDetail
+from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
-from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
+from scadbuddy.crud.client import (
+    CrudClient,
+    CrudRefusedError,
+    CrudSyncClient,
+    CrudUnavailableError,
+)
 from scadbuddy.crud.guard import CRUD_HEADERS
 from scadbuddy.crud.idempotency import KEY_REQUIRED_PROBLEM
 from scadbuddy.crud.print import (
     BASE,
+    DEADLINE_MARGIN,
     HELD_PRESETS_API_ONLY,
     NATIVE_SLICES_API_ONLY,
     NATIVE_SPOOLS_API_ONLY,
@@ -45,6 +56,7 @@ from scadbuddy.crud.print import (
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.store import NativeSliceStore, SliceSubjectError
+from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.models import SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpoolCreate, NativeSpoolStore, SpoolUse
 from scadbuddy.spools.store import SpoolStore
@@ -172,6 +184,87 @@ async def test_the_routes_refusals_are_raised_as_the_sql_stores_raise() -> None:
     finally:
         await client.aclose()
         blocking.close()
+
+
+class _PastDeadlineStore:
+    """A `SpoolStore` stand-in whose write is past its deadline: what the route gets."""
+
+    pool = object()
+
+    def __init__(self) -> None:
+        self.timeouts: list[float | None] = []
+
+    def deadline(self, timeout: float | None) -> float | None:
+        self.timeouts.append(timeout)
+        return None if timeout is None else 100.0 + timeout
+
+    def replace_records_in(self, *args: Any) -> None:
+        raise TimeoutError("past")
+
+
+async def test_a_write_past_its_deadline_is_409_and_raised_as_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route maps a write past its deadline to 409 ``past-deadline``, and the remote
+    store raises it as `TimeoutError`, as the SQL store does. The route's deadline is the
+    caller's ``timeout`` less `DEADLINE_MARGIN`, so the API gives up first."""
+    store = _PastDeadlineStore()
+    monkeypatch.setattr(
+        crud_print, "_once_on", lambda pool, key, route, body, write: write(object())
+    )
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.include_router(crud_print.router, prefix="/api/v1")
+    [guard] = crud_print.router.dependencies
+    assert guard.dependency is not None
+    app.dependency_overrides[guard.dependency] = lambda: None
+    app.dependency_overrides[getter_for(SPOOLS)] = lambda: SimpleNamespace(store=store)
+    client = CrudClient(
+        "http://api",
+        "print",
+        ServiceAuth(FixedToken()),
+        transport=httpx.ASGITransport(app=app),
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            await RemoteSpoolStore(client).replace_records("native", [], NOW, timeout=5)
+        answer = await client._http.post(
+            f"{BASE}/spools/records",
+            json={"provider": "native", "snapshots": [], "at": NOW.isoformat(), "timeout": 2},
+            headers={"Idempotency-Key": "k"},
+        )
+    finally:
+        await client.aclose()
+    assert store.timeouts == [5 - DEADLINE_MARGIN, 2]
+    assert answer.status_code == 409 and answer.json()["reason"] == PAST_DEADLINE
+
+
+async def test_a_write_with_a_timeout_is_sent_once_and_waits_it_out() -> None:
+    """No answer: no retry, and the call raises only once its ``timeout`` has passed, by
+    when the API's own deadline has passed too."""
+    asked: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return httpx.Response(503, json={"type": "about:blank"}, headers=CRUD_HEADERS)
+
+    client, blocking = _stand_in(answer)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        with pytest.raises(CrudUnavailableError):
+            await RemoteSpoolStore(client).replace_records(
+                "native", [], NOW, timeout=DEADLINE_MARGIN + 0.2
+            )
+        with pytest.raises(TimeoutError):
+            await RemoteSpoolStore(client).replace_records(
+                "native", [], NOW, timeout=DEADLINE_MARGIN
+            )
+    finally:
+        await client.aclose()
+        blocking.close()
+    assert loop.time() - started >= DEADLINE_MARGIN + 0.2
+    assert len(asked) == 1
 
 
 # -- over the routes ---------------------------------------------------------------------

@@ -150,7 +150,12 @@ from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
 from scadbuddy.core.secrets import Kek, SealError
-from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
+from scadbuddy.crud.client import (
+    CrudClient,
+    CrudRefusedError,
+    CrudSyncClient,
+    CrudUnavailableError,
+)
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
@@ -1334,13 +1339,16 @@ _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 #: The route's reason for a refresh's write that ran past its deadline
 #: (`api/crud_print.py`): it rolled back, as `SpoolStore.replace_records`' does.
 PAST_DEADLINE = "past-deadline"
+#: Seconds a `RemoteSpoolStore.replace_records` with a timeout keeps between the API's
+#: deadline and its own: the request's way there and the commit after the last check.
+DEADLINE_MARGIN = 1.0
 #: The route's reason for a slice start of a copy another subject's row holds.
 SLICE_SUBJECT = "slice-subject"
 
 #: The `SpoolStore` methods only the API calls: the refresh's ``seen`` half and the
 #: providers' list, on the ``library`` worker (`spools/activities.py`), a person's tray
 #: links (`api/tray_spools.py`), and the ``_in`` write, which runs on the API's connection.
-SPOOLS_API_ONLY = ("seen", "refreshes", "link", "unlink", "replace_records_in")
+SPOOLS_API_ONLY = ("seen", "refreshes", "link", "unlink", "replace_records_in", "deadline")
 
 
 class RemoteSpoolStore(SpoolStore):
@@ -1369,21 +1377,54 @@ class RemoteSpoolStore(SpoolStore):
         """Under an ``Idempotency-Key`` of its own, a new UUID per call, which the client
         sends again on its retries (plan D5): the body carries the refresh's ``at``, so a
         retried activity's `WriteKeys` key would never replay, and a refresh is a whole
-        new answer, never a replay of an earlier one. ``timeout`` bounds the call, retries
-        included, and the API's write, as it bounds the SQL store's."""
-        body = {
+        new answer, never a replay of an earlier one.
+
+        With a ``timeout`` the API never commits after this call gives up, as the SQL
+        store never does: the call is sent once, with no retry, and waits ``timeout``
+        seconds for its answer; the API's deadline is ``timeout`` less
+        `DEADLINE_MARGIN` from its receipt, so it rolls back (409 ``past-deadline``,
+        raised here as `TimeoutError`) before this call stops waiting. A call that gets
+        no answer waits out its ``timeout`` before it raises, so the API is past its
+        deadline by then. Less than the margin left raises `TimeoutError` unsent."""
+        body: dict[str, Any] = {
             "provider": provider,
             "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
             "at": at.isoformat(),
-            "timeout": timeout,
         }
+        if timeout is None:
+            await self._send_records(provider, body)
+            return
+        if timeout <= DEADLINE_MARGIN:
+            raise TimeoutError(f"the refresh of {provider} ran past its deadline")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            await self._send_records(
+                provider,
+                {**body, "timeout": timeout - DEADLINE_MARGIN},
+                budget=0.0,
+                timeout=timeout,
+            )
+        except CrudUnavailableError:
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            raise
+
+    async def _send_records(
+        self,
+        provider: str,
+        body: dict[str, Any],
+        *,
+        budget: float | None = None,
+        timeout: float | None = None,
+    ) -> None:
         try:
             await self._client.request(
                 "POST",
                 f"{BASE}/spools/records",
                 json=body,
                 idempotency_key=uuid.uuid4().hex,
-                budget=timeout,
+                budget=budget,
+                timeout=timeout,
             )
         except CrudRefusedError as error:
             if _refused_as(error, PAST_DEADLINE):

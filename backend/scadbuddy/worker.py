@@ -1255,20 +1255,23 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     slices, project records, print links, sends, outputs' last prints, printer rows, LAN
     reports, access codes, the rack hotends' usage, the spools, ScadBuddy's own spools,
     the kept presets and a native slice's start go through its CRUD routes. ``crud``, the
-    client of those routes, defaults to one with the worker's credential, which is
-    exchanged for its proof, or read from its view while it has a database URL and no
-    proof (`token_source`): that view is the one thing the URL is still read for."""
+    client of those routes, defaults to one with the worker's credential. With a proof
+    (`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`) it is exchanged
+    for that proof alone (`exchange_source`, no view fallback), whether or not
+    `SCADBUDDY_DATABASE_URL` is set: the worker waits for CRUD areas that only an API with
+    the exchange route serves. Only with no proof and a URL set is it read from its view
+    (`token_source`, until #5298 Task 34), one short connection per read, never a pool.
+    With neither, the worker refuses to start."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for --queue bambuddy: the print worker"
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    if (
-        settings.service_token_file is None
-        and settings.service_bootstrap_file is None
-        and not settings.database_url
-    ):
+    has_proof = (
+        settings.service_token_file is not None or settings.service_bootstrap_file is not None
+    )
+    if not has_proof and not settings.database_url:
         raise ServiceCredentialConfigError(
             "SCADBUDDY_SERVICE_TOKEN_FILE (or SCADBUDDY_SERVICE_BOOTSTRAP_FILE outside"
             " Kubernetes) is required for --queue bambuddy: it exchanges that proof for its"
@@ -1276,12 +1279,15 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             " view (#5298)"
         )
     metrics = worker_metrics(settings, "print")
-    # #4975 phase 4: the print worker's service credential on the internal routes:
-    # exchanged for its proof when one is configured (#5494), else read from its own view
-    # and unsealed with the KEK (none without one). The view is the only SQL it may read:
-    # every store below goes through the API's CRUD routes, so it holds no pool (#5298).
+    # #4975 phase 4: the print worker's service credential on the internal routes. With a
+    # proof it is exchanged for that proof only (#5494): no view fallback, URL or not. With
+    # no proof it is read from its own view and unsealed with the KEK, until #5298 Task 34.
+    # The view is the only SQL it may read: every store below goes through the API's CRUD
+    # routes, so it holds no pool (#5298).
     credential = ServiceAuth(
-        token_source("print", settings, settings_kek(settings.secret_key_file))
+        exchange_source("print", settings)
+        if has_proof
+        else token_source("print", settings, settings_kek(settings.secret_key_file))
     )
     crud = crud or CrudClient(settings.api_internal_url, "print", credential, metrics=metrics)
     # Called from threads (`asyncio.to_thread`), so blocking. The settings store closes it.

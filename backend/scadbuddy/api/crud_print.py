@@ -1597,7 +1597,8 @@ class SpoolRecords(BaseModel):
     provider: str = Field(min_length=1, max_length=64)
     snapshots: list[SpoolSnapshot]
     at: datetime
-    #: Seconds the write may take, the lock's wait included (`SpoolStore.replace_records`).
+    #: Seconds the write may take from the route's receipt, the waits for a connection
+    #: and the lock included; the caller sends less than it waits (`RemoteSpoolStore`).
     timeout: float | None = Field(default=None, gt=0)
 
 
@@ -1667,13 +1668,15 @@ async def replace_spool_records(
     body: SpoolRecords, spools: SpoolsDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> None:
     """A provider's whole inventory, under the store's advisory lock, in one transaction
-    with its ledger row (plans D5, D6): once per ``Idempotency-Key``. One past its
-    ``timeout`` rolls back and is 409 ``past-deadline``, as the SQL store's raises."""
+    with its ledger row (plans D5, D6): once per ``Idempotency-Key``. The deadline is
+    ``timeout`` seconds from this route's receipt, before it waits for a connection; a
+    write past it rolls back and is 409 ``past-deadline``, as the SQL store's raises."""
     key = required_key(idempotency_key)
     store = spools.store
+    deadline = store.deadline(body.timeout)
 
     def write(conn: Connection[DictRow]) -> None:
-        store.replace_records_in(conn, body.provider, body.snapshots, body.at, body.timeout)
+        store.replace_records_in(conn, body.provider, body.snapshots, body.at, deadline)
 
     try:
         await asyncio.to_thread(

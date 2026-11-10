@@ -12,16 +12,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import psycopg
 from psycopg import Connection, sql
 from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool
-
-from scadbuddy.render.pg_store import MIGRATIONS, Migration
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +60,6 @@ RENDER_ROWS: Mapping[str, str] = {
 #: `pg_advisory_xact_lock` key for `grant_render_role` ("SCADRNDR" in ASCII), so two
 #: API replicas starting together never race on its policies.
 GRANT_LOCK = 0x5343_4144_524E_4452
-
-#: Seconds between looks while the worker waits for the API's migrations or grants.
-READY_POLL = 5.0
 
 
 def _role_exists(conn: Connection[Any], role: str) -> bool:
@@ -117,23 +111,6 @@ def grant_role(
         for table, predicate in (rows or {}).items():
             _hold_to_rows(conn, role, table, predicate)
     return True
-
-
-def owns_schema(conn: Connection[Any]) -> bool:
-    """Whether this connection's role may migrate: the ledger is missing (a new schema,
-    which whoever connects first creates) or its owner is a role this one belongs to.
-    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_render`) is
-    neither, and waits for the API instead."""
-    cur = conn.cursor(row_factory=tuple_row)
-    schema = cur.execute("SELECT current_schema()").fetchone()
-    if schema is None or schema[0] is None:
-        # No schema on the search path this role may use: nothing to migrate into.
-        return False
-    row = cur.execute(
-        "SELECT pg_has_role(current_user, tableowner, 'MEMBER') FROM pg_tables"
-        " WHERE schemaname = current_schema() AND tablename = 'scadbuddy_migrations'"
-    ).fetchone()
-    return row is None or bool(row[0])
 
 
 def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
@@ -196,92 +173,3 @@ def _current_schema(conn: Connection[Any]) -> str:
     row = conn.cursor(row_factory=tuple_row).execute("SELECT current_schema()").fetchone()
     assert row is not None and row[0] is not None
     return str(row[0])
-
-
-def _ledger_unreadable(conn: Connection[Any]) -> bool:
-    """Whether the migrations ledger exists and this role may not read it."""
-    row = (
-        conn.cursor(row_factory=tuple_row)
-        .execute(
-            "SELECT CASE WHEN to_regclass('scadbuddy_migrations') IS NULL THEN false"
-            " ELSE NOT has_table_privilege('scadbuddy_migrations', 'SELECT') END"
-        )
-        .fetchone()
-    )
-    return bool(row and row[0])
-
-
-def pending_migrations(
-    conn: Connection[Any], migrations: tuple[Migration, ...] = MIGRATIONS
-) -> list[str]:
-    """This build's migrations the ledger does not record yet."""
-    cur = conn.cursor(row_factory=tuple_row)
-    ledger = cur.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
-    if ledger is None or ledger[0] is None:
-        return [m.id for m in migrations]
-    done = {row[0] for row in cur.execute("SELECT id FROM scadbuddy_migrations")}
-    return sorted(m.id for m in migrations if m.id not in done)
-
-
-def missing_privileges(conn: Connection[Any], grants: Mapping[str, tuple[str, ...]]) -> list[str]:
-    """The ``grants`` this connection's role lacks, as ``table: PRIVILEGE``."""
-    cur = conn.cursor(row_factory=tuple_row)
-    missing: list[str] = []
-    for table, privileges in grants.items():
-        exists = cur.execute("SELECT to_regclass(%s)", (table,)).fetchone()
-        if exists is None or exists[0] is None:
-            missing.extend(f"{table}: {p}" for p in privileges)
-            continue
-        for privilege in privileges:
-            row = cur.execute("SELECT has_table_privilege(%s, %s)", (table, privilege)).fetchone()
-            if row is None or not row[0]:
-                missing.append(f"{table}: {privilege}")
-    return missing
-
-
-class WorkerStoppedError(Exception):
-    """The worker was stopped while it waited for the API's schema or grants."""
-
-
-def wait_until_ready(
-    pool: ConnectionPool[Any],
-    *,
-    stopping: Callable[[], bool] = lambda: False,
-    poll: float = READY_POLL,
-    grants: Mapping[str, tuple[str, ...]],
-    role: str,
-) -> None:
-    """Return once the API has applied every migration this build has and ``role``
-    holds ``grants`` (`auth/caller_grants.py`); until then log what is missing and look again every
-    ``poll`` seconds. A worker never migrates: in a rollout it may start before the
-    API, and its role may not create anything. ``stopping`` ends the wait with
-    `WorkerStoppedError`. A ledger the role may not read yet (migrated, not yet
-    granted) is a missing grant, waited for, never an error."""
-    last: tuple[list[str], list[str]] | None = None
-    while True:
-        with pool.connection() as conn:
-            if _ledger_unreadable(conn):
-                pending, missing = [], missing_privileges(conn, grants)
-            else:
-                pending = pending_migrations(conn)
-                missing = [] if pending else missing_privileges(conn, grants)
-        if not pending and not missing:
-            return
-        if (pending, missing) != last:
-            if pending:
-                logger.warning(
-                    "waiting for the API to apply this build's database migrations",
-                    extra={"pending": pending},
-                )
-            else:
-                logger.warning(
-                    "waiting for the API to grant this worker's database role what it"
-                    f" needs; the API grants role {role!r} at start",
-                    extra={"missing": missing},
-                )
-            last = (pending, missing)
-        deadline = time.monotonic() + poll
-        while time.monotonic() < deadline:
-            if stopping():
-                raise WorkerStoppedError
-            time.sleep(min(0.1, poll))

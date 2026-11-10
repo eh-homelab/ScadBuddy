@@ -47,8 +47,10 @@ _READ = ("SELECT",)
 #: spools, ScadBuddy's own spools and their uses, the kept presets and a native slice's
 #: start (`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets`,
 #: `RemoteNativeSlices`, Task 31). It no longer waits for the migrations ledger either: it
-#: waits for its CRUD areas. The only SQL it may still read is its credential's view
-#: (`grant_caller_views`), with no proof to exchange. An existing role keeps every table it
+#: waits for its CRUD areas. With a proof it exchanges that proof only (`exchange_source`,
+#: no view fallback), whether or not `SCADBUDDY_DATABASE_URL` is set; only with no proof
+#: and the URL set does it read its sealed credential from its view (`grant_caller_views`,
+#: until #5298 Task 34); with neither it refuses to start. An existing role keeps every table it
 #: held, and the `native_slices_id_seq` sequence, until #5298 Task 35 revokes it. Never
 #: add a table here: add a CRUD route instead.
 PRINT_GRANTS: Grants = {}

@@ -19,11 +19,7 @@ from scadbuddy.auth.service_credentials import ROLES, VIEWS, ServiceCaller
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.render.pg_store import Migration, migrate
-from scadbuddy.render.worker_role import (
-    grant_role,
-    missing_privileges,
-    owns_schema,
-)
+from scadbuddy.render.worker_role import grant_role
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
@@ -117,8 +113,12 @@ def test_the_role_holds_its_list_and_cannot_migrate(
     pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
     try:
         with pool.connection() as conn:
-            assert missing_privileges(conn, GRANTS[caller]) == []
-            assert owns_schema(conn) is False
+            for table, privileges in GRANTS[caller].items():
+                for privilege in privileges:
+                    row = conn.execute(
+                        "SELECT has_table_privilege(%s, %s) AS held", (table, privilege)
+                    ).fetchone()
+                    assert row is not None and row["held"], f"{table}: {privilege}"
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))
     finally:

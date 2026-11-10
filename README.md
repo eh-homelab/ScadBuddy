@@ -896,7 +896,7 @@ store or another caller's credential:
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
 | render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
-| print worker | `scadbuddy_print`, granted no table: the worker holds no pool, and reads only its credential's view, with no proof to exchange (#5298) | `scadbuddy-print.yaml` |
+| print worker | `scadbuddy_print`: its list grants no table; the role keeps the 34 tables and the sequence it held until #5298 Task 35 revokes them. The worker holds no pool. With a proof it exchanges that proof only (`exchange_source`, no view fallback), whether or not `SCADBUDDY_DATABASE_URL` is set; only with no proof and the URL set does it read its sealed credential from its view (`token_source`, until #5298 Task 34); with neither it refuses to start | `scadbuddy-print.yaml` |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
@@ -1237,9 +1237,11 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and
   `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
-  exchanges for its service credential. It holds no Postgres pool (#5298): with a proof it
-  starts with `SCADBUDDY_DATABASE_URL` unset; without one it reads its credential's view
-  with that URL, the URL's only use; with neither it refuses to start. It reads the
+  exchanges for its service credential. It holds no Postgres pool (#5298). With a proof
+  it exchanges that proof only (`exchange_source`, no view fallback), whether or not
+  `SCADBUDDY_DATABASE_URL` is set, so it starts with the URL unset. Only with no proof and
+  the URL set does it read its sealed credential from its view (`token_source`, until
+  #5298 Task 34), one short connection per read; with neither it refuses to start. It reads the
   settings, the Bambuddy key included, from the API's CRUD route
   `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
   them, so its own Bambuddy URL and key variables are not read. That answer is

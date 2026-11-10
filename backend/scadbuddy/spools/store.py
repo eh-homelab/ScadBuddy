@@ -172,8 +172,13 @@ class SpoolStore:
         at: datetime,
         timeout: float | None,
     ) -> None:
+        deadline = self.deadline(timeout)
         with self._pool.connection() as conn, conn.transaction():
-            self.replace_records_in(conn, provider, snapshots, at, timeout)
+            self.replace_records_in(conn, provider, snapshots, at, deadline)
+
+    def deadline(self, timeout: float | None) -> float | None:
+        """``timeout`` seconds from now on the store's clock (`replace_records_in`)."""
+        return None if timeout is None else self._clock() + timeout
 
     def replace_records_in(
         self,
@@ -181,12 +186,12 @@ class SpoolStore:
         provider: str,
         snapshots: Sequence[SpoolSnapshot],
         at: datetime,
-        timeout: float | None,
+        deadline: float | None,
     ) -> None:
         """`replace_records` on ``conn``, in its caller's transaction: the CRUD route runs
         it there with its ledger row (#5298, plan D5), so the lock and every statement
-        commit with that row or not at all."""
-        deadline = None if timeout is None else self._clock() + timeout
+        commit with that row or not at all. ``deadline`` is on the store's clock
+        (`deadline`), taken by the caller before it waits for a connection."""
         listed: dict[str, SpoolSnapshot] = {}
         for snapshot in snapshots:
             listed.setdefault(snapshot.record_id, snapshot)
