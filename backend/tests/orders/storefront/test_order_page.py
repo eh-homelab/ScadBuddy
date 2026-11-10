@@ -45,6 +45,7 @@ from tests.orders.test_lifecycle import resolved
 from tests.support.store import s3  # noqa: F401  (fixture)
 
 pytestmark = pytest.mark.requires_postgres
+FAKE_CONNECT = {"settings": {"account": "a"}, "secrets": {"signing_secret": "s3cret"}}
 
 BY = Actor(kind="browser")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
@@ -59,10 +60,15 @@ def _kek(tmp_path: Path) -> Path:
 @pytest.fixture
 def api(settings: Settings, tmp_path: Path) -> Iterator[TestClient]:
     """The app with a KEK: the order link's token is sealed under it."""
-    with TestClient(
-        create_app(settings.model_copy(update={"secret_key_file": _kek(tmp_path)}))
-    ) as client:
+    update = {"secret_key_file": _kek(tmp_path), "payments_fake_provider": True}
+    with TestClient(create_app(settings.model_copy(update=update))) as client:
         yield client
+
+
+def connect_fake(api: TestClient) -> None:
+    """The fake provider connected, so a cancelled request's page is closed through it."""
+    connected = api.put("/api/v1/payments/providers/fake", json=FAKE_CONNECT)
+    assert connected.status_code == 200, connected.text
 
 
 @pytest.fixture
@@ -475,6 +481,7 @@ def test_the_customers_last_accept_closes_an_open_deposit_requests_page(
     """#5923 review: the accept that accepts the order cancels its open requests, and their
     provider pages close right after the commit; the order's projects are then made."""
     monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(api)
     ensured: list[str] = []
 
     async def ensure(store: object, integrations: object, order_id: str) -> None:
@@ -509,6 +516,7 @@ def test_the_customers_cancel_closes_an_open_deposit_requests_page(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(FAKE, "cancelled", [])
+    connect_fake(api)
     made = make_order(api, crud)
     deposit = open_deposit(api, made)
     r = made.reader.cancel(key="k1")
@@ -982,7 +990,8 @@ def test_a_row_whose_link_is_revoked_owns_nothing(api: TestClient, crud: CrudCal
     with _orders(api).store.transaction() as conn:
         attach_order(conn, me.account.id, made.order.id, link)
         conn.execute(
-            "UPDATE storefront_order_links SET revoked_at = clock_timestamp() WHERE id = %s",
+            "UPDATE storefront_order_links SET revoked_at = clock_timestamp(),"
+            " token_sealed = NULL, dek_sealed = NULL, kek_id = NULL WHERE id = %s",
             (link,),
         )
     assert link_rows(api, me.account.id) == [{"order_id": made.order.id, "link_id": link}]

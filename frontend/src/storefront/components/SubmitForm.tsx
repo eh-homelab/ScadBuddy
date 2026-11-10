@@ -1,4 +1,5 @@
 import { useId, useRef, useState, type FormEvent } from 'react'
+import { RadioGroup, RadioGroupItem } from '../../components/ui/radio-group'
 import { formatMoney } from '../../lib/money'
 import { ActionKey, StoreError, errorText, store, type Draft, type SubmitInput, type SubmittedOrder } from '../api/client'
 import { forgetTurnstileSiteKey, useTurnstileSiteKey } from '../turnstile'
@@ -133,18 +134,14 @@ export function SubmitForm({ draft, onSubmitted }: Props) {
       {options.length > 0 && (
         <fieldset className="sf-field">
           <legend className="sf-label">How should your order reach you?</legend>
-          {options.map((option) => (
-            <label key={option.id} className="sf-choice">
-              <input
-                type="radio"
-                name={`${id}-shipping`}
-                value={option.id}
-                checked={optionId === option.id}
-                onChange={() => setOptionId(option.id)}
-              />
-              {` ${option.label} — ${formatMoney(option.amount_minor, draft.currency, draft.minor_exponent)}`}
-            </label>
-          ))}
+          <RadioGroup name={`${id}-shipping`} value={optionId ?? ''} onValueChange={setOptionId}>
+            {options.map((option) => (
+              <label key={option.id} className="sf-choice">
+                <RadioGroupItem value={option.id} />
+                {` ${option.label} — ${formatMoney(option.amount_minor, draft.currency, draft.minor_exponent)}`}
+              </label>
+            ))}
+          </RadioGroup>
         </fieldset>
       )}
       {ships && (
