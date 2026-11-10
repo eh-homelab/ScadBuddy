@@ -119,7 +119,7 @@ import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
-import { Runtime } from '@temporalio/worker'
+import { type NativeConnection, Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
@@ -890,9 +890,23 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+// This process's agent-tools worker (below), once it starts: a turn here starts its calls eagerly on
+// that worker's connection (activityProjection.ts `ToolCallStarterDeps`, #5865).
+const eager: { worker: AgentWorker | undefined } = { worker: undefined }
+const eagerClients = new WeakMap<NativeConnection, Client>()
+const eagerClient = (): Client | undefined => {
+  const connection = eager.worker?.connection()
+  if (!connection) return undefined
+  let client = eagerClients.get(connection)
+  if (!client) {
+    client = new Client({ connection, namespace: config.temporalNamespace, ...(dataConverter ? { dataConverter } : {}) })
+    eagerClients.set(connection, client)
+  }
+  return client
+}
 if (temporalClient && temporal) {
   const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
-  toolCallStart = toolCallStarter(results)
+  toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
 }
@@ -981,6 +995,7 @@ const temporalWorker =
         },
       })
     : undefined
+eager.worker = temporalWorker
 // AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
 // as agent-tools is, else unversioned like the host queues. `session_settings` is a local activity, so it
