@@ -988,9 +988,11 @@ const temporalWorker =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
         // agent-tools' tasks, whoever schedules them, only to the current build's workers. A ToolCall
-        // started eagerly (`eager`, above) is the exception: its first workflow task and its activity
-        // go to this replica's worker, whatever its build, as during a rollout an old replica's turn
-        // runs its calls on its own build; the ToolCall is AUTO_UPGRADE, so its next task goes to the current build.
+        // started eagerly (`eager`, above) asks for its first workflow task on this replica's worker
+        // instead, and its activity too when the call is not pinned and the worker has a free slot.
+        // Whether Temporal grants that to a build a later one has superseded (an old replica during a
+        // rollout) is not measured; a call it declines goes through matching to the current build, and
+        // the call's span says which (`scadbuddy.eager`). The ToolCall is AUTO_UPGRADE either way.
         ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {

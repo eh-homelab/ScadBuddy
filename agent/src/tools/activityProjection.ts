@@ -1,7 +1,7 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { context as otelContext, trace } from '@opentelemetry/api'
+import { context as otelContext, type Span, trace } from '@opentelemetry/api'
 import type { CallApproval } from '../harness/seamLedger.js'
 import { TOOL_USE_META, toolContextFor } from '../telemetry/trace.js'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
@@ -100,7 +100,8 @@ export async function callToolResult(sessionId: string, result: ToolCallResult, 
  * and the call is decoded where its session's payload key is already held (#5865). Its activity is
  * dispatched eagerly to the same worker when it is on `queue` and the worker has a free slot; a
  * pinned call (`activityQueue`) goes through matching to its replica's queue.
- * Without it, or when its connection fails, the call is started on `client` as before.
+ * Without it, or when its connection fails, the call is started on `client` as before. The call's
+ * span says which (`EAGER_ATTRIBUTE`).
  */
 export type ToolCallStarterDeps = {
   client: Client
@@ -141,7 +142,7 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
     } as const
     let handle
     try {
-      handle = (await startEagerly(deps, options)) ?? (await deps.client.workflow.start(TOOL_CALL_WORKFLOW, options))
+      handle = (await startEagerly(deps, options, trace.getSpan(otelContext.active()))) ?? (await deps.client.workflow.start(TOOL_CALL_WORKFLOW, options))
     } catch (err) {
       if (!(err instanceof WorkflowExecutionAlreadyStartedError)) throw err
       handle = deps.client.workflow.getHandle(workflowId)
@@ -161,8 +162,14 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
   }
 }
 
-/** Whether this process has said an eager start failed (`startEagerly`). */
-let eagerFailureLogged = false
+/**
+ * The call's span attribute that says how its ToolCall was started (#5865): `started`, eagerly (the
+ * first workflow task came back in the start's answer); `declined`, on the worker's connection but
+ * Temporal gave no task back (the execution was already there, or the server dispatched it through
+ * matching); `failed`, the eager start failed and the call was started on the shared client;
+ * `fallback`, no worker to start on, so the shared client.
+ */
+export const EAGER_ATTRIBUTE = 'scadbuddy.eager'
 
 /**
  * The call started on the worker's own connection with `requestEagerStart` (ToolCallStarterDeps
@@ -173,18 +180,19 @@ let eagerFailureLogged = false
 async function startEagerly(
   deps: ToolCallStarterDeps,
   options: Parameters<Client['workflow']['start']>[1] & { workflowId: string },
+  span: Span | undefined,
 ): Promise<ReturnType<Client['workflow']['getHandle']> | undefined> {
   const eager = deps.eager?.()
-  if (!eager) return undefined
+  if (!eager) {
+    span?.setAttribute(EAGER_ATTRIBUTE, 'fallback')
+    return undefined
+  }
   try {
-    await eager.workflow.start(TOOL_CALL_WORKFLOW, { ...options, requestEagerStart: true })
+    const started = await eager.workflow.start(TOOL_CALL_WORKFLOW, { ...options, requestEagerStart: true })
+    span?.setAttribute(EAGER_ATTRIBUTE, started.eagerlyStarted ? 'started' : 'declined')
   } catch (err) {
     if (err instanceof WorkflowExecutionAlreadyStartedError) throw err
-    // Once a process: the shared client then starts every call that fails here, as it did before eager starts.
-    if (!eagerFailureLogged) {
-      eagerFailureLogged = true
-      console.warn(`tool calls: an eager start failed (${(err as Error).name}); starting such calls on the shared client`)
-    }
+    span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)

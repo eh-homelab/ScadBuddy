@@ -4,14 +4,28 @@ import { Client, Connection } from '@temporalio/client'
 import { bundleWorkflowCode, NativeConnection } from '@temporalio/worker'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { context as otelContext, trace } from '@opentelemetry/api'
 import { SessionBlobs } from '../src/sessions/blobs.js'
-import { toolCallStarter } from '../src/tools/activityProjection.js'
+import { EAGER_ATTRIBUTE, toolCallStarter } from '../src/tools/activityProjection.js'
 import { PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
 import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { until } from './support/until.js'
+import { testTracing } from './support/tracing.js'
+
+/** Runs `fn` under a span of its own, as a turn's call is (telemetry/turn.ts), and says what the starter set on it as `scadbuddy.eager`. */
+async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
+  testTracing()
+  const span = trace.getTracer('test').startSpan('call')
+  try {
+    await otelContext.with(trace.setSpan(otelContext.active(), span), fn)
+  } finally {
+    span.end()
+  }
+  return (span as unknown as { attributes: Record<string, unknown> }).attributes[EAGER_ATTRIBUTE]
+}
 
 // What Temporal adds around a ToolCall's activity (#5865), on a dev server and a real AgentWorker
 // as main.ts runs it, with calls started by toolCallStarter as a turn starts them: N calls of a
@@ -159,7 +173,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
       }
     }, 300_000)
 
-    it("starts the call on the starter's client when the eager connection has failed", async () => {
+    it("starts the call on the starter's client when the eager connection has failed, and the call's span says how it started", async () => {
       const queue = `bench-${randomUUID().slice(0, 8)}`
       const worker = AgentWorker.start({
         address: server.address,
@@ -178,13 +192,17 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         const client = new Client({ connection, namespace: server.namespace })
         const start = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => new Client({ connection: gone, namespace: server.namespace }) })
         const session = randomUUID()
-        const result = await start({ sessionId: session, toolUseId: 'toolu_bench_gone', tool: 'bench', input: {}, signal: new AbortController().signal })
+        let result: unknown
+        expect(await eagerOf(async () => (result = await start({ sessionId: session, toolUseId: 'toolu_bench_gone', tool: 'bench', input: {}, signal: new AbortController().signal })))).toBe('failed')
         expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }] })
         // And with no worker to start on (`eager` answers undefined), on the starter's client too.
         const plain = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => undefined })
-        expect(await plain({ sessionId: session, toolUseId: 'toolu_bench_none', tool: 'bench', input: {}, signal: new AbortController().signal })).toEqual({
+        expect(await eagerOf(async () => expect(await plain({ sessionId: session, toolUseId: 'toolu_bench_none', tool: 'bench', input: {}, signal: new AbortController().signal })).toEqual({
           content: [{ type: 'text', text: 'ok' }],
-        })
+        }))).toBe('fallback')
+        // On the worker's own connection, the first task comes back in the start's answer.
+        const eagerStart = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => new Client({ connection: worker.connection()!, namespace: server.namespace }) })
+        expect(await eagerOf(() => eagerStart({ sessionId: session, toolUseId: 'toolu_bench_eager', tool: 'bench', input: {}, signal: new AbortController().signal }))).toBe('started')
         // An unversioned worker's build is current at once: its connection is offered while it polls.
         expect(worker.connection()).toBeDefined()
       } finally {
