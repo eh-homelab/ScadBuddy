@@ -95,6 +95,9 @@ const WORKFLOW_SLACK_MS = 15_000
  */
 export const BRIDGE_WORKFLOW_TASK_TIMEOUT_MS = 3_000
 
+/** temporal.api.enums.v1.TimeoutType.TIMEOUT_TYPE_START_TO_CLOSE */
+const TIMEOUT_TYPE_START_TO_CLOSE = 1
+
 /**
  * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
  * the database was down, or a row a call that missed this replica's queue dropped, is back
@@ -322,6 +325,7 @@ export class TemporalTabRelay implements TabRelay {
     const workflowId = bridgeWorkflowId()
     // Before the start: its first workflow task may start before the start's answer comes back.
     const startedAt = this.#now()
+    const startTime = new Date()
     const handle = await client.workflow.start(BRIDGE_CALL_WORKFLOW, {
       // This replica's own queue: its own host worker runs the workflow tasks, at once (#5862).
       taskQueue: this.hostQueue,
@@ -331,6 +335,7 @@ export class TemporalTabRelay implements TabRelay {
       workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS,
     })
     const span = tracer().startSpan('agent.bridge.call', {
+      startTime,
       attributes: { 'scadbuddy.bridge.op': request.op, 'scadbuddy.bridge.owner_queue': queue, 'scadbuddy.task_queue': this.hostQueue },
     })
     const answering = new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
@@ -404,10 +409,12 @@ export class TemporalTabRelay implements TabRelay {
     if (call.closed && endedAt - call.startedAt < BRIDGE_WORKFLOW_TASK_TIMEOUT_MS) return end(0)
     void (async () => {
       const handle = client.workflow.getHandle(workflowId)
-      // Only that it closed: its payloads may be past reading (the key is dropped once answered).
-      await handle.result().catch(() => undefined)
+      // An aborted call's workflow runs on: wait only until it closes (its result is not read).
+      if (!call.closed) await handle.result().catch(() => undefined)
       const { events } = await handle.fetchHistory()
-      return (events ?? []).filter((e) => e.workflowTaskTimedOutEventAttributes).length
+      // Only the task timeout this counts (a sticky queue's schedule-to-start, after a worker
+      // restart, is another kind).
+      return (events ?? []).filter((e) => e.workflowTaskTimedOutEventAttributes?.timeoutType === TIMEOUT_TYPE_START_TO_CLOSE).length
     })().then(
       (timeouts) => {
         if (timeouts > 0) {
