@@ -17,6 +17,8 @@ const PAGES = [
   '/m/name-keychain/prints',
   '/prints',
   '/prints/35',
+  // One queue item (#3744), from src/mocks/features/printQueue.ts: "Bracket.gcode.3mf · ScadBuddy".
+  '/prints/queue/260',
   '/edit/no-such-output',
   '/library',
   '/workflows',
@@ -51,6 +53,11 @@ for (const path of PAGES) {
 test('/orders/profit is the profit report, not an order', async ({ page }) => {
   await page.goto('/orders/profit')
   await expect(page).toHaveTitle('Profit by model · ScadBuddy')
+})
+
+test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
+  await page.goto('/prints/queue/260')
+  await expect(page).toHaveTitle('Bracket.gcode.3mf · ScadBuddy')
 })
 
 test('/orders/parts is the parts inventory, not an order', async ({ page }) => {

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
+import type { LockClient } from '../db.js'
 import { WorkspaceBlobError, type WorkspaceBlobStore } from './blobs.js'
 import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
@@ -59,6 +60,10 @@ export const WORKSPACE_SWEEP_MS = 10 * 60 * 1000
 export const RECONCILE_GRACE_MS = 60 * 60 * 1000
 /** How often the sweeper's tick also runs `reconcile`. */
 export const RECONCILE_EVERY_MS = 60 * 60 * 1000
+/** The advisory lock that lets one replica at a time run `reconcile`. */
+export const RECONCILE_LOCK = 'scadbuddy:ai_session_files:reconcile'
+/** Why `reconcile` did nothing: another replica holds RECONCILE_LOCK, or no lock connection was free. */
+export type ReconcileSkipped = 'held' | 'no_connection'
 /** The slice `chunks` reads at a time. */
 export const STREAM_CHUNK_BYTES = 1024 * 1024
 
@@ -372,6 +377,7 @@ export class SessionFiles {
   private readonly fixed: Partial<WorkspaceLimits>
   private readonly blobs: WorkspaceBlobs | undefined
   private readonly onReleaseError: (message: string) => void
+  private readonly locks: LockClient | undefined
   /** When `reconcile` last ran on the sweeper's tick (ms). */
   #reconciledAt = 0
   /** The most files one workspace holds (WORKSPACE_MAX_FILES; tests set fewer). */
@@ -386,6 +392,8 @@ export class SessionFiles {
       maxFiles?: number | undefined
       /** A release that failed (its hold stays until `reconcile`); console.error by default. */
       onReleaseError?: ((message: string) => void) | undefined
+      /** The connections `reconcile` holds its lock on (db.ts `Database.locks`); without them it takes none. */
+      locks?: LockClient | undefined
     } = {},
   ) {
     this.sql = sql
@@ -394,6 +402,7 @@ export class SessionFiles {
     this.blobs = options.blobs
     this.maxFiles = options.maxFiles ?? WORKSPACE_MAX_FILES
     this.onReleaseError = options.onReleaseError ?? ((message) => console.error(message))
+    this.locks = options.locks
   }
 
   /** Holds `blobKey` for `<workspace>/<path>`; `unavailable` when the backend refuses it. */
@@ -911,11 +920,42 @@ export class SessionFiles {
    * failed release left), and holds every row no hold names. Reads every hold, then every
    * row: a row written meanwhile is held again (a no-op), and a hold taken again meanwhile is
    * kept, since the backend releases only a hold still older than the grace. Nothing without
-   * a blob store; WorkspaceBlobError when the backend cannot list or answer.
+   * a blob store; WorkspaceBlobError when the backend cannot list or answer. With `locks`, one
+   * replica at a time: `skipped` is `held` while another replica holds RECONCILE_LOCK, and
+   * `no_connection` while no lock connection is free (the sweeper then tries again at its next
+   * tick, not an hour later).
    */
-  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number }> {
+  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: ReconcileSkipped }> {
     const store = this.blobs?.store
     if (!store) return { released: 0, held: 0 }
+    if (!this.locks) return this.#reconcile(store, graceMs)
+    // One replica at a time: the lock is held on a lock-client connection (db.ts
+    // `createLockClient`), never one of the stores'. With every lock connection out this one
+    // skips `no_connection`, and the sweeper tries again at its next tick; with the lock held
+    // by another replica it skips `held`, since that replica runs it this hour.
+    const lease = await this.locks.take()
+    if (!lease) return { released: 0, held: 0, skipped: 'no_connection' }
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
+    try {
+      const [lock] = await lease.sql<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtextextended(${RECONCILE_LOCK}, 0)) AS locked`
+      if (!lock?.locked) {
+        healthy = true
+        return { released: 0, held: 0, skipped: 'held' }
+      }
+      try {
+        return await this.#reconcile(store, graceMs)
+      } finally {
+        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${RECONCILE_LOCK}, 0))`
+        healthy = true
+      }
+    } finally {
+      lease.done(healthy)
+    }
+  }
+
+  async #reconcile(store: WorkspaceBlobStore, graceMs: number): Promise<{ released: number; held: number }> {
     const holds = await store.listHolds(0)
     const rows = await this.sql<{ workspace: string; path: string; blob_key: string }[]>`
       SELECT workspace, path, blob_key FROM ai_session_files WHERE blob_key IS NOT NULL`
@@ -939,7 +979,8 @@ export class SessionFiles {
 
   /**
    * Sweeps every `everyMs` once `ready` says the database is, and reconciles the holds on the
-   * first tick past RECONCILE_EVERY_MS since the last; the returned function stops it.
+   * first tick past RECONCILE_EVERY_MS since the last; a reconcile that skipped
+   * `no_connection` or failed is tried again at the next tick. The returned function stops it.
    */
   startSweeper(everyMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
@@ -950,7 +991,15 @@ export class SessionFiles {
           await this.sweep()
           if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
           this.#reconciledAt = Date.now()
-          await this.reconcile()
+          // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
+          let skipped: ReconcileSkipped | undefined
+          try {
+            skipped = (await this.reconcile()).skipped
+          } catch (err) {
+            this.#reconciledAt = 0
+            throw err
+          }
+          if (skipped === 'no_connection') this.#reconciledAt = 0
         })
         .catch(options.onError ?? (() => {}))
     }

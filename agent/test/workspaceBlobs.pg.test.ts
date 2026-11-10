@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { Database } from '../src/db.js'
+import type { Database, LockClient, LockLease } from '../src/db.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { payloadKeyLock, SubjectForgotten } from '../src/temporal/payloadCodec.js'
@@ -594,6 +594,123 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       await files.write(ws, 'a.txt', Buffer.from('inline'))
       expect(await files.delete(ws, 'a.txt')).toBe(true)
       expect(backend.refCalls).toEqual([])
+    })
+  })
+  describe('review of 610034b0b', () => {
+    it('reconciles on one replica at a time: a second caller skips while the lock is held', async () => {
+      const orphan = `workspace-${'4'.repeat(64)}`
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      const replica = (store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })) =>
+        new SessionFiles(db.sql, { locks: db.locks, blobs: { store, sealing } })
+      // The first replica's reconcile holds the lock while it lists the holds.
+      let listing!: () => void
+      const listed = new Promise<void>((resolve) => (listing = resolve))
+      let finish!: () => void
+      const finished = new Promise<void>((resolve) => (finish = resolve))
+      const slow = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      const list = slow.listHolds.bind(slow)
+      slow.listHolds = async (olderThanSeconds) => {
+        listing()
+        await finished
+        return list(olderThanSeconds)
+      }
+      const first = replica(slow).reconcile(0)
+      await listed
+      const second = replica()
+      expect(await second.reconcile(0)).toEqual({ released: 0, held: 0, skipped: 'held' })
+      expect(backend.holds.size).toBe(1)
+      finish()
+      expect(await first).toEqual({ released: 1, held: 0 })
+      // Once the lock is free again the next caller runs.
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      expect(await second.reconcile(0)).toEqual({ released: 1, held: 0 })
+    })
+  })
+  describe('review of 9b86879ac', () => {
+    const orphan = `workspace-${'5'.repeat(64)}`
+    /** db.locks, except that the first `busy` takes find no free connection, and each lease's `done` is recorded. */
+    const stubLocks = (busy: number, unlockFails = false) => {
+      const done: boolean[] = []
+      const locks: LockClient = {
+        async take() {
+          if (busy > 0) {
+            busy -= 1
+            return undefined
+          }
+          const lease = await db.locks.take()
+          if (!lease) return undefined
+          const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+            if (unlockFails && strings.join('?').includes('pg_advisory_unlock')) return Promise.reject(new Error('connection lost'))
+            return (lease.sql as unknown as (s: TemplateStringsArray, ...v: unknown[]) => Promise<unknown>)(strings, ...values)
+          }) as unknown as LockLease['sql']
+          return {
+            sql,
+            done(healthy) {
+              done.push(healthy)
+              // The real connection's lock is released either way, so later tests start clean.
+              void lease.sql`SELECT pg_advisory_unlock_all()`.finally(() => lease.done(true))
+            },
+          }
+        },
+        end: () => Promise.resolve(),
+      }
+      return { locks, done }
+    }
+
+    it('skips with no_connection when no lock connection is free, and the sweeper tries again at its next tick', async () => {
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      const { locks } = stubLocks(1)
+      const replica = new SessionFiles(db.sql, { locks, blobs: { store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }), sealing } })
+      expect(await replica.reconcile(0)).toEqual({ released: 0, held: 0, skipped: 'no_connection' })
+      expect(backend.holds.size).toBe(1)
+      // The sweeper's first tick finds no connection either; the next tick, not an hour later, reconciles.
+      const { locks: sweeperLocks } = stubLocks(1)
+      const swept = new SessionFiles(db.sql, {
+        locks: sweeperLocks,
+        blobs: { store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }), sealing },
+      })
+      const stop = swept.startSweeper(50)
+      try {
+        await expect.poll(() => backend.holds.size, { timeout: 10_000 }).toBe(0)
+      } finally {
+        stop()
+      }
+    })
+
+    it('retires a lock connection whose unlock fails', async () => {
+      const { locks, done } = stubLocks(0, true)
+      const replica = new SessionFiles(db.sql, { locks, blobs: { store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }), sealing } })
+      await expect(replica.reconcile(0)).rejects.toThrow('connection lost')
+      expect(done).toEqual([false])
+      // A clean run hands its connection back healthy.
+      const clean = stubLocks(0)
+      const next = new SessionFiles(db.sql, { locks: clean.locks, blobs: { store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }), sealing } })
+      await expect.poll(async () => (await next.reconcile(0)).skipped ?? 'ran', { timeout: 5_000 }).toBe('ran')
+      expect(clean.done.at(-1)).toBe(true)
+    })
+  })
+  describe('review of 90edb1e90', () => {
+    it('tries a failed reconcile again at the next tick, not an hour later', async () => {
+      backend.holds.set(`workspace-${'6'.repeat(64)} session:${sessionId}/gone.txt`, 0)
+      const store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      const list = store.listHolds.bind(store)
+      let failures = 1
+      store.listHolds = async (olderThanSeconds) => {
+        if (failures > 0) {
+          failures -= 1
+          throw new Error('the backend could not be reached (list)')
+        }
+        return list(olderThanSeconds)
+      }
+      const errors: unknown[] = []
+      const swept = new SessionFiles(db.sql, { locks: db.locks, blobs: { store, sealing } })
+      const stop = swept.startSweeper(50, { onError: (err) => errors.push(err) })
+      try {
+        await expect.poll(() => backend.holds.size, { timeout: 10_000 }).toBe(0)
+      } finally {
+        stop()
+      }
+      expect(errors).toHaveLength(1)
     })
   })
 })

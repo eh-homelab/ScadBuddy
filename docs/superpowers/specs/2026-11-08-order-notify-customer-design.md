@@ -159,8 +159,12 @@ Rules:
 - `contact_kind` filters the customer's contacts: only contacts of that kind are
   addressed (primary ones of that kind, else every one of that kind).
 - `fixed_args` may not name an argument that `args` maps, and its values are strings,
-  numbers or booleans. The setting refuses a key whose name looks like a secret
-  (`pass`, `token`, `secret`, `key`, `auth`, `credential`); secrets go in the plugin's header or OAuth.
+  numbers or booleans. The setting refuses a key whose name looks like a secret: one of
+  its words, split at `_` and at a lower-to-upper case change, is `pass`, `password`,
+  `token`, `secret`, `key`, `apikey`, `auth`, `credential`, a near form, or a lowercase
+  compound such as `apitoken`, `smtppass` or `privatekey` (`message_models.py`
+  `SECRET_WORDS`). So `smtp_password` and `apiKey` are refused, and `author` and `keyword`
+  pass. Secrets go in the plugin's header or OAuth.
 
 ### 4.3 Validation (agent route)
 
@@ -179,10 +183,18 @@ The checks:
    and is not disabled in Settings → Tools & plugins.
 4. The tool's `inputSchema` has each mapped argument with a `string` type (or an array of
    strings for `to_shape: list`), and every required argument is mapped or in `fixed_args`.
-5. A "Send a test" button (`POST /api/v1/ai/orders/messaging-binding/test`, person-only)
-   sends one message to an address the person types, through the messaging client of
-   §6.1. It belongs to no order, so no `order_messages` row records it; the agent's span
-   for the call is its only trace.
+5. A "Send a test" button (`POST /api/v1/ai/orders/messaging-binding/test`) sends one
+   message to an address the person types, through the messaging client of §6.1. It sends
+   a real message, so it needs a person's signed-in session (401 without one): no tool, no
+   flow and no `/mcp` client reaches it. It belongs to no order, so no `order_messages` row
+   records it; the agent's audit log does, like any other send (kind `plugin`, action
+   `messaging.test_send`, the person, the address, the source and tool, and the outcome).
+   With auth mode `off` no person is signed in, so the test answers 401, and the page says
+   that the test needs a signed-in person.
+
+Every send runs rules 1 to 4 again (`orders/messaging.ts` `openChecked`) before it claims a
+row, so a tool changed or removed since the binding was saved is refused
+`messaging_plugin_unavailable` and nothing is claimed or sent.
 
 The binding is read again at every send. A plugin removed, disabled or changed since is a
 refusal at send time (`messaging_plugin_unavailable`), never a silent fallback.
@@ -193,7 +205,14 @@ Success is an MCP `tools/call` result with `isError` false. ScadBuddy keeps an i
 only when the result's `structuredContent` has a string `id` or `message_id`; otherwise
 none. The result text is untrusted data: it is not stored and not shown to the model as
 instructions (the untrusted-data envelope, `agent/src/safety/untrusted.ts`). `isError` true
-is a failed send (§7).
+is a failed send (§7). The result is not checked against the tool's `outputSchema`: the
+client sends a plain `tools/call` request, not the SDK's `callTool`, which would throw for a
+message the plugin already sent. Only `isError`, or a JSON-RPC error from the server, is a
+refusal.
+
+A message goes to at most 20 recipients (the record's bound). A customer with more contacts
+of the bound kind to address is refused `too_many_recipients` before anything parks; the
+shop marks the ones to use as primary.
 
 ## 5. The tools
 
@@ -285,7 +304,7 @@ New table `order_messages` (backend migration, a new file
 | Column | Meaning |
 |---|---|
 | `id` | uuid |
-| `order_id` | the order; never null (a test send is not recorded, §4.3) |
+| `order_id` | the order; never null (a test send is in the agent's audit log, §4.3) |
 | `template` | `quoted`, `accepted`, `ready`, `shipped` |
 | `source`, `tool` | the binding used |
 | `recipients` | jsonb `[{kind, value}]` |
@@ -307,15 +326,18 @@ Routes (`backend/scadbuddy/api/order_messages.py`, all under `/api/v1/orders/{id
 - `POST` (claim). Header `Idempotency-Key`. Under the order's row lock (`lock_order`). A
   cart is refused `order_not_submitted`.
   1. A row with that key exists: answer it as it is (200). Nothing new is written. A key
-     of another order is 409 `idempotency_key_reused`.
+     of another order is 409 `idempotency_key_reused`, also when that order's claim
+     commits the key between this claim's read and its insert (the insert's unique
+     violation is caught and the row read again).
   2. §8 says skip: write a `skipped` row and the audit row `message.skipped`; answer it.
      (PR 5. Until then this step is absent and nothing is skipped.)
   3. A row of the same template and `episode` that is `sent`, `sending` or `unknown`
      exists and the body has no `resend_of`: refuse 409 `already_notified`, naming that
      row. This stops a flow re-run or a second session from telling the customer twice
      for one status change. A `failed` or `skipped` row does not block.
-  4. With `resend_of`: it must name a row of this order (else 422), and not one still
-     `sending` and fresh (409 `message_in_flight`).
+  4. With `resend_of`: it must name a row of this order and of the same template (else
+     422), and not one still `sending` and fresh (409 `message_in_flight`). A stale
+     `sending` row reads `unknown`, so it may be sent again by name.
   5. Else write a `sending` row and the audit row `message.sending`; answer 201.
 - `POST …/{message_id}/outcome`: `sent`, `failed` or `unknown`, with `reason` and
   `provider_message_id`. Taken while the stored status is `sending` (stale or not) or
@@ -341,12 +363,25 @@ The handler's order of work:
    answer, between the call and the outcome.
    - With `args.idempotency_key` bound: call the plugin again with the same key (the
      plugin drops the copy), then post the outcome.
-   - Without it: post `unknown` (`no_answer`) and send nothing. The answer tells the
-     person to check the inbox, then "Mark sent" or send again.
+   - Without it, a row that reads `unknown` (stale, or recorded so): post `unknown`
+     (`no_answer`) and send nothing. The answer tells the person to check the inbox, then
+     "Mark sent" or send again.
+   - Without it, a row still `sending` and fresh: another call is sending it now. Send
+     nothing and post no outcome; the answer says it is in flight. Once stale, it reads
+     `unknown` (above).
 5. The plugin's key is the message row's `id`, so each send attempt of one row has one key.
 
 "Send again" is a new call with `resend_of: <message id>`: a new key, a new approval, a
-new row. It is the only way past `already_notified` and `unknown`.
+new row. It is the only way past `already_notified` and `unknown`. The ids are the read tool
+`order_messages_list`'s (`GET …/messages`), as the order page lists them.
+
+On the order page (PR 3), "Send again" goes to the agent's person-only routes
+`POST /api/v1/ai/orders/{id}/messages/preview` and `…/send` (`routes/orderMessages.ts`, the
+UI's origin and a signed-in person, as the test send). The preview composes the message and
+answers it with its digest; nothing is sent or recorded. The send names the template,
+`resend_of` and that digest, never the text: the agent composes the message again, refuses
+409 `message_changed` when its digest differs, and else claims and sends it as the tool does,
+under the click's `Idempotency-Key`. The person's click on the shown message is the approval.
 
 Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only `read`
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a

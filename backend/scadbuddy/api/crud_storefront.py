@@ -33,9 +33,12 @@ values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (ea
 that is not an item is 422 ``draft_body_invalid``.
 
 Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
-the edge refuses a request before it reads the body. ``POST …/draft/requests`` (multipart
+the edge refuses a request before it reads the body; with the request's
+``Idempotency-Key``, it is also on for a key that holds a committed request, whose retry
+answers its stored reply whatever changed since. ``POST …/draft/requests`` (multipart
 ``text`` and ``files``, ``Idempotency-Key`` required) adds a design request with its files.
-It refuses 404 ``requests_disabled`` before it reads the body; then the body is read with
+It refuses 404 ``requests_disabled`` before it reads the body, unless its key holds a
+committed request (`request_sent`); then the body is read with
 its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
@@ -72,6 +75,7 @@ from scadbuddy.orders.storefront.drafts import (
     add_request,
     get_draft,
     remove_item,
+    request_sent,
     requests_disabled,
 )
 from scadbuddy.orders.storefront.listings import (
@@ -316,8 +320,12 @@ async def draft_remove(
     return await remove_item(state, visitor, key, item_id)
 
 
-def _requests_enabled(state: StateDep) -> bool:
-    return state.settings_store.snapshot().runtime.storefront_requests_enabled
+def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
+    """Whether "Ask for a design" is on, or ``key`` holds a committed request (a retry,
+    answered whatever changed since)."""
+    if state.settings_store.snapshot().runtime.storefront_requests_enabled:
+        return True
+    return key is not None and request_sent(state, key)
 
 
 class RequestsEnabled(BaseModel):
@@ -326,10 +334,16 @@ class RequestsEnabled(BaseModel):
 
 @router.get("/requests-enabled", name="crud_storefront_requests_enabled")
 async def requests_enabled(
-    state: StateDep, _visitor: Visitor, _client: StoreClient
+    state: StateDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
 ) -> RequestsEnabled:
-    """Whether "Ask for a design" is on (``storefront_requests_enabled``)."""
-    return RequestsEnabled(enabled=await asyncio.to_thread(_requests_enabled, state))
+    """Whether "Ask for a design" is on (``storefront_requests_enabled``); with a
+    request's ``Idempotency-Key``, also on when that key holds a committed request."""
+    return RequestsEnabled(
+        enabled=await asyncio.to_thread(_requests_enabled, state, idempotency_key)
+    )
 
 
 @router.post(
@@ -366,7 +380,7 @@ async def draft_request(
     """A design request added to the visitor's draft
     (`orders/storefront/drafts.py` `add_request`)."""
     key = required_key(idempotency_key)
-    if not await asyncio.to_thread(_requests_enabled, state):
+    if not await asyncio.to_thread(_requests_enabled, state, key):
         raise requests_disabled()
     upload = await read_request(request)
     try:

@@ -75,6 +75,11 @@ same way, `vite.config.ts`).
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
   after each send, because a token passes one check only. The mocks keep the check off.
 
+- Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
+  (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
+  ("Mark sent", "Send again" through a preview), over the agent routes in `api/orderMessages.ts`;
+  mocks `src/mocks/features/orders/messages.ts`.
+
 ## See also
 
 - Real-stack e2e: see `e2e-stack/CLAUDE.md`. Generated API files: see the root `CLAUDE.md`.

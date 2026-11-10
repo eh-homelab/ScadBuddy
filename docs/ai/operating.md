@@ -1102,6 +1102,18 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.
+- A fork's working directory is its own, so its first turn resumes a transcript that names
+  the parent's directory. When the transcript's newest entry ran in another directory than
+  this turn's (a fork's first turn, or a moved `SCADBUDDY_SESSION_DIR`), the turn's prompt
+  starts with a note that names the new directory, says the old one is not this session's and
+  calls to it are refused, and asks for the same relative paths there (#5867,
+  `agent/src/sessions/directoryNote.ts`). Hindsight's retain strips the note, so it is never
+  kept as the user's words.
+  Claude Code itself says only "Primary working directory: <new> (was <old>)", and with that
+  alone the model read the parent's path first and the seam refused it. One path for every
+  session, such as `/workspace`, cannot be made: the pod's sessions share one filesystem, a
+  per-process mount is refused (below), and Claude Code takes the real cwd, so a link would
+  not hide it.
 - `Bash` and `PowerShell` are `off` because Claude Code's sandbox cannot run in the worker
   pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
   --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change
@@ -1435,8 +1447,8 @@ with the forwarder).
 
 - **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
-  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
-  logged.
+  10 s (`RECALL_TIMEOUT_MS`; prod's bank answered in 4.2 to 8.8 s on 2026-11-09, #5866);
+  on a timeout or error nothing is added and the failure is logged.
 - **The recall query's length** (#2655). Only the start of the redacted query is sent:
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
@@ -1646,7 +1658,10 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   before the backend container answers (#5868): a refused connection reads "the backend is
   not up yet", and the start-up check waits for the backend's `/healthz`, logged once as
   "waiting for the backend", trying again after 1 s doubling to 30 s
-  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)); then it logs where
+  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)). Any other transport
+  error (a host that does not resolve, a timeout: a backend URL that may never answer) is
+  tried again the same way but logged as an error, once per kind (`ENOTFOUND`, ...), so a
+  bad `SCADBUDDY_BACKEND_URL` shows (#5889). Once the backend answers, it logs where
   the files go and moves them. A write or read asks the backend each time, so it works
   as soon as the backend answers, with no restart.
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
@@ -1664,10 +1679,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
   is refused `unavailable` and writes no row; and it releases after the row is gone (a
   replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
-  `reconcile`, on the sweeper's tick at most once an hour, releases every hold older than an
-  hour whose row is gone or names another blob (a session's cascade, `forgetSubject`, a
-  crash, a failed release), and holds every row no hold names. On `store_backend` local
-  nothing is held. The trigger that once did this (migration
+  `reconcile`, on the sweeper's tick at most once an hour and on one replica at a time (a
+  session advisory lock on a lock connection, `Database.locks`), releases every hold older
+  than an hour whose row is gone or names another blob (a session's cascade, `forgetSubject`,
+  a crash, a failed release), and holds every row no hold names. On `store_backend` local
+  nothing is held.
+  Roll the API before the agent: an agent whose API does not serve the routes yet gets a 404
+  on the hold, and its blob-backed workspace writes are refused `unavailable` until the API
+  has rolled. That fails closed on purpose: a write never leaves a blob that no holder keeps,
+  which the blob sweep could take. The trigger that once did this (migration
   `20261027T0114Z_session_files_blobs.sql`) is dropped by
   `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
   stay valid, and the API revokes `blob_refs` from the agent's role at every start

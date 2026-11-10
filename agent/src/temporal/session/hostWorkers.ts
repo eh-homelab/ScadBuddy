@@ -34,6 +34,14 @@ type Activities = NonNullable<WorkerOptions['activities']>
  */
 export const BRIDGE_CACHED_WORKFLOWS = 50
 
+/**
+ * The pinned worker's shutdown grace and force times (#5881 review): its stop starts once the turns
+ * drain, so both must end inside shutdown()'s 10 s deadline with a margin. A Monitor command still
+ * running at 6 s is cancelled, and at 8 s the worker stops regardless, before the pool closes.
+ */
+export const PINNED_SHUTDOWN_GRACE_MS = 6_000
+export const PINNED_SHUTDOWN_FORCE_MS = 8_000
+
 export type HostWorkersOptions = {
   address: string
   namespace: string
@@ -54,6 +62,19 @@ export type HostWorkersOptions = {
 
 export type HostWorkers = { pinned: AgentWorker; sessions: AgentWorker | undefined; stop(): Promise<void> }
 
+/**
+ * Stops `worker` only once `drained` settles (#5862 review): the pinned worker runs this replica's
+ * own BridgeCalls, whose workflow tasks a draining turn's browser_* call needs until the turn ends.
+ * Its promise is the stop's, for a shutdown to await before the database closes.
+ */
+export function stopAfter(worker: { stop(): Promise<void> }, drained: Promise<unknown>): Promise<void> {
+  // Never rejects: a shutdown that fails before awaiting it must not leave an unhandled rejection.
+  return drained
+    .catch(() => undefined)
+    .then(() => worker.stop())
+    .catch((err: unknown) => console.error('agent: the pinned host worker did not stop cleanly', err instanceof Error ? err.name : 'error'))
+}
+
 export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
   const common = {
     address: options.address,
@@ -67,6 +88,9 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
     ...common,
     taskQueue: `${TASK_QUEUE}.${options.identity}`,
     activities: options.pinned,
+    shutdownGraceMs: options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS,
+    // Force keeps its margin after any grace, so a cancelled activity always has a window to end.
+    shutdownForceMs: (options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS) + (PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS),
     ...(options.pinnedWorkflows ? { workflows: options.pinnedWorkflows, maxCachedWorkflows: BRIDGE_CACHED_WORKFLOWS } : {}),
   })
   const sessions = options.sessions

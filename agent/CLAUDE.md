@@ -133,10 +133,26 @@ opens every one and seals it again byte for byte).
   `RESTARTED_PROMPT` once its message is in the transcript (§5.5). Every tool call
   of a turn on Temporal is a `ToolCall` workflow of its own, `session-<id>-call-<tool_use_id>`
   (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
-  `tools_as_activities` switch is gone, Step 9.9); without Temporal the calls run in the turn's
+  `tools_as_activities` switch is gone, Step 9.9), started with `requestEagerStart` on the turn's
+  replica's own agent-tools worker connection while it polls, once its build has been made current (AgentWorker
+  `connection`, #5865; it stays so when a later build is promoted, and Temporal grants an eager start
+  to such a superseded build, whose worker then runs the call: measured on a dev server, Server
+  1.32.0, `toolCallLatency.temporal.test.ts` `SUPERSEDED`; the call's span attribute `scadbuddy.eager` says
+  `started`, `declined`, `failed` or `fallback`): the first workflow task comes back in the start's answer
+  without waiting on matching, and the activity is dispatched eagerly to the same worker when it is
+  on agent-tools and the worker has a free slot (a pinned server's call goes to `agent-tools.<hostname>`
+  through matching). Both need the server's `system.enableEagerWorkflowStart` and
+  `system.enableActivityEagerExecution`, on by default at Temporal v1.32.1
+  ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
+  and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
+  `test/toolCallLatency.temporal.test.ts`
+  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
+  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
-  below). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
-  `agent.turn.spawn` (`warm.outcome`), `agent.turn.release` and each ToolCall's
+  below); a turn whose transcript last ran in another directory (a fork's first) is told so in
+  its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
+  `agent.turn.spawn` (`warm.outcome`), `agent.turn.release`, the turn's span of each call with
+  `scadbuddy.eager` (above), and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
   charts.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
@@ -323,6 +339,24 @@ opens every one and seals it again byte for byte).
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+  - Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md`):
+    `src/orders/messaging.ts` `pluginMessaging` opens the backend setting
+    `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,
+    both through the forwarder) and calls its tool; an `McpError` is `failed`, a timeout, a
+    closed connection or another error is `unknown`. `order_notify_customer` (`read`) composes
+    and answers `channel` and `send_ready`; `order_messages_list` (`read`) lists the order's
+    messages, whose ids `resend_of` takes; `order_notify_customer_send` (`outward`) parks the
+    exact message as `approved`, claims an `order_messages` row through the backend's
+    `POST /api/v1/orders/{id}/messages` (`Idempotency-Key`, the call's `idempotencyKey`),
+    sends, then posts the outcome. A replayed claim sends again only when the binding maps an
+    `idempotency_key` argument; otherwise a fresh `sending` row is answered as in flight (no
+    outcome posted) and one that reads `unknown` is recorded `unknown`, never resent by itself.
+    `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
+    message (a person's session only, kept in the audit log as `messaging.test_send`).
+    `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message
+    composed now and its digest, and the send takes only the template, `resend_of` and the
+    digest, composes again and refuses `message_changed` on a difference (a person's session
+    only; `tools/orders.ts` `previewPersonSend`, `personSend`).
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

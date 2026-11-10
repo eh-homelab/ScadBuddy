@@ -625,7 +625,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a payment or a plain edit), `actor.py` (`created_by` and an audit row's `by` from the
   author header, never a body). The bus events are `OrderChanged` (`order.changed`) and
   `OrderItemChanged` (`order_item.changed`), ids and the new status only, on the realtime
-  topics `orders` and `order:<id>`. Every item's `inputs` join `referenced_asset_ids`, and
+  topics `orders` and `order:<id>`; a frame for a cart the draft sweep deleted also
+  carries `deleted: true` (and `cart`, a flag flow triggers read, marks a storefront cart). Every item's `inputs` join `referenced_asset_ids`, and
   `main.sweep_assets` skips the pass when they cannot be read. Routes `api/customers.py`,
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
@@ -864,7 +865,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
-  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  in every order status, ended and on hold included, except that adding one to a storefront cart not yet submitted is 409 `order_not_submitted` (`time.added`, `cost.removed`, … on the
   audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
   currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
   `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
