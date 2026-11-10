@@ -205,7 +205,14 @@ Success is an MCP `tools/call` result with `isError` false. ScadBuddy keeps an i
 only when the result's `structuredContent` has a string `id` or `message_id`; otherwise
 none. The result text is untrusted data: it is not stored and not shown to the model as
 instructions (the untrusted-data envelope, `agent/src/safety/untrusted.ts`). `isError` true
-is a failed send (§7).
+is a failed send (§7). The result is not checked against the tool's `outputSchema`: the
+client sends a plain `tools/call` request, not the SDK's `callTool`, which would throw for a
+message the plugin already sent. Only `isError`, or a JSON-RPC error from the server, is a
+refusal.
+
+A message goes to at most 20 recipients (the record's bound). A customer with more contacts
+of the bound kind to address is refused `too_many_recipients` before anything parks; the
+shop marks the ones to use as primary.
 
 ## 5. The tools
 

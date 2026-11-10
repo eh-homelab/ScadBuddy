@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js'
 import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
@@ -51,7 +52,15 @@ function tool(name: string): Tool {
 type Message = { id: string; status: string; [key: string]: unknown }
 
 /** The backend as order_notify_customer_send reads and writes it, recording every write. */
-function fakeBackend(opts: { binding?: MessagingBinding | null; claim?: { status: number; message: Message }; told?: Message | null } = {}) {
+function fakeBackend(
+  opts: {
+    binding?: MessagingBinding | null
+    claim?: { status: number; message: Message }
+    told?: Message | null
+    contacts?: { kind: string; value: string; primary: boolean }[]
+    outcomeStatus?: number
+  } = {},
+) {
   const writes: { path: string; body: unknown; key: string | null }[] = []
   let message: Message = opts.claim?.message ?? { id: 'm1', status: 'sending' }
   const backend = createBackendClient(BACKEND, async (input) => {
@@ -67,7 +76,7 @@ function fakeBackend(opts: { binding?: MessagingBinding | null; claim?: { status
     if (request.method === 'GET' && path === `/api/v1/customers/${CUSTOMER}`) {
       return Response.json({
         display_name: 'Ada',
-        contacts: [
+        contacts: opts.contacts ?? [
           { kind: 'phone', value: '+1 555 0100', primary: true },
           { kind: 'email', value: 'ada@example.com', primary: true },
           { kind: 'email', value: 'ada@work.example', primary: false },
@@ -87,6 +96,7 @@ function fakeBackend(opts: { binding?: MessagingBinding | null; claim?: { status
     if (request.method === 'POST' && path.endsWith('/outcome')) {
       const body = (await request.json()) as { status: string }
       writes.push({ path, body, key: null })
+      if (opts.outcomeStatus) return Response.json({ detail: 'down' }, { status: opts.outcomeStatus })
       message = { ...message, ...body }
       return Response.json(message)
     }
@@ -201,6 +211,25 @@ describe('order_notify_customer_send (#5660)', () => {
     expect(answer.warning).toMatch(/check the inbox, then "Mark sent"/)
     expect(sends).toEqual([])
     expect(writes[1]!.body).toEqual({ status: 'unknown', reason: 'no_answer' })
+  })
+
+  it('says a replayed claim was not sent again when its outcome cannot be recorded either', async () => {
+    const { backend } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'sending' } }, outcomeStatus: 503 })
+    const { messaging, sends } = fakeMessaging()
+    const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean; warning?: string }
+    expect(answer.sent).toBe(false)
+    expect(sends).toEqual([])
+    expect(answer.warning).toMatch(/it was not sent again[\s\S]*could not be updated \(HTTP 503\)/)
+    expect(answer.warning).not.toMatch(/the plugin answered/)
+  })
+
+  it('refuses a customer with more contacts of the kind than a message takes, before anything parks', async () => {
+    const contacts = Array.from({ length: 21 }, (_, i) => ({ kind: 'email', value: `ada${i}@example.com`, primary: false }))
+    const { backend, writes } = fakeBackend({ contacts })
+    const { messaging, sends } = fakeMessaging()
+    await expect(send.execute(ARGS, ctx({ backend, messaging }))).rejects.toThrow(/too_many_recipients: .*21 email contacts.*at most 20/)
+    expect(writes).toEqual([])
+    expect(sends).toEqual([])
   })
 
   it('sends a retried claim again only with the dedupe key the plugin takes, the message id', async () => {
@@ -364,6 +393,37 @@ describe('the messaging client (#5660 §6.1)', () => {
     await connection.close()
     expect(calls).toHaveLength(2)
     expect(released).toBe(1)
+  })
+
+  it('reads a message the plugin sent as sent, even when its answer misses the declared outputSchema', async () => {
+    // A plain server (not the SDK's McpServer, which checks its own output): it declares an
+    // outputSchema and answers text only. The SDK's callTool would throw on this side for a
+    // message that already went out (#5858 review).
+    const sent: unknown[] = []
+    const make = () => {
+      const server = new Server({ name: 'mail', version: '1' }, { capabilities: { tools: {} } })
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [
+          {
+            name: 'send_email',
+            inputSchema: SEND_EMAIL_SCHEMA as { type: 'object' },
+            outputSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'] },
+          },
+        ],
+      }))
+      server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        sent.push(request.params.arguments)
+        return { content: [{ type: 'text' as const, text: 'queued' }] }
+      })
+      return server
+    }
+    const messaging = pluginMessaging({ remote: async () => ({ plugins: [plugin()], release: () => {} }), connect: () => connectInProcess(make) })
+    const connection = await messaging.open(BINDING)
+    await connection.tools()
+    const args = messageArguments(BINDING, { to: [{ value: 'ada@example.com' }], subject: 'S', text: 'T', key: 'k' })
+    expect(await connection.send(args)).toEqual({ status: 'sent' })
+    await connection.close()
+    expect(sent).toHaveLength(1)
   })
 
   it('refuses a source it cannot reach, a disabled tool, and a local server', async () => {

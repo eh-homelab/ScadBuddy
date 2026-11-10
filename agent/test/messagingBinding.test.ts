@@ -3,7 +3,10 @@ import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
 import type { AuditEntry } from '../src/audit/log.js'
 import { BrowserSessions, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
-import type { CustomerMessaging, MessagingConnection, SendOutcome } from '../src/orders/messaging.js'
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { type CustomerMessaging, type MessagingConnection, pluginMessaging, type SendOutcome } from '../src/orders/messaging.js'
+import { connectInProcess } from '../src/temporal/turnTools.js'
 import { registerMessagingBindingRoutes, TEST_TEXT } from '../src/routes/messagingBinding.js'
 import { LOOPBACK, ORIGINS } from './helpers/mcp.js'
 
@@ -121,6 +124,36 @@ describe('the messaging binding routes (#5660)', () => {
     expect(sent.status).toBe(200)
     expect(await sent.json()).toEqual({ ok: true, status: 'sent' })
     expect(sends).toHaveLength(1)
+  })
+
+  it('answers a test the plugin sent as sent, even when its answer misses the declared outputSchema', async () => {
+    const sent: unknown[] = []
+    const make = () => {
+      const server = new Server({ name: 'mail', version: '1' }, { capabilities: { tools: {} } })
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [
+          {
+            name: 'send_email',
+            inputSchema: SCHEMA as { type: 'object' },
+            outputSchema: { type: 'object', properties: { message_id: { type: 'string' } }, required: ['message_id'] },
+          },
+        ],
+      }))
+      server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        sent.push(request.params.arguments)
+        return { content: [{ type: 'text' as const, text: 'queued' }] }
+      })
+      return server
+    }
+    const messaging = pluginMessaging({
+      remote: async () => ({ plugins: [{ name: 'mail', url: 'mem://mail', toolTiers: {}, disabledTools: [] }], release: () => {} }),
+      connect: () => connectInProcess(make),
+    })
+    const { hono, audits } = app(messaging, signedIn())
+    const answer = await post(hono, 'test', { binding: BINDING, to: 'ada@example.com' }, true)
+    expect(await answer.json()).toEqual({ ok: true, status: 'sent' })
+    expect(sent).toHaveLength(1)
+    expect(audits).toEqual([expect.objectContaining({ outcome: 'ok' })])
   })
 
   it('refuses a request that is not the UI’s', async () => {

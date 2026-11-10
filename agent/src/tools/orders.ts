@@ -170,6 +170,9 @@ async function composeFor(
   return { binding, notice: composeNotice(template, order, customer, note, binding?.contact_kind) }
 }
 
+/** `message_models.py` `MessageClaim.recipients`' bound. */
+const MAX_RECIPIENTS = 20
+
 type SendArgs = { order_id: string; template: NotifyTemplate; note?: string | undefined; resend_of?: string | undefined }
 type SendPlan = { binding: Binding; notice: Notice; approved: ApprovedMessage }
 
@@ -184,6 +187,13 @@ async function sendPlan(ctx: ToolContext, args: SendArgs): Promise<SendPlan> {
   }
   if (notice.to.length === 0) {
     throw new ToolError(`no_contact: ${notice.warning ?? 'the customer has no contact of the plugin’s kind'} Nothing was sent.`)
+  }
+  // The record takes at most MAX_RECIPIENTS (the backend's `MessageClaim.recipients`).
+  if (notice.to.length > MAX_RECIPIENTS) {
+    throw new ToolError(
+      `too_many_recipients: the customer has ${notice.to.length} ${binding.contact_kind} contacts to address and a ` +
+        `message goes to at most ${MAX_RECIPIENTS}; mark the ones to use as primary. Nothing was sent.`,
+    )
   }
   const subject = binding.args.subject ? notice.subject : null
   return {
@@ -263,24 +273,21 @@ async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Pr
           ? { status: 'sent', ...(outcome.providerMessageId ? { provider_message_id: outcome.providerMessageId } : {}) }
           : { status: outcome.status, reason: outcome.reason },
     })
+    // §7.2 step 4: a replayed claim with no dedupe key is not sent again; a person checks.
+    const notResent =
+      'this send was tried before and may have reached the customer; it was not sent again. Ask a person to ' +
+      'check the inbox, then "Mark sent" on the order page, or send it again with resend_of'
     if (!recorded.response.ok) {
       // The plugin's answer stands; the record keeps `sending`, which reads `unknown` later.
+      const unrecorded = `the order's record could not be updated (HTTP ${recorded.response.status})`
       return {
         sent: outcome.status === 'sent',
         message,
-        warning: `the plugin answered ${outcome.status}, but the order's record could not be updated (HTTP ${recorded.response.status})`,
+        warning: resendable ? `the plugin answered ${outcome.status}, but ${unrecorded}` : `${notResent}; ${unrecorded}`,
       }
     }
     const answer: SendAnswer = { sent: outcome.status === 'sent', message: recorded.data as OrderMessage }
-    // §7.2 step 4: a replayed claim with no dedupe key is not sent again; a person checks.
-    return resendable
-      ? answer
-      : {
-          ...answer,
-          warning:
-            'this send was tried before and may have reached the customer; it was not sent again. Ask a person to ' +
-            'check the inbox, then "Mark sent" on the order page, or send it again with resend_of',
-        }
+    return resendable ? answer : { ...answer, warning: notResent }
   } finally {
     await connection.close().catch(() => {})
   }

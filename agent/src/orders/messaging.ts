@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
+import { CallToolResultSchema, ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
 import type { components } from '../api/schema.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 
@@ -125,7 +125,10 @@ export function pluginMessaging(deps: MessagingDeps): CustomerMessaging {
         },
         async send(args) {
           try {
-            const result = await client.callTool({ name: tool, arguments: args })
+            // Not `callTool`: it checks the result against the tool's `outputSchema` on this side
+            // and throws an McpError for a message the plugin already sent. Only a JSON-RPC error
+            // from the server, or `isError`, is a refusal (#5858 review).
+            const result = await client.request({ method: 'tools/call', params: { name: tool, arguments: args } }, CallToolResultSchema)
             if (result.isError === true) return { status: 'failed', reason: 'plugin_error' }
             const id = providerId(result)
             return id === undefined ? { status: 'sent' } : { status: 'sent', providerMessageId: id }
