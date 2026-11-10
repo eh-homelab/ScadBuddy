@@ -87,6 +87,14 @@ class OperationStore:
         ``idempotency_key`` is on record, whatever its body (review #1126 1.3)."""
         return await asyncio.to_thread(self._keyed, kind, subject, idempotency_key)
 
+    async def keyed_operation(
+        self, kind: str, subject: str, idempotency_key: str
+    ) -> Operation | None:
+        """The newest operation of ``kind`` on ``subject`` that the client sent with
+        ``idempotency_key``, whatever its body (#5979: what a changed retry's first send
+        did)."""
+        return await asyncio.to_thread(self._keyed_operation, kind, subject, idempotency_key)
+
     async def named_by_running(self, names: list[str]) -> set[str]:
         """Those of ``names`` that the request of an operation still running contains
         (a claim's name, #1054)."""
@@ -192,6 +200,16 @@ class OperationStore:
                 (idempotency_key, kind, subject),
             ).fetchone()
         return row is not None
+
+    def _keyed_operation(self, kind: str, subject: str, idempotency_key: str) -> Operation | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM operations"
+                " WHERE idempotency_key = %s AND kind = %s AND subject = %s"
+                " ORDER BY created_at DESC LIMIT 1",
+                (idempotency_key, kind, subject),
+            ).fetchone()
+        return Operation.model_validate(row) if row else None
 
     def _named_by_running(self, names: list[str]) -> set[str]:
         with self._pool.connection() as conn:

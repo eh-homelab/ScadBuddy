@@ -32,6 +32,7 @@ from scadbuddy.meshmodel.paint import scene_notes
 from scadbuddy.meshmodel.scene import Scene
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.operations.store import Operation
 
 router = APIRouter(tags=["mesh models"])
 
@@ -92,14 +93,15 @@ async def create_mesh_model(
     description: str,
     source: dict[str, Any],
     claim: Callable[[ClaimStore], Awaitable[Held]] | None = None,
-    changed: Callable[[bool], str] | None = None,
+    changed: Callable[[Operation, bool], str] | None = None,
 ) -> ModelRecord | JSONResponse:
     """The ``mesh_model_create`` operation. ``claim`` holds an upload's bytes by claim,
     called only when no record answers the request: a repeat holds nothing. With
     ``changed``, a key on record for another body of this model is a 409 whose text is
-    ``changed(made)``, ``made`` whether the model exists now (#5979: the source's bytes
-    moved between a request and its retry; that request's operation may have failed or
-    still be running, and then no model exists to name)."""
+    ``changed(first, made)``: ``first`` the operation that key started (it may have
+    succeeded, failed or still be running), ``made`` whether the model exists now (it may
+    have been deleted since). #5979: the source's bytes moved between a request and its
+    retry."""
     slug = _slug_from_name(name)
     request = {"slug": slug, "name": name, "description": description, "source": source}
     kind = ops.kinds["mesh_model_create"]
@@ -111,12 +113,17 @@ async def create_mesh_model(
         )
         is None
     ):
-        if (
-            changed is not None
-            and idempotency_key is not None
-            and await ops.store.keyed(kind.name, slug, idempotency_key)
-        ):
-            raise ApiError(status.HTTP_409_CONFLICT, changed(catalogue.exists(slug)))
+        first = (
+            await ops.store.keyed_operation(kind.name, slug, idempotency_key)
+            if changed is not None and idempotency_key is not None
+            else None
+        )
+        if changed is not None and first is not None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                changed(first, catalogue.exists(slug)),
+                operation_id=first.id,
+            )
         _require_new(catalogue, slug)
         if claim is not None:
             held.append(await claim(claims))

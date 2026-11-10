@@ -714,5 +714,6 @@ def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
     gone = import_print(client, body, **key)
 
     assert gone.status_code == 409, gone.text
-    assert "that request made no model 'trophy'" in gone.json()["detail"]
+    assert "that request made the model 'trophy', which was deleted since" in gone.json()["detail"]
+    assert gone.json()["operation_id"] == made.json()["operation_id"]
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None

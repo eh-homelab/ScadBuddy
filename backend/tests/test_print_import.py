@@ -41,3 +41,29 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
         reverse=True,
     )
     assert [r.id for r in rows] == [2, 1, 3]
+
+
+@pytest.mark.parametrize(
+    ("status", "made", "says"),
+    [
+        ("succeeded", True, "no longer the file the model 'trophy' was made from"),
+        ("succeeded", False, "made the model 'trophy', which was deleted since"),
+        ("running", False, "is still being made (operation op-1, `GET /api/v1/operations/op-1`)"),
+        ("failed", False, "made no model: its operation op-1 failed"),
+    ],
+)
+def test_a_changed_retry_says_what_its_first_send_did(status: str, made: bool, says: str) -> None:
+    """#5979 review: the 409 names a model only by what the key's operation did."""
+    from datetime import UTC, datetime
+
+    from scadbuddy.api.print_imports import _source_changed
+    from scadbuddy.operations.store import Operation
+
+    first = Operation(
+        id="op-1",
+        kind="mesh_model_create",
+        subject="trophy",
+        status=status,  # type: ignore[arg-type]
+        created_at=datetime(2026, 11, 10, tzinfo=UTC),
+    )
+    assert says in _source_changed("x.3mf", "trophy", first, made)
