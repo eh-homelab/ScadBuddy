@@ -381,9 +381,9 @@ export async function readDirFile(dir: string, rel: string, max: number): Promis
 
 /**
  * The sha256 of a regular file at `rel` in a session's directory, read as a stream whatever its
- * size (never through a link); undefined when there is none, or when it cannot be opened (any
- * open error, EACCES too). The sandbox's sync uses it for a file past the per-file cap that is or becomes kept, so
- * a change to such a file is seen (#5942).
+ * size (never through a link); undefined when there is none, or when it cannot be opened for
+ * lack of permission (EACCES, EPERM); another open error throws. The sandbox's sync uses it for
+ * a file past the per-file cap that is or becomes kept, so a change to such a file is seen (#5942).
  */
 export async function dirFileSha256(dir: string, rel: string): Promise<string | undefined> {
   const abs = path.join(dir, rel)
@@ -391,10 +391,14 @@ export async function dirFileSha256(dir: string, rel: string): Promise<string | 
   let handle
   try {
     handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
-  } catch {
-    // Gone, a link (ELOOP), or not readable (EACCES): no sha256 for this one file, never a
-    // failure of the call that asked (the sandbox's sync records it as `large`).
-    return undefined
+  } catch (err) {
+    // Gone, a link (ELOOP), or not readable (EACCES, EPERM): no sha256 for this one file, never
+    // a failure of the call that asked (the sandbox's sync records it as `large`). Anything else
+    // (EMFILE, EIO) is transient and fails the call: read as `large`, a kept path's pod copy,
+    // the command's only one, would be deleted.
+    const code = (err as NodeJS.ErrnoException).code
+    if (missing(err) || code === 'ELOOP' || code === 'EACCES' || code === 'EPERM') return undefined
+    throw err
   }
   try {
     if (!(await handle.stat()).isFile()) return undefined
