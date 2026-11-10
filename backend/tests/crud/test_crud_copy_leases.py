@@ -67,7 +67,7 @@ def remote(crud: CrudClient) -> RemoteUploadStore:
 
 def test_the_worker_waits_for_the_copy_leases_area() -> None:
     assert "copy-leases" in PRINT_CRUD_AREAS
-    assert CRUD_AREAS["print"][-1] == "copy-leases"
+    assert "copy-leases" in CRUD_AREAS["print"]
 
 
 def test_the_worker_store_holds_no_pool(crud: CrudClient) -> None:

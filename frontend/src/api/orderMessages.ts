@@ -4,7 +4,7 @@
  * shapes are written out here from `agent/src/routes/messagingBinding.ts` and
  * `agent/src/routes/orderMessages.ts`. Each needs the UI's origin; the test send, the preview
  * and the send need a person signed in. A refusal is an `ApiError` with the agent's `detail`,
- * and the send's slug (`message_changed`, `already_notified`) as its `type`.
+ * and the send's slug (`message_changed`, `already_notified`, `storefront_mail`) as its `type`.
  */
 import { aiRequest } from './aiPlugins'
 import type { MessagingBinding, OrderMessage } from './types'
@@ -47,14 +47,27 @@ export function testMessagingBinding(binding: MessagingBinding, to: string): Pro
   return aiRequest<TestSend>('/orders/messaging-binding/test', post({ binding, to }))
 }
 
-export function previewOrderMessage(orderId: string, template: NotifyTemplate, resendOf: string): Promise<MessagePreview> {
-  return aiRequest<MessagePreview>(`/orders/${encodeURIComponent(orderId)}/messages/preview`, post({ template, resend_of: resendOf }))
+/** `also`: the person said yes to sending what the storefront already emails (else 409 `storefront_mail`). */
+const alsoField = (also: boolean) => (also ? { also_when_storefront_mails: true } : {})
+
+export function previewOrderMessage(orderId: string, template: NotifyTemplate, resendOf: string, also = false): Promise<MessagePreview> {
+  return aiRequest<MessagePreview>(
+    `/orders/${encodeURIComponent(orderId)}/messages/preview`,
+    post({ template, resend_of: resendOf, ...alsoField(also) }),
+  )
 }
 
 /** `key` is one per open preview, so a retry after a lost answer is answered from its claim, never sent twice. */
-export function sendOrderMessage(orderId: string, template: NotifyTemplate, resendOf: string, digest: string, key: string): Promise<MessageSent> {
+export function sendOrderMessage(
+  orderId: string,
+  template: NotifyTemplate,
+  resendOf: string,
+  digest: string,
+  key: string,
+  also = false,
+): Promise<MessageSent> {
   return aiRequest<MessageSent>(
     `/orders/${encodeURIComponent(orderId)}/messages/send`,
-    post({ template, resend_of: resendOf, digest }, { 'Idempotency-Key': key }),
+    post({ template, resend_of: resendOf, digest, ...alsoField(also) }, { 'Idempotency-Key': key }),
   )
 }

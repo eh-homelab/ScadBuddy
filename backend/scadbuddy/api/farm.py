@@ -3,7 +3,8 @@ archive with its outcome, aggregate stats and the spool inventory, and (#3742) t
 pictures of the queue's items and the printers' jobs.
 
 Read only: nothing here writes to Bambuddy, and every call needs only the ``Read
-Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
+Status`` scope, which a 401/403 names (``bambuddy/errors.py``). Each archive says whether
+it is a ScadBuddy print (#4698), so a print to import can be found.
 """
 
 from __future__ import annotations
@@ -227,21 +228,31 @@ async def get_stats(
         return await client.archive_stats(date_from=date_from, date_to=date_to)
 
 
+class FarmArchive(ArchiveOutcome):
+    """An archive, and whether it is a ScadBuddy print (#4698)."""
+
+    #: Whether a print link names it: a print ScadBuddy queued or started, or one a person
+    #: imported (``POST /print-imports/{id}``). ``False`` is an archive to import;
+    #: ``None`` when ScadBuddy's records cannot be read.
+    scadbuddy_print: bool | None = None
+
+
 @router.get(
-    "/archives", response_model=list[ArchiveOutcome], summary="Bambuddy's archives with outcomes"
+    "/archives", response_model=list[FarmArchive], summary="Bambuddy's archives with outcomes"
 )
 async def get_archives(
     store: SettingsStoreDep,
+    links: PrintLinksDep,
     printer_id: PrinterFilter = None,
     project_id: Annotated[int | None, Query(description="One Bambuddy project's id")] = None,
     date_from: DateFrom = None,
     date_to: DateTo = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[ArchiveOutcome]:
+) -> list[FarmArchive]:
     """Every archive Bambuddy has, ScadBuddy's or not (``GET /prints`` is ScadBuddy's
-    own), each with its status, times, filament, cost, failure reason and run counts.
-    A page shorter than ``limit`` is the last."""
+    own), each with its status, times, filament, cost, failure reason and run counts,
+    and ``scadbuddy_print``. A page shorter than ``limit`` is the last."""
     async with client_for(store.load()) as client:
         # Strict, unlike the print history's list read (#3477 review): this page *is*
         # the rows, so one that does not parse fails the read rather than vanish from it.
@@ -253,7 +264,19 @@ async def get_archives(
             date_from=date_from,
             date_to=date_to,
         )
-    return [ArchiveOutcome.of(row) for row in rows]
+    linked: set[int] | None
+    try:
+        linked = await links.linked_among([row.id for row in rows])
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the archives show no ScadBuddy marks")
+        linked = None
+    return [
+        FarmArchive(
+            **ArchiveOutcome.of(row).model_dump(),
+            scadbuddy_print=None if linked is None else row.id in linked,
+        )
+        for row in rows
+    ]
 
 
 @router.get("/inventory", response_model=InventoryView, summary="Spools and loaded slots")

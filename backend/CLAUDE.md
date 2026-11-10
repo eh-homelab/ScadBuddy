@@ -466,7 +466,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the projects' printers, folderless projects and destination touches
   (`RemoteUploadStore`, a `BambuddyUploadStore` with no pool, whose copy lock is the API's
   copy lease, `bambuddy/copy_leases.py`, #5298 Task 27; a method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
-  its claim take an `Idempotency-Key`), and it
+  its claim take an `Idempotency-Key`), and its print links, sends and outputs' last
+  prints (`RemotePrintLinks`, a `PrintLinkStore` with no pool, and `RemoteOutputPrints`,
+  an `OutputPrintStore` with no pool, area `links`, #5298 Task 28; each refuses the
+  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
@@ -479,6 +482,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
+  be (the archive's file and slicer project, Bambuddy library files by name and hash, the
+  printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
+  links the archive to a model as a `print_links` row with the subject `model:<slug>` and
+  `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  Both routes first run the link passes for the one archive (`linking.link_archive`), so a
+  print ScadBuddy made is linked to its run and refused (409), never imported; a run's
+  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  of an archive runs at a time (`PrintLinkStore.import_lock`); one that waits past
+  `IMPORT_LOCK_WAIT_S` (30 s) is a 409 to send again. Every owner lookup (`archive_origin`,
+  `archive_run_plates`) orders as `_OWNER_ORDER` does.
+  Only a source the listing finds is read. A printer file is kept as a Bambuddy library
+  file in the inbox folder. A model's delete forgets its imports (`delete_models`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -1070,8 +1086,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
   422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
   the output whose `print_links` row owns it, else a `library_file` item of the library file
-  that owns it, else (an output or file gone since, or an output whose template was deleted,
-  falls through too) a `library_file` item of
+  that owns it, else (an output or file gone since, an output whose template was deleted,
+  or a print imported onto a model, #4698, falls through too) a `library_file` item of
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is

@@ -48,6 +48,7 @@ from scadbuddy.bambuddy.send import Target
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.reads import LibraryReads, reads_for
@@ -268,10 +269,13 @@ class _Sends:
 class _Prints:
     """`OutputPrintStore`: where an output's own last print is kept (#1060)."""
 
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.sends: list[dict[str, Any]] = []
+        self.error = error
 
     def record(self, output_id: str, **fields: Any) -> None:
+        if self.error is not None:
+            raise self.error
         self.sends.append({"output_id": output_id, **fields})
 
 
@@ -346,6 +350,37 @@ async def test_a_send_record_that_fails_does_not_fail_the_queued_plate(
     assert [s.queue_item_id for s in sent] == [51, 52]
     assert "OperationalError" in caplog.text
     assert "connection refused" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError("connection refused"),
+        CrudUnavailableError("route missing", "route_missing"),
+        CrudRefusedError(422, {"detail": "refused"}),
+    ],
+)
+async def test_a_last_print_record_that_fails_does_not_fail_the_queued_plate(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The plate is queued: failing the activity over the output's last print would queue
+    # it again on the retry. Its send is still recorded (#5298 Task 28).
+    sends = _Sends()
+    meta: Any = _Meta()
+    source = OutputSource(
+        store=None,  # type: ignore[arg-type]
+        uploads=_Uploads(),  # type: ignore[arg-type]
+        meta=meta,
+        settings=StoredSettings(),
+        prints=_Prints(error),  # type: ignore[arg-type]
+        sends=sends,  # type: ignore[arg-type]
+    )
+
+    sent = await source.record(11, 1, OUTCOME, 7, [])
+
+    assert [s.queue_item_id for s in sent] == [51, 52]
+    assert sends.recorded == [(PrintSubject.output(meta.id), SENT)]
+    assert type(error).__name__ in caplog.text
 
 
 # --- #1752: one pipeline; a library file differs only in how its 3MF is obtained -------

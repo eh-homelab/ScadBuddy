@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCrea
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.uploads import DestinationKind
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.settings_store import DestinationSort
 
 logger = logging.getLogger(__name__)
@@ -497,7 +498,7 @@ async def attach_results(
                 # A side effect of the attach, which must not fail over it.
                 try:
                     await link_item(links, output_id, item)
-                except psycopg.Error:
+                except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
                     logger.exception("could not link a queue item's archive", extra={"id": item_id})
 
     if queue_item_ids:

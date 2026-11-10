@@ -8,7 +8,8 @@ import { OUTPUT_REAGAN } from './state'
  * quote (`orders/past_prints.py`). 9101 and 9102 are one two-plate run of the output
  * `OUTPUT_REAGAN`; 9103 printed library file 120; 9104 is nobody's; 9105 failed. The
  * route's `date_from`, `date_to`, `printer_id`, `project_id`, `limit` and `offset` are
- * honoured; status and name are the browser's.
+ * honoured; status and name are the browser's. Each row's `scadbuddy_print` (#4698) says
+ * whether an output or a library file printed it.
  */
 
 /** What the backend reads of an archive beyond the listing: its owner and its slots. */
@@ -76,7 +77,13 @@ export const handlers = [
       .filter((p) => printer === null || p.printer_id === Number(printer))
       .filter((p) => project === null || p.project_id === Number(project))
       .slice(offset, offset + limit)
-      .map((p) => Object.fromEntries(LISTED.map((key) => [key, p[key]])) as ArchiveOutcome)
+      .map(
+        (p): ArchiveOutcome => ({
+          ...(Object.fromEntries(LISTED.map((key) => [key, p[key]])) as Omit<ArchiveOutcome, 'scadbuddy_print'>),
+          // #4698: an archive an output or a library file printed is a ScadBuddy print.
+          scadbuddy_print: p.output_id !== undefined || p.library_file_id !== undefined,
+        }),
+      )
     return HttpResponse.json(rows)
   }),
 ]
