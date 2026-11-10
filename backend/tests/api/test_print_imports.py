@@ -410,12 +410,13 @@ def test_a_new_model_is_made_from_the_slicer_project(client: TestClient, model: 
 
     assert response.status_code == 201, response.text
     made = response.json()
-    assert (made["slug"], made["created_model"]) == ("trophy", True)
+    assert (made["slug"], made["created_model"], made["made_now"]) == ("trophy", True, True)
     assert made["imported"]["source"] == "archive_source"
     assert client.get("/api/v1/models/trophy/scene").status_code == 200
     assert client.get(f"/api/v1/prints/{ARCHIVE}").json()["slug"] == "trophy"
     again = import_print(client, body, **key)
     assert (again.status_code, again.json()["slug"]) == (200, "trophy")
+    assert (again.json()["created_model"], again.json()["made_now"]) == (True, False)
 
 
 @respx.mock
@@ -671,3 +672,28 @@ def test_an_import_waiting_on_another_is_refused_in_time(
     assert response.status_code == 409, response.text
     assert "still running" in response.json()["detail"]
     assert import_print(client, {"source": {"kind": "archive"}, "slug": model}).status_code == 201
+
+
+@respx.mock
+def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
+    client: TestClient, model: str
+) -> None:
+    """#5979: the key made a model from other bytes, as a printer file overwritten
+    between a 202 and its retry would; the retry is a 409 naming that model."""
+    from tests.api.test_mesh_models import painted_3mf, upload
+
+    configure(client)
+    bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
+        return_value=httpx.Response(200, content=painted_3mf())
+    )
+    key = press()
+    assert upload(client, name="Trophy", key=key).status_code == 201
+
+    response = import_print(
+        client, {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}, **key
+    )
+
+    assert response.status_code == 409, response.text
+    assert "the model 'trophy' was made from" in response.json()["detail"]
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None

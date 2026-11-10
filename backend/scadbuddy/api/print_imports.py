@@ -121,8 +121,10 @@ class ImportedPrint(BaseModel):
     slug: str
     #: The print's record: ``GET /prints/{archive_id}``.
     print_url: str
-    #: Whether this request made the model (``new_model``).
+    #: Whether the import made the model (``new_model``); a repeat answers the same.
     created_model: bool
+    #: Whether this request made the import (201), not a repeat answering it (200).
+    made_now: bool
     imported: PrintImport
 
 
@@ -221,6 +223,7 @@ async def _answer(
         slug=slug,
         print_url=f"/api/v1/prints/{archive_id}",
         created_model=record.created_model,
+        made_now=new,
         imported=record,
     )
 
@@ -447,6 +450,13 @@ async def _new_model(
         description=new_model.description,
         source={"kind": "upload", "claim": read.sha256, "name": read.name},
         claim=claim,
+        # A retry reads its source again, and a printer overwrites its files: the model
+        # the first read made is no longer this file's, so it is named, never linked.
+        changed=(
+            f"{read.name} changed since this request was first sent, so it is no longer the"
+            f" file the model {_slug_from_name(new_model.name)!r} was made from: that model"
+            " stays; import the print onto it with `slug`, or choose another source"
+        ),
     )
     if isinstance(made, JSONResponse):
         return made

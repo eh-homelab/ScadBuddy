@@ -589,7 +589,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   import_print: (input, result) => {
     const archive = bambuddyId(input.archive_id)
     const touched: Touch[] = archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
-    return field(result, 'created_model') === true ? [...touched, ...modelCreated(result)] : touched
+    // A repeat (200, `made_now: false`) answers the stored `created_model`: only the import's own request made it.
+    return field(result, 'created_model') === true && field(result, 'made_now') !== false
+      ? [...touched, ...modelCreated(result)]
+      : touched
   },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
