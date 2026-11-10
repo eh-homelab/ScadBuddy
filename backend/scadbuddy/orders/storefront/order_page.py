@@ -21,7 +21,8 @@ only once the provider's payment settled it, spec §7) and the shipments. Every 
 staff name. The first view stamps the link's ``opened_at``.
 
 The customer's writes (`answer`, `accept`, `cancel`) run as `customer_actor`, with the
-session ``link:<link id>``, through the lifecycle under the order's lock, in one
+session ``link:<link id>`` (a link's reader) or ``account:<account id>`` (a signed-in
+reader), through the lifecycle under the order's lock, in one
 transaction with their ``Idempotency-Key``'s ledger row (`InTransaction`): a retry answers
 once. Each answers the view as it is after the write.
 
@@ -373,7 +374,10 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
         return None
     quote = next((q for q in quotes if q.accepted), quotes[-1])
     by_id = {r.id: r for r in revisions}
-    named = by_id.get(quote.revision_id) if quote.revision_id else None
+    # A quote that names no design (a manual price, #4250) prices the item as the
+    # customer last saw it: the newest design sent to them.
+    sent = [r for r in revisions if r.sent_at is not None]
+    named = by_id.get(quote.revision_id) if quote.revision_id else (sent[-1] if sent else None)
     if revisions and (named is None or named.sent_at is None):
         return None
     open_order = rows.order.status in ("draft", "quoted") and not rows.order.on_hold
@@ -409,19 +413,21 @@ async def _item(
     for revision in revisions:
         if revision.sent_at is None:
             continue
-        pictures: list[CustomerPicture] = []
-        for number, (attachment, blob_key) in enumerate(rows.pictures.get(revision.id, []), 1):
-            url = None
-            if content is not None:
-                url = await _picture_url(state, content, attachment, blob_key)
-            pictures.append(
-                CustomerPicture(
-                    url=url,
-                    kind=_picture_kind(attachment),
-                    caption=attachment.caption.strip()
-                    or f"Design {revision.number}, picture {number}",
-                )
+        held = rows.pictures.get(revision.id, [])
+        # The first view copies each picture into the store; the copies run side by side.
+        urls: list[str | None] = (
+            list(await asyncio.gather(*(_picture_url(state, content, a, k) for a, k in held)))
+            if content is not None
+            else [None] * len(held)
+        )
+        pictures = [
+            CustomerPicture(
+                url=url,
+                kind=_picture_kind(attachment),
+                caption=attachment.caption.strip() or f"Design {revision.number}, picture {number}",
             )
+            for number, ((attachment, _key), url) in enumerate(zip(held, urls, strict=True), 1)
+        ]
         shown.append(
             CustomerRevision(
                 id=revision.id,
@@ -430,7 +436,10 @@ async def _item(
                 sent_at=revision.sent_at,
                 answer=revision.answer,
                 answer_note=revision.answer_note,
-                can_answer=revision is newest and revision.answer is None and open_item,
+                can_answer=revision is newest
+                and revision.answer is None
+                and open_item
+                and not rows.order.on_hold,
                 pictures=pictures,
                 colours=[
                     CustomerColour(

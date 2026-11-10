@@ -527,6 +527,31 @@ def test_the_customers_cancel_closes_an_open_deposit_requests_page(
     assert FAKE.cancelled == ["r1"]
 
 
+def test_a_paused_order_offers_no_answer(api: TestClient, crud: CrudCaller) -> None:
+    """#5965 review: a design on an order the shop put on hold cannot be answered (the
+    lifecycle refuses it, ``order_on_hold``), so the page does not offer it."""
+    made = make_order(api, crud)
+    _orders(api).lifecycle.hold(made.order.id, BY)
+    [rev] = made.reader.view().json()["items"][0]["revisions"]
+    assert rev["can_answer"] is False
+
+
+def test_a_price_that_names_no_design_shows_with_the_newest_sent_one(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """#5965 review: a manual price may name no design; it prices the item as the
+    customer last saw it, so it shows once a design was sent."""
+    made = make_order(api, crud)
+    [item] = items_of(api, made)
+    with _orders(api).store.transaction() as conn:
+        conn.execute(
+            "UPDATE order_item_quotes SET revision_id = NULL WHERE order_item_id = %s",
+            (item.id,),
+        )
+    quote = made.reader.view().json()["items"][0]["quote"]
+    assert quote is not None and quote["unit_price_minor"] == 1250
+
+
 def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud, approval="design_first")
     [item] = items_of(api, made)
