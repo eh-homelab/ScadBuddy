@@ -152,11 +152,12 @@ export class AgentWorker {
 
   /**
    * The connection the worker polls on, while it polls and once its build has been made current
-   * (`current`, which stays true when a later build is promoted); undefined otherwise. A client on it may start a workflow with `requestEagerStart`, which hands the first
+   * (`current`, which stays true when a later build is promoted), and not once `stop()` is called
+   * (a terminating pod takes no more eager calls); undefined otherwise. A client on it may start a workflow with `requestEagerStart`, which hands the first
    * workflow task to this worker in the start's answer (activityProjection.ts `toolCallStarter`).
    */
   connection(): NativeConnection | undefined {
-    return this.#state === 'ok' && this.#current ? this.#connection : undefined
+    return this.#state === 'ok' && this.#current && !this.#stopping ? this.#connection : undefined
   }
 
   async stop(): Promise<void> {

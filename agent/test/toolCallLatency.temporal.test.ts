@@ -34,6 +34,8 @@ async function eagerOf(fn: () => Promise<unknown>): Promise<unknown> {
 // payload codec (PgPayloadKeys over Postgres) on a versioned worker (a Deployment version,
 // AUTO_UPGRADE), with and without eager start (ToolCallStarterDeps `eager`).
 //
+// The timed cases run only with TOOL_CALL_BENCH_REPORT=1 or TOOL_CALL_BENCH_ASSERT=1; the tests of
+// how a call starts (and on a superseded build) run always.
 // Knobs: TOOL_CALL_BENCH_N (default 10) calls a case; TOOL_CALL_BENCH_MATRIX=1 adds the cases
 // without the codec or versioning; TOOL_CALL_BENCH_REPORT=1 prints each case's phases;
 // TOOL_CALL_BENCH_ASSERT=1 fails a case whose median overhead passes OVERHEAD_LIMIT_MS (off by
@@ -131,7 +133,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
       await server?.teardown()
     })
 
-    it.each(CASES)('codec $codec, versioned $versioned, eager $eager', async ({ codec, versioned, eager }) => {
+    // Only when asked for: the span test below checks how calls start on every run.
+    it.skipIf(!REPORT && !ASSERT).each(CASES)('codec $codec, versioned $versioned, eager $eager', async ({ codec, versioned, eager }) => {
       const queue = `bench-${randomUUID().slice(0, 8)}`
       const keys = codec ? new PgPayloadKeys(db.sql, { id: 'bench', key: randomBytes(32) }) : undefined
       const converter = keys ? subjectDataConverter(keys) : undefined
@@ -243,6 +246,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         // On the worker's own connection, the first task comes back in the start's answer.
         const eagerStart = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => new Client({ connection: worker.connection()!, namespace: server.namespace }) })
         expect(await eagerOf(() => eagerStart({ sessionId: session, toolUseId: 'toolu_bench_eager', tool: 'bench', input: {}, signal: new AbortController().signal }))).toBe('started')
+        // A re-send of the same call finds its execution (USE_EXISTING): no task comes back.
+        expect(await eagerOf(() => eagerStart({ sessionId: session, toolUseId: 'toolu_bench_eager', tool: 'bench', input: {}, signal: new AbortController().signal }))).toBe('declined')
         // An unversioned worker's build is current at once: its connection is offered while it polls.
         expect(worker.connection()).toBeDefined()
       } finally {
