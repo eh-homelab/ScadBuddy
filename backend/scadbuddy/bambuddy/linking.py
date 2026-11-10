@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.print_library.ids import is_native_id
 
@@ -154,7 +155,7 @@ async def owned_queue_items(
         owned.add(meta.queue_item_id)
     try:
         known = await links.for_subject(PrintSubject.output(meta.id))
-    except psycopg.Error:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
         logger.exception("could not read an output's print links", extra={"output_id": meta.id})
     else:
         owned.update(link.queue_item_id for link in known if link.queue_item_id is not None)
@@ -308,7 +309,7 @@ async def scan_library_by_hash(
         return
     try:
         await link_subject_by_hash(client, uploads, links, PrintSubject.library(file_id))
-    except (ApiError, psycopg.Error):
+    except (ApiError, psycopg.Error, CrudUnavailableError, CrudRefusedError):
         # A failed scan found nothing, so the next read may try again.
         _last_library_scan.pop(file_id, None)
         logger.exception(

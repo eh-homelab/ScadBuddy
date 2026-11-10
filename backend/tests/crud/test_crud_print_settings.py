@@ -178,4 +178,5 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
         "uploads",
         "previews",
         "copy-leases",
+        "links",
     ]

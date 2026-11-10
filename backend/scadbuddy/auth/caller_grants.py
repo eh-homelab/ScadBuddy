@@ -65,18 +65,17 @@ PRINT_GRANTS: Grants = {
     # Read by a native print's spool uses (`spools/native.py`) and rewritten by the
     # printer merge (`PrinterReference("print_runs", "printer")`) until #5298 Task 31.
     # The runs themselves, their outcomes, the operations and the events go through the
-    # API's CRUD routes (`crud/print.py`, `crud/operations.py`, #5298 Task 24); an
-    # existing role keeps those grants until the revoke.
+    # API's CRUD routes (`crud/print.py`, `crud/operations.py`, #5298 Task 24), and so do
+    # the print links, the sends and the outputs' last prints (`RemotePrintLinks`,
+    # `RemoteOutputPrints`, #5298 Task 28); an existing role keeps those grants until
+    # the revoke.
     "print_runs": _ALL,
-    "print_links": ("SELECT", "INSERT"),
-    "print_sends": ("SELECT", "INSERT", "UPDATE"),
     # Rewritten by the printer merge (`PrinterReference("project_print_targets",
     # "printer")`) until #5298 Task 29. The uploads, slices, slice starts, background
     # slices, project targets, folderless projects and destination touches go through
     # the API's CRUD routes (`crud/print.py` `RemoteUploadStore`, #5298 Tasks 25, 26);
     # an existing role keeps those grants until the revoke.
     "project_print_targets": ("SELECT", "UPDATE"),
-    "output_last_prints": ("SELECT", "INSERT", "UPDATE"),
     # A native run's slice (`slicing/store.py` `start`) and held presets.
     "native_slices": ("SELECT", "INSERT", "UPDATE"),
     "held_local_presets": _READ,

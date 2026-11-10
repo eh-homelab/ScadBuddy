@@ -62,6 +62,7 @@ from scadbuddy.bambuddy.uploads import (
     SlicedCopy,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
@@ -356,7 +357,7 @@ async def record_sends(
                 for item in outcome.queue_item_ids
             ],
         )
-    except psycopg.Error as exc:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
         logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
 
 

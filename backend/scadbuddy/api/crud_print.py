@@ -26,6 +26,14 @@ The queue item ScadBuddy's reprint queues is recorded as a reprint of the archiv
 subject (`POST /reprints`, #3741), so the Prints page marks it. It is not a send. Natural:
 a reprint recorded again keeps the first record.
 
+The archives a subject's prints produced, the queue items a run queued and an output's
+last print (Q20, Q21, #5298 Task 28) are `bambuddy/print_links.py` `PrintLinkStore`'s
+and `library/output_prints.py` `OutputPrintStore`'s, for `RemotePrintLinks` and
+`RemoteOutputPrints` (area ``links``: ``…/links``, ``…/sends``, ``…/last-prints``). Each
+write is natural: a link, a send and a library file's link are ``ON CONFLICT DO
+NOTHING`` on their keys, a gone item sets a flag, and a last print is set by the
+output's key, so a resend after a lost answer leaves what one send left.
+
 A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
 or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
 #4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
@@ -93,10 +101,11 @@ from scadbuddy.bambuddy.copy_leases import (
     LeaseLostError,
 )
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
-from scadbuddy.bambuddy.print_links import PrintReprint
+from scadbuddy.bambuddy.print_links import LinkedPrint, PrintLink, PrintReprint, PrintSend
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
+from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
@@ -112,6 +121,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, Replay, idempotent_write, required_key
 from scadbuddy.crud.operations import operations_router
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
@@ -376,6 +387,170 @@ async def record_reprint(body: ReprintWrite, links: PrintLinksDep) -> None:
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
     await links.record_reprint(subject, body.reprint)
+
+
+# -- links, sends and an output's last print (Q20, Q21) ----------------------------
+
+
+def _subject(key: str) -> PrintSubject:
+    try:
+        return PrintSubject.parse(key)
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_ENTITY, str(error)) from error
+
+
+class LinkWrite(BaseModel):
+    """`PrintLinkStore.record`'s arguments."""
+
+    subject: str
+    link: PrintLink
+
+
+class SendsWrite(BaseModel):
+    """`PrintLinkStore.record_sends`'s arguments."""
+
+    subject: str
+    sends: list[PrintSend]
+
+
+class LibraryLink(BaseModel):
+    """`PrintLinkStore.link_library`'s arguments but the queue item."""
+
+    archive_id: int
+    name: str | None = None
+
+
+class LastPrintWrite(BaseModel):
+    """`OutputPrintStore.record`'s arguments but the output."""
+
+    queue_item_id: int | None = None
+    slice_job_id: int | None = None
+    project_id: int | None = None
+    plates: list[PlateSend] = Field(default_factory=list)
+
+
+class LanLastPrintWrite(BaseModel):
+    """`OutputPrintStore.record_lan`'s arguments but the output."""
+
+    run_id: str
+    printer: str | None = None
+    plates: list[LanPlateSend] = Field(default_factory=list)
+
+
+class LanProgressWrite(BaseModel):
+    """`OutputPrintStore.record_lan_progress`'s arguments but the output."""
+
+    run_id: str
+    stage: Stage
+    settled: bool
+
+
+@router.post("/links", name="crud_print_record_link", status_code=status.HTTP_204_NO_CONTENT)
+async def record_link(body: LinkWrite, links: PrintLinksDep) -> None:
+    """Natural: a second sighting of the archive keeps the first link."""
+    await links.record(_subject(body.subject), body.link)
+
+
+@router.get("/links", name="crud_print_links_for")
+async def links_for(subject: str, links: PrintLinksDep) -> list[PrintLink]:
+    return await links.for_subject(_subject(subject))
+
+
+@router.get("/links/{archive_id}", name="crud_print_linked")
+async def linked(archive_id: int, links: PrintLinksDep) -> LinkedPrint | None:
+    return await links.linked(archive_id)
+
+
+@router.post("/sends", name="crud_print_record_sends", status_code=status.HTTP_204_NO_CONTENT)
+async def record_sends(body: SendsWrite, links: PrintLinksDep) -> None:
+    """Natural: a queue item recorded again keeps its first record."""
+    await links.record_sends(_subject(body.subject), body.sends)
+
+
+@router.get("/sends", name="crud_print_sends_for")
+async def sends_for(
+    subject: str, links: PrintLinksDep, run_id: str | None = None
+) -> list[PrintSend]:
+    """The subject's sends in the order recorded; only ``run_id``'s when given."""
+    if run_id is None:
+        return await links.sends_for(_subject(subject))
+    return await links.run_sends(_subject(subject), run_id)
+
+
+@router.post(
+    "/sends/{queue_item_id}/library-link",
+    name="crud_print_link_library",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def link_library(queue_item_id: int, body: LibraryLink, links: PrintLinksDep) -> None:
+    """Natural: the first archive the item reported is kept."""
+    await links.link_library(queue_item_id, body.archive_id, body.name)
+
+
+@router.post(
+    "/sends/{queue_item_id}/library-gone",
+    name="crud_print_library_gone",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def library_gone(queue_item_id: int, links: PrintLinksDep) -> None:
+    """Natural: it sets a flag."""
+    await links.library_gone(queue_item_id)
+
+
+def _last_prints(uploads: BambuddyUploadStore) -> OutputPrintStore:
+    # The pool the API's own `OutputStore.prints` is on (`api/deps.py`).
+    return OutputPrintStore(uploads.pool)
+
+
+@router.put(
+    "/last-prints/{output_id}",
+    name="crud_print_record_last_print",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_last_print(output_id: str, body: LastPrintWrite, uploads: UploadsDep) -> None:
+    """Natural: set by the output's key, so a resend leaves what one send left."""
+    await asyncio.to_thread(
+        _last_prints(uploads).record,
+        output_id,
+        queue_item_id=body.queue_item_id,
+        slice_job_id=body.slice_job_id,
+        project_id=body.project_id,
+        plates=body.plates,
+    )
+
+
+@router.put(
+    "/last-prints/{output_id}/lan",
+    name="crud_print_record_lan_last_print",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_lan_last_print(
+    output_id: str, body: LanLastPrintWrite, uploads: UploadsDep
+) -> None:
+    """Natural: recorded again for the same run it keeps the stage written since."""
+    await asyncio.to_thread(
+        _last_prints(uploads).record_lan,
+        output_id,
+        run_id=body.run_id,
+        printer=body.printer,
+        plates=body.plates,
+    )
+
+
+@router.put(
+    "/last-prints/{output_id}/lan-progress",
+    name="crud_print_record_lan_progress",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_lan_progress(output_id: str, body: LanProgressWrite, uploads: UploadsDep) -> None:
+    """Natural: it sets the run's stage and whether it settled."""
+    await asyncio.to_thread(
+        _last_prints(uploads).record_lan_progress,
+        output_id,
+        body.run_id,
+        stage=body.stage,
+        settled=body.settled,
+    )
 
 
 class EnsureBambuddy(BaseModel):
