@@ -310,6 +310,11 @@ class DraftView(BaseModel):
     #: The shop's shipping options, in its currency (`orders_currency`), from which the
     #: visitor picks one at submit (#5283, spec §9); one that ``ships`` needs an address.
     shipping_options: list[PublicShippingOption] = Field(default_factory=list)
+    #: The currency and minor exponent of ``shipping_options``' amounts: the shop's
+    #: ``orders_currency`` now, which is not ``currency`` for a cart made before the shop
+    #: changed it.
+    shipping_currency: str
+    shipping_minor_exponent: int
 
 
 class PublicShippingOption(BaseModel):

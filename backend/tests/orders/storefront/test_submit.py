@@ -92,9 +92,12 @@ def listing(api: TestClient) -> Listing:
 
 
 def rules(
-    *, options: tuple[ShippingOption, ...] = (), deposit: tuple[DepositRule, ...] = ()
+    *,
+    options: tuple[ShippingOption, ...] = (),
+    deposit: tuple[DepositRule, ...] = (),
+    currency: str = "USD",
 ) -> Any:
-    return lambda: OrderRules("USD", Decimal(0), False, deposit, options)
+    return lambda: OrderRules(currency, Decimal(0), False, deposit, options)
 
 
 def draft_of(
@@ -275,6 +278,22 @@ def test_the_draft_view_shows_the_shipping_options(
         {"id": "post", "label": "Post", "amount_minor": 700, "ships": True},
         {"id": "pickup", "label": "Pick up", "amount_minor": 0, "ships": False},
     ]
+    assert (draft["shipping_currency"], draft["shipping_minor_exponent"]) == ("USD", 2)
+
+
+def test_the_shipping_options_are_in_the_shops_currency_not_the_carts(
+    crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
+) -> None:
+    """The cart keeps the currency it was made in; the options are priced in the shop's
+    ``orders_currency`` now, so the view says which, with its minor exponent."""
+    draft = draft_of(crud, listing)
+    owner_lifecycle.rules = rules(options=(POST,), currency="JPY")
+    r = crud.get("/draft")
+    assert r.status_code == 200, r.text
+    view = r.json()
+    assert (view["currency"], view["minor_exponent"]) == ("USD", 2)
+    assert (view["shipping_currency"], view["shipping_minor_exponent"]) == ("JPY", 0)
+    assert view["id"] == draft["id"]
 
 
 def test_the_deposit_policy_applies(
@@ -416,6 +435,33 @@ def test_the_submit_is_the_customers_on_the_audit_line(
 def test_a_422_refusal_keeps_its_own_slug(slug: str) -> None:
     error = _refusal(LifecycleError(slug, f"{slug}: no", unprocessable=True))
     assert (error.status, error.type) == (422, f"{STOREFRONT_PROBLEMS}{slug}")
+
+
+@pytest.mark.parametrize(
+    ("slug", "own"),
+    [
+        ("order_submitted", "This order is sent already."),
+        ("draft_empty", "Your order is empty. Add something to it first."),
+        ("shipping_address_required", "This way of shipping needs your address."),
+    ],
+)
+def test_a_409_refusal_with_its_own_text_keeps_its_slug(slug: str, own: str) -> None:
+    error = _refusal(LifecycleError(slug, f"{slug}: no"))
+    assert (error.status, error.type, error.detail) == (409, f"{STOREFRONT_PROBLEMS}{slug}", own)
+
+
+@pytest.mark.parametrize(
+    "slug", ["payment_in_flight", "order_not_editable", "deposit_policy_currency", "anything_else"]
+)
+def test_every_other_409_refusal_is_draft_changed(slug: str) -> None:
+    """The fallback is deliberate: no other lifecycle refusal has a text of its own in the
+    spec, so a visitor reads "Load it again" and the slug stays out of the page."""
+    error = _refusal(LifecycleError(slug, f"{slug}: no"))
+    assert (error.status, error.type, error.detail) == (
+        409,
+        f"{STOREFRONT_PROBLEMS}draft_changed",
+        "Your order has changed. Load it again.",
+    )
 
 
 # -- a signed-in submit (#5283: the account from the CRUD side's session) ------------------
@@ -627,3 +673,36 @@ def test_an_expired_session_submits_as_anonymous(
     order = _orders(api).store.order(draft["id"])
     assert order is not None and order.customer_id != account.customer_id
     assert account_orders(api, account.id) == []
+
+
+def test_a_signed_in_submit_never_takes_a_customer_the_shop_archived(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """As the back office refuses a new order for an archived customer (`create_order`),
+    a signed-in submit makes a new customer, with the account's verified email as its
+    contact, and the account links to it: the archived customer gets no order."""
+    session, account = signed_in(api, "grace@example.com", None)
+    store = _orders(api).store
+    assert store.archive_customer(account.customer_id) is not None
+    draft = draft_of(crud, listing)
+    r = crud.post("/draft/submit", json=submit_body(draft), key="s1", session=session)
+    assert r.status_code == 200, r.text
+    order = store.order(draft["id"])
+    assert order is not None and order.submitted_at is not None
+    assert order.customer_id is not None and order.customer_id != account.customer_id
+    made = store.customer(order.customer_id)
+    assert made is not None and made.archived_at is None
+    assert made.display_name == "Ada"
+    assert [(c.kind, c.value) for c in made.contacts] == [("email", "grace@example.com")]
+    assert rows(api, "SELECT customer_id FROM storefront_accounts WHERE id = %s", account.id) == [
+        {"customer_id": order.customer_id}
+    ]
+    assert account_orders(api, account.id) == [order.id]
+    # The next signed-in submit takes the new customer: none is made again.
+    again = draft_of(crud, listing, key="a2")
+    customers = rows(api, "SELECT id FROM customers ORDER BY id")
+    r = crud.post("/draft/submit", json=submit_body(again), key="s2", session=session)
+    assert r.status_code == 200, r.text
+    second = store.order(again["id"])
+    assert second is not None and second.customer_id == order.customer_id
+    assert rows(api, "SELECT id FROM customers ORDER BY id") == customers
