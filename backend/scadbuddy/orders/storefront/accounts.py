@@ -17,12 +17,12 @@ Codes:
   10^23 or 2^78. A code is shown grouped, ``XXXX-XXXX-XXXX-XXXX`` (`request_code` returns
   it so), and read with case, spaces and hyphens ignored; the mail also carries a sign-in
   link, so nobody types it. It is single use and dies only when it is used or when
-  `CODE_TTL` (10 minutes) ends: no wrong guess, by anyone, ever spends it. At 78 bits a
+  `CODE_TTL` (an hour) ends: no wrong guess, by anyone, ever spends it. At 78 bits a
   per-code try count adds nothing to the bound below, and it let an attacker kill the
   owner's codes.
 - Only a digest is kept: sha256 over ``<row id>:<code>``. The row id salts it, so one
   table of digests does not read every row. It is not a keyed hash, but a 78-bit code
-  that lives 10 minutes cannot be found from its digest, and a key would need the KEK,
+  that lives an hour cannot be found from its digest, and a key would need the KEK,
   which a deployment may lack.
 - The digests are compared in constant time (`hmac.compare_digest`), against every live
   code of the address, with no early exit.
@@ -36,18 +36,19 @@ No address can be locked: nothing one client does stops another from signing in.
 - Mail to one address is capped (`CODES_PER_ADDRESS`, 20 an hour, counting every code
   made for it in the window from all clients). Past the cap `request_code` answers as
   usual, raising nothing, but makes no code and returns None, so no mail is sent. That is
-  not a lockout: every code already mailed stays good until it expires, whatever anyone
-  guesses, and each signs in from any client.
+  not a lockout: a code lives exactly as long as the cap's window (`CODE_TTL` is
+  `LIMIT_WINDOW`), so whenever the cap is full, every code it counts is still live in the
+  owner's inbox, whatever anyone guesses, and each signs in from any client.
 - There is no address-wide guess budget: it would be a lock.
 
 The guess bound. Wrong guesses are limited per client: `FAILURES_PER_CLIENT` (20) an hour
 here, by the client key above, and on the edge the bot check's failure limits (#5857: per
 IPv4 address or IPv6 /64, and per /24 or /48). A guess is compared with every live code
-of the address, and the cap bounds those too: at most 20 made in an hour, each living 10
-minutes, so at most 20 live. Each guess has a chance of at most 20 in 30^16 (4.3 *
-10^23), about 4.6 * 10^-23. At G = 2 * 10^5 guesses an hour (10^4 clients each at its
-limit, solving the bot check every time), that is about 10^-17 an hour, or 8 * 10^-14 a
-year, per address.
+of the address, and the cap bounds those too: at most 20 made in an hour, each living an
+hour, so at most 20 live. Each guess has a chance of at most 20 in 30^16 (4.3 * 10^23),
+about 4.6 * 10^-23. At G = 2 * 10^5 guesses an hour (10^4 clients each at its limit,
+solving the bot check every time), that is about 10^-17 an hour, or 8 * 10^-14 a year,
+per address.
 
 The bot check: whenever a site key is set, the route that asks for a code takes
 Turnstile with action ``sign_up``, and the route that verifies one with ``sign_in`` (the
@@ -98,13 +99,14 @@ CODE_ALPHABET: Final = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE_LENGTH: Final = 16
 #: The code as shown: groups of this many characters, joined by hyphens.
 CODE_GROUP: Final = 4
-CODE_TTL: Final = timedelta(minutes=10)
 CODES_PER_ADDRESS_CLIENT: Final = 3
 CODES_PER_CLIENT: Final = 10
 #: Codes made for one address in `LIMIT_WINDOW` from all clients: the mail cap.
 CODES_PER_ADDRESS: Final = 20
 FAILURES_PER_CLIENT: Final = 20
 LIMIT_WINDOW: Final = timedelta(hours=1)
+#: A code lives as long as the mail cap's window, so a full cap's codes are all live.
+CODE_TTL: Final = LIMIT_WINDOW
 #: How long a code or failure row is kept: past the limits' window.
 KEEP_ROWS: Final = timedelta(days=1)
 SESSION_TTL: Final = timedelta(days=30)

@@ -200,6 +200,25 @@ def test_others_requests_and_guesses_never_lock_the_owner_out(conn: Conn) -> Non
     assert verify(conn, inbox[0], client="192.0.2.77") is not None
 
 
+def test_a_full_caps_codes_are_live_until_the_cap_frees(conn: Conn) -> None:
+    count = math.ceil(CODES_PER_ADDRESS / CODES_PER_ADDRESS_CLIENT)
+    inbox = [
+        code
+        for n in range(count)
+        for _ in range(CODES_PER_ADDRESS_CLIENT)
+        if (code := request_code(conn, EMAIL, f"198.51.100.{n}")) is not None
+    ]
+    assert len(inbox) == CODES_PER_ADDRESS
+    # 59 minutes on: the cap is still full, so the owner gets no new code ...
+    conn.execute(
+        "UPDATE storefront_sign_in_codes SET created_at = created_at - interval '59 minutes',"
+        " expires_at = expires_at - interval '59 minutes'"
+    )
+    assert request_code(conn, EMAIL, CLIENT) is None
+    # ... but every code the cap counts is still live, so an inbox code signs in.
+    assert verify(conn, inbox[0], client=CLIENT) is not None
+
+
 def test_the_mail_cap_makes_no_code_and_raises_nothing(conn: Conn) -> None:
     others = [code_for(conn, client=f"198.51.100.{n}") for n in range(CODES_PER_ADDRESS)]
     assert len({*others}) == CODES_PER_ADDRESS
