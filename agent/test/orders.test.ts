@@ -75,6 +75,8 @@ describe('order tools (#4249)', () => {
       'order_deposit_waive',
       'order_balance_waive',
       'order_shipping_option_set',
+      'order_notify_customer',
+      'order_notify_customer_send',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -108,6 +110,8 @@ describe('order tools (#4249)', () => {
       order_deposit_waive: 'write',
       order_balance_waive: 'outward',
       order_shipping_option_set: 'write',
+      order_notify_customer: 'read',
+      order_notify_customer_send: 'outward',
     })
   })
 
@@ -155,6 +159,7 @@ describe('order tools (#4249)', () => {
           totals: { total_minor: 4250 },
         }),
       ),
+      http.get(`${BACKEND}/api/v1/settings`, () => HttpResponse.json({ orders_customer_messaging: null })),
       http.get(`${BACKEND}/api/v1/customers/${CUSTOMER}`, () =>
         HttpResponse.json({
           display_name: 'Ada',
@@ -176,6 +181,9 @@ describe('order tools (#4249)', () => {
       subject: 'Order ORD-2026-7 accepted',
       text: 'Hello Ada,\n\nWe have accepted order ORD-2026-7 (42.50 USD) and will start on it.\n\nThanks!',
       sent: false,
+      // No messaging plugin is bound (#5660): a person sends it.
+      channel: null,
+      send_ready: false,
     })
   })
 

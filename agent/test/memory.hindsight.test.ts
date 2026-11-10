@@ -16,6 +16,7 @@ import {
   type MemoryHooksOptions,
   hindsightTarget,
   RECALL_SPAN,
+  RECALL_TIMEOUT_MS,
   retryQueryLength,
 } from '../src/memory/hindsight.js'
 import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
@@ -327,6 +328,20 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(performance.now() - started).toBeLessThan(2_000)
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatch(/recall from bank scadbuddy failed \(timed out after 100 ms\); no memories were injected/)
+  })
+
+  // #5866: prod's bank answered a recall in 4.2–8.8 s (p50 4.9 s), so the old 3 s
+  // budget gave up on nearly every turn. A recall just past that old budget must still
+  // inject its memories under the default one (3.2 s keeps the test's real wait short).
+  // The budget must also cover the slowest prod recall measured, 8.8 s.
+  it('waits past the old 3 s budget by default for a slow recall (#5866)', { timeout: 15_000 }, async () => {
+    expect(RECALL_TIMEOUT_MS).toBeGreaterThanOrEqual(8_800)
+    fake.respond = () => ({ delayMs: 3_200, json: { results: [{ text: 'The user prints in PETG.', type: 'world' }] } })
+    const h = hooks()
+    expect(h.hooks.UserPromptSubmit?.[0]?.timeout).toBeGreaterThan(RECALL_TIMEOUT_MS / 1000)
+    const out = await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+    expect(logs).toEqual([])
+    expect(JSON.stringify(out)).toContain('The user prints in PETG.')
   })
 
   it('injects nothing and logs when recall fails, with the plugin secret redacted', async () => {

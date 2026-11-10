@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { PINNED_SHUTDOWN_FORCE_MS, PINNED_SHUTDOWN_GRACE_MS, stopAfter } from '../src/temporal/session/hostWorkers.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PINNED_SHUTDOWN_FORCE_MS, PINNED_SHUTDOWN_GRACE_MS, startHostWorkers, stopAfter } from '../src/temporal/session/hostWorkers.js'
+import { AgentWorker, type AgentWorkerOptions } from '../src/temporal/worker.js'
 
 // #5862 review: the pinned host worker runs this replica's own BridgeCalls, so a draining turn's
 // browser_* call needs it until the turn ends. It must stop only once the drain settles.
@@ -41,5 +42,33 @@ describe('stopAfter', () => {
   it("ends inside shutdown()'s 10 s deadline with a margin (#5881 review)", () => {
     expect(PINNED_SHUTDOWN_GRACE_MS).toBeLessThan(PINNED_SHUTDOWN_FORCE_MS)
     expect(PINNED_SHUTDOWN_FORCE_MS).toBeLessThanOrEqual(8_000)
+  })
+})
+
+describe('startHostWorkers', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function pinnedOptions(extra: { shutdownGraceMs?: number } = {}): AgentWorkerOptions {
+    const started: AgentWorkerOptions[] = []
+    vi.spyOn(AgentWorker, 'start').mockImplementation((options) => {
+      started.push(options)
+      return { stop: async () => {} } as unknown as AgentWorker
+    })
+    startHostWorkers({ address: 'localhost:7233', namespace: 'test', identity: 'pod-a', pinned: {}, ...extra })
+    const pinned = started.find((o) => o.taskQueue === 'agent-tools.pod-a')
+    expect(pinned).toBeDefined()
+    return pinned!
+  }
+
+  it('gives the pinned worker the bounded grace and force times (#5886 review)', () => {
+    const pinned = pinnedOptions()
+    expect(pinned.shutdownGraceMs).toBe(PINNED_SHUTDOWN_GRACE_MS)
+    expect(pinned.shutdownForceMs).toBe(PINNED_SHUTDOWN_FORCE_MS)
+  })
+
+  it('keeps a window between the cancel and the force when a caller sets a longer grace', () => {
+    const pinned = pinnedOptions({ shutdownGraceMs: 9_000 })
+    expect(pinned.shutdownGraceMs).toBe(9_000)
+    expect(pinned.shutdownForceMs).toBe(9_000 + PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS)
   })
 })

@@ -215,6 +215,31 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
   })
 
+  it('reads no more once the wait reaches the time limit, even when the timer fires before the clock does', async () => {
+    // A timer can fire a millisecond or two before Date.now() shows its delay has passed
+    // (Node: 5 of 200 timers, measured for #5875). Fired 5 ms early on purpose here.
+    const realSetTimeout = globalThis.setTimeout
+    const early = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation(((handler: () => void, ms?: number) => realSetTimeout(handler, Math.max(0, (ms ?? 0) - 5))) as typeof setTimeout)
+    try {
+      let polls = 0
+      server.use(
+        http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),
+        http.get('/api/store/v1/renders/:id', () => {
+          polls += 1
+          return HttpResponse.json({ type: `${PROBLEMS}rate_limited`, status: 429, detail: 'Slow down.' }, { status: 429, headers: { 'Retry-After': '99999' } })
+        }),
+      )
+      const { user } = show('l1', { firstMs: 20, maxMs: 40, limitMs: 400 })
+      await user.click(await screen.findByRole('button', { name: 'Render' }))
+      expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
+      expect(polls).toBe(1)
+    } finally {
+      early.mockRestore()
+    }
+  })
+
   it('stops reading a render once the page is gone', async () => {
     let polls = 0
     server.use(

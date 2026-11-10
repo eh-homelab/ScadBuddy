@@ -102,6 +102,7 @@ import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { pluginMessaging } from './orders/messaging.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
@@ -120,7 +121,7 @@ import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
-import { Runtime } from '@temporalio/worker'
+import { type NativeConnection, Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
@@ -461,16 +462,18 @@ const workspaceBytesStatus = workspace
 // Once migrations have applied and the backend answers: say where the files go (once, the cause
 // when refused), and move the files written before #4789 (or while the backend kept no blobs) to
 // blobs; what is left is retried at the next start. The API pod's sidecar can start before the
-// backend container answers (#5868): until /healthz answers this waits, logged once, with
-// back-off (backendUp.ts); writes and reads ask the backend each time and need no wait.
+// backend container answers (#5868): until /healthz answers this waits with back-off
+// (backendUp.ts), logged once as waiting, or as an error once per kind when the backend does not
+// answer for another reason (#5889); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
       if (!ready) return
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
-        unreachable: (err) => err instanceof WorkspaceBlobError && err.unreachable,
+        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachable : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
+        error: (message) => console.error(`workspace files: ${message}`),
       })
       // A status read while the backend was down would be served for up to a minute.
       workspaceBytes = undefined
@@ -839,6 +842,26 @@ const agentSecrets = toolSecrets({
   ...(pluginPackages ? { packages: { store: pluginPackages, installer: packageInstaller } } : {}),
 })
 toolServices.secrets = agentSecrets.secrets
+// The messaging plugin a customer notice goes through (#5660, orders/messaging.ts): the
+// bound remote MCP server through the loopback forwarder, as a turn reaches it, in the one
+// services object every path shares (an in-process turn, /mcp, a ToolCall, a flow's call).
+toolServices.messaging = pluginMessaging({
+  remote: durableRemotePlugins,
+  ...(pluginPackages
+    ? {
+        packages: async () => {
+          const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
+          try {
+            const forwarded = await forwardPackageServers(loaded.loaded, pluginForwarder, undefined, { access: accessResolver })
+            return { plugins: forwarded.plugins, servers: forwarded.servers, release: () => (forwarded.release(), loaded.release()) }
+          } catch (err) {
+            loaded.release()
+            throw err
+          }
+        },
+      }
+    : {}),
+})
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -904,9 +927,23 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+// This process's agent-tools worker (below), once it starts: a turn here starts its calls eagerly on
+// that worker's connection (activityProjection.ts `ToolCallStarterDeps`, #5865).
+const eager: { worker: AgentWorker | undefined } = { worker: undefined }
+const eagerClients = new WeakMap<NativeConnection, Client>()
+const eagerClient = (): Client | undefined => {
+  const connection = eager.worker?.connection()
+  if (!connection) return undefined
+  let client = eagerClients.get(connection)
+  if (!client) {
+    client = new Client({ connection, namespace: config.temporalNamespace, ...(dataConverter ? { dataConverter } : {}) })
+    eagerClients.set(connection, client)
+  }
+  return client
+}
 if (temporalClient && temporal) {
   const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
-  toolCallStart = toolCallStarter(results)
+  toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
 }
@@ -987,7 +1024,13 @@ const temporalWorker =
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
-        // agent-tools' tasks, whoever schedules them, only to the current build's workers.
+        // agent-tools' tasks, whoever schedules them, only to the current build's workers. A ToolCall
+        // started eagerly (`eager`, above) asks for its first workflow task on this replica's worker
+        // instead, and its activity too when the call is not pinned and the worker has a free slot.
+        // Temporal grants that to a build a later one has superseded too (an old replica during a
+        // rollout): the old build runs the call's first task and activity (measured on a dev server,
+        // Server 1.32.0, test/toolCallLatency.temporal.test.ts `SUPERSEDED`). A call it declines goes
+        // through matching to the current build; the call's span says which (`scadbuddy.eager`).
         ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
@@ -995,6 +1038,7 @@ const temporalWorker =
         },
       })
     : undefined
+eager.worker = temporalWorker
 // AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
 // as agent-tools is, else unversioned like the host queues. `session_settings` is a local activity, so it
@@ -1206,6 +1250,8 @@ const app = !role.http
   // Claude credential and every plugin secret, as a turn's upload tools search for them.
   // Read fresh, not through the 30 s cache: a pick is rare, and a secret stored a moment ago counts.
   workspaceSecrets: agentSecrets.fresh,
+  // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
+  orderMessaging: toolServices.messaging,
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
@@ -1380,6 +1426,8 @@ async function stop(): Promise<void> {
     closeDatabase: database
       ? async () => {
           // The pinned host worker's running activities, bounded by its 8 s force time, before the pool closes.
+          // Bounded, not prevented: an activity that ignores its cancel is abandoned at the force time but
+          // runs on in-process, so it may still meet the closed pool (and fail) before process.exit.
           await pinnedStopped
           sessionEvents?.close()
           await database.close()

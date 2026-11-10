@@ -150,9 +150,17 @@ export function CustomizePage({ id, timing = POLL }: { id: string; timing?: Poll
     }
     while (!terminal(next)) {
       if (timedOut()) return null
-      // Never past the time limit, however long the edge asked to wait.
-      await wait(Math.min(delay, Math.max(0, started + timing.limitMs - Date.now())))
-      if (!alive.current || timedOut()) return null
+      // Never past the time limit, however long the edge asked to wait. A wait cut to the
+      // time left ends at the limit: a timer can fire a millisecond before Date.now()
+      // shows it (#5875), so that wait stops the reads without asking the clock.
+      const left = started + timing.limitMs - Date.now()
+      await wait(Math.min(delay, Math.max(0, left)))
+      if (!alive.current) return null
+      if (delay >= left) {
+        setRenderError(SLOW)
+        return null
+      }
+      if (timedOut()) return null
       try {
         next = await store.render(next.id)
         if (!alive.current) return null

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from scadbuddy.orders.lifecycle import LifecycleError, check_submitted
@@ -79,17 +80,11 @@ class OrderMessages:
                 f"SELECT {_COLUMNS} FROM order_messages WHERE idempotency_key = %s", (key,)
             ).fetchone()
             if existing is not None:
-                found = OrderMessage.model_validate(existing)
-                if found.order_id != order.id:
-                    raise LifecycleError(
-                        "idempotency_key_reused",
-                        "this Idempotency-Key already claimed a message of another order",
-                    )
-                return found, False
+                return self._same_order(OrderMessage.model_validate(existing), order), False
             check_submitted(order)
             episode = self._episode(conn, order.id)
             if body.resend_of is not None:
-                self._resendable(conn, order, body.resend_of)
+                self._resendable(conn, order, body.resend_of, body.template)
             else:
                 told = self._told(conn, order.id, body.template, episode)
                 if told is not None:
@@ -99,25 +94,36 @@ class OrderMessages:
                         f"(message {told.id}, {told.status}) since its last status change; "
                         "name it in resend_of to send it again",
                     )
-            row = conn.execute(
-                "INSERT INTO order_messages (order_id, template, source, tool, recipients,"
-                " subject, text, status, idempotency_key, episode, resend_of, by)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, 'sending', %s, %s, %s, %s)"
-                f" RETURNING {_COLUMNS}",
-                (
-                    order.id,
-                    body.template,
-                    body.source,
-                    body.tool,
-                    Jsonb([r.model_dump() for r in body.recipients]),
-                    body.subject,
-                    body.text,
-                    key,
-                    episode,
-                    body.resend_of,
-                    Jsonb(by.model_dump(mode="json")),
-                ),
-            ).fetchone()
+            try:
+                # A savepoint: another order's claim may commit the same key between the
+                # read above and this insert (this order's lock does not cover it).
+                with conn.transaction():
+                    row = conn.execute(
+                        "INSERT INTO order_messages (order_id, template, source, tool,"
+                        " recipients, subject, text, status, idempotency_key, episode,"
+                        " resend_of, by)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, 'sending', %s, %s, %s, %s)"
+                        f" RETURNING {_COLUMNS}",
+                        (
+                            order.id,
+                            body.template,
+                            body.source,
+                            body.tool,
+                            Jsonb([r.model_dump() for r in body.recipients]),
+                            body.subject,
+                            body.text,
+                            key,
+                            episode,
+                            body.resend_of,
+                            Jsonb(by.model_dump(mode="json")),
+                        ),
+                    ).fetchone()
+            except UniqueViolation:
+                taken = conn.execute(
+                    f"SELECT {_COLUMNS} FROM order_messages WHERE idempotency_key = %s", (key,)
+                ).fetchone()
+                assert taken is not None
+                return self._same_order(OrderMessage.model_validate(taken), order), False
             assert row is not None
             message = OrderMessage.model_validate(row)
             self._event(conn, order, by, "message.sending", message, resend_of=body.resend_of)
@@ -195,7 +201,20 @@ class OrderMessages:
         ).fetchone()
         return None if row is None else OrderMessage.model_validate(row)
 
-    def _resendable(self, conn: Conn, order: Order, resend_of: str) -> None:
+    @staticmethod
+    def _same_order(found: OrderMessage, order: Order) -> OrderMessage:
+        if found.order_id != order.id:
+            raise LifecycleError(
+                "idempotency_key_reused",
+                "this Idempotency-Key already claimed a message of another order",
+            )
+        return found
+
+    def _resendable(
+        self, conn: Conn, order: Order, resend_of: str, template: NotifyTemplate
+    ) -> None:
+        """A message sent again is one of the order's, of the same template, and not in
+        flight (a stale ``sending`` row reads ``unknown`` and may be sent again by name)."""
         row = conn.execute(
             f"SELECT {_COLUMNS} FROM order_messages WHERE id = %s AND order_id = %s",
             (resend_of, order.id),
@@ -203,6 +222,12 @@ class OrderMessages:
         if row is None:
             raise LifecycleError(
                 "resend_of", f"no message {resend_of} of {order.label}", unprocessable=True
+            )
+        if row["template"] != template:
+            raise LifecycleError(
+                "resend_of",
+                f"message {resend_of} is '{row['template']}', not '{template}'",
+                unprocessable=True,
             )
         if row["status"] == "sending":
             raise LifecycleError(

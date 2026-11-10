@@ -716,12 +716,12 @@ A turn that loads an allowed pin also gets two more things:
   `SESSION_BUILTINS`) are never among them: every session turn gets those from the agent's
   `builtin` server (`builtins/server.ts` `classicBuiltinServer`, `mcp__builtin__<Name>`),
   whether or not a package names them, each at its `builtin:claude-code` item's access
-  unless that item is `off` (#5870, [operating.md](operating.md) §9). So `CronCreate`,
-  `ScheduleWakeup` and `Workflow`, at `write` by default, run with no approval for any
-  owner whose tiers hold `write`, an `/mcp` agent principal too. They start turns or agents
-  that spend after this one, with no person in the loop. Each one spends from the session's
-  budget, and a session keeps at most 10 background tasks. An admin who wants a person to
-  approve each one sets its item to `outward`. Claude Code's own
+  unless that item is `off` (#5870, [operating.md](operating.md) §9). `CronCreate`,
+  `ScheduleWakeup` and `Workflow` run at `write` in every turn (they were `outward` while only
+  a package could name them). So an MCP-origin principal that holds `write` can schedule later
+  turns, or a Workflow's agents, that spend the session's budget with no human approval. A
+  session keeps at most 10 background tasks. An admin who wants a person to approve each call
+  sets those items to `outward` in Settings → Tools & plugins. Claude Code's own
   `WebFetch` is never offered (#2684): it fetches inside Claude Code, outside the agent's
   egress checks, and resolves the name again as it connects. The agent's (`builtins/web.ts`)
   connects only to the addresses its check passed, on every hop, and refuses the pod's

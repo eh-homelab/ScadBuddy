@@ -3,6 +3,8 @@ the claim before a send, its outcome, a person's "Mark sent", and the stale rule
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import psycopg
@@ -87,6 +89,38 @@ def test_a_key_of_another_order_is_refused(client: TestClient, order_id: str) ->
     assert reused.json()["type"].endswith("/idempotency_key_reused")
 
 
+def test_a_key_another_order_takes_at_the_same_time_is_refused(
+    client: TestClient, order_id: str, pg_conninfo: str
+) -> None:
+    other = create_order(client, create_customer(client)["id"])
+    answers: list[Any] = []
+    with psycopg.connect(pg_conninfo) as rival:
+        # The other order's claim has written the key and not committed yet.
+        rival.execute(
+            "INSERT INTO order_messages (order_id, template, source, tool, recipients, text,"
+            " status, idempotency_key, by) VALUES (%s, 'ready', 'remote:mail', 'send_email',"
+            " '[]', 'x', 'sending', 'k1', '{\"kind\": \"browser\"}')",
+            (other["id"],),
+        )
+        racing = threading.Thread(target=lambda: answers.append(claim(client, order_id, "k1")))
+        racing.start()
+        with psycopg.connect(pg_conninfo, autocommit=True) as watch:
+            for _ in range(200):
+                waiting = watch.execute(
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'"
+                ).fetchone()
+                if waiting is not None and waiting[0] > 0:
+                    break
+                time.sleep(0.05)
+        rival.commit()
+        racing.join(timeout=10)
+
+    (reused,) = answers
+    assert reused.status_code == 409, reused.text
+    assert reused.json()["type"].endswith("/idempotency_key_reused")
+    assert client.get(f"/api/v1/orders/{order_id}/messages").json() == []
+
+
 def test_one_template_is_told_once_per_status_change(client: TestClient, order_id: str) -> None:
     first = claim(client, order_id, "k1").json()
     check = client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "ready"})
@@ -141,6 +175,20 @@ def test_resend_names_a_finished_message_of_the_order(client: TestClient, order_
     assert again.json()["resend_of"] == first["id"]
 
 
+def test_resend_keeps_the_template_of_the_message(client: TestClient, order_id: str) -> None:
+    first = claim(client, order_id, "k1").json()
+    client.post(
+        f"/api/v1/orders/{order_id}/messages/{first['id']}/outcome",
+        json={"status": "failed", "reason": "transport"},
+        headers=AGENT,
+    )
+    other = claim(client, order_id, "k2", claim_body("shipped", resend_of=first["id"]))
+    assert other.status_code == 422
+    assert other.json()["errors"][0]["loc"] == ["body", "resend_of"]
+    assert "'ready'" in other.json()["detail"]
+    assert len(client.get(f"/api/v1/orders/{order_id}/messages").json()) == 1
+
+
 def test_an_outcome_is_taken_until_the_message_is_final(client: TestClient, order_id: str) -> None:
     first = claim(client, order_id, "k1").json()
     path = f"/api/v1/orders/{order_id}/messages/{first['id']}/outcome"
@@ -190,11 +238,18 @@ def test_a_stale_send_reads_unknown_and_is_never_sent_again(
     # A new call is refused: the customer may have been told.
     assert claim(client, order_id, "k2").json()["type"].endswith("/already_notified")
     assert len(client.get(f"/api/v1/orders/{order_id}/messages").json()) == 1
+    # A send that names it is not refused as in flight: it reads unknown.
+    resent = claim(client, order_id, "k3", claim_body(resend_of=first["id"]))
+    assert resent.status_code == 201, resent.text
 
     marked = client.post(f"/api/v1/orders/{order_id}/messages/{first['id']}/mark-sent")
     assert marked.status_code == 200, marked.text
     assert marked.json()["status"] == "sent"
-    assert events(client, order_id) == ["message.sending", "message.marked_sent"]
+    assert events(client, order_id) == [
+        "message.sending",
+        "message.sending",
+        "message.marked_sent",
+    ]
     refused = client.post(f"/api/v1/orders/{order_id}/messages/{first['id']}/mark-sent")
     assert refused.json()["type"].endswith("/message_not_unknown")
 
@@ -246,6 +301,12 @@ def test_the_binding_is_a_setting(client: TestClient) -> None:
     ("change", "why"),
     [
         ({"fixed_args": {"smtp_password": "x"}}, "secret"),
+        ({"fixed_args": {"apiKey": "x"}}, "secret"),
+        ({"fixed_args": {"auth": "x"}}, "secret"),
+        ({"fixed_args": {"x_token": "x"}}, "secret"),
+        ({"fixed_args": {"apitoken": "x"}}, "secret"),
+        ({"fixed_args": {"smtppass": "x"}}, "secret"),
+        ({"fixed_args": {"privatekey": "x"}}, "secret"),
         ({"fixed_args": {"body": "x"}}, "mapped"),
         ({"args": {"to": "to", "text": "to"}}, "two fields"),
         ({"source": "stdio:mail"}, "source"),
@@ -256,3 +317,10 @@ def test_a_bad_binding_is_refused(client: TestClient, change: dict[str, Any], wh
         "/api/v1/settings", json={"orders_customer_messaging": {**BINDING, **change}}
     )
     assert refused.status_code == 422, why
+
+
+@pytest.mark.parametrize("key", ["author", "keyword", "monkey", "passenger", "reply_to"])
+def test_a_word_that_holds_a_secret_word_is_no_secret(client: TestClient, key: str) -> None:
+    binding = {**BINDING, "fixed_args": {key: "x"}}
+    saved = client.put("/api/v1/settings", json={"orders_customer_messaging": binding})
+    assert saved.status_code == 200, saved.text
