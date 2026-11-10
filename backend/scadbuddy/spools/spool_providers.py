@@ -24,17 +24,23 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from scadbuddy.core.components import Components
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import SpoolSnapshot
 from scadbuddy.spools.native import NativeSpoolStore
-from scadbuddy.spools.providers import ProviderCore, SpoolProvider, SpoolProviderBuild
+from scadbuddy.spools.providers import (
+    ProviderCore,
+    SettingsOnly,
+    SpoolProvider,
+    SpoolProviderBuild,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.bambuddy.follow import ReadHook
     from scadbuddy.bambuddy.progress import PrintProgress
+    from scadbuddy.core.components import Core
     from scadbuddy.spools.component import Spools
 
 logger = logging.getLogger(__name__)
@@ -91,7 +97,8 @@ def native_use_hook(spools: Spools) -> ReadHook:
     run's print has settled, each of its starts that ended ``done`` takes its grams off
     its native spools (`NativeSpoolStore.settle_uses`), once whichever reader settles it
     first, and the records are re-cached for the overlay. Advisory: a failure is logged,
-    never raised into the follow. Reads and writes ScadBuddy's Postgres only."""
+    never raised into the follow. Reads and writes ScadBuddy's Postgres only: on the print
+    worker through the API's CRUD routes (`crud/print.py` `RemoteNativeSpools`, #5298)."""
 
     async def hook(run_subject: str, progress: PrintProgress) -> None:
         if progress.route != "lan" or not progress.settled or progress.run_id is None:
@@ -113,7 +120,10 @@ def native_use_hook(spools: Spools) -> ReadHook:
 
 
 def _build(core: ProviderCore, components: Components | None) -> SpoolProvider:
-    return NativeProvider(NativeSpoolStore(core.settings_store.pool))
+    # The print worker's spools are its CRUD routes' (#5298 Task 31); the API's are SQL.
+    if isinstance(core, SettingsOnly):
+        return NativeProvider(core.native_spools)
+    return NativeProvider(NativeSpoolStore(cast("Core", core).settings_store.pool))
 
 
 SPOOL_PROVIDERS: list[SpoolProviderBuild] = [_build]

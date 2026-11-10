@@ -32,9 +32,9 @@ from temporalio.runtime import Runtime
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
-from scadbuddy.auth.caller_grants import open_for_caller
 from scadbuddy.auth.service_credentials import (
     ServiceAuth,
+    ServiceCredentialConfigError,
     exchange_source,
     token_source,
 )
@@ -65,7 +65,10 @@ from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteEvents,
+    RemoteHeldPresets,
     RemoteLanImports,
+    RemoteNativeSlices,
+    RemoteNativeSpools,
     RemoteOutcomes,
     RemoteOutputPrints,
     RemotePrinterStore,
@@ -75,6 +78,7 @@ from scadbuddy.crud.print import (
     RemoteReports,
     RemoteReprints,
     RemoteSettingsStore,
+    RemoteSpoolStore,
     RemoteUploadStore,
 )
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
@@ -103,7 +107,6 @@ from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import (
     RenderStoreSettings,
-    SettingsStore,
     settings_kek,
 )
 from scadbuddy.print_library.reads import LibraryReads
@@ -119,15 +122,11 @@ from scadbuddy.rack.usage import lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
-from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
-from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.spools.component import Spools
-from scadbuddy.spools.native import NativeSpoolStore
-from scadbuddy.spools.providers import SettingsOnly, SplitSettings, discover_providers
+from scadbuddy.spools.providers import SettingsOnly, discover_providers
 from scadbuddy.spools.spool_providers import native_use_hook
-from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store.bambuddy import StoreSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
@@ -1202,17 +1201,15 @@ async def run_inprocess_worker(
 
 @dataclass
 class PrintWorkerDeps:
-    """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres and the
-    API's internal URL. It mounts no data volume and runs no template code. The settings,
-    the Bambuddy key among them, its runs, their outcomes, its operations and its events
-    go through the API's CRUD routes (#5298); it does not LISTEN."""
+    """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): the API's internal
+    URL, and no Postgres pool. It mounts no data volume and runs no template code. Every
+    store it reads or writes goes through the API's CRUD routes (#5298), and it does not
+    LISTEN."""
 
     #: The settings, read through ``crud``.
     settings_store: RemoteSettingsStore
     #: The client of the API's CRUD routes.
     crud: CrudClient
-    #: The worker's own pool, on its role (`open_for_caller`); no settings are read here.
-    database: SettingsStore
     #: Its events, posted to the API (#5298): it does not LISTEN.
     events: RemoteEvents
     outputs: RemoteOutputs
@@ -1241,7 +1238,6 @@ class PrintWorkerDeps:
         await self.events.aclose()
         await asyncio.to_thread(self.settings_store.close)
         await self.crud.aclose()
-        await asyncio.to_thread(self.database.close)
 
 
 class ApiUrlMissingError(ValueError):
@@ -1253,26 +1249,37 @@ async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
 
 
 def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> PrintWorkerDeps:
-    """The print worker's stores, over the API's database and its internal routes. The
-    Bambuddy settings, key included, are read through the API's CRUD route on every use,
-    and the runs, outcomes, operations, events, uploads, slices, background slices,
-    project records, print links, sends, outputs' last prints, printer rows, LAN reports,
-    access codes and the rack hotends' usage go through its CRUD routes (#5298).
-    ``crud``, the client of those routes, defaults to one with the worker's credential."""
+    """The print worker's stores, over the API's internal routes, with no Postgres pool
+    (#5298). The Bambuddy settings, key included, are read through the API's CRUD route on
+    every use, and the runs, outcomes, operations, events, uploads, slices, background
+    slices, project records, print links, sends, outputs' last prints, printer rows, LAN
+    reports, access codes, the rack hotends' usage, the spools, ScadBuddy's own spools,
+    the kept presets and a native slice's start go through its CRUD routes. ``crud``, the
+    client of those routes, defaults to one with the worker's credential, which is
+    exchanged for its proof, or read from its view while it has a database URL and no
+    proof (`token_source`): that view is the one thing the URL is still read for."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for --queue bambuddy: the print worker"
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
+    if (
+        settings.service_token_file is None
+        and settings.service_bootstrap_file is None
+        and not settings.database_url
+    ):
+        raise ServiceCredentialConfigError(
+            "SCADBUDDY_SERVICE_TOKEN_FILE (or SCADBUDDY_SERVICE_BOOTSTRAP_FILE outside"
+            " Kubernetes) is required for --queue bambuddy: it exchanges that proof for its"
+            " service credential; without one, SCADBUDDY_DATABASE_URL names its credential's"
+            " view (#5298)"
+        )
     metrics = worker_metrics(settings, "print")
-    database = SettingsStore(settings)
-    # #5210: on a role of its own, wait for the API's migrations and grants.
-    open_for_caller(database, "print")
-    pool = database.pool
     # #4975 phase 4: the print worker's service credential on the internal routes:
     # exchanged for its proof when one is configured (#5494), else read from its own view
-    # and unsealed with the KEK (none without one).
+    # and unsealed with the KEK (none without one). The view is the only SQL it may read:
+    # every store below goes through the API's CRUD routes, so it holds no pool (#5298).
     credential = ServiceAuth(
         token_source("print", settings, settings_kek(settings.secret_key_file))
     )
@@ -1355,9 +1362,12 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # A native run's plan lays the providers' records over its trays (#4551): the same
     # providers the API discovers, over this worker's settings. Its follow takes what a
     # native print used off ScadBuddy's own spools (#4643).
+    # The spools, ScadBuddy's own among them, through the API (#5298 Task 31): no pool.
     spools = Spools(
-        store=SpoolStore(pool),
-        providers=discover_providers(SettingsOnly(SplitSettings(settings_store, pool)), None),
+        store=RemoteSpoolStore(crud),
+        providers=discover_providers(
+            SettingsOnly(settings_store, RemoteNativeSpools(blocking)), None
+        ),
     )
     outcomes = RemoteOutcomes(crud)
     follower = Follower(
@@ -1382,7 +1392,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
     # with the kept copy of Bambuddy's local presets (#4645).
     native = native_slice_starter(
-        settings, Profiles.installed(settings.slicer_profiles_dir, held=HeldPresetStore(pool))
+        settings,
+        Profiles.installed(settings.slicer_profiles_dir, held=RemoteHeldPresets(crud)),
     )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
@@ -1394,7 +1405,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         reprints=RemoteReprints(crud),
         archive_cache=ArchiveCache(),
         library=partial(_given, library),
-        native_slices=NativeSliceStore(pool),
+        # A native slice's start runs whole on the API, under its lock (#5298 Task 31).
+        native_slices=RemoteNativeSlices(crud),
         native=native,
         # A native printer's background slice is decided on its registry row, as the
         # run is (plan 2026-10-18 D2).
@@ -1430,13 +1442,12 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             rack=rack,
             # A run's next plate copy waits on the printer's report (#4541).
             reports=reports,
-            native_spools=NativeSpoolStore(pool),
+            native_spools=RemoteNativeSpools(blocking),
         )
     )
     return PrintWorkerDeps(
         settings_store=settings_store,
         crud=crud,
-        database=database,
         events=events,
         outputs=outputs,
         rack=rack,
@@ -1494,6 +1505,7 @@ PRINT_CRUD_AREAS = frozenset(
         "lan-imports",
         "printers",
         "rack",
+        "spools",
     }
 )
 
@@ -1737,7 +1749,7 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
 
 def main() -> None:
     queue = parse_queue()
-    settings = NoDatabaseSettings() if queue in ("render", "projects") else Settings()
+    settings = NoDatabaseSettings()
     configure_logging(settings.log_level)
     # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
     if queue not in SERVICE_NAMES:

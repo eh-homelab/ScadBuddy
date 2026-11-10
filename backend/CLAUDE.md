@@ -10,9 +10,12 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The print worker connects as a
-role of its own, with the grant list in `auth/caller_grants.py` (`PRINT_GRANTS`, and
-`AGENT_GRANTS` for the agent). The projects and render workers have no database client
+database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
+`auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
+Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
+empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it, and
+the worker still reads its credential's view with `SCADBUDDY_DATABASE_URL` when it has no
+proof to exchange (`token_source`). The projects and render workers have no database client
 (#5298): they reach their data through CRUD routes. The projects worker has no grant
 list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
 every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
@@ -454,7 +457,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `exchange_source`, and refuses the local store (`LocalStoreRefusedError`, plan D11). `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
+  volume and no Postgres pool, `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`,
+  `NoDatabaseSettings`, `tests/test_print_worker_nodb.py`); it starts with
+  `SCADBUDDY_DATABASE_URL` unset when it has a proof to exchange, reads the URL only for its
+  credential's view when it has none (`token_source`), and refuses to start with neither; its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
   every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
@@ -479,7 +485,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   signs a LAN print's transfer tokens), and its rack hotends' usage (`RemoteRackUsage`, a
   `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
   route and one transaction on the API; every write but `seen` takes an
-  `Idempotency-Key`; `spool_history` is the API's), and it
+  `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
+  and their uses, the kept presets and a native slice's start (`RemoteSpoolStore`,
+  `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298
+  Task 31: each write runs whole on the API under its lock; a provider's records and a
+  run's settle take an `Idempotency-Key`; the refresh, tray links and the shelf's edits
+  are the API's), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning

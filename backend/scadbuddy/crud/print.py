@@ -49,6 +49,22 @@ watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys ac
 attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
 API's (the rack usage route).
 
+`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets` and `RemoteNativeSlices`
+are `spools/store.py` `SpoolStore`, `spools/native.py` `NativeSpoolStore`,
+`slicing/held_presets.py` `HeldPresetStore` and `slicing/store.py` `NativeSliceStore`
+(Q28-Q30, #5298 Task 31) for the methods the print worker calls: a native run's overlay
+and the native provider's recache after a print (``overlay``, ``replace_records``,
+``failed``), the shelf, a LAN start's uses and their settle (``list``, ``any``,
+``record_uses``, ``settle_uses``), the kept presets a native run reads (``rows``,
+``documents``) and a native slice's ``start``. None holds a pool, and none is called in
+the printer watch. Each SQL write is one transaction, under the spools' advisory lock,
+the uses' row locks or the slice key's lock, so each is one route run whole on the API
+(plan D6). ``failed``, ``record_uses`` and ``start`` are natural (an upsert, ``ON CONFLICT
+DO NOTHING``, and the key's newest row). ``replace_records`` and ``settle_uses`` take an
+``Idempotency-Key`` of their own, a new UUID per call, sent again on the client's
+retries: a refresh's body carries its time, and a settle runs in the follow's one long
+activity. The refresh, the tray links and the shelf's edits are the API's.
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -91,16 +107,25 @@ import logging
 import threading
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Collection, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime, timedelta
 from typing import Any, NoReturn
 from urllib.parse import quote, urlencode
+from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail
 from scadbuddy.bambuddy.print_links import (
     LinkedPrint,
     PrintLink,
@@ -148,6 +173,11 @@ from scadbuddy.printers.store import (
 )
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
+from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
+from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
+from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
+from scadbuddy.spools.store import SpoolStore
 
 logger = logging.getLogger(__name__)
 
@@ -1297,6 +1327,245 @@ def _when(value: str | None) -> datetime | None:
 
 
 _refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
+
+
+# -- spools, native spools, held presets, native slices (Q28-Q30, #5298 Task 31) ---------
+
+#: The route's reason for a refresh's write that ran past its deadline
+#: (`api/crud_print.py`): it rolled back, as `SpoolStore.replace_records`' does.
+PAST_DEADLINE = "past-deadline"
+#: The route's reason for a slice start of a copy another subject's row holds.
+SLICE_SUBJECT = "slice-subject"
+
+#: The `SpoolStore` methods only the API calls: the refresh's ``seen`` half and the
+#: providers' list, on the ``library`` worker (`spools/activities.py`), a person's tray
+#: links (`api/tray_spools.py`), and the ``_in`` write, which runs on the API's connection.
+SPOOLS_API_ONLY = ("seen", "refreshes", "link", "unlink", "replace_records_in")
+
+
+class RemoteSpoolStore(SpoolStore):
+    """`spools/store.py` `SpoolStore` (Q28) over ``…/print/spools`` (area ``spools``).
+    Async, as the SQL store is. No pool. The print worker calls it for a native run's
+    overlay (`spools/overlay.py`) and the native provider's recache after a print took
+    its grams (`spools/spool_providers.py` `recache`). Every SQL write is one transaction
+    under the store's advisory lock, so each is one route, run whole on the API (plan
+    D6)."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("SpoolStore.pool is the API's; the worker has none")
+
+    async def replace_records(
+        self,
+        provider: str,
+        snapshots: Sequence[SpoolSnapshot],
+        at: datetime,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Under an ``Idempotency-Key`` of its own, a new UUID per call, which the client
+        sends again on its retries (plan D5): the body carries the refresh's ``at``, so a
+        retried activity's `WriteKeys` key would never replay, and a refresh is a whole
+        new answer, never a replay of an earlier one. ``timeout`` bounds the call, retries
+        included, and the API's write, as it bounds the SQL store's."""
+        body = {
+            "provider": provider,
+            "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
+            "at": at.isoformat(),
+            "timeout": timeout,
+        }
+        try:
+            await self._client.request(
+                "POST",
+                f"{BASE}/spools/records",
+                json=body,
+                idempotency_key=uuid.uuid4().hex,
+                budget=timeout,
+            )
+        except CrudRefusedError as error:
+            if _refused_as(error, PAST_DEADLINE):
+                raise TimeoutError(f"the refresh of {provider} ran past its deadline") from None
+            raise
+
+    async def failed(self, provider: str, at: datetime, failure: str) -> None:
+        """Natural: an upsert of the provider's failure."""
+        await self._client.request(
+            "POST",
+            f"{BASE}/spools/refreshes/{quote(provider, safe='')}/failed",
+            json={"at": at.isoformat(), "failure": failure},
+        )
+
+    async def overlay(
+        self,
+        printer_id: UUID,
+        trays: Sequence[SeenTray],
+        *,
+        now: datetime,
+        providers: Sequence[str],
+        located: Mapping[str, str] | None = None,
+    ) -> Overlay:
+        """A ``POST`` read: the trays' RFID keys stay out of the URL (spec §7)."""
+        body = {
+            "printer_id": str(printer_id),
+            "trays": [tray.model_dump(mode="json") for tray in trays],
+            "now": now.isoformat(),
+            "providers": list(providers),
+            "located": dict(located or {}),
+        }
+        response = await self._client.request("POST", f"{BASE}/spools/overlay", json=body)
+        return Overlay.model_validate(response.json())
+
+
+_refuse(RemoteSpoolStore, "SpoolStore", SPOOLS_API_ONLY)
+
+
+#: The `NativeSpoolStore` methods only the API calls: the shelf's routes
+#: (`api/native_spools.py`), and the ``_in`` settle, which runs on the API's connection.
+NATIVE_SPOOLS_API_ONLY = ("get", "create", "update", "delete", "settle_uses_in")
+
+
+class RemoteNativeSpools(NativeSpoolStore):
+    """`spools/native.py` `NativeSpoolStore` (Q29) over ``…/print/native-spools`` (area
+    ``spools``). Blocking, as the SQL store is: callers on the loop use a thread. No
+    pool. The worker reads the shelf (the native provider), saves what a LAN start uses
+    and settles a run's uses once its print settles."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("NativeSpoolStore.pool is the API's; the worker has none")
+
+    def list(self, *, include_archived: bool = False) -> list[NativeSpool]:
+        query = urlencode({"include_archived": "true" if include_archived else "false"})
+        body = self._client.request("GET", f"{BASE}/native-spools?{query}").json()
+        return [NativeSpool.model_validate(row) for row in body]
+
+    def any(self) -> bool:
+        return bool(self._client.request("GET", f"{BASE}/native-spools/any").json()["any"])
+
+    def record_uses(self, run_id: str, subtask_name: str, uses: Sequence[SpoolUse]) -> None:
+        """Natural: ``ON CONFLICT DO NOTHING`` on the start's slot, so a resend keeps the
+        rows one send wrote."""
+        if not uses:
+            return
+        body = {
+            "run_id": run_id,
+            "subtask_name": subtask_name,
+            "uses": [use.model_dump(mode="json") for use in uses],
+        }
+        self._client.request("POST", f"{BASE}/native-spools/uses", json=body)
+
+    def settle_uses(self, run_id: str, stages: Sequence[str]) -> set[UUID]:
+        """One route, one transaction on the API, its row locks included (plan D6). The
+        answer is the spools this settle changed, which a resend would not repeat (the
+        rows read settled then), so an ``Idempotency-Key`` of its own, a new UUID per
+        call, sent again on the client's retries: the follow's read hook settles a run
+        from one long activity, whose ordinals would not name one settle."""
+        response = self._client.request(
+            "POST",
+            f"{BASE}/native-spools/uses/settle",
+            json={"run_id": run_id, "stages": list(stages)},
+            idempotency_key=uuid.uuid4().hex,
+        )
+        return {UUID(spool_id) for spool_id in response.json()["changed"]}
+
+
+_refuse(RemoteNativeSpools, "NativeSpoolStore", NATIVE_SPOOLS_API_ONLY)
+
+
+#: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the
+#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), and its clear at
+#: the API's start (`slicing/component.py`).
+HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear")
+
+
+class RemoteHeldPresets(HeldPresetStore):
+    """`slicing/held_presets.py` `HeldPresetStore` (Q30) over ``…/print/held-presets``
+    (area ``spools``): the kept copy a native run's catalogue and presets read. Reads
+    only. Async, as the SQL store is. No pool."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def rows(self) -> list[HeldRow]:
+        body = (await self._client.request("GET", f"{BASE}/held-presets")).json()
+        return [
+            HeldRow(preset=LocalPreset.model_validate(row["preset"]), sha256=row["sha256"])
+            for row in body
+        ]
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        unique = sorted(set(ids))
+        if not unique:
+            return {}
+        url = f"{BASE}/held-presets/documents?{urlencode({'id': unique}, doseq=True)}"
+        body = (await self._client.request("GET", url)).json()
+        return {int(found): LocalPresetDetail.model_validate(doc) for found, doc in body.items()}
+
+
+_refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
+
+
+#: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities
+#: on the ``library`` worker (`workflows/slicing_activities.py`), the dialog's read
+#: (`slicing/preview.py`) and the sweeps (`slicing/start.py`, from `main.py`).
+NATIVE_SLICES_API_ONLY = (
+    "running",
+    "prepared",
+    "finish",
+    "lost",
+    "stop_lost",
+    "slicing",
+    "get",
+    "reusable",
+    "sweep",
+)
+
+
+class RemoteNativeSlices(NativeSliceStore):
+    """`slicing/store.py` `NativeSliceStore` (Q30) over ``…/print/native-slices`` (area
+    ``spools``) for the one method the print worker calls: a native slice's ``start``
+    (`slicing/start.py` `start_native_slice`, from the dialog's background slice).
+    Async, as the SQL store is. No pool. The start runs whole on the API, under its lock
+    on the workflow id (plan D6), and is natural on that id: a start sent again answers
+    the key's newest running or completed row, which the first send left."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def start(
+        self,
+        *,
+        workflow_id: str,
+        subject: str,
+        library_file_id: int,
+        plate_id: int,
+        preset_key: str,
+        fresh: bool = False,
+    ) -> NativeSlice:
+        body = {
+            "workflow_id": workflow_id,
+            "subject": subject,
+            "library_file_id": library_file_id,
+            "plate_id": plate_id,
+            "preset_key": preset_key,
+            "fresh": fresh,
+        }
+        try:
+            response = await self._client.request("POST", f"{BASE}/native-slices/start", json=body)
+        except CrudRefusedError as error:
+            if _refused_as(error, SLICE_SUBJECT):
+                raise SliceSubjectError(str(error.problem.get("detail", ""))) from None
+            raise
+        return NativeSlice.model_validate(response.json())
+
+
+_refuse(RemoteNativeSlices, "NativeSliceStore", NATIVE_SLICES_API_ONLY)
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

@@ -1005,8 +1005,7 @@ class SettingsStore:
 
     def open(self, *, migrate_schema: bool = True) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot.
-        ``migrate_schema=False`` only connects: a worker on a role of its own never
-        migrates (`render/worker_role.py` `open_for_caller`)."""
+        ``migrate_schema=False`` only connects."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
         if migrate_schema:
             self.migrate_and_seal()

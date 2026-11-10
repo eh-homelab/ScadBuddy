@@ -2580,9 +2580,10 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
     """#3020 review: an explicit exit, not an assert python -O would strip."""
     monkeypatch.setattr(worker_module, "parse_queue", lambda: "unnamed")
     monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
+    # Every queue reads `NoDatabaseSettings` (#5298 Task 31: the print worker too).
     monkeypatch.setattr(
         worker_module,
-        "Settings",
+        "NoDatabaseSettings",
         lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
     )
 

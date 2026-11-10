@@ -442,8 +442,8 @@ on shutdown.
     could not finish.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10): the most connections of the API's main pool
     (`scadbuddy-api`, which the settings, the jobs and the presets share; before #5226
-    the settings and the jobs each had a pool of this size, so twice it), and of the
-    print worker's `scadbuddy-settings` pool. Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
+    the settings and the jobs each had a pool of this size, so twice it); the print
+    worker has no pool (#5298). Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
     too small. The schema is created and migrated at startup.
     An API process's pools hold at most that plus 13 connections: the event bus's 2,
     the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
@@ -896,7 +896,7 @@ store or another caller's credential:
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
 | render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
-| print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
+| print worker | `scadbuddy_print`, granted no table: the worker holds no pool, and reads only its credential's view, with no proof to exchange (#5298) | `scadbuddy-print.yaml` |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
@@ -905,8 +905,8 @@ CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` a
 the API itself stays on the database's owner role. At every start the API grants each
 role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
 render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
-after the API started is granted on the API's next start. The print worker, on its own
-role, never migrates: it waits until the API has migrated and granted it. The agent's role owns the
+after the API started is granted on the API's next start. The print worker never
+migrates and waits for no migration: it waits for its CRUD areas (#5298). The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
@@ -1233,9 +1233,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
-- **Environment:** `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
-  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES` and `SCADBUDDY_API_INTERNAL_URL`. It reads the
+  `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and
+  `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
+  exchanges for its service credential. It holds no Postgres pool (#5298): with a proof it
+  starts with `SCADBUDDY_DATABASE_URL` unset; without one it reads its credential's view
+  with that URL, the URL's only use; with neither it refuses to start. It reads the
   settings, the Bambuddy key included, from the API's CRUD route
   `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
   them, so its own Bambuddy URL and key variables are not read. That answer is
@@ -1260,11 +1264,15 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   so the worker's KEK opens no access code; it still unseals a virtual printer's request
   and signs a LAN print's blob reads. The rack hotends' usage goes through them too
   (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
-  start's settles take an `Idempotency-Key`), so the worker holds no rack pool. The
-  worker does not `LISTEN`. It waits until the API
+  start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
+  them too go the spools a native run's overlay reads and the native provider re-caches, ScadBuddy's
+  own spools and what a LAN start uses of them, the kept copy of Bambuddy's local presets
+  and a native slice's start (`…/spools`, `…/native-spools`, `…/held-presets`,
+  `…/native-slices`; a provider's records and a run's settle take an `Idempotency-Key`).
+  The worker does not `LISTEN`. It waits until the API
   lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers` and `rack`) before it serves. Its
+  `lan-imports`, `printers`, `rack` and `spools`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is

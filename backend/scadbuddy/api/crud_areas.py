@@ -33,7 +33,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (#4699 phase 4). Its ``printers`` area is every other ``…/print/printers`` route (the
 #: reads, a printer's access code, a virtual printer's sync) and ``…/print/reports``
 #: (#5298 Task 29). Its ``rack`` area is ``…/print/rack``, the rack hotends' usage
-#: (#5298 Task 30).
+#: (#5298 Task 30). Its ``spools`` area is ``…/print/spools``, ``…/print/native-spools``,
+#: ``…/print/held-presets`` and ``…/print/native-slices`` (#5298 Task 31).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -51,6 +52,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "lan-imports",
         "printers",
         "rack",
+        "spools",
     ],
     "storefront": [
         "listings",

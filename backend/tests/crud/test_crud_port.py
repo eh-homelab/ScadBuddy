@@ -98,6 +98,7 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
             "lan-imports",
             "printers",
             "rack",
+            "spools",
         ]
     }
     assert client.get("/api/v1/internal/crud/render/areas", headers=printing).status_code == 403
