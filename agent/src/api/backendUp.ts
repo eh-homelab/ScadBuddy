@@ -17,11 +17,16 @@ function codeOf(error: unknown): string | undefined {
 
 /**
  * The kind of a fetch's transport error, for a log line: its cause's code (`ECONNREFUSED`,
- * `ENOTFOUND`, ...; an AggregateError's first one), else the error's name (`TimeoutError`).
+ * `ENOTFOUND`, ...; for an AggregateError, `NOT_UP` when any of its errors is a refusal, else
+ * its first code), else the error's name (`TimeoutError`).
  */
 export function transportKind(error: unknown): string {
   const cause = error instanceof Error ? error.cause : undefined
-  const code = codeOf(cause) ?? (cause instanceof AggregateError ? cause.errors.map(codeOf).find((c) => c !== undefined) : undefined)
+  // `localhost` tried on ::1, then 127.0.0.1: a refusal by either is the backend not up yet,
+  // whatever came first (Node may set the AggregateError's own code to the first one).
+  const codes = cause instanceof AggregateError ? cause.errors.map(codeOf) : []
+  if (codes.includes(NOT_UP)) return NOT_UP
+  const code = codeOf(cause) ?? codes.find((c) => c !== undefined)
   if (code !== undefined) return code
   return error instanceof Error ? error.name : 'Error'
 }

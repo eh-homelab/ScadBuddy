@@ -49,6 +49,15 @@ describe('backendNotUp', () => {
       cause: new AggregateError([Object.assign(new Error('a'), { code: 'ECONNREFUSED' })]),
     })
     expect(backendNotUp(both)).toBe(true)
+    // `localhost` tried on ::1 first: a refusal anywhere in the list is the backend not up yet.
+    const mixed = new TypeError('fetch failed', {
+      cause: new AggregateError([
+        Object.assign(new Error('a'), { code: 'EADDRNOTAVAIL' }),
+        Object.assign(new Error('b'), { code: 'ECONNREFUSED' }),
+      ]),
+    })
+    expect(backendNotUp(mixed)).toBe(true)
+    expect(transportKind(mixed)).toBe(NOT_UP)
     expect(backendNotUp(new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }) }))).toBe(false)
     expect(backendNotUp(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe(false)
     expect(backendNotUp(new DOMException('timed out', 'TimeoutError'))).toBe(false)
