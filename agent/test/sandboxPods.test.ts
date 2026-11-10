@@ -153,9 +153,13 @@ describe('sandbox pods on Kubernetes', () => {
     kube.onCreate = undefined
     expect(await other().acquire(SESSION, AbortSignal.timeout(5_000))).toEqual(mine)
     expect(kube.pods.size).toBe(2)
-    // A replica whose own new pod sorts after another's made in the same second gives up its own.
+    // A replica whose own new pod sorts after another's made in the same second gives up its own,
+    // and deletes a pod made in a later second too.
     kube.pods.clear()
-    kube.onCreate = () => kube.pods.set(`${APP}-0`, theirs(`${APP}-0`))
+    kube.onCreate = () => {
+      kube.pods.set(`${APP}-0`, theirs(`${APP}-0`))
+      kube.pods.set('later', { ...theirs('later'), metadata: { ...theirs('later').metadata, creationTimestamp: '2026-11-09T00:00:02.000Z' } })
+    }
     const loser = other()
     expect((await loser.acquire(SESSION, AbortSignal.timeout(5_000))).token).toBe(`${APP}-0`)
     expect([...kube.pods.keys()]).toEqual([`${APP}-0`])

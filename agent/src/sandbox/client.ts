@@ -69,7 +69,10 @@ type SandboxResponse = Awaited<ReturnType<typeof fetch>>
 /** How much of an error answer's body is read and shown; the rest is cancelled unread. */
 export const ERROR_BODY_MAX_BYTES = 500
 
-/** The first `max` bytes of a body, the rest cancelled: a pod may send an error body that never ends. */
+/**
+ * The first `max` bytes of a body, the rest cancelled: a pod may send an error body that never
+ * ends. The cut may split a UTF-8 character, which then reads as U+FFFD at the end.
+ */
 async function bodyHead(res: SandboxResponse, max: number): Promise<string> {
   const chunks: Buffer[] = []
   let size = 0
@@ -298,7 +301,8 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
  * Makes the pod's files match the session directory's: each changed file sent, each one the
  * directory no longer has deleted there, except the `kept` ones (see Kept). A session file past
  * the per-file cap is not sent, and the pod's copy of it is deleted, so a command never reads an
- * older copy as if it were the session's; it is named in `notSent`. Returns the pod's manifest
+ * older copy as if it were the session's; it is named in `notSent`. A kept path is the exception:
+ * the pod's own copy stays, and the path is not named. Returns the pod's manifest
  * as it is then.
  */
 export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncedIn> {

@@ -875,7 +875,9 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   be read back for any other reason is not kept, and the next command's sync removes it from
   the pod. A session file past `workspace_file_max_bytes` is never sent: the sync deletes the
   pod's copy at that path, so a command never reads an older copy in its place, and the result
-  names it (`files_not_in_sandbox`). An error answer from the pod is read only to its first
+  names it (`files_not_in_sandbox`). The one exception is a copy the pod keeps under the record
+  above (a command left it there, and the session's copy has not changed since): it stays, and
+  is not named. An error answer from the pod is read only to its first
   500 bytes. The exec server streams each file to disk and back, at most 256 MiB, and keeps a
   file it is sent only when its sha256 matches. The turn's write-back then records the
   directory in `SessionFiles`, as it does for `Write`.

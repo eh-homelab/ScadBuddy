@@ -60,7 +60,9 @@ const where =
   'levels deep, outside node_modules and __pycache__, and only within the workspace caps. Any other file stays in the sandbox ' +
   'pod while the pod lasts, and the result lists it under files_left_in_sandbox (node_modules and __pycache__ are not listed); ' +
   "a new pod (after 15 idle minutes, or 4 hours) starts from the session's files alone. A session file past the workspace's " +
-  'per-file cap is not in the sandbox, and the result lists it under files_not_in_sandbox. The ' +
+  'per-file cap is not in the sandbox, and the result lists it under files_not_in_sandbox, unless the sandbox keeps its own ' +
+  'copy at that path (one an earlier command left there, listed then under files_left_in_sandbox), which stays and is not ' +
+  'listed. The ' +
   'network reaches only public hosts on ports 80 and 443, through an HTTPS proxy (HTTPS_PROXY is set; plain http:// and other ' +
   `protocols are refused). The timeout is ${DEFAULT_TIMEOUT_MS / 1000} s by default, at most ${MAX_TIMEOUT_MS / 1000} s. ` +
   `Output past ${OUTPUT_MAX_CHARS} characters is cut.`
