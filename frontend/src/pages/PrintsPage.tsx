@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
+import { ImportPrintDialog } from '../components/prints/ImportPrintDialog'
 import { LiveJobItem } from '../components/prints/LiveJobItem'
 import { liveJobs, queueTail, startedOn, type LiveJob } from '../components/prints/liveJobs'
 import { PrinterStrip, usePrintersNow } from '../components/prints/NowPrinting'
@@ -24,12 +25,18 @@ import { Button } from '@/components/ui/button'
  * page asks Bambuddy nothing, and the printers and their jobs are the LAN reports'
  * (`get_printers_now`). Until Settings answer neither is read, so a native page never
  * asks first; a failed Settings read reads both, as before.
+ *
+ * "Import print" (#4698) links a Bambuddy archive ScadBuddy did not print to a model
+ * (`ImportPrintDialog`); it reads Bambuddy, so it shows with Bambuddy's lists.
  */
 export function PrintsPage() {
   const settings = useAsync(() => api.getSettings(), [])
   const settled = settings.data !== undefined || settings.error !== undefined
   const lazy = nativeBackends(settings.data)
   const [asked, setAsked] = useState(false)
+  const [importing, setImporting] = useState(false)
+  // #4698: an import adds a print to the history, which reads again for it.
+  const [imports, setImports] = useState(0)
   const bambuddy = settled && (!lazy || asked)
   const now = usePrintersNow()
   const working = useMemo(() => (now.cards === null ? null : liveJobs(now.cards, [])), [now.cards])
@@ -47,19 +54,27 @@ export function PrintsPage() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
-        <div className="mb-5">
-          <h1 className="text-lg font-semibold tracking-tight">Prints</h1>
-          <p className="mt-0.5 text-[13px] text-subtle">
-            What waits in Bambuddy's queue, what prints now, and every print of a ScadBuddy output, as Bambuddy
-            archived it.
-          </p>
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-lg font-semibold tracking-tight">Prints</h1>
+            <p className="mt-0.5 text-[13px] text-subtle">
+              What waits in Bambuddy's queue, what prints now, and every print of a ScadBuddy output, as Bambuddy
+              archived it.
+            </p>
+          </div>
+          {bambuddy && (
+            <Button variant="outline" size="sm" onClick={() => setImporting(true)} data-testid="import-print">
+              Import print
+            </Button>
+          )}
         </div>
+        <ImportPrintDialog open={importing} onOpenChange={setImporting} onImported={() => setImports((n) => n + 1)} />
         <PrinterStrip now={now} />
         {settled &&
           (bambuddy ? (
             <>
               <QueueNotes queue={queue} tail={queueTail(queue.items ?? [])} filtered={filtered} />
-              <PrintHistory live={jobs} />
+              <PrintHistory key={imports} live={jobs} />
             </>
           ) : (
             <>
