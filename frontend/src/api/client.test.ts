@@ -1012,6 +1012,24 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('imports a print after its new model: the same key sent again once the model is made (#4698)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    const made = { id: 'op-2', kind: 'mesh_model_create', subject: 'trophy', status: 'running', created_at: '2026-11-10T00:00:00Z' }
+    const imported = { archive_id: 193, slug: 'trophy', print_url: '/api/v1/prints/193', created_model: true }
+    server.use(
+      http.post('/api/v1/print-imports/193', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2 ? HttpResponse.json(made, { status: 202 }) : HttpResponse.json(imported, { status: 201 })
+      }),
+      http.get('/api/v1/operations/op-2', () => HttpResponse.json({ ...made, status: 'succeeded', result: { slug: 'trophy', name: 'Trophy' } })),
+    )
+
+    await expect(api.importPrint(193, { source: { kind: 'archive_source' }, new_model: { name: 'Trophy', description: '' } })).resolves.toEqual(imported)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
   it("follows a 202 to the operation's result", async () => {
     printRunPoll.intervalMs = 1
     let reads = 0

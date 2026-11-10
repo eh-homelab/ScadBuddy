@@ -231,10 +231,13 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           ) : (
             <Section title="Provenance">
               {/* #1860 — say why there is none, rather than leave the section out. */}
-              <p className="text-[13px] text-muted-foreground">
-                {print.library_file_id !== null
-                  ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
-                  : 'The ScadBuddy output this print came from is not known.'}
+              <p className="text-[13px] text-muted-foreground" data-testid="print-provenance">
+                {print.imported
+                  ? // #4698 — a print a person linked to the model, from the file they chose.
+                    `Imported onto ${print.imported.slug} from ${IMPORT_SOURCE[print.imported.source]} ${print.imported.filename}. ScadBuddy did not print it, so there are no parameters.`
+                  : print.library_file_id !== null
+                    ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
+                    : 'The ScadBuddy output this print came from is not known.'}
               </p>
             </Section>
           )}
@@ -749,6 +752,14 @@ function RunRow({ run }: { run: Run }) {
       {run.failure_reason && <span className="text-warn">{run.failure_reason}</span>}
     </li>
   )
+}
+
+/** #4698 — where an imported print's 3MF was, as the provenance names it. */
+const IMPORT_SOURCE: Record<NonNullable<PrintDetail['imported']>['source'], string> = {
+  archive: "the archive's file",
+  archive_source: "the archive's slicer project",
+  library: 'the library file',
+  printer: "the printer's file",
 }
 
 function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail['provenance']> }) {
