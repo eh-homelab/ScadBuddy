@@ -612,7 +612,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
       },
     })
     // The second check asked the replica itself: the cancelled check's answer was not reused.
-    expect(seen.statuses).toBeGreaterThanOrEqual(2)
+    expect(seen.statuses).toBe(2)
   })
 
   it('a write call whose wait a slow owner ended says to snapshot and call again, not that the tab reconnected', async () => {

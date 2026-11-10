@@ -1593,6 +1593,17 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toHaveLength(0)
   })
 
+  it("returns the latch, not the slow advice, when another call latched the turn while this one's check ran", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const wait = waitForTab((request) => Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'Carry on without the tab' } }), never, noop)
+    // This call's slow check is still out while another call's wait ends "carry on".
+    const pending = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_slow', signal: never, isBack: gone, slow: () => held.then(() => 'slow, try again') })
+    await wait({ tool: 'browser_click', toolUseId: 'toolu_other', signal: never, isBack: gone })
+    release()
+    expect(await pending).toEqual({ back: false, message: expect.stringMatching(/carry on without the tab/) })
+  })
+
   it('stops asking a slow owner after as many tries as the turn has waits, and latches the turn', async () => {
     const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
     let slowAsked = 0
