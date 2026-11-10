@@ -70,7 +70,9 @@ function answeringClient(
       return {
         events: [
           { workflowTaskStartedEventAttributes: {} },
-          ...Array.from({ length: timedOutTasks }, () => ({ workflowTaskTimedOutEventAttributes: {} })),
+          // TIMEOUT_TYPE_START_TO_CLOSE (1) each; a sticky queue's SCHEDULE_TO_START (2) is not counted.
+          ...Array.from({ length: timedOutTasks }, () => ({ workflowTaskTimedOutEventAttributes: { timeoutType: 1 } })),
+          { workflowTaskTimedOutEventAttributes: { timeoutType: 2 } },
           { workflowTaskCompletedEventAttributes: {} },
         ],
       }
