@@ -382,7 +382,7 @@ export async function readDirFile(dir: string, rel: string, max: number): Promis
 /**
  * The sha256 of a regular file at `rel` in a session's directory, read as a stream whatever its
  * size (never through a link); undefined when there is none, or when it cannot be opened (any
- * open error, EACCES too). The sandbox's sync uses it for a kept file past the per-file cap, so
+ * open error, EACCES too). The sandbox's sync uses it for a file past the per-file cap that is or becomes kept, so
  * a change to such a file is seen (#5942).
  */
 export async function dirFileSha256(dir: string, rel: string): Promise<string | undefined> {
