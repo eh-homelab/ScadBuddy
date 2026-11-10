@@ -336,6 +336,10 @@ opens every one and seals it again byte for byte).
     `idempotency_key` argument; otherwise it is `unknown`, never resent by itself.
     `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
     message (a person's session only, kept in the audit log as `messaging.test_send`).
+    `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message
+    composed now and its digest, and the send takes only the template, `resend_of` and the
+    digest, composes again and refuses `message_changed` on a difference (a person's session
+    only; `tools/orders.ts` `previewPersonSend`, `personSend`).
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

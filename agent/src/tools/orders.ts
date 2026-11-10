@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
@@ -135,6 +136,8 @@ export function composeNotice(
 type Binding = components['schemas']['MessagingBinding']
 type Notice = ReturnType<typeof composeNotice>
 type OrderMessage = components['schemas']['OrderMessage']
+/** What the send helpers read of a call's context: the order page's own send (routes/orderMessages.ts) has no more. */
+type SendContext = Pick<ToolContext, 'backend' | 'messaging' | 'callKey'>
 
 /** What a person approves: the message itself, so what runs is what was approved. */
 const APPROVED_MESSAGE = z.object({
@@ -144,11 +147,11 @@ const APPROVED_MESSAGE = z.object({
   subject: z.string().max(300).nullable(),
   text: z.string().max(12_000),
 })
-type ApprovedMessage = z.infer<typeof APPROVED_MESSAGE>
+export type ApprovedMessage = z.infer<typeof APPROVED_MESSAGE>
 
 /** The order's notice, composed for the bound channel when there is one. */
 async function composeFor(
-  ctx: ToolContext,
+  ctx: SendContext,
   order_id: string,
   template: NotifyTemplate,
   note: string | undefined,
@@ -177,7 +180,7 @@ type SendArgs = { order_id: string; template: NotifyTemplate; note?: string | un
 type SendPlan = { binding: Binding; notice: Notice; approved: ApprovedMessage }
 
 /** The message a send would send now, or why it cannot be sent (nothing sent, nothing recorded). */
-async function sendPlan(ctx: ToolContext, args: SendArgs): Promise<SendPlan> {
+async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
   const { binding, notice } = await composeFor(ctx, args.order_id, args.template, args.note)
   if (!binding) {
     throw new ToolError(
@@ -204,7 +207,7 @@ async function sendPlan(ctx: ToolContext, args: SendArgs): Promise<SendPlan> {
 }
 
 /** `already_notified` before anything parks (§5.2), from the backend's read-only check. */
-async function refuseIfTold(ctx: ToolContext, order_id: string, template: NotifyTemplate): Promise<void> {
+async function refuseIfTold(ctx: SendContext, order_id: string, template: NotifyTemplate): Promise<void> {
   const check = await ok(
     ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', { params: { path: { order_id }, query: { template } } }),
     `check order ${order_id}'s messages`,
@@ -226,14 +229,14 @@ function approvalLine(message: ApprovedMessage): string {
 }
 
 /** What a send answers: the recorded message, and whether the plugin reached the customer. */
-type SendAnswer = { sent: boolean; message: OrderMessage; warning?: string }
+export type SendAnswer = { sent: boolean; message: OrderMessage; warning?: string }
 
 /**
  * Claims the message, calls the plugin once, records the outcome (§7.2). A claim that comes
  * back as an earlier one (the same call retried) never sends again, unless the binding
  * gives the plugin a dedupe key: then the plugin drops the copy.
  */
-async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Promise<SendAnswer> {
+async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Promise<SendAnswer> {
   const { backend } = ctx
   const order_id = args.order_id
   if (!ctx.messaging) {
@@ -291,6 +294,39 @@ async function sendMessage(ctx: ToolContext, args: SendArgs, plan: SendPlan): Pr
   } finally {
     await connection.close().catch(() => {})
   }
+}
+
+/** The digest of an approved message, which the order page's preview gives and its send names. */
+export function messageDigest(message: ApprovedMessage): string {
+  return createHash('sha256').update(JSON.stringify(message)).digest('hex')
+}
+
+/** A person's own send from the order page (#5660 PR 3): the template, and the message it sends again. */
+export type PersonSend = { order_id: string; template: NotifyTemplate; resend_of?: string | undefined }
+
+/** The message a person's send would send now, and its digest; nothing is sent or recorded. */
+export async function previewPersonSend(
+  ctx: SendContext,
+  args: PersonSend,
+): Promise<{ message: ApprovedMessage; digest: string }> {
+  const planned = await sendPlan(ctx, args)
+  if (args.resend_of === undefined) await refuseIfTold(ctx, args.order_id, args.template)
+  return { message: planned.approved, digest: messageDigest(planned.approved) }
+}
+
+/**
+ * Sends the message composed now, only when it is the one the person previewed (`digest`):
+ * the browser names what it saw and never supplies the text.
+ */
+export async function personSend(ctx: SendContext, args: PersonSend, digest: string): Promise<SendAnswer> {
+  const planned = await sendPlan(ctx, args)
+  if (messageDigest(planned.approved) !== digest) {
+    throw new ToolError(
+      'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing ' +
+        'was sent; preview it again',
+    )
+  }
+  return sendMessage(ctx, args, planned)
 }
 
 const itemId = ID.describe('A line item id, as order_get lists them')

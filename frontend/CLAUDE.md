@@ -71,6 +71,11 @@ same way, `vite.config.ts`).
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
 
+- Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
+  (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
+  ("Mark sent", "Send again" through a preview), over the agent routes in `api/orderMessages.ts`;
+  mocks `src/mocks/features/orders/messages.ts`.
+
 ## See also
 
 - Real-stack e2e: see `e2e-stack/CLAUDE.md`. Generated API files: see the root `CLAUDE.md`.

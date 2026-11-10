@@ -39,6 +39,15 @@ describe('the approval card', () => {
       unmount()
     }
   })
+
+  it('keeps the line breaks of a summary, as a message to a customer has them (#5660)', () => {
+    const summary = 'Send "Order ready" to ada@example.com through remote:mail:\nHello Ada,\n\nOrder ORD-2026-7 is ready.'
+    const item: FeedItem = { kind: 'approval', id: 'a3', tool: 't1', summary, state: 'pending' }
+    render(<FeedItemView item={item} onDecide={vi.fn()} onAnswer={vi.fn()} />)
+    const shown = screen.getByText(/Hello Ada,/)
+    expect(shown.textContent).toBe(summary)
+    expect(shown).toHaveClass('whitespace-pre-wrap')
+  })
 })
 
 describe("a headless-browser navigation's approval card (#982)", () => {

@@ -1229,6 +1229,7 @@ const app = !role.http
   workspaceSecrets: agentSecrets.fresh,
   // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
   orderMessaging: toolServices.messaging,
+  orderSends: { backend: toolServices.backend, messaging: toolServices.messaging },
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
