@@ -518,7 +518,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   transaction; a re-archived job (same printer, hash and start) is never taken twice.
   The three settings are a person's only (`api/settings.py` `PRINT_WATCH`, 403
   `person_only`). `GET /print-imports/auto` lists the rows (`state` `linked` or `inbox`;
-  an inbox row a link names since is left out).
+  an inbox row a link names since is left out); the agent reads it with `list_auto_imports`
+  (`agent/src/tools/prints.ts`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through

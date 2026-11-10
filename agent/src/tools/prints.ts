@@ -151,6 +151,40 @@ export const printHistoryTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'list_auto_imports',
+    label: 'List the prints the print watcher imported',
+    description:
+      'The prints the print watcher (#4699) imported, ScadBuddy not having started them, newest archive first: each ' +
+      'it linked to a model (`state: linked`, with `matched_by`: an earlier import of the same file, or the job\'s ' +
+      'name), and each it put in the Unsorted imports inbox (`state: inbox`, with `reason` and the models the job\'s ' +
+      'name suggests). To link an inbox print, show the user the suggestions, then import_print. Page with `before`, ' +
+      'the last `archive_id` read.',
+    input: z.object({
+      state: z.enum(['linked', 'inbox']).optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+      before: archiveId.optional().describe('Only archives older than this one: the last archive_id of the page before'),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/print-imports/auto'],
+    summarize: ({ state }) => (state === 'inbox' ? 'List the Unsorted imports inbox' : 'List the prints the print watcher imported'),
+    handler: async ({ state, limit, before }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print-imports/auto', {
+            params: {
+              query: {
+                ...(state === undefined ? {} : { state }),
+                ...(limit === undefined ? {} : { limit }),
+                ...(before === undefined ? {} : { before }),
+              },
+            },
+          }),
+          'list the prints the print watcher imported',
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'import_print',
     label: 'Import a print onto a model',
     description:

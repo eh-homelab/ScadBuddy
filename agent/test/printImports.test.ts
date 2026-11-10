@@ -176,3 +176,22 @@ describe('the touched list of an import (#5979)', () => {
     expect(touches).toEqual([{ type: 'print_archive', id: '193', action: 'modified' }])
   })
 })
+
+describe('list_auto_imports (#4699)', () => {
+  it('reads the print watcher\'s imports as a read, passing only the filters given', async () => {
+    expect(tool('list_auto_imports')).toMatchObject({ risk: 'read', routes: ['GET /api/v1/print-imports/auto'] })
+    const seen: URLSearchParams[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, ({ request }) => {
+        seen.push(new URL(request.url).searchParams)
+        return HttpResponse.json([{ archive_id: 193, state: 'inbox', reason: 'no model matches the job name' }])
+      }),
+    )
+    const all = await runTool(tool('list_auto_imports'), {}, ctx())
+    const inbox = await runTool(tool('list_auto_imports'), { state: 'inbox', before: 200 }, ctx())
+    expect(all.isError).toBeFalsy()
+    expect(firstText(inbox)).toEqual([{ archive_id: 193, state: 'inbox', reason: 'no model matches the job name' }])
+    expect(Object.fromEntries(seen[0]!)).toEqual({})
+    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', before: '200' })
+  })
+})
