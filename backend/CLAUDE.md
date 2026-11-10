@@ -889,9 +889,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
   area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
   `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.
-  The token travels in the body only; `resolve` (a `Reader`, today `ByLink`) finds the live
-  link by the token's sha256 (`links.link_by_token`), and any token that reads nothing is
-  a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
+  The reader travels in the body only. `resolve` takes a `ByLink` (the token: the live link
+  by its sha256, `links.link_by_token`) or a `ByAccount` (`/o?order=<id>`: the signed-in
+  account must own the submitted order, `accounts.account_owns_order`), and any reader that
+  reads nothing is a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
   view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
   `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
   `test_order_page.py` pins. A revision's pictures (its `render` and `test_print` files and
@@ -901,7 +902,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   that is not S3) is listed with no URL, never a 500. Its caption is the shop's caption or
   "Design N, picture K", never the file name. Each revision lists its colour slots with
   the price book's names. Writes take an `Idempotency-Key` and run as `customer_actor`
-  (session `link:<link id>`) inside the ledger's transaction (`Lifecycle` `InTransaction`,
+  (session `link:<link id>`, or `account:<account id>` for a signed-in reader) inside the ledger's transaction (`Lifecycle` `InTransaction`,
   told by `Lifecycle.tell` after commit; the pre-lock checks and `ensure_revision` run on
   that connection too). The customer's cancel is refused 409 `order_approved` once anything
   is approved (`Lifecycle.approved_anything`) and 409 `order_paid` once a payment is
@@ -1213,7 +1214,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     session, never from a body. Submit takes the account from it (the edge sends the
     cookie's session on): the order takes the account's customer, makes none, and is
     attached to the account (`attach_order`); a cart whose visitor joined another account
-    is 404 `draft_not_found`. The order page is to take it too (a later PR).
+    is 404 `draft_not_found`. The order page takes it too (`/o?order=<id>`, `order_page.ByAccount`).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
     deletes the session, and the edge also gives the browser a new visitor. When the CRUD
