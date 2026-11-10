@@ -16,14 +16,19 @@ the form's ``action``, to ``POST …/storefront/turnstile/verify``, which answer
 
 A token longer than Cloudflare's bound fails here, before any call, and so does a client
 with `FAILED_CHECKS` failed checks in `FAILED_WINDOW`, or one of a prefix with
-`PREFIX_FAILED_CHECKS` (`FailedChecks`). `SiteKey` is the
-CRUD side's site key, read at most once per `SITE_KEY_TTL` per replica: the page's
-widget (`GET /api/store/v1/turnstile`) and the page's CSP (`static.py`) both read it, so
-the CSP names Cloudflare only while the check is on.
+`PREFIX_FAILED_CHECKS` (`FailedChecks`). The verdict is asked once, never retried, with
+`TURNSTILE_VERIFY_SECONDS` to answer; a transport failure or a timeout is 503 and is not
+counted as a failed check. `SiteKey` is the CRUD side's site key, read at most once per
+`SITE_KEY_TTL` (30 s) per replica: the page's widget (`GET /api/store/v1/turnstile`) and
+the page's CSP (`static.py`) both read it, so the CSP names Cloudflare only while the
+check is on. While a read within that time found no key, `require_turnstile` passes with
+no call, so a key the shop sets takes effect within 30 s. Siteverify itself stays on the
+CRUD side.
 """
 
 from __future__ import annotations
 
+import heapq
 import ipaddress
 import logging
 import threading
@@ -49,7 +54,8 @@ logger = logging.getLogger(__name__)
 
 BOT_CHECK_FAILED: Final = f"{STOREFRONT_PROBLEMS}bot_check_failed"
 BOT_CHECK_UNAVAILABLE: Final = f"{STOREFRONT_PROBLEMS}bot_check_unavailable"
-#: How long one replica trusts its read of the site key.
+#: How long one replica trusts its read of the site key. While a read found none, a check
+#: passes with no call, so a key the shop sets takes effect within this time.
 SITE_KEY_TTL: Final = 30.0
 #: How long a failed read is kept: page loads meanwhile do not each wait for the CRUD side.
 SITE_KEY_RETRY: Final = 30.0
@@ -106,20 +112,21 @@ def _prefix(client: str) -> str:
 class _Tier:
     """One key's failures: the unblocked keys in an LRU (least recently failed first),
     the blocked ones apart with the time their block ends, so eviction is O(1) and never
-    drops a block."""
+    drops a block. A heap of block ends sweeps every expired block, in order of expiry."""
 
     def __init__(self, most: int, size: int) -> None:
         self.most = most
         self.size = size
         self.open: OrderedDict[str, deque[float]] = OrderedDict()
-        self.blocked: OrderedDict[str, float] = OrderedDict()
+        self.blocked: dict[str, float] = {}
+        self._ends: list[tuple[float, str]] = []
 
     def _sweep(self, now: float) -> None:
-        while self.blocked:
-            key, until = next(iter(self.blocked.items()))
-            if until > now:
-                return
-            del self.blocked[key]
+        while self._ends and self._ends[0][0] <= now:
+            until, key = heapq.heappop(self._ends)
+            # A key blocked again since has a later end of its own in the heap.
+            if self.blocked.get(key) == until:
+                del self.blocked[key]
 
     def is_blocked(self, key: str, now: float) -> bool:
         until = self.blocked.get(key)
@@ -151,7 +158,9 @@ class _Tier:
         if len(failures) >= self.most:
             # A blocked key is never asked about, so it gets no newer failures: its block
             # ends when the oldest failure that makes it ages out.
-            self.blocked[key] = failures[-self.most] + FAILED_WINDOW
+            until = failures[-self.most] + FAILED_WINDOW
+            self.blocked[key] = until
+            heapq.heappush(self._ends, (until, key))
             del self.open[key]
         return True
 
@@ -211,18 +220,26 @@ class FailedChecks:
 async def require_turnstile(request: Request, action: TurnstileAction) -> None:
     """Passes when the check is off or the browser's token passes; raises 403
     `BOT_CHECK_FAILED` or 503 `BOT_CHECK_UNAVAILABLE` otherwise (module docstring). A
-    client past `FAILED_CHECKS` (`FailedChecks`) is refused 403 with no call."""
+    client past `FAILED_CHECKS` (`FailedChecks`) is refused 403 with no call, and while
+    `SiteKey` found no key within `SITE_KEY_TTL` it passes with no call at all."""
     token = request.headers.get(TURNSTILE_HEADER) or None
     if token is not None and len(token) > MAX_TURNSTILE_TOKEN_CHARS:
         raise bot_check_failed()
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    if site_key.known_off():
+        return
     client = _client(request)
     failures: FailedChecks = request.app.state.turnstile_failures
     if failures.blocked(client):
         raise bot_check_failed()
     crud: StorefrontCrud = request.app.state.crud
-    verdict = await crud.turnstile_verify(
-        token, action, visitor_id=request.state.visitor_id, client=client
-    )
+    try:
+        verdict = await crud.turnstile_verify(
+            token, action, visitor_id=request.state.visitor_id, client=client
+        )
+    except CrudUnavailableError:
+        # No answer is not a refusal: never counted as a failed check.
+        raise bot_check_unavailable() from None
     if verdict in ("off", "pass"):
         return
     if verdict == "fail":
@@ -264,3 +281,8 @@ class SiteKey:
         self._read = (now, key)
         self._failed_at = None
         return key
+
+    def known_off(self) -> bool:
+        """Whether a read within `SITE_KEY_TTL` found no site key: the check is off."""
+        read = self._read
+        return read is not None and read[1] is None and self._clock() - read[0] < SITE_KEY_TTL

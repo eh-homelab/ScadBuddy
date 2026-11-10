@@ -535,7 +535,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
   without tracking them, never refusing them). A
   design request checks its upload allowance first, and only a passed check spends it.
-  A form route awaits it
+  The edge asks for the verdict once, never retried, with 15 s to answer; no answer is
+  503 and never counts as a failed check. While the edge's `SiteKey` read no key within
+  `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
+  within 30 s. A form route awaits it
   before it reads its body. Today only design requests (`request`) take it; the actions
   `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
   routes still to come. The edge's page CSP (`storefront/static.py`) names

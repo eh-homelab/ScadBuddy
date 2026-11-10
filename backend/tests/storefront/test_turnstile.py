@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -30,7 +31,12 @@ from scadbuddy.storefront.turnstile import (
     FailedChecks,
     SiteKey,
 )
-from scadbuddy.storefront.wire import CLIENT_HEADER, TURNSTILE_HEADER, VISITOR_HEADER
+from scadbuddy.storefront.wire import (
+    CLIENT_HEADER,
+    TURNSTILE_HEADER,
+    TURNSTILE_VERIFY_SECONDS,
+    VISITOR_HEADER,
+)
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
     CRUD,
@@ -242,6 +248,65 @@ def test_a_table_full_of_blocks_checks_new_clients_and_warns_once_a_minute(
         now[0] += FULL_WARNING_EVERY
         failures.failed("192.0.2.3")
         assert len(warnings(caplog)) == 2
+
+
+def test_a_timed_out_check_is_sent_once_answers_503_and_is_not_a_failure(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].side_effect = httpx.ReadTimeout("no answer")
+    for n in range(FAILED_CHECKS + 1):
+        r = ask(edge)
+        assert r.status_code == 503  # type: ignore[attr-defined]
+        assert r.json()["type"] == BOT_CHECK_UNAVAILABLE  # type: ignore[attr-defined]
+        # Exactly one CRUD call per check: never retried, never counted as a failure
+        # (past FAILED_CHECKS a counted one would be refused 403 with no call).
+        assert crud_mock["turnstile"].call_count == n + 1
+    request = crud_mock["turnstile"].calls.last.request
+    assert request.extensions["timeout"]["read"] == TURNSTILE_VERIFY_SECONDS == 15.0
+
+
+def test_with_no_key_read_within_its_life_the_check_makes_no_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["site_key"].respond(200, json={"site_key": None}, headers=CRUD)
+    assert edge.get("/api/store/v1/turnstile").json() == {"site_key": None}
+    r = ask(edge, token=None)
+    assert r.status_code == 200, r.text  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == 0
+
+
+def test_a_known_off_read_lasts_only_its_life() -> None:
+    now = [0.0]
+    site_key = SiteKey(clock=lambda: now[0])
+    assert not site_key.known_off()
+    site_key._read = (0.0, None)
+    assert site_key.known_off()
+    now[0] = SITE_KEY_TTL
+    assert not site_key.known_off()
+    site_key._read = (now[0], "key-1")
+    assert not site_key.known_off()
+    assert SITE_KEY_TTL <= 60
+
+
+def test_an_expired_block_behind_a_later_one_is_swept() -> None:
+    now = [0.0]
+    failures = FailedChecks(clock=lambda: now[0], size=2)
+    failures.failed("198.51.100.2")  # its block will start at t=0
+    now[0] = 5.0
+    for _ in range(FAILED_CHECKS):
+        failures.failed("203.0.113.1")  # blocked first, until t=605
+    now[0] = 6.0
+    for _ in range(FAILED_CHECKS - 1):
+        failures.failed("198.51.100.2")  # blocked second, until t=600
+    assert failures.blocked("203.0.113.1") and failures.blocked("198.51.100.2")
+    now[0] = 601.0
+    # The table is full of blocks; the expired one, behind the other, must make room.
+    for _ in range(FAILED_CHECKS):
+        failures.failed("192.0.2.3")
+    assert failures.blocked("192.0.2.3")
+    assert failures.blocked("203.0.113.1")
 
 
 def test_an_unavailable_check_spends_no_allowance(

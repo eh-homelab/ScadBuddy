@@ -44,6 +44,10 @@ TURNSTILE_HEADER: Final = "X-Turnstile-Token"
 #: Cloudflare's bound on a token's length
 #: (https://developers.cloudflare.com/turnstile/get-started/server-side-validation/).
 MAX_TURNSTILE_TOKEN_CHARS: Final = 2048
+#: How long the CRUD side's one Siteverify call may take, connect to answer.
+SITEVERIFY_SECONDS: Final = 10.0
+#: How long the edge waits for the CRUD side's verdict: the Siteverify call, plus room.
+TURNSTILE_VERIFY_SECONDS: Final = SITEVERIFY_SECONDS + 5.0
 
 
 def public_problem(problem_type: object) -> bool:

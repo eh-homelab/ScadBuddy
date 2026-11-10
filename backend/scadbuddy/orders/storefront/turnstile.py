@@ -37,7 +37,11 @@ from typing import Final, Literal, NamedTuple
 
 import httpx
 
-from scadbuddy.storefront.wire import MAX_TURNSTILE_TOKEN_CHARS, TurnstileAction
+from scadbuddy.storefront.wire import (
+    MAX_TURNSTILE_TOKEN_CHARS,
+    SITEVERIFY_SECONDS,
+    TurnstileAction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,7 @@ SITEVERIFY_URL: Final = "https://challenges.cloudflare.com/turnstile/v0/siteveri
 #: Cloudflare's bound on a token's length.
 MAX_TOKEN_CHARS: Final = MAX_TURNSTILE_TOKEN_CHARS
 #: How long one Siteverify call may take, connect to answer.
-SITEVERIFY_TIMEOUT: Final = httpx.Timeout(10.0)
+SITEVERIFY_TIMEOUT: Final = httpx.Timeout(SITEVERIFY_SECONDS)
 #: Refusals that are not the visitor's doing: the check cannot judge the token.
 _NOT_THE_VISITOR: Final = frozenset(
     {"missing-input-secret", "invalid-input-secret", "bad-request", "internal-error"}

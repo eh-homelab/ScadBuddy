@@ -62,7 +62,9 @@ let siteKeyRead: Promise<string | null> | null = null
  * undefined until read. Read once per page. A failed read counts as off for now (the edge
  * still refuses a form that needs a token) and is read again when `retryKey` changes:
  * a form passes the key it bumps after each send, so a send refused for its missing token
- * reads the key again and shows the widget.
+ * reads the key again and shows the widget. A read that answered off is read again too
+ * after `forgetTurnstileSiteKey` (the form calls it on a `bot_check_failed`): the shop
+ * may have turned the check on since.
  */
 export function useTurnstileSiteKey(retryKey: number = 0): string | null | undefined {
   const [siteKey, setSiteKey] = useState<string | null | undefined>(undefined)
@@ -81,6 +83,11 @@ export function useTurnstileSiteKey(retryKey: number = 0): string | null | undef
     }
   }, [retryKey])
   return siteKey
+}
+
+/** Read the site key again at the next `retryKey`, whatever the last read answered. */
+export function forgetTurnstileSiteKey(): void {
+  siteKeyRead = null
 }
 
 /** For tests: forget the loaded script and the site key read. */

@@ -2,7 +2,7 @@ import { useId, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { ActionKey, StoreError, errorText, store } from '../api/client'
 import { useDraftChanged } from '../draftCount'
-import { useTurnstileSiteKey } from '../turnstile'
+import { forgetTurnstileSiteKey, useTurnstileSiteKey } from '../turnstile'
 import { Turnstile } from './Turnstile'
 
 /** The edge's caps (`storefront/wire.py`): the page says so before a byte is sent. */
@@ -58,6 +58,8 @@ export function RequestForm() {
       setText('')
       setFiles([])
     } catch (caught) {
+      // Refused for its bot check: the check may have been turned on since the key was read.
+      if (caught instanceof StoreError && caught.slug === 'bot_check_failed') forgetTurnstileSiteKey()
       const wait = caught instanceof StoreError && caught.status === 429 && caught.retryAfter !== null
       setError(wait ? `${errorText(caught)} Try again in ${(caught as StoreError).retryAfter} seconds.` : errorText(caught))
     } finally {

@@ -30,7 +30,7 @@ from starlette.datastructures import UploadFile
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
-from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
+from scadbuddy.storefront.wire import CLIENT_HEADER, TURNSTILE_VERIFY_SECONDS, VISITOR_HEADER
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
@@ -213,12 +213,17 @@ class StorefrontCrud:
         self, token: str | None, action: str, *, visitor_id: str, client: str
     ) -> str:
         """``POST …/storefront/turnstile/verify``: the CRUD side's verdict on the
-        browser's token for ``action`` (``off``, ``pass``, ``fail``, ``unavailable``)."""
+        browser's token for ``action`` (``off``, ``pass``, ``fail``, ``unavailable``).
+        Sent once, never retried: a token passes one Siteverify call only, so a retry
+        after a lost answer would fail a good token. A transport failure or a timeout
+        (`TURNSTILE_VERIFY_SECONDS`) raises `CrudUnavailableError`."""
         response = await self._crud.request(
             "POST",
             f"{BASE}/turnstile/verify",
             json={"token": token, "action": action},
             headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+            timeout=TURNSTILE_VERIFY_SECONDS,
+            budget=0.0,
         )
         answer = response.json()
         verdict = answer.get("verdict") if isinstance(answer, dict) else None
