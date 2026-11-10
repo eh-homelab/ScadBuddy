@@ -64,7 +64,8 @@ def test_the_list_is_the_orders_rows_newest_first_with_each_state(api: TestClien
     [queued] = rows(api, "SELECT id FROM storefront_mail WHERE order_id = %s", order["id"])
     insert(
         api,
-        "UPDATE storefront_mail SET created_at = '2026-11-01T10:00:00Z' WHERE id = %s",
+        "UPDATE storefront_mail SET created_at = '2026-11-01T10:00:00Z', sent_at = NULL,"
+        " failed_at = NULL, attempts = 0, last_error = NULL WHERE id = %s",
         queued["id"],
     )
     insert(

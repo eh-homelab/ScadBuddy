@@ -868,6 +868,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
   `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
+  `GET /orders/{id}/mail` (`Lifecycle.order_mail`, `mail.py` `order_mail`, no lock) lists the
+  order's outbox rows, newest first, as `OrderMail`: never the body, context, link or token, and no
+  sign-in code. Agent `order_mail_list` (read).
   The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
   area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
   `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.

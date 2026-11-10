@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderMail } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
@@ -12,7 +13,7 @@ const EVENT: Record<OrderMail['event'], string> = {
   shipped: 'Order shipped',
 }
 
-function State({ mail }: { mail: OrderMail }) {
+function State({ mail, now }: { mail: OrderMail; now: number }) {
   if (mail.sent_at) {
     return (
       <>
@@ -21,7 +22,8 @@ function State({ mail }: { mail: OrderMail }) {
     )
   }
   if (mail.failed_at) return <span className="text-warn">Failed: {mail.last_error ?? 'no reason was given'}</span>
-  if (mail.attempts > 0) {
+  // Waiting only while its next try is still ahead; after that the sender owes it, so it reads queued.
+  if (mail.attempts > 0 && Date.parse(mail.next_attempt_at) > now) {
     return (
       <>
         Waiting until <When at={mail.next_attempt_at} />
@@ -44,6 +46,9 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
   const mail = useAsync(() => api.orderMail(orderId), [orderId, version], [`order:${orderId}`])
   const settings = useAsync(() => api.getSettings(), [])
   const server = useAsync(() => api.storefrontMail(), [])
+  // The clock a backed-off mail is judged by, read again whenever the list is.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => setNow(Date.now()), [mail.data])
   const unset = settings.data !== undefined && !settings.data.storefront_mail_host
 
   return (
@@ -73,12 +78,13 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
       {mail.data && mail.data.length === 0 && <p className="text-[13px] text-muted-foreground">No mail yet.</p>}
       {mail.data && mail.data.length > 0 && (
         <ul className="flex flex-col gap-1 text-[13px]">
-          {mail.data.map((m) => (
-            <li key={`${m.created_at}-${m.event}-${m.to}`} className="flex flex-wrap gap-x-2">
+          {mail.data.map((m, i) => (
+            // The API gives no row id by design; the index keeps two like rows apart.
+            <li key={`${i}-${m.created_at}-${m.event}`} className="flex flex-wrap gap-x-2">
               <span className="font-medium">{EVENT[m.event]}</span>
               <span className="break-all">{m.to}</span>
               <span>
-                <State mail={m} />
+                <State mail={m} now={now} />
               </span>
             </li>
           ))}

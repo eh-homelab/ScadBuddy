@@ -615,6 +615,7 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
 // customer link. The card shows the link's state, never the link itself.
 describe('OrderPage, the customer link (#5283)', () => {
   beforeEach(() => resetMockState())
+  afterEach(() => vi.useRealTimers())
 
   it("sends a link to the customer's email, replaces it after a confirm, and revokes it", async () => {
     const { user } = render(ORDER_ACCEPTED)
@@ -689,6 +690,9 @@ describe('OrderPage, the customer link (#5283)', () => {
       { ...row, event: 'revision_ready', created_at: '2026-11-02T10:00:00Z', next_attempt_at: '2026-11-09T11:00:00Z', attempts: 1, last_error: 'try later' },
       { ...row, event: 'order_link', created_at: '2026-11-01T10:00:00Z', next_attempt_at: '2026-11-01T10:00:00Z', sent_at: '2026-11-01T10:01:00Z' },
     ])
+    // Only Date is faked, so the page's timers and requests run as usual.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T10:00:00Z'))
     render(ORDER_ACCEPTED)
     const list = await screen.findByRole('region', { name: 'Customer mail' })
     const items = await within(list).findAllByRole('listitem')
@@ -705,6 +709,19 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(items[3]).toHaveTextContent('Sent')
     // The default settings name no SMTP host.
     expect(within(list).getByText(/mail server is not set up/)).toBeInTheDocument()
+  })
+
+  it('reads a backed-off mail as queued once its next try has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T12:00:00Z'))
+    mockOrderMail(ORDER_ACCEPTED, [
+      { event: 'revision_ready', to: 'ada@example.test', created_at: '2026-11-02T10:00:00Z', sent_at: null, failed_at: null, attempts: 1, last_error: 'try later', next_attempt_at: '2026-11-09T11:00:00Z' },
+    ])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    const [item] = await within(list).findAllByRole('listitem')
+    expect(item).toHaveTextContent('Queued')
+    expect(item).not.toHaveTextContent('Waiting until')
   })
 
   it("shows the mail server's last error, and no note once a host is set", async () => {
