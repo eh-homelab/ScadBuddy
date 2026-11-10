@@ -62,6 +62,8 @@ export const RECONCILE_GRACE_MS = 60 * 60 * 1000
 export const RECONCILE_EVERY_MS = 60 * 60 * 1000
 /** The advisory lock that lets one replica at a time run `reconcile`. */
 export const RECONCILE_LOCK = 'scadbuddy:ai_session_files:reconcile'
+/** Why `reconcile` did nothing: another replica holds RECONCILE_LOCK, or no lock connection was free. */
+export type ReconcileSkipped = 'held' | 'no_connection'
 /** The slice `chunks` reads at a time. */
 export const STREAM_CHUNK_BYTES = 1024 * 1024
 
@@ -919,9 +921,11 @@ export class SessionFiles {
    * row: a row written meanwhile is held again (a no-op), and a hold taken again meanwhile is
    * kept, since the backend releases only a hold still older than the grace. Nothing without
    * a blob store; WorkspaceBlobError when the backend cannot list or answer. With `locks`, one
-   * replica at a time: `skipped` while another holds RECONCILE_LOCK or no lock connection is free.
+   * replica at a time: `skipped` is `held` while another replica holds RECONCILE_LOCK, and
+   * `no_connection` while no lock connection is free (the sweeper then tries again at its next
+   * tick, not an hour later).
    */
-  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: true }> {
+  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: ReconcileSkipped }> {
     const store = this.blobs?.store
     if (!store) return { released: 0, held: 0 }
     if (!this.locks) return this.#reconcile(store, graceMs)
@@ -929,7 +933,7 @@ export class SessionFiles {
     // `createLockClient`), never one of the stores'. With every lock connection out, or the
     // lock held by another replica, this one skips; the next tick tries again.
     const lease = await this.locks.take()
-    if (!lease) return { released: 0, held: 0, skipped: true }
+    if (!lease) return { released: 0, held: 0, skipped: 'no_connection' }
     // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
     let healthy = false
     try {
@@ -937,7 +941,7 @@ export class SessionFiles {
         SELECT pg_try_advisory_lock(hashtextextended(${RECONCILE_LOCK}, 0)) AS locked`
       if (!lock?.locked) {
         healthy = true
-        return { released: 0, held: 0, skipped: true }
+        return { released: 0, held: 0, skipped: 'held' }
       }
       try {
         return await this.#reconcile(store, graceMs)
@@ -985,7 +989,8 @@ export class SessionFiles {
           await this.sweep()
           if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
           this.#reconciledAt = Date.now()
-          await this.reconcile()
+          // No replica ran it this hour when no lock connection was free: try at the next tick.
+          if ((await this.reconcile()).skipped === 'no_connection') this.#reconciledAt = 0
         })
         .catch(options.onError ?? (() => {}))
     }
