@@ -306,9 +306,9 @@ main on 2026-11-01:
     goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
     ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
     tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
-    A session whose plugin package names Claude Code built-ins that the session serves also
-    gets the note on those, after the fixed part; it is per turn, so not in
-    `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
+    Every session turn also gets a note on the session's own built-ins it serves (`WebFetch`,
+    `WebSearch` and, where the session keeps background tasks, the background ones; #5870), after the fixed part; it is
+    per turn, so not in `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
     before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
     static and its cache is shared across sessions
     ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
@@ -1072,6 +1072,31 @@ session's Claude Code process offers its own built-ins, each an item of the acce
 | `Read`, `Glob`, `Grep`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate` | `read` |
 | `Write`, `Edit`, `NotebookEdit` | `write` |
 | `Bash`, `PowerShell` | `off` |
+| `WebFetch`, `WebSearch` (the session's, below) | `outward` |
+| `CronCreate`, `CronDelete`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` (the session's, below) | `write` |
+| `CronList` (the session's, below) | `read` |
+
+The last three rows are the session's own built-ins (`SESSION_BUILTINS`), served in place of
+Claude Code's (below) and listed in the same source, so an admin sees and sets them there.
+Every turn offers each one that is not `off`, whether or not a plugin package names it (#2726
+R2; before, only a turn with an allowed package that named one got it). A session a flow run
+started or forked (`sessions_start`, `sessions_fork` in the run's call) and a Workflow agent's
+chat (`SessionManager.startChild`) keep no background tasks, nor does a session one of them
+starts or forks through the `sessions_*` tools, nor a fork of any of them
+(`ai_sessions.background_tools`), so their turns are offered `WebFetch` and `WebSearch` only,
+whatever a package names. A turn a flow run sends (`ask_session`), or such a session sends,
+to any other session gets only those two as well (`ai_sessions.turn_flow`); that session's
+next turn from anyone else gets its own again. So does every turn on an agent without
+Temporal or a database. The tiers:
+`WebFetch` and `WebSearch` reach the internet, so each call asks first. `CronCreate`,
+`ScheduleWakeup` and `Workflow` start turns or agents that spend after this one, and
+`CronDelete` and `TaskStop` end them: each changes what the session keeps, so `write`.
+`CronList` only reads it. A `Monitor` takes the stricter of its item and its source: a `ws`
+source connects to a web host as `WebFetch` does, so `outward`; a `command` source runs a
+shell where `Bash` runs, unsandboxed in the worker pod, so a turn gives it a command queue
+only while `Bash` is on (a package switched it on, or an admin), and a call takes `Bash`'s
+tier if it is stricter. With `Bash` off, its default, a `command` call is refused and a
+Monitor watches a WebSocket only (`nativeBuiltins.ts` `monitorAccess`, `live.ts`).
 
 - They run in the session's working directory (§13), the process's cwd. The permission
   seam refuses a file tool's path outside it: an absolute path elsewhere, `..`, a link
@@ -1143,7 +1168,7 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   Claude Code's own tools, with paths in the session directory.
 
 The agent still provides these in place of Claude Code's, from the in-process `builtin`
-server (`agent/src/builtins/server.ts`, `mcp__builtin__<Name>`), each outward:
+server (`agent/src/builtins/server.ts`, `mcp__builtin__<Name>`), each `outward` by default:
 
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
@@ -1160,7 +1185,7 @@ as a turn counts Claude Code's own calls.
 session (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so every turn gets these in place of its own (`mcp__builtin__<Name>`, the
-`builtin` in-process server, `sessions/manager.ts`). Each task is a row of
+`builtin` in-process server, `sessions/turnRunner.ts`), at the access in the table above. Each task is a row of
 `ai_background_tasks` and what fires it on `agent-tools`, which carries only the id: a
 recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
 timezone, ending at its expiry) whose every fire is a short `BackgroundFire` workflow
@@ -1186,7 +1211,7 @@ the session's data key; archiving the chat or marking it done ends its tasks, an
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
 A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
-where the session's Bash runs: a command in the session's directory on
+where the session's Bash runs (a command only while `Bash` is on, above): a command in the session's directory on
 the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
 WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
@@ -1314,7 +1339,7 @@ user sets them in Settings → Tools & plugins → Packages
     any match it reaches is off.
 - **Hooks change per turn.** No SDK option drops one plugin hook from a
   running query (spec §2), so a hook switched off is left out of the next turn's copy.
-- **Built-ins.** Claude Code's own built-ins are items of `builtin:claude-code` (§9). For a
+- **Built-ins.** Claude Code's own built-ins, and the session's own, are items of `builtin:claude-code` (§9). For a
   pin approved with `allow_refused`, each Claude Code built-in it names is also an item
   `builtin:<Tool>`, with a tool's access; for one of `builtin:claude-code`'s it counts only
   while that item is `off`, as the switch that turns it on. Where several packages of the
