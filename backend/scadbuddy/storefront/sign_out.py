@@ -7,7 +7,8 @@ never success, and tries the revocation again in the background: `SIGN_OUT_RETRY
 (five tries over about ten minutes), each try and the give-up logged.
 
 The queue is in memory and bounded (`SIGN_OUT_RETRIES_MAX`): a full queue takes no more,
-and the route logs the sign-out "not queued". An edge restart drops the queue; a session it held then ends at its expiry.
+and the route logs the sign-out "not queued". An edge restart drops the queue; a session it
+held then ends at its expiry.
 """
 
 from __future__ import annotations
