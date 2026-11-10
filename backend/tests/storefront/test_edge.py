@@ -134,8 +134,25 @@ def test_a_database_or_key_variable_refuses_the_start(name: str) -> None:
     with pytest.raises(EdgeRefusal) as refused:
         check_environment({name: "x"})
     assert refused.value.reasons == [
-        f"{name} is set; the storefront holds no database secret or key"
+        f"{name} is set; the storefront holds no database secret, key or Temporal address"
     ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SCADBUDDY_DATABASE_URL",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "SCADBUDDY_SECRET_KEY_FILE",
+        "SCADBUDDY_TEMPORAL_ADDRESS",
+    ],
+)
+def test_each_named_variable_is_refused(name: str) -> None:
+    """#5284: the list by name, so a variable dropped from FORBIDDEN_ENV fails here. The
+    edge reaches nothing but the CRUD service: no database and no Temporal (#5295)."""
+    with pytest.raises(EdgeRefusal):
+        check_environment({name: "x"})
 
 
 def test_a_clean_environment_is_accepted() -> None:

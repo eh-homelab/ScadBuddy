@@ -45,6 +45,13 @@ sweep took it first, so both take an ``Idempotency-Key``: a resend after a lost 
 records one slice, and a claim it won answers true again, though the slice was retired
 since. Every other write sets or deletes by key.
 
+The copy lease (#5298 Task 27, `bambuddy/copy_leases.py`) is the copy lock the worker
+holds while it finds, uploads and records a library copy: ``POST /copy-leases/{key}``
+takes it for ``token`` (waiting on the API up to ``wait_s``, at most 25 s) or answers 409
+``busy``, ``PUT`` renews it or answers 409 ``lease-lost``, and ``DELETE`` releases it.
+Each is natural on the token. An upload's record that names a lease is written only
+while that lease holds, else 409 ``lease-lost``.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -65,7 +72,7 @@ from uuid import UUID
 from fastapi import Query, Request, status
 from psycopg import Connection
 from psycopg.rows import DictRow
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     EventsDep,
@@ -77,6 +84,14 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
+from scadbuddy.bambuddy.copy_leases import (
+    COPY_LEASE_TTL,
+    MAX_TTL,
+    MAX_WAIT,
+    CopyLease,
+    CopyLeases,
+    LeaseLostError,
+)
 from scadbuddy.bambuddy.outcomes import PrintOutcomeStore
 from scadbuddy.bambuddy.print_links import PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
@@ -420,6 +435,8 @@ async def publish_event(body: EventPost, events: EventsDep) -> Logged:
 class CopyWrite(BaseModel):
     output_id: str
     upload: LibraryCopy
+    #: The copy lease it was uploaded under: written only while that holds.
+    lease: CopyLease | None = None
 
 
 class CopyKey(BaseModel):
@@ -473,7 +490,64 @@ async def uploads_for(
 
 @router.post("/uploads", name="crud_print_record_upload", status_code=status.HTTP_204_NO_CONTENT)
 async def record_upload(body: CopyWrite, uploads: UploadsDep) -> None:
-    await uploads.record(body.output_id, body.upload)
+    try:
+        await uploads.record(body.output_id, body.upload, body.lease)
+    except LeaseLostError as error:
+        raise _lease_lost() from error
+
+
+#: A lease another holder keeps for all of the wait, and one its token no longer holds.
+LEASE_BUSY = "busy"
+LEASE_LOST = "lease-lost"
+
+
+def _lease_lost() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT, "The copy lease is not held by this token.", reason=LEASE_LOST
+    )
+
+
+class LeaseAsk(BaseModel):
+    token: UUID
+    ttl_s: float = Field(gt=0, le=MAX_TTL)
+    wait_s: float = Field(default=0, ge=0, le=MAX_WAIT)
+
+
+class LeaseRenew(BaseModel):
+    token: UUID
+    ttl_s: float = Field(default=COPY_LEASE_TTL, gt=0, le=MAX_TTL)
+
+
+class LeaseHeld(BaseModel):
+    token: UUID
+    expires_at: datetime
+
+
+@router.post("/copy-leases/{key:path}", name="crud_print_acquire_copy_lease")
+async def acquire_copy_lease(key: str, body: LeaseAsk, uploads: UploadsDep) -> LeaseHeld:
+    expires = await CopyLeases(uploads.pool).acquire(key, str(body.token), body.ttl_s, body.wait_s)
+    if expires is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, "Another holder keeps the copy lease.", reason=LEASE_BUSY
+        )
+    return LeaseHeld(token=body.token, expires_at=expires)
+
+
+@router.put("/copy-leases/{key:path}", name="crud_print_renew_copy_lease")
+async def renew_copy_lease(key: str, body: LeaseRenew, uploads: UploadsDep) -> LeaseHeld:
+    expires = await CopyLeases(uploads.pool).renew(key, str(body.token), body.ttl_s)
+    if expires is None:
+        raise _lease_lost()
+    return LeaseHeld(token=body.token, expires_at=expires)
+
+
+@router.delete(
+    "/copy-leases/{key:path}",
+    name="crud_print_release_copy_lease",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def release_copy_lease(key: str, token: UUID, uploads: UploadsDep) -> None:
+    await CopyLeases(uploads.pool).release(key, str(token))
 
 
 @router.get("/uploads/same-content", name="crud_print_same_content")

@@ -29,4 +29,19 @@ test.describe('the storefront account', () => {
     await expect(page.getByRole('status')).toHaveText('You are signed out.')
     await expect(page.getByRole('link', { name: 'Sign in' })).toBeVisible()
   })
+
+  test('asks for a code, then signs in with it on a phone', async ({ page }) => {
+    await page.goto('/store/account/sign-in')
+    await expect(page.getByLabel('Code')).toHaveCount(0)
+    await page.getByLabel('Email').fill('ada@example.com')
+    await page.getByRole('button', { name: 'Send me a code' }).click()
+    await expect(page.getByText('We emailed a code to ada@example.com.')).toBeVisible()
+    await expect(page.getByLabel('Email')).toHaveValue('ada@example.com')
+
+    await page.getByLabel('Code').fill('ABCD-EFGH-JKMN-PQRS')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await expect(page.getByRole('heading', { name: 'Your account', level: 1 })).toBeVisible()
+    const width = Number(await page.evaluate('document.documentElement.scrollWidth'))
+    expect(width).toBeLessThanOrEqual(390)
+  })
 })

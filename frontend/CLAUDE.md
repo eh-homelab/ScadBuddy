@@ -79,9 +79,11 @@ same way, `vite.config.ts`).
   the history); a 404 with no body is a link that opens nothing. It says "Paid" only from
   the edge's answer ("Check for updates" reads again), never from a provider's redirect
   (spec §7). The mocks open one order with the token `tok`.
-  Accounts (#5283, spec §5.2): `pages/SignInPage.tsx` (`/account/sign-in`; the address and
-  the mailed code, the code filled from a link's `#code=` and then dropped from the
-  address; Turnstile `sign_in`) and `pages/AccountPage.tsx` (`/account`; "Your orders",
+  Accounts (#5283, spec §5.2): `pages/SignInPage.tsx` (`/account/sign-in`, two steps:
+  "Send me a code" mails a code to the address, Turnstile `sign_up`, and says the same for
+  every address; then the address and the code, Turnstile `sign_in`. A mailed link opens on
+  the second step, the code filled from its `#code=` and then dropped from the address)
+  and `pages/AccountPage.tsx` (`/account`; "Your orders",
   each linking through `api/client.ts` `ACCOUNT_ORDER_URL` to `/o?order=<id>`, and
   sign-out, which on a 503 `sign_out_incomplete` shows the edge's text). Each order's
   status reads from the page's `STATUS_LABELS`, typed by the spec's status enum (backend
