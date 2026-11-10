@@ -34,6 +34,8 @@ export type CustomerOrder = Schemas['CustomerOrderView']
  * id (`/o?order=<id>`), which the CRUD side reads only for the session's own account.
  */
 export type OrderReader = { token: string } | { order_id: string }
+/** What the pay page needs to render PayPal's buttons for one request (`/pay#<token>`). */
+export type PayCheckout = Schemas['VenmoCheckout']
 export type CustomerItem = Schemas['CustomerItem']
 export type CustomerRevision = Schemas['CustomerRevision']
 export type CustomerPayment = Schemas['CustomerPayment']
@@ -150,6 +152,7 @@ export const store = {
   submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
     call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
+  payCheckout: (token: string) => call<PayCheckout>('/pay/checkout', { method: 'POST', json: { token } }),
   orderView: (who: OrderReader) => call<CustomerOrder>('/order/view', { method: 'POST', json: { ...who } }),
   answerRevision: (
     who: OrderReader,

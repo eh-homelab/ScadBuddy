@@ -54,12 +54,28 @@ TURNSTILE_ORIGIN: Final = "https://challenges.cloudflare.com"
 TURNSTILE_CSP: Final = STOREFRONT_CSP.replace(
     "script-src 'self';", f"script-src 'self' {TURNSTILE_ORIGIN}; frame-src {TURNSTILE_ORIGIN};"
 )
+#: PayPal's SDK origins, live and sandbox, for the ``/pay`` page only (#5283 phase 4): the
+#: SDK script loads from them, its buttons are frames of them, and the SDK calls them. Added
+#: on top of the shared policy (Turnstile's origins stay while a site key is set), so no
+#: other path may reach PayPal
+#: (https://developer.paypal.com/sdk/js/configuration/, read 2026-11-10).
+PAYPAL_ORIGINS: Final = "https://www.paypal.com https://www.sandbox.paypal.com"
+PAY_PATH: Final = "/pay"
 
 
-def storefront_csp(turnstile: bool) -> str:
+def storefront_csp(turnstile: bool, pay: bool = False) -> str:
     """The page's policy: `TURNSTILE_CSP` while the check is on, or until the edge's first
-    site-key read succeeds (`SiteKey.ever_read`), else the first-party `STOREFRONT_CSP`."""
-    return TURNSTILE_CSP if turnstile else STOREFRONT_CSP
+    site-key read succeeds (`SiteKey.ever_read`), else the first-party `STOREFRONT_CSP`;
+    with ``pay``, PayPal's origins (`PAYPAL_ORIGINS`) on top, in ``script-src``,
+    ``frame-src`` and ``connect-src``."""
+    csp = TURNSTILE_CSP if turnstile else STOREFRONT_CSP
+    if not pay:
+        return csp
+    csp = csp.replace("script-src 'self'", f"script-src 'self' {PAYPAL_ORIGINS}", 1)
+    csp = csp.replace("connect-src 'self'", f"connect-src 'self' {PAYPAL_ORIGINS}", 1)
+    if "frame-src " in csp:
+        return csp.replace("frame-src ", f"frame-src {PAYPAL_ORIGINS} ", 1)
+    return csp.replace("script-src ", f"frame-src {PAYPAL_ORIGINS}; script-src ", 1)
 
 
 async def _turnstile_off() -> bool:
@@ -117,7 +133,11 @@ class StorefrontStatic:
             return
         response = self._response(scope)
         if response is None:
-            response = self._page(await self._turnstile())
+            path: str = scope["path"]
+            root: str = scope.get("root_path", "")
+            if root and path.startswith(root):
+                path = path[len(root) :]
+            response = self._page(await self._turnstile(), pay=path.rstrip("/") == PAY_PATH)
         await response(scope, receive, send)
 
     def _response(self, scope: Scope) -> Response | None:
@@ -147,8 +167,8 @@ class StorefrontStatic:
             return _not_found()
         return None
 
-    def _page(self, turnstile: bool) -> Response:
+    def _page(self, turnstile: bool, pay: bool = False) -> Response:
         response = FileResponse(self.page, media_type="text/html")
         response.headers["Cache-Control"] = REVALIDATE
-        response.headers["Content-Security-Policy"] = storefront_csp(turnstile)
+        response.headers["Content-Security-Policy"] = storefront_csp(turnstile, pay)
         return response

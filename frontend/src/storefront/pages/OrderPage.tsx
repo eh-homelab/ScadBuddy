@@ -25,6 +25,9 @@ function modelJob(url: string): PreviewJob {
 /** What a link that opens no order reads (an unknown, revoked or broken link). */
 const NO_ORDER = 'This link does not open an order. It may have been replaced by a newer one: use the link in the latest mail from the shop.'
 
+/** What `/o` reads with no token and no order id (the payment provider sends a payer here). */
+const NO_LINK = 'Open your order from the link in your mail.'
+
 /**
  * `/o#<token>`: the customer's order (spec §5.2, §5.6). The token is the order link's,
  * read from the URL fragment, which the browser never sends: the page posts it in each
@@ -84,6 +87,17 @@ export function OrderPage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  if (who === null) {
+    return (
+      <section>
+        <h1 className="sf-h1">Your order</h1>
+        <div className="sf-panel">
+          <p className="sf-lead">{NO_LINK}</p>
+        </div>
+      </section>
+    )
   }
 
   if (order === null) {

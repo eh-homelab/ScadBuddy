@@ -59,7 +59,7 @@ or ``null``, and ``GET …/account/orders`` its submitted orders (401 ``sign_in_
 with no live session).
 
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
-edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
+edge's ``/pay#<token>`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
 The token travels in the body, never the path, so no access log holds it. The token is
 the secret here, so it takes no visitor or client header.
@@ -515,7 +515,7 @@ async def draft_request(
 
 
 class PayCheckoutRead(BaseModel):
-    """The pay page's token, as the edge took it from ``/pay/{token}``."""
+    """The pay page's token, as the edge took it from the ``/pay#<token>`` page."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -45,7 +45,7 @@ from scadbuddy.storefront.wire import (
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
-#: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
+#: ``/pay#<token>`` page (#5283 phase 4).
 #: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
 #: customer's order page (#5283).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
@@ -284,6 +284,14 @@ class StorefrontCrud:
             idempotency_key=key,
             headers=None if session is None else {SESSION_HEADER: session},
         )
+        return response.json()
+
+    async def pay_checkout(self, body: bytes) -> Any:
+        """``POST …/storefront/pay/checkout``: what the pay page needs to render PayPal's
+        buttons for the request the body's token names. The body goes on as it came,
+        unread: the token is in it only, never a path. A token that reads nothing raises
+        `CrudRefusedError` 404 with no problem."""
+        response = await self._crud.request("POST", f"{BASE}/pay/checkout", content=body)
         return response.json()
 
     async def turnstile_site_key(self) -> str | None:

@@ -80,7 +80,7 @@ def tokened(shop: PayShop) -> tuple[Order, PaymentRequestView, str]:
     shop.lifecycle.set_request_link(
         req.id,
         hosted=HostedRequest.model_validate(
-            {"provider_ref": PAYPAL_ORDER, "hosted_url": f"{STOREFRONT}/pay/{token}"}
+            {"provider_ref": PAYPAL_ORDER, "hosted_url": f"{STOREFRONT}/pay#{token}"}
         ),
         error=None,
         pay_token_hash=digest,
@@ -120,7 +120,7 @@ def test_the_request_stores_the_hash_never_the_token(shop: PayShop) -> None:
             "SELECT row_to_json(r)::text AS whole FROM payment_requests r WHERE id = %s",
             (req.id,),
         ).fetchone()
-    assert row is not None and token not in row["whole"].replace(f"/pay/{token}", "")
+    assert row is not None and token not in row["whole"].replace(f"/pay#{token}", "")
 
 
 # -- venmo_checkout --------------------------------------------------------------------------
@@ -147,8 +147,8 @@ def test_an_unknown_token_reads_nothing(shop: PayShop, token: str) -> None:
 
 @pytest.mark.parametrize("status", ["paid", "cancelled", "expired"])
 def test_a_request_that_ends_reads_nothing_and_drops_its_token(shop: PayShop, status: Any) -> None:
-    """A token is spent once its request ends: the storefront's ``/pay/{token}`` answers
-    404 for it, whatever the request does next."""
+    """A token is spent once its request ends: the storefront's ``/pay#<token>`` page gets
+    a 404 for it, whatever the request does next."""
     _, req, token = tokened(shop)
     with shop.rows.transaction() as conn:
         payments_store.set_request_status(conn, req.id, status)
@@ -325,8 +325,8 @@ async def test_an_eligible_request_links_to_the_storefront_pay_page(
     linked = await service(shop).link(req.id)
     assert linked.provider_ref == PAYPAL_ORDER
     assert linked.hosted_url is not None
-    assert linked.hosted_url.startswith(f"{STOREFRONT}/pay/")
-    token = linked.hosted_url.removeprefix(f"{STOREFRONT}/pay/")
+    assert linked.hosted_url.startswith(f"{STOREFRONT}/pay#")
+    token = linked.hosted_url.removeprefix(f"{STOREFRONT}/pay#")
     assert stored_hash(shop, req.id) == token_hash(token)
     found = checkout(shop, token)
     assert found is not None and found.paypal_order_id == PAYPAL_ORDER

@@ -626,9 +626,9 @@ Cash needs no provider: record it as a manual payment.
 Venmo is a funding source of PayPal, for US buyers paying in USD. Only PayPal's
 JavaScript SDK offers it, and PayPal's own approval link never does
 ([Pay with Venmo](https://developer.paypal.com/docs/checkout/pay-with-venmo/)). Venmo
-needs a pay page on the storefront, `/pay/<token>`, that renders PayPal's buttons for the
-request's PayPal order. That page is the storefront's (#5283 phase 4) and is not built
-yet. Until it ships, PayPal's connect form shows Venmo `on` as unavailable, a connect
+needs a pay page on the storefront, `/pay#<token>`, that renders PayPal's buttons for the
+request's PayPal order. That page is the storefront's (#5283 phase 4) and is built. Until its sandbox
+measurement is made and `PAY_PAGE_READY` flips, PayPal's connect form shows Venmo `on` as unavailable, a connect
 with `on` is refused (409 `venmo_page_missing`), a connect that leaves Venmo out saves
 `off`, and every PayPal request keeps PayPal's own approval link. Once the page ships,
 the link rewrite and the toggle turn on: with Venmo `on` (which also needs

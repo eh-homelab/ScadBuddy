@@ -55,6 +55,7 @@ from scadbuddy.storefront.wire import (
     JOB_ID,
     LISTING_ID,
     ORDER_VIEW_FIELDS,
+    PAY_CHECKOUT_FIELDS,
     QUOTE_ID,
     REVISION_ID,
     STOREFRONT_PROBLEMS,
@@ -430,6 +431,20 @@ async def _order(
             return Response(status_code=status.HTTP_404_NOT_FOUND)
         raise
     return _shown(answer)
+
+
+@visitor_router.post("/pay/checkout")
+async def pay_checkout(request: Request, crud: Crud) -> Any:
+    """What the pay page (`/pay#<token>`) needs to render PayPal's buttons. The body's
+    ``token`` goes on in the body, never a path or a log; a token that reads nothing is a
+    404 with no body."""
+    try:
+        answer = await crud.pay_checkout(await _body(request, "pay_body_invalid"))
+    except CrudRefusedError as error:
+        if error.status == status.HTTP_404_NOT_FOUND and not error.problem:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+        raise
+    return {k: v for k, v in answer.items() if k in PAY_CHECKOUT_FIELDS}
 
 
 @visitor_router.post("/order/view")

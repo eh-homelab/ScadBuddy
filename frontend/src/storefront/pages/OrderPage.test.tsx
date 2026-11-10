@@ -171,6 +171,13 @@ describe('OrderPage', () => {
     expect(sent[1]!.key).toBe(sent[0]!.key)
   })
 
+  it('asks for the mail\'s link when it has no token and no order id', async () => {
+    const sent = serve(ORDER)
+    renderPage(<OrderPage />, { route: '/o' })
+    expect(await screen.findByText('Open your order from the link in your mail.')).toBeInTheDocument()
+    expect(sent).toEqual([])
+  })
+
   it('says a link that opens nothing opens nothing', async () => {
     server.use(http.post('/api/store/v1/order/view', () => new HttpResponse(null, { status: 404 })))
     renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
