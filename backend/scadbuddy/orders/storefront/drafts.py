@@ -61,6 +61,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftItem,
     DraftView,
     Listing,
+    PublicShippingOption,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -194,7 +195,11 @@ async def _view(state: AppState, order: Order) -> DraftView:
     orders = _orders(state)
 
     def read() -> tuple[
-        list[OrderItem], dict[str, list[str] | None], list[Attachment], list[Listing]
+        list[OrderItem],
+        dict[str, list[str] | None],
+        list[Attachment],
+        list[Listing],
+        list[PublicShippingOption],
     ]:
         offered = orders.store.storefront_offered(order.id)
         items = orders.store.items(order.id)
@@ -210,9 +215,13 @@ async def _view(state: AppState, order: Order) -> DraftView:
             offered,
             orders.store.attachments(order.id),
             orders.listings.at_commits(pairs) if pairs else [],
+            [
+                PublicShippingOption(**option.model_dump())
+                for option in orders.lifecycle.rules().shipping_options
+            ],
         )
 
-    rows, offered, files, listings = await asyncio.to_thread(read)
+    rows, offered, files, listings, shipping = await asyncio.to_thread(read)
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -251,6 +260,7 @@ async def _view(state: AppState, order: Order) -> DraftView:
         currency=order.currency,
         minor_exponent=order.minor_exponent,
         items=items,
+        shipping_options=shipping,
     )
 
 

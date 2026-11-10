@@ -21,7 +21,7 @@ from starlette.routing import Route
 
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudUnavailableError
-from scadbuddy.storefront import uploads
+from scadbuddy.storefront import routes, uploads
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
     MAX_CLIENTS,
@@ -36,6 +36,7 @@ from scadbuddy.storefront.ratelimit import (
     client_key,
 )
 from scadbuddy.storefront.routes import MAX_RENDER_BODY
+from scadbuddy.storefront.turnstile import bot_check_failed
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
@@ -1291,3 +1292,81 @@ def test_a_browser_key_on_a_write_is_bound_to_its_visitor(
             client.post(path, json=BODY, headers=_keyed(key))
     one, two = (call.request.headers["idempotency-key"] for call in route.calls)
     assert one != two
+
+
+# -- submit (#5283 Task 3) ----------------------------------------------------------------
+
+SUBMIT = f"{DRAFT}/submit"
+SUBMIT_BODY = {"draft_id": VIEW["id"], "name": "Ada", "email": "ada@example.com"}
+SUBMITTED = {"id": VIEW["id"], "number": "ORD-2026-1", "email": "ada@example.com"}
+
+
+def test_a_submit_without_a_browser_key_is_428_before_any_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+
+    async def check(_request: Request, action: str) -> None:
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(SUBMIT)
+    r = edge.post("/api/store/v1/draft/submit", json=SUBMIT_BODY, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 428
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}idempotency_key_required"
+    assert (route.call_count, checks) == (0, [])
+
+
+def test_a_submit_takes_the_bot_check_then_is_forwarded_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+    route = crud_mock.post(SUBMIT).respond(200, json=SUBMITTED, headers=CRUD)
+
+    async def check(_request: Request, action: str) -> None:
+        # Awaited before the CRUD call that acts.
+        assert route.call_count == 0
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    r = edge.post("/api/store/v1/draft/submit", json=SUBMIT_BODY, headers=_keyed())
+    assert r.status_code == 200 and r.json() == SUBMITTED
+    assert checks == ["submit"]
+    sent = route.calls.last.request
+    assert len(sent.headers["idempotency-key"]) == 64
+    assert len(sent.headers[VISITOR_HEADER]) == 43
+
+
+def test_a_failed_bot_check_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check(_request: Request, _action: str) -> None:
+        raise bot_check_failed()
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(SUBMIT)
+    r = edge.post("/api/store/v1/draft/submit", json=SUBMIT_BODY, headers=_keyed())
+    assert r.status_code == 403
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}bot_check_failed"
+    assert route.call_count == 0
+
+
+def test_a_submit_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    refused = {
+        "type": f"{STOREFRONT_PROBLEMS}shipping_address_required",
+        "title": "Conflict",
+        "status": 409,
+        "detail": "This way of shipping needs your address.",
+    }
+    crud_mock.post(SUBMIT).respond(409, json=refused, headers=CRUD)
+    r = edge.post("/api/store/v1/draft/submit", json=SUBMIT_BODY, headers=_keyed())
+    assert r.status_code == 409 and r.json()["type"] == refused["type"]

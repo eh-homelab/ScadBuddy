@@ -30,12 +30,13 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from psycopg import errors
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
+from scadbuddy.core.secrets import Kek
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
     REVISION_ROLES,
@@ -50,6 +51,7 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    ContactInput,
     CostEntry,
     CostEntryInput,
     Fulfilment,
@@ -69,6 +71,7 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     ShipmentItem,
+    SubmitAddress,
     TimeEntry,
     TimeEntryInput,
 )
@@ -104,7 +107,9 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.storefront.links import live_link
+from scadbuddy.orders.storefront.addresses import check_address
+from scadbuddy.orders.storefront.customers import customer_actor
+from scadbuddy.orders.storefront.links import create_order_link, live_link
 from scadbuddy.orders.storefront.mail import MailEvent, queue_mail
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
@@ -291,6 +296,21 @@ class ShipmentEdit(BaseModel):
     _lines = field_validator("items")(
         lambda items: None if items is None else _distinct_lines(items)
     )
+
+
+class SubmitInput(BaseModel):
+    """A visitor's submit of its cart (#5283, spec §5.5): who it is, where the mail goes,
+    the shipping option and, when that ships, the address. ``email`` is one address
+    (`check_address`). ``account_id`` comes only from the CRUD side's session lookup,
+    never from a body; nothing sets it until the storefront's accounts do."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    email: str = Field(max_length=254)
+    shipping_option_id: str | None = None
+    address: SubmitAddress | None = None
+    account_id: str | None = None
 
 
 class OrderEdit(BaseModel):
@@ -556,6 +576,9 @@ class Lifecycle:
         self.mail_host: Callable[[], str | None] = lambda: None
         #: Called after a commit that queued mail (`StorefrontMail.kick`).
         self.on_mail: Callable[[], None] = lambda: None
+        #: The CRUD service's KEK, which seals an order link's token (#5283); None makes
+        #: no link. Set by ``OrdersComponent``.
+        self.kek: Kek | None = None
 
     # -- the frame every transition runs in -------------------------------------------
 
@@ -806,6 +829,106 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    def submit_order(
+        self,
+        order_id: str,
+        body: SubmitInput,
+        by: Actor,
+        *,
+        cart_of: str | None = None,
+        conn: Conn | None = None,
+    ) -> tuple[Order, str]:
+        """The visitor's cart submitted as an order (#5283, spec §5.5), in one transaction
+        under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
+        the bus then): it
+
+        1. links the customer that is the only one (not archived) with ``body.email`` as a
+           contact, or makes one with the name and that email; an address given is added
+           to that customer and is the order's shipping address (a linked customer's own
+           addresses are never used: an email alone proves no address);
+        2. takes the year's number (`OrderStore.claim_draft`);
+        3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
+           one that ships with no address), which
+        4. recomputes the auto tax;
+        5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
+           queues no `payment_requested` mail, since no link exists yet: the order link's
+           mail leads to the page that shows it). A policy that applies only in another
+           currency sets none, and `deposit.policy_skipped` tells the shop;
+        6. stamps ``submitted_at``;
+        7. makes the order link (`create_order_link`);
+        8. queues the `order_link` mail to ``body.email``.
+
+        Everything after step 1 is recorded as the customer (`customer_actor`, with the
+        cart's visitor row as the session). The order and the link's token, which is
+        returned once and never stored in clear. Refusals: `order_not_found` (404) unless
+        the order is a storefront cart of ``cart_of``'s; `order_submitted` once submitted;
+        `draft_empty` with no item; 422 `shipping_option_id` with no option when the shop
+        lists some, or one it does not list; `shipping_address_required`;
+        `EmailInvalidError`; `KekMissingError` with no KEK."""
+        email = check_address(body.email)
+        with self.store.transaction(conn) as tx:
+            order = self._lock(tx, order_id)
+            if order.source != "storefront" or (
+                cart_of is not None and order.storefront_visitor_id != cart_of
+            ):
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            if not order.unsubmitted:
+                raise LifecycleError("order_submitted", f"order {order.label} is submitted")
+            if not any(i.status != "cancelled" for i in self.store.items(order.id, conn=tx)):
+                raise LifecycleError("draft_empty", f"{order.label} has no item")
+            rules = self.rules()
+            option_id = body.shipping_option_id
+            if option_id is None and rules.shipping_options:
+                raise LifecycleError(
+                    "shipping_option_id", "shipping_option_id: choose one", unprocessable=True
+                )
+            if option_id is not None and all(o.id != option_id for o in rules.shipping_options):
+                raise LifecycleError(
+                    "shipping_option_id",
+                    f"shipping_option_id: no shipping option {option_id}",
+                    unprocessable=True,
+                )
+            found = self.store.customers_with_email(tx, email)
+            linked = len(found) == 1
+            if linked:
+                customer_id = found[0]
+            else:
+                customer_id = self.store.insert_customer(
+                    display_name=body.name,
+                    company=None,
+                    notes="",
+                    tags=[],
+                    contacts=[ContactInput(kind="email", value=email, primary=True)],
+                    addresses=[],
+                    conn=tx,
+                ).id
+            address_id = None
+            if body.address is not None:
+                address = body.address.as_input(default_shipping=not linked)
+                address_id = self.store.add_address(tx, customer_id, address).id
+            customer = customer_actor(customer_id, order.storefront_visitor_id or "")
+            order = self.store.claim_draft(
+                tx, order.id, customer_id=customer_id, shipping_address_id=address_id
+            )
+            self._event(tx, order, customer, "order.customer_set", linked=linked)
+            order = self._shipping_option(tx, order, customer, option_id, rules)
+            try:
+                self._deposit_policy(tx, order, customer, rules)
+            except LifecycleError as error:
+                if error.slug != "deposit_policy_currency":
+                    raise
+                self._event(tx, order, customer, "deposit.policy_skipped", reason=str(error))
+            order = self.store.stamp_submitted(tx, order.id)
+            self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
+            link_id, token = create_order_link(tx, self.kek, order.id, email)
+            queue_mail(
+                tx, "order_link", email, {"order": order.label, "link_id": link_id}, order.id
+            )
+            order = self.store.order(order.id, conn=tx) or order
+        if conn is None:
+            self._told(_Change(order))
+        return order, token
+
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
         housekeeping sweep, after ``storefront_draft_ttl_days``): the candidates
@@ -1007,41 +1130,47 @@ class Lifecycle:
                     f"order {order.label} is {order.status}: its shipping option is"
                     f" set while draft or quoted{route}",
                 )
-            rules = self.rules()
-            charges: list[ChargeInput] = [
-                charge
-                for charge in self.store.charges(order.id, conn=conn)
-                if not charge.auto and charge.kind != "shipping"
-            ]
-            if option_id is not None:
-                option = next((o for o in rules.shipping_options if o.id == option_id), None)
-                if option is None:
-                    raise LifecycleError(
-                        "option_id",
-                        f"option_id: no shipping option {option_id} (shipping_option_not_found)",
-                        unprocessable=True,
-                    )
-                if option.ships and order.shipping_address_id is None:
-                    raise LifecycleError(
-                        "shipping_address_required",
-                        f"order {order.label} has no shipping address: {option.label} ships"
-                        " it; set the address first, or choose an option that does not ship",
-                    )
-                charges.append(
-                    ChargeInput(
-                        kind="shipping",
-                        label=option.label,
-                        amount_minor=option.amount_minor,
-                        shipping_option_id=option.id,
-                    )
-                )
-            self.store.replace_charges(conn, order.id, charges)
-            self._event(conn, order, by, "shipping.option_set", option_id=option_id)
-            self._retax(conn, order, by, rules)
-            order = self._rederive(conn, order, by)
-            order = self.store.order(order.id, conn=conn) or order
+            order = self._shipping_option(conn, order, by, option_id, self.rules())
         self._told(_Change(order))
         return order
+
+    def _shipping_option(
+        self, conn: Conn, order: Order, by: Actor, option_id: str | None, rules: OrderRules
+    ) -> Order:
+        """`set_shipping_option`'s write on the locked ``order``, with no check of who
+        asks or of the state: the order as the write left it."""
+        charges: list[ChargeInput] = [
+            charge
+            for charge in self.store.charges(order.id, conn=conn)
+            if not charge.auto and charge.kind != "shipping"
+        ]
+        if option_id is not None:
+            option = next((o for o in rules.shipping_options if o.id == option_id), None)
+            if option is None:
+                raise LifecycleError(
+                    "option_id",
+                    f"option_id: no shipping option {option_id} (shipping_option_not_found)",
+                    unprocessable=True,
+                )
+            if option.ships and order.shipping_address_id is None:
+                raise LifecycleError(
+                    "shipping_address_required",
+                    f"order {order.label} has no shipping address: {option.label} ships"
+                    " it; set the address first, or choose an option that does not ship",
+                )
+            charges.append(
+                ChargeInput(
+                    kind="shipping",
+                    label=option.label,
+                    amount_minor=option.amount_minor,
+                    shipping_option_id=option.id,
+                )
+            )
+        self.store.replace_charges(conn, order.id, charges)
+        self._event(conn, order, by, "shipping.option_set", option_id=option_id)
+        self._retax(conn, order, by, rules)
+        order = self._rederive(conn, order, by)
+        return self.store.order(order.id, conn=conn) or order
 
     def add_payment(
         self,
@@ -1313,37 +1442,43 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._deposit_editable(order)
-            rules = self.rules()
-            items = self.store.items(order.id, conn=conn)
-            context: dict[str, Any] = {
-                "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
-                "first_order": order.customer_id is None
-                or not self.store.accepted_before(conn, order.customer_id, order.id),
-                "currency": order.currency,
-                "shop_currency": rules.shop_currency,
-            }
-            amount = deposit_for(
-                rules.deposit_policy,
-                total_minor=totals_of(self.store, conn, order.id).total_minor,
-                **context,
-            )
-            skipped = skipped_for_currency(rules.deposit_policy, **context)
-            if amount is None and skipped:
-                raise LifecycleError(
-                    "deposit_policy_currency",
-                    f"order {order.label} is in {order.currency}: the deposit policy's rules"
-                    f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
-                    " by hand",
-                )
-            audit: dict[str, Any] = {"policy": True}
-            if skipped:
-                audit["skipped"] = skipped
-            updated = self._set_deposit(conn, order, by, amount, **audit)
+            updated = self._deposit_policy(conn, order, by, self.rules())
             if updated is None:
                 return order
             order = updated
         self._told(_Change(order))
         return order
+
+    def _deposit_policy(
+        self, conn: Conn, order: Order, by: Actor, rules: OrderRules
+    ) -> Order | None:
+        """`apply_deposit_policy`'s write on the locked ``order``, with no check of its
+        state: as `_set_deposit`, the order or None when nothing was written."""
+        items = self.store.items(order.id, conn=conn)
+        context: dict[str, Any] = {
+            "has_request": any(i.kind == "request" and i.status != "cancelled" for i in items),
+            "first_order": order.customer_id is None
+            or not self.store.accepted_before(conn, order.customer_id, order.id),
+            "currency": order.currency,
+            "shop_currency": rules.shop_currency,
+        }
+        amount = deposit_for(
+            rules.deposit_policy,
+            total_minor=totals_of(self.store, conn, order.id).total_minor,
+            **context,
+        )
+        skipped = skipped_for_currency(rules.deposit_policy, **context)
+        if amount is None and skipped:
+            raise LifecycleError(
+                "deposit_policy_currency",
+                f"order {order.label} is in {order.currency}: the deposit policy's rules"
+                f" {skipped} that would apply are in {rules.shop_currency}; set the deposit"
+                " by hand",
+            )
+        audit: dict[str, Any] = {"policy": True}
+        if skipped:
+            audit["skipped"] = skipped
+        return self._set_deposit(conn, order, by, amount, **audit)
 
     def waive_deposit(self, order_id: str, by: Actor, reason: str) -> Order:
         """ "Proceed without deposit": the work goes on unpaid, for ``reason`` (trimmed,

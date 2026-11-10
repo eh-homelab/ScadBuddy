@@ -16,11 +16,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
-from scadbuddy.orders.models import ItemKind
+from scadbuddy.orders.models import ItemKind, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -307,3 +307,38 @@ class DraftView(BaseModel):
     currency: str
     minor_exponent: int
     items: list[DraftItem]
+    #: The shop's shipping options, in its currency (`orders_currency`), from which the
+    #: visitor picks one at submit (#5283, spec §9); one that ``ships`` needs an address.
+    shipping_options: list[PublicShippingOption] = Field(default_factory=list)
+
+
+class PublicShippingOption(BaseModel):
+    """A shipping option as the visitor reads it."""
+
+    id: str
+    label: str
+    amount_minor: int
+    ships: bool
+
+
+class SubmitBody(BaseModel):
+    """``POST …/draft/submit`` (#5283, spec §5.5): the cart the page shows (its ``id``)
+    and what the visitor typed. No ``account_id``: only the CRUD side's session lookup
+    names an account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = Field(max_length=64)
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    email: str = Field(max_length=254)
+    shipping_option_id: str | None = Field(default=None, max_length=40)
+    address: SubmitAddress | None = None
+
+
+class SubmittedOrder(BaseModel):
+    """The answer to a submit: the order's id and number, and where its link went. Never
+    the link's token, which only the mail carries."""
+
+    id: str
+    number: str
+    email: str

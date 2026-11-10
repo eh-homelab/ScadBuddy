@@ -8,7 +8,7 @@
  * that action is sent again (`ActionKey`). The edge requires it (428 without) and forwards
  * it bound to the visitor (`backend/scadbuddy/storefront/routes.py` `_request_key`), and
  * the CRUD side keeps one answer per key, so a render, an add, a removal or a design
- * request sent again after a lost answer is done once. A refusal is a `StoreError` with the problem's
+ * request or a submit sent again after a lost answer is done once. A refusal is a `StoreError` with the problem's
  * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
  * seconds the edge says to wait.
  */
@@ -24,6 +24,8 @@ export type StoreEstimate = Schemas['StoreEstimate']
 export type Draft = Schemas['DraftView']
 export type DraftItem = Schemas['DraftItem']
 export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
+export type ShippingOption = Schemas['PublicShippingOption']
+export type SubmittedOrder = Schemas['SubmittedOrder']
 export type ParamValue = boolean | number | string
 
 export const BASE = '/api/store/v1'
@@ -114,6 +116,25 @@ export interface RenderInput {
   colours: Record<string, string>
 }
 
+/** The address an option that ships needs (backend `orders/models.py` `SubmitAddress`). */
+export interface SubmitAddress {
+  recipient: string
+  lines: string[]
+  locality?: string
+  region?: string
+  postal_code?: string
+  country?: string
+}
+
+/** A submit of the cart the page shows (backend `orders/storefront/wire.py` `SubmitBody`). */
+export interface SubmitInput {
+  draft_id: string
+  name: string
+  email: string
+  shipping_option_id?: string
+  address?: SubmitAddress
+}
+
 export const store = {
   listings: () => call<Listings>('/listings'),
   listing: (id: string) => call<Listing>(`/listings/${encodeURIComponent(id)}`),
@@ -131,6 +152,8 @@ export const store = {
     for (const file of files) form.append('files', file, file.name)
     return call<Draft>('/draft/requests', { method: 'POST', form, key, turnstile })
   },
+  submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
+    call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
 }
 

@@ -546,6 +546,18 @@
   padding-left: 1.2rem;
   overflow-wrap: anywhere;
 }
+fieldset.sf-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sf-choice {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+}
 .sf-items {
   display: grid;
   gap: 14px;

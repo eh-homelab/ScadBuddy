@@ -2,7 +2,7 @@
 of which forwards to the CRUD client with the verified visitor id and the browser's
 address. `app.py` answers a CRUD refusal.
 
-A render's body, and a draft item's, goes on as the visitor sent it (at most
+A render's body, a draft item's and a submit's go on as the visitor sent them (at most
 `MAX_RENDER_BODY` bytes). Each write needs the browser's ``Idempotency-Key`` (a UUID, one
 per visitor action; 428 without one), forwarded bound to the visitor (`_request_key`): a
 visitor's resend of a request whose answer was lost is the same request to the CRUD side,
@@ -163,6 +163,18 @@ async def remove_item(
         raise ApiError(404, "There is no such item.", type_=f"{STOREFRONT_PROBLEMS}item_not_found")
     key = _request_key(request, visitor_id)
     return await crud.remove_item(item_id, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/submit")
+async def submit(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """The visitor's cart submitted as an order (#5283, spec §5.5): 428
+    ``idempotency_key_required`` without a key, then the bot check (`turnstile.py`, action
+    ``submit``: 403 ``bot_check_failed``, 503 ``bot_check_unavailable``), both before the
+    body is read or the CRUD side is called."""
+    key = _request_key(request, visitor_id)
+    await require_turnstile(request, "submit")
+    body = await _body(request, "submit_body_invalid")
+    return await crud.submit(body, key=key, visitor_id=visitor_id, client=client)
 
 
 #: How long one replica trusts its read of `requests_enabled`.
