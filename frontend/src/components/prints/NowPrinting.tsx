@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { JobPicture } from './JobPicture'
 import { mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
@@ -234,7 +235,13 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
       {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
       {working && (
         <>
-          <JobLink printer={printer} />
+          {/* #3742 — ScadBuddy's picture of its own job, else Bambuddy's cover. */}
+          <div className="mt-1 flex items-center gap-2">
+            <JobPicture src={printer.picture} />
+            <div className="min-w-0 flex-1 [&>p]:mt-0">
+              <JobLink printer={printer} />
+            </div>
+          </div>
           {printer.scadbuddy && <QueuedFromScadBuddy job={printer.scadbuddy} className="mt-1 self-start" />}
           {progress !== null && (
             <div

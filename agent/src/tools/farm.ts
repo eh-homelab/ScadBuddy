@@ -24,7 +24,9 @@ export const farmTools: Tool[] = [
       'to a printer. A pending or printing item ScadBuddy queued (a print run or a reprint) carries ' +
       '`scadbuddy` (its output or library file, template `slug`, `run_id` and linked `archive_id`), matched ' +
       "only by ScadBuddy's record of that item; a finished item has none, and so has an item queued from " +
-      'Bambuddy, its reprint of a ScadBuddy print too.' +
+      'Bambuddy, its reprint of a ScadBuddy print too. Each item has `picture` (#3742), a URL on ScadBuddy of its ' +
+      "image: ScadBuddy's own for its item (the output's or library file's thumbnail), else Bambuddy's thumbnail " +
+      'through ScadBuddy; null when there is none.' +
       PAGED,
     input: z.object({
       printer_id: z.number().int().min(-1).optional(),
@@ -59,7 +61,9 @@ export const farmTools: Tool[] = [
       "printing item on the printer, only ScadBuddy's record of that item matches, so a job queued from Bambuddy " +
       '(its reprint of a ScadBuddy print too) has none; when its queue cannot be read, nothing matches. Otherwise ' +
       "a run's LAN start on that printer under the job's name matches until the run records that start ended; a " +
-      'job started on the printer itself has none unless it has such a name.',
+      'job started on the printer itself has none unless it has such a name. A working job has `picture` (#3742), a ' +
+      "URL on ScadBuddy of its image: ScadBuddy's own for its job, else Bambuddy's cover of the job through " +
+      'ScadBuddy on a card Bambuddy answered; null when there is none.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

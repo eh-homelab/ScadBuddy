@@ -3,7 +3,8 @@
 ScadBuddy is an overlay on Bambuddy, so ``/prints`` shows every active printer's live
 state from ``GET /printers/{id}/status``, not only the archives ScadBuddy linked: a job
 started from Bambuddy, or one paused on an HMS error, is as visible as one ScadBuddy
-queued. A job whose archive ScadBuddy linked points at its print; any other at its
+queued. Each working job has a picture where one is known (#3742, `bambuddy/pictures.py`).
+A job whose archive ScadBuddy linked points at its print; any other at its
 archive in Bambuddy: that archive's page, ``/archives/{id}``, on a Bambuddy that has one,
 else the archives page (#3743, `with_archive_pages`). A job ScadBuddy queued or
 started carries ``scadbuddy`` (#3741, `with_scadbuddy_jobs`): the printing queue item
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus, QueueItem
+from scadbuddy.bambuddy.pictures import printer_cover, scadbuddy_picture
 from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
 from scadbuddy.bambuddy.progress import LanRunControl
 from scadbuddy.core.problems import ApiError
@@ -138,6 +140,12 @@ class PrinterNow(BaseModel):
     #: printer itself is ``None`` too, unless it has the name of such a LAN start: then
     #: it matches that run.
     scadbuddy: ScadBuddyJob | None = None
+    #: The working job's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's
+    #: for its own job (`scadbuddy`); else, on a card Bambuddy's status filled, its cover
+    #: of the job (the status's ``cover_url``) through the farm proxy
+    #: (`bambuddy/pictures.py`). ``None`` when there is none: a LAN card asks Bambuddy
+    #: nothing, so only ScadBuddy's own job there has one.
+    picture: str | None = None
 
 
 class PrintersNow(BaseModel):
@@ -238,7 +246,13 @@ def with_scadbuddy_jobs(
                 job = matches.queue_items.get(item)
         elif printer.job_name is not None:
             job = matches.lan_starts.get((printer.id, printer.job_name))
-        return printer if job is None else printer.model_copy(update={"scadbuddy": job})
+        if job is None:
+            return printer
+        update: dict[str, Any] = {"scadbuddy": job}
+        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover.
+        if (picture := scadbuddy_picture(job)) is not None:
+            update["picture"] = picture
+        return printer.model_copy(update=update)
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])
 
@@ -372,6 +386,11 @@ async def printer_now(
         update={
             "archive_id": archive_id,
             "linked": linked,
+            "picture": (
+                printer_cover(printer.id, archive_id, card.job_name)
+                if working and status.cover_url
+                else None
+            ),
             "bambuddy_url": (
                 client.config.web_url(ARCHIVES_PAGE)
                 if archive_id is not None and not linked

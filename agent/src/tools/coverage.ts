@@ -469,6 +469,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
   })),
+  ...(
+    [
+      'GET /api/v1/farm/library/{file_id}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/printers/{printer_id}/cover',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "Serves Bambuddy's picture of a queue item or a printer's job to the Prints page (#3742); list_print_queue " +
+      'and get_printers_now give its URL as `picture`, and an agent has no use for the bytes.',
+  })),
   ...(['GET /api/v1/print/models/{slug}/projects', 'PUT /api/v1/print/models/{slug}/project'] as const).map(
     (operation) => ({
       operation,
