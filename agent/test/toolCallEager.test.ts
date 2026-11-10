@@ -2,7 +2,7 @@ import type { Client } from '@temporalio/client'
 import { context as otelContext, trace } from '@opentelemetry/api'
 import { describe, expect, it } from 'vitest'
 import { EAGER_ATTRIBUTE, toolCallStarter } from '../src/tools/activityProjection.js'
-import { flushTracing, testTracing } from './support/tracing.js'
+import { flushTracing, resetTracing, testTracing } from './support/tracing.js'
 
 // A failed eager start (#5865) as the exported span shows it: `failed`, and an exception event that
 // keeps the failure's class and never a non-Error's value. No Temporal: both clients are stubs.
@@ -10,7 +10,7 @@ import { flushTracing, testTracing } from './support/tracing.js'
 describe('an eager ToolCall start that throws a non-Error', () => {
   it('is recorded as failed with its class, not its value, and the call starts on the shared client', async () => {
     const spans = testTracing()
-    spans.reset()
+    await resetTracing()
     const result = { ok: true, content: [{ type: 'text', text: 'ok' }] }
     const handle = { result: async () => result, cancel: async () => {} }
     const client = { workflow: { start: async () => handle, getHandle: () => handle } } as unknown as Client
