@@ -66,6 +66,22 @@ describe('OrderMessages (#5660)', () => {
     expect(await api.orderMessages(ORDER_ACCEPTED)).toHaveLength(2)
   })
 
+  it('serves a retry after a lost answer from its first claim after the message changed (#5978)', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { status: 'failed', reason: 'transport' })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    mockLoseNextSendAnswer()
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    mockMessageChange()
+    await user.click(within(screen.getByRole('region', { name: 'Message to send' })).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    expect(mockSendKeys()).toHaveLength(1)
+    expect(await api.orderMessages(ORDER_ACCEPTED)).toHaveLength(2)
+  })
+
   it('previews a skipped message with the flag when "Send here too" is pressed', async () => {
     mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'skipped', reason: 'storefront_mail' })
     const bodies: unknown[] = []
