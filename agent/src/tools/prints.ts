@@ -10,6 +10,8 @@ import { blob, defineTool, image, json, ToolError, type Tool } from './registry.
 // to the output that printed it. Routes: backend/scadbuddy/api/print_history.py.
 
 const archiveId = z.number().int().min(1).describe("A Bambuddy print archive's id, as list_prints returns it")
+/** The route's default page (`api/print_imports.py` `list_auto_imports`). */
+const AUTO_IMPORTS_PAGE = 50
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a day, YYYY-MM-DD')
 
 export const printHistoryTools: Tool[] = [
@@ -157,31 +159,28 @@ export const printHistoryTools: Tool[] = [
       'The prints the print watcher (#4699) imported, ScadBuddy not having started them, newest archive first: each ' +
       'it linked to a model (`state: linked`, with `matched_by`: an earlier import of the same file, or the job\'s ' +
       'name), and each it put in the Unsorted imports inbox (`state: inbox`, with `reason` and the models the job\'s ' +
-      'name suggests). To link an inbox print, show the user the suggestions, then import_print. Page with `before`, ' +
-      'the last `archive_id` read.',
+      'name suggests). To link an inbox print, show the user the suggestions, then import_print. Answers `items`, ' +
+      'and `next_cursor` when the page was full: pass it back as `cursor` for the next page.',
     input: z.object({
       state: z.enum(['linked', 'inbox']).optional(),
       limit: z.number().int().min(1).max(200).optional(),
-      before: archiveId.optional().describe('Only archives older than this one: the last archive_id of the page before'),
+      cursor: z.string().regex(/^[1-9][0-9]{0,17}$/, 'must be a next_cursor from list_auto_imports').optional(),
     }),
     risk: 'read',
     routes: ['GET /api/v1/print-imports/auto'],
     summarize: ({ state }) => (state === 'inbox' ? 'List the Unsorted imports inbox' : 'List the prints the print watcher imported'),
-    handler: async ({ state, limit, before }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/print-imports/auto', {
-            params: {
-              query: {
-                ...(state === undefined ? {} : { state }),
-                ...(limit === undefined ? {} : { limit }),
-                ...(before === undefined ? {} : { before }),
-              },
-            },
-          }),
-          'list the prints the print watcher imported',
-        ),
-      ),
+    handler: async ({ state, limit, cursor }, { backend }) => {
+      const size = limit ?? AUTO_IMPORTS_PAGE
+      const items = await ok(
+        backend.GET('/api/v1/print-imports/auto', {
+          params: { query: { ...(state === undefined ? {} : { state }), limit: size, ...(cursor === undefined ? {} : { before: Number(cursor) }) } },
+        }),
+        'list the prints the print watcher imported',
+      )
+      // The route pages by the last archive read (`before`); a full page may have more after it.
+      const last = items.at(-1)
+      return json({ items, ...(items.length === size && last ? { next_cursor: String(last.archive_id) } : {}) })
+    },
   }),
 
   defineTool({

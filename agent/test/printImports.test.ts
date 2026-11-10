@@ -178,20 +178,23 @@ describe('the touched list of an import (#5979)', () => {
 })
 
 describe('list_auto_imports (#4699)', () => {
-  it('reads the print watcher\'s imports as a read, passing only the filters given', async () => {
+  it('reads the print watcher\'s imports as a read, paging by the last archive', async () => {
     expect(tool('list_auto_imports')).toMatchObject({ risk: 'read', routes: ['GET /api/v1/print-imports/auto'] })
     const seen: URLSearchParams[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/print-imports/auto`, ({ request }) => {
-        seen.push(new URL(request.url).searchParams)
-        return HttpResponse.json([{ archive_id: 193, state: 'inbox', reason: 'no model matches the job name' }])
+        const query = new URL(request.url).searchParams
+        seen.push(query)
+        const rows = [{ archive_id: 300, state: 'inbox' }, { archive_id: 250, state: 'inbox' }]
+        return HttpResponse.json(query.get('before') ? [] : rows)
       }),
     )
-    const all = await runTool(tool('list_auto_imports'), {}, ctx())
-    const inbox = await runTool(tool('list_auto_imports'), { state: 'inbox', before: 200 }, ctx())
-    expect(all.isError).toBeFalsy()
-    expect(firstText(inbox)).toEqual([{ archive_id: 193, state: 'inbox', reason: 'no model matches the job name' }])
-    expect(Object.fromEntries(seen[0]!)).toEqual({})
-    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', before: '200' })
+    const first = await runTool(tool('list_auto_imports'), { state: 'inbox', limit: 2 }, ctx())
+    expect(first.isError).toBeFalsy()
+    expect(firstText(first)).toEqual({ items: [{ archive_id: 300, state: 'inbox' }, { archive_id: 250, state: 'inbox' }], next_cursor: '250' })
+    const next = await runTool(tool('list_auto_imports'), { state: 'inbox', limit: 2, cursor: '250' }, ctx())
+    expect(firstText(next)).toEqual({ items: [] })
+    expect(Object.fromEntries(seen[0]!)).toEqual({ state: 'inbox', limit: '2' })
+    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', limit: '2', before: '250' })
   })
 })
