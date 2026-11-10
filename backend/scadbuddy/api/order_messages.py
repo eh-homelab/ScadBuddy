@@ -95,8 +95,9 @@ async def check_order_message(
         "key of another order is 409 `idempotency_key_reused`. 409 `already_notified` when "
         "the template was already `sent`, `sending` or `unknown` since the order's last "
         "status change and the body names no `resend_of`; 409 `message_in_flight` when "
-        "`resend_of` is still being sent; 422 on `resend_of` for a message not of this "
-        "order; 409 `order_not_submitted` for a cart."
+        "`resend_of` is still being sent (a stale one reads `unknown` and may be sent "
+        "again); 422 on `resend_of` for a message not of this order or of another "
+        "template; 409 `order_not_submitted` for a cart."
     ),
     responses={status.HTTP_200_OK: {"model": OrderMessage, "description": "Already claimed"}},
 )
