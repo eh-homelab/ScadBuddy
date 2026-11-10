@@ -10,6 +10,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from email.message import EmailMessage
 from typing import Any
 
@@ -19,6 +20,7 @@ from scadbuddy.core.secrets import Kek, kek_from_base64
 from scadbuddy.orders.lifecycle import ManualQuoteInput
 from scadbuddy.orders.models import Order
 from scadbuddy.orders.store import MAIL_QUEUED, OrderStore
+from scadbuddy.orders.storefront.accounts import CODE_TTL
 from scadbuddy.orders.storefront.links import create_order_link, revoke_order_links
 from scadbuddy.orders.storefront.mail import (
     MAX_ATTEMPTS,
@@ -891,6 +893,12 @@ def test_a_sign_in_code_carries_its_link_and_its_code() -> None:
     assert f"{PUBLIC}/account/sign-in#code={CODE}" in rendered.body
     assert CODE in rendered.body.replace(f"#code={CODE}", "")
     assert f"{PUBLIC}/o#" not in rendered.body
+
+
+def test_a_sign_in_code_mail_names_the_codes_real_life() -> None:
+    """The code works for `accounts.CODE_TTL` (an hour), not for the outbox row's life."""
+    assert timedelta(hours=1) == CODE_TTL
+    assert "It works for one hour." in render("sign_in_code", sign_in(), None).body
 
 
 @pytest.mark.parametrize("missing", ["code", "link"])
