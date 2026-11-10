@@ -347,7 +347,6 @@ class ApiOnlyError(RuntimeError):
 #: The `BambuddyUploadStore` methods only the API's sweeps and routes call: the print
 #: worker has no route for them (#5298).
 API_ONLY = (
-    "recorded_files",
     "outputs_for_files",
     "relocate",
     "copies_by_use",
@@ -426,6 +425,12 @@ class RemoteUploadStore(BambuddyUploadStore):
         if not ids:
             return set()
         return set(await self._get("/uploads/recorded", {"id": ids}))
+
+    async def recorded_files(self, library_file_ids: Iterable[int]) -> set[int]:
+        ids = list(library_file_ids)
+        if not ids:
+            return set()
+        return set(await self._get("/uploads/recorded-files", {"id": ids}))
 
     async def touch(self, output_id: str, library_file_id: int) -> None:
         await self._send(

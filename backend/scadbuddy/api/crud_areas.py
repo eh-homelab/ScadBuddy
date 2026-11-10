@@ -29,7 +29,16 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
-    "print": ["settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads", "previews"],
+    "print": [
+        "settings",
+        "runs",
+        "operations",
+        "events",
+        "printer-ensure",
+        "reprints",
+        "uploads",
+        "previews",
+    ],
     "storefront": ["listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"],
     "agent": ["order-costs", "workspace-blob-refs"],
 }

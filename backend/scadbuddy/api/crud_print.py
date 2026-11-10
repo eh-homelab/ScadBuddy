@@ -31,6 +31,7 @@ or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken e
 #4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
 those writes are the API's, never the worker's role's. Natural: decided under the
 registry's lock, so a call sent again finds the row and writes nothing.
+
 The uploads and slices (Q15, Q17) are `bambuddy/uploads.py` `BambuddyUploadStore`'s, for
 `RemoteUploadStore`. Each write but one is natural: a record is ``ON CONFLICT`` on the
 key the caller names, a touch, a hash and a forget set or delete by key. A slice start is
@@ -495,6 +496,13 @@ async def recorded_uploads(
     uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
 ) -> list[int]:
     return sorted(await uploads.recorded(id))
+
+
+@router.get("/uploads/recorded-files", name="crud_print_recorded_files")
+async def recorded_files(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded_files(id))
 
 
 @router.get("/uploads/sent-between", name="crud_print_sent_between")

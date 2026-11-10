@@ -1449,7 +1449,16 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
 
 #: The CRUD areas the print worker calls (`api/crud_areas.py` `CRUD_AREAS`).
 PRINT_CRUD_AREAS = frozenset(
-    {"settings", "runs", "operations", "events", "printer-ensure", "reprints", "uploads", "previews"}
+    {
+        "settings",
+        "runs",
+        "operations",
+        "events",
+        "printer-ensure",
+        "reprints",
+        "uploads",
+        "previews",
+    }
 )
 
 

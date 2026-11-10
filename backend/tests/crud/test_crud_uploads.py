@@ -129,6 +129,9 @@ async def test_the_reads_answer_as_the_sql_store(
     assert await remote.shared([], OUTPUT) == set()
     assert await remote.recorded([11, 12, 99]) == await sql.recorded([11, 12, 99]) == {11, 12}
     assert await remote.recorded([]) == set()
+    assert await remote.recorded_files([11, 21, 99]) == await sql.recorded_files([11, 21, 99])
+    assert await remote.recorded_files([11, 21, 99]) == {11, 21}
+    assert await remote.recorded_files([]) == set()
     assert await remote.slices_of(OUTPUT, 11, "p") == await sql.slices_of(OUTPUT, 11, "p")
     assert await remote.slices_of(OUTPUT, 11, "other") == []
     assert await remote.sent_between(OUTPUT) == await sql.sent_between(OUTPUT)
@@ -210,6 +213,7 @@ def test_another_callers_credential_is_refused(store: SettingsStore) -> None:
             ("GET", f"{BASE}/uploads?output_id=x"),
             ("POST", f"{BASE}/uploads"),
             ("GET", f"{BASE}/uploads/recorded?id=1"),
+            ("GET", f"{BASE}/uploads/recorded-files?id=1"),
             ("POST", f"{BASE}/uploads/forget-files"),
             ("POST", f"{BASE}/slices"),
             ("PUT", f"{BASE}/slices/1/hash"),

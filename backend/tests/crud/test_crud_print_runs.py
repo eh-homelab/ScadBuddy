@@ -565,6 +565,8 @@ async def test_an_outage_drops_each_event_after_a_short_budget() -> None:
         await events.aclose()
         await client.aclose()
     assert metrics.events_dropped.labels("error")._value.get() == 3
-    assert posts >= 3
-    # Each post's retries end inside its own short budget, not the client's.
-    assert clock.now <= 3 * EVENT_POST_BUDGET + 3
+    # Each post was retried, and its retries ended inside its own short budget, not the
+    # client's: a back-off never sleeps past the budget's end (`crud/client.py`, the
+    # ``remaining`` cap), and each 503 answers at once on the fake clock.
+    assert posts > 3
+    assert clock.now <= 3 * EVENT_POST_BUDGET
