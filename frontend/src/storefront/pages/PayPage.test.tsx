@@ -63,12 +63,17 @@ async function sdk(): Promise<HTMLScriptElement> {
   })
 }
 
+function history(length: number) {
+  Object.defineProperty(window.history, 'length', { value: length, configurable: true })
+}
+
 function referrer(value: string) {
   Object.defineProperty(document, 'referrer', { value, configurable: true })
 }
 
 afterEach(() => {
   referrer('')
+  history(1)
   navigate.mockReset()
   delete (window as unknown as { paypal?: unknown }).paypal
   document.querySelectorAll('script[src*="paypal.com"]').forEach((node) => node.remove())
@@ -120,11 +125,20 @@ describe('PayPage', () => {
 
   it('goes back to the order when the payer came from this site\'s order page', async () => {
     referrer(`${window.location.origin}/o`)
+    history(2)
     await approve()
     const { default: userEvent } = await import('@testing-library/user-event')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Back to your order' }))
     expect(navigate).toHaveBeenCalledWith(-1)
     expect(screen.queryByText('Open your order from the link in your mail.')).not.toBeInTheDocument()
+  })
+
+  it('offers no way back when the pay link opened in a tab of its own', async () => {
+    referrer(`${window.location.origin}/o`)
+    history(1)
+    await approve()
+    expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
+    expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
   })
 
   it.each(['https://elsewhere.example/o', `${window.location.origin}/draft`, `${window.location.origin}/order`])(

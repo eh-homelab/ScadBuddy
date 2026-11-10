@@ -1607,7 +1607,7 @@ def test_an_empty_crud_404_is_the_edge_s_own_404(
 
 
 @pytest.mark.parametrize("code", [404, 422])
-def test_a_pay_checkout_refusal_with_a_problem_is_not_blanked_to_an_empty_404(
+def test_a_pay_checkout_refusal_with_a_problem_is_the_edge_s_502_not_an_empty_404(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
     code: int,
@@ -1617,5 +1617,6 @@ def test_a_pay_checkout_refusal_with_a_problem_is_not_blanked_to_an_empty_404(
         code, json=problem, headers={**CRUD, "Content-Type": "application/problem+json"}
     )
     r = edge.post("/api/store/v1/pay/checkout", json={"token": "x"}, headers={"Origin": PUBLIC_URL})
-    assert (r.status_code, r.content) != (404, b"")
-    assert r.status_code >= 400
+    # The edge answers its own 502 problem, never an empty 404 and never the CRUD text.
+    assert r.status_code == 502
+    assert r.json()["detail"] == "The shop could not answer this request."

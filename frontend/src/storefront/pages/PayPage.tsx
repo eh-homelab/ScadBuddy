@@ -27,8 +27,12 @@ declare global {
   }
 }
 
-/** Whether the payer came from this site's order page (`/o`; a referrer holds no fragment). */
+/**
+ * Whether the payer came from this site's order page (`/o`; a referrer holds no fragment)
+ * and has a page to go back to: a pay link opened in a tab of its own has none.
+ */
 function cameFromOrderPage(): boolean {
+  if (window.history.length <= 1) return false
   try {
     const from = new URL(document.referrer)
     return from.origin === window.location.origin && from.pathname === '/o'

@@ -140,6 +140,16 @@ def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
     )
 
 
+def test_the_checkout_carries_the_currency_s_own_minor_exponent(shop: PayShop) -> None:
+    """A yen request has no decimals (`orders/currency.py`); the page shows it so."""
+    _, req, token = tokened(shop)
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE payment_requests SET currency = 'JPY' WHERE id = %s", (req.id,))
+    found = checkout(shop, token)
+    assert found is not None
+    assert (found.currency, found.minor_exponent) == ("JPY", 0)
+
+
 @pytest.mark.parametrize("token", ["", "x" * 43, "not a token", "a" * 5000])
 def test_an_unknown_token_reads_nothing(shop: PayShop, token: str) -> None:
     tokened(shop)
