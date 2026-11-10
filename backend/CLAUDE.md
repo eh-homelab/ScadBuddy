@@ -640,8 +640,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   input `settle_hours` (default 48; past it the run ends with a summary and no check);
   an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
-  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing),
+  and with `send` too (#5660) and the answer's `send_ready`, `order_notify_customer_send` (`outward`,
+  so the trigger's grant must name it); the result's `send` says `sent`, `skipped`, `refused` or
+  `not_sent`, and a refusal never ends the run. `ensure_builtin_flow` runs as a task beside the
   component's start; it reads the versions first (a name with any registers nothing,
   unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
