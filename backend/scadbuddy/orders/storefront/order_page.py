@@ -389,6 +389,16 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
     if revisions and (named is None or named.sent_at is None):
         return None
     open_order = rows.order.status in ("draft", "quoted") and not rows.order.on_hold
+    # Accepting follows `Lifecycle.accept_quote`: a quote that names no design is
+    # accepted against the item's current design, which a `design_first` item needs
+    # accepted first, so the page never offers an accept the lifecycle refuses.
+    agreed = (
+        named
+        if quote.revision_id
+        else by_id.get(item.current_revision_id)
+        if item.current_revision_id
+        else None
+    )
     can_accept = (
         not quote.accepted
         and open_order
@@ -397,7 +407,9 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
         and (
             not revisions
             or (
-                item.approval == "design_first" and named is not None and named.answer == "accepted"
+                item.approval == "design_first"
+                and agreed is not None
+                and agreed.answer == "accepted"
             )
         )
     )

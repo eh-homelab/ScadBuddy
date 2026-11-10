@@ -572,9 +572,10 @@ def test_a_price_made_before_any_design_was_sent_is_hidden(
 def test_a_price_that_names_no_design_does_not_follow_a_design_sent_after_it(
     api: TestClient, crud: CrudCaller
 ) -> None:
-    """The price was made while design 1 was the newest sent, so it is design 1's: it
-    is accepted with design 1 (`design_first`), and design 2, sent later, neither
-    gives it that answer nor takes it away."""
+    """The price was made while design 1 was the newest sent, so it shows from then on,
+    whatever is sent later. Accepting it follows `Lifecycle.accept_quote`: a price that
+    names no design is accepted against the item's current design, here design 2,
+    unanswered, so the page does not offer it, and the lifecycle refuses it too."""
     made = make_order(api, crud, approval="design_first")
     [item] = items_of(api, made)
     first = newest(api, item)
@@ -588,10 +589,11 @@ def test_a_price_that_names_no_design_does_not_follow_a_design_sent_after_it(
     [rev1, rev2] = made.reader.view().json()["items"][0]["revisions"]
     assert (rev1["answer"], rev2["answer"]) == ("accepted", None)
     quote = made.reader.view().json()["items"][0]["quote"]
-    # With the old fallback (the newest sent design) the price named design 2, which
-    # has no answer, so the customer could not accept it; now it names design 1.
     assert quote is not None and quote["unit_price_minor"] == 1250
-    assert quote["can_accept"] is True
+    assert quote["can_accept"] is False
+    [row] = _orders(api).store.quotes(item.id)
+    refused = made.reader.accept(row.id, key="k2")
+    assert refused.status_code == 409 and slug(refused) == "revision_not_accepted"
 
 
 def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: CrudCaller) -> None:
