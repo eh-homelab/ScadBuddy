@@ -15,7 +15,8 @@ agent call's grant only narrows the run's); nothing here makes that trigger or a
 that grant. With the inputs `notify` and `send` (#5660) it also sends the `ready` message
 through the bound messaging plugin, so its grant then also names
 `order_notify_customer_send` (spec 2026-11-08-order-notify-customer-design.md §6.2). The
-run's result says what became of it (`send`: `sent`, `skipped`, `refused` or `not_sent`).
+run's result says what became of it (`send`: `sent`, `skipped`, `refused`, `unknown` or
+`not_sent`).
 
 A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
 asks a person and never re-quotes: on an accepted order a new quote is open only after a
@@ -270,11 +271,34 @@ async def settle(order_id, printed, hours):
         wait = min(wait * 2, POLL_MAX_S)
 
 
+def send_refusal(err):
+    """The agent's refusal of the send, or None when its outcome is not known. The script
+    sees a host call's failure as `Exception("<type>: <text>")` (the harness's
+    `_script_outcome`): a tool's failure is `ToolFailedError`, whatever its activity type,
+    and a denied approval `ToolApprovalDenied`. A refusal is one of the agent's own texts:
+    the tool's `<slug>: ...` (`already_notified`, `messaging_plugin_unavailable`, ...), a
+    backend 4xx, a call that "was not run", or one with no approval. Anything else (a
+    timeout, a lost answer, a 5xx) may have sent it."""
+    kind, _, text = str(err).partition(": ")
+    if kind == "ToolApprovalDenied":
+        return "the send was not approved: " + text
+    if kind != "ToolFailedError":
+        return None
+    slug, colon, _ = text.partition(": ")
+    if colon and slug and slug.replace("_", "").isalpha() and slug == slug.lower():
+        return text
+    for mark in (" was not run: ", "needs an approval", "failed (HTTP 4"):
+        if mark in text:
+            return text
+    return None
+
+
 async def send_ready_message(order_id, settings, message):
-    """What became of the composed message (#5660): `sent`, `skipped` with why, or
-    `refused`/`not_sent` with the tool's reason. A refusal never ends the run. Each call's
-    key is its own request id, so a retried call is answered from its first claim; another
-    run on the same ready order is refused `already_notified`."""
+    """What became of the composed message (#5660): `sent`, `skipped` with why, `refused`
+    with the agent's reason, `unknown` when the call failed in a way that may have sent it,
+    or `not_sent` with the tool's reason. None ends the run. Each call's key is its own
+    request id, so a retried call is answered from its first claim; another run on the same
+    ready order is refused `already_notified`."""
     if not settings.get("send"):
         return {
             "status": "skipped",
@@ -290,7 +314,13 @@ async def send_ready_message(order_id, settings, message):
             "order_id": order_id, "template": "ready",
         }))
     except Exception as err:
-        return {"status": "refused", "reason": str(err)}
+        reason = send_refusal(err)
+        if reason is None:
+            return {
+                "status": "unknown",
+                "reason": "the outcome is unknown; check the order's messages",
+            }
+        return {"status": "refused", "reason": reason}
     if answer["sent"]:
         return {"status": "sent", "message_id": answer["message"]["id"]}
     return {

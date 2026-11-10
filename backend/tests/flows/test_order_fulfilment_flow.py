@@ -216,7 +216,10 @@ async def _approved_trigger(
             }
         )
     )
-    spec = GrantSpec(expires_at=datetime.now(UTC) + timedelta(days=6), rules=rules or BUILTIN_RULES)
+    spec = GrantSpec(
+        expires_at=datetime.now(UTC) + timedelta(days=6),
+        rules=rules if rules is not None else BUILTIN_RULES,
+    )
     seen = await asyncio.to_thread(triggers.live_hash, trigger)
     assert await triggers.attach_grant(trigger.id, spec, "approved", browser, seen)
     return trigger
@@ -587,6 +590,8 @@ class _Host:
         send: bool = False,
         send_ready: bool = True,
         told: set[str] | None = None,
+        send_error: str | None = None,
+        send_answer: dict[str, Any] | None = None,
         settle_hours: int = 48,
         choices: dict[str, Any] | None = None,
     ) -> None:
@@ -599,6 +604,10 @@ class _Host:
         # The orders already told "ready" since their last status change, shared across runs
         # as the backend's episode rule is (#5660 §7.1): a second run's send is refused.
         self.told = told if told is not None else set()
+        # How a failed send reaches the script: `Exception("<type>: <text>")`, as the
+        # harness's `_script_outcome` hands it over; and the send's answer when it is not sent.
+        self.send_error = send_error
+        self.send_answer = send_answer
         self.sends: list[dict[str, Any]] = []
         self.choices = choices or {"default_nozzles": [], "bed_type": "pei"}
         self.requests: list[dict[str, Any]] = []
@@ -639,11 +648,16 @@ class _Host:
             )
         if name == "order_notify_customer_send":
             self.sends.append(args)
+            if self.send_error is not None:
+                raise Exception(self.send_error)
             if args["order_id"] in self.told:
-                # A refused call is the tool's failure (`ToolFailedError` in a real run).
-                raise RuntimeError(
-                    'already_notified: the customer was already sent "ready" (message m1, sent)'
+                # A refused call is the tool's failure, as the script sees it in a real run.
+                raise Exception(
+                    'ToolFailedError: already_notified: the customer was already sent "ready" '
+                    "(message m1, sent)"
                 )
+            if self.send_answer is not None:
+                return json.dumps(self.send_answer)
             self.told.add(args["order_id"])
             return json.dumps({"sent": True, "message": {"id": "m1", "status": "sent"}})
         raise AssertionError(f"unexpected tool {name}")
@@ -848,6 +862,59 @@ def test_a_second_run_on_the_same_ready_order_never_sends_twice() -> None:
     assert result["send"]["status"] == "refused"
     assert result["send"]["reason"].startswith("already_notified")
     assert result["report"] == {"summary": "ok"}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "reason"),
+    [
+        (
+            "ToolFailedError: messaging_plugin_unavailable: remote:mail is not connected; "
+            "nothing was sent",
+            "refused",
+            "messaging_plugin_unavailable: remote:mail is not connected; nothing was sent",
+        ),
+        (
+            "ToolApprovalDenied: timed out",
+            "refused",
+            "the send was not approved: timed out",
+        ),
+        (
+            "ToolFailedError: order_notify_customer_send may have run: the agent replica that "
+            "took it sent no heartbeat for 30s",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+        (
+            "ToolFailedError: record the message to order o1's customer failed (HTTP 503)",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+        (
+            "TimeoutError: no answer",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+    ],
+)
+def test_a_failed_send_is_refused_only_on_the_agents_refusal(
+    error: str, status: str, reason: str
+) -> None:
+    """Review of #5919: only the agent's refusal is `refused`; a failure that may have sent
+    the message (a timeout, a lost answer, a 5xx) is `unknown`, and nothing is sent again."""
+    host = _ready_host(send=True, send_error=error)
+    result = host.run()
+    assert len(host.sends) == 1
+    assert result["send"] == {"status": status, "reason": reason}
+    assert result["report"] == {"summary": "ok"}
+
+
+def test_a_send_the_plugin_did_not_take_is_not_sent() -> None:
+    """Review of #5919: the call answered, but the plugin refused the message."""
+    host = _ready_host(
+        send=True, send_answer={"sent": False, "message": {"id": "m2", "status": "failed"}}
+    )
+    result = host.run()
+    assert result["send"] == {"status": "not_sent", "reason": "failed", "message_id": "m2"}
 
 
 def test_print_choices_that_cannot_be_read_ask_a_person_and_the_next_item_prints() -> None:
