@@ -27,8 +27,9 @@ import { errorResult } from './registry.js'
 // (`session-<uuid>-call-<tool_use_id>`, temporal/toolCall.ts), or attaches to it when it is
 // already there (a re-send after a lost answer), and answers with its result. The call then runs
 // as `tool:<name>` (toolActivities.ts `toolCallActivities`) on the turn's own replica's
-// agent-tools worker when it polls (an eager start, `ToolCallStarterDeps`, #5865), else on
-// whichever agent-tools worker takes it, so a pod that dies while the turn waits loses the turn, not the call:
+// agent-tools worker when an eager start is made and granted (#5865; the conditions are
+// `ToolCallStarterDeps`'s: the worker polls with its build made current, Temporal hands the task
+// back, and its activity has a free slot), else on whichever agent-tools worker takes it, so a pod that dies while the turn waits loses the turn, not the call:
 // the restarted turn is told which calls finished (`finishedToolCalls`) and reads what each
 // returned with `tool_call_result` (`toolCallResult`), so the result reaches the model as a tool
 // result, never in the user's message. Images come back as names in the session's blobs, never as

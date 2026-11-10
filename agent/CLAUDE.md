@@ -135,8 +135,9 @@ opens every one and seals it again byte for byte).
   (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
   `tools_as_activities` switch is gone, Step 9.9), started with `requestEagerStart` on the turn's
   replica's own agent-tools worker connection while it polls, once its build has been made current (AgentWorker
-  `connection`, #5865; it stays so when a later build is promoted, and whether Temporal grants an
-  eager start to a superseded build is not measured; the call's span attribute `scadbuddy.eager` says
+  `connection`, #5865; it stays so when a later build is promoted, and Temporal grants an eager start
+  to such a superseded build, whose worker then runs the call: measured on a dev server, Server
+  1.32.0, `toolCallLatency.temporal.test.ts` `SUPERSEDED`; the call's span attribute `scadbuddy.eager` says
   `started`, `declined`, `failed` or `fallback`): the first workflow task comes back in the start's answer
   without waiting on matching, and the activity is dispatched eagerly to the same worker when it is
   on agent-tools and the worker has a free slot (a pinned server's call goes to `agent-tools.<hostname>`
@@ -145,7 +146,8 @@ opens every one and seals it again byte for byte).
   ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
   and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
   `test/toolCallLatency.temporal.test.ts`
-  checks the overhead around the activity; without Temporal the calls run in the turn's
+  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
+  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
   below); a turn whose transcript last ran in another directory (a fork's first) is told so in
   its prompt (`turnRunner.ts` `directoryNote`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
