@@ -372,7 +372,7 @@ sequenceDiagram
   participant T as Temporal
   B->>PG: hello: ai_tab_owners row (tab → agent-tools.<B>)
   A->>PG: read the tab's owner queue
-  A->>T: start BridgeCall on agent-tools
+  A->>T: start BridgeCall on agent-tools.<A> (A's own host worker runs it)
   T->>B: activity bridge.tab on agent-tools.<B> (B only, one attempt)
   B->>B: run the call on the tab, as a local call
   B-->>T: the answer, as the activity's result
@@ -392,6 +392,13 @@ sequenceDiagram
   a missed call dropped. It never takes back a row that names another replica.
 - **One replica runs a call:** the activity is scheduled on the owner's queue only, with
   one attempt, so the other replicas do no work for it.
+- **No shared queue on the way (#5862):** the workflow's own tasks run on the caller's queue,
+  `agent-tools.<A>`, which only the caller's host worker polls (with `BridgeCall` alone,
+  `dist/temporal/bridge-bundle.js`). Both queues are unversioned. The shared `agent-tools`
+  is versioned, and in prod a `BridgeCall` started there waited 3.4 s for its first
+  workflow task, so the 6 s status probe ran out before the activity started. A call or
+  a status check between two healthy replicas now answers in well under a second
+  (`agent/test/bridgeRelay.temporal.test.ts`).
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
   contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
   workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
@@ -424,11 +431,12 @@ sequenceDiagram
   tab's route and live tools, but waits at most 6 s for the answer (`STATUS_PROBE_MS`,
   #4950), as does the check behind a chat attach: past it the tab reads "not connected".
   Those 6 s are the ack (3 s) plus the status activity's start-to-close (3 s), with none of
-  the workflow's slack: a probe made while a rollout fails the first workflow task reads
-  "not connected" at once, and does not wait for the task to run again (#5421).
+  the workflow's slack: a probe whose workflow tasks are slow on the caller reads
+  "not connected" once they run out, and does not wait for the slack (#5421).
   A workflow that ends on its own execution timeout is logged as one ("timed out as a
-  workflow (rollout?)"), apart from an owner's failure: its 15 s of slack covers about one
-  failed workflow task during a rolling deploy.
+  workflow (is this replica's host worker … polling?)"), apart from an owner's failure: its
+  15 s of slack covers the workflow tasks on a loaded caller and its host worker's
+  reconnect.
 - **The Postgres relay is gone (#4868):** the relay of #1916 (rows in
   `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`) ran beside this path for one release
   of #4780. No replica of this build sends or answers it. While a replica of the build before

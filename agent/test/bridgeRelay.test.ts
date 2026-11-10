@@ -228,6 +228,6 @@ describe('TemporalTabRelay', () => {
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: failingWorkflowClient(executionTimeout()), log: (m) => logged.push(m) })
     expect(await relay.forward('tab-1', call, options())).toMatchObject({ op: 'call', outcome: { ok: false, error: { code: 'no_answer' } } })
     expect(logged).toHaveLength(1)
-    expect(logged[0]).toMatch(/tab-1 on agent-tools\.b timed out as a workflow \(rollout\?/)
+    expect(logged[0]).toMatch(/tab-1 on agent-tools\.b timed out as a workflow \(is this replica.s host worker on agent-tools\.a polling\?/)
   })
 })

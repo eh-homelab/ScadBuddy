@@ -327,12 +327,14 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 // The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
 const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
-// Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
-// replicas make for a tab connected here (#4780).
+// Monitor commands, which run where its turns' Bash runs, the browser_* calls other
+// replicas make for a tab connected here (#4780), and the BridgeCall workflows this
+// replica starts for a tab on another one (#5862).
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
-// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
-// activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
-// (temporalClient below), only with the KEK; without it, such a call is refused.
+// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): a workflow
+// on this replica's HOST_QUEUE whose activity runs on the owner's, through Temporal, sealed.
+// Its client is set once made (temporalClient below), only with the KEK; without it, such a
+// call is refused.
 const tabRelay = database
   ? new TemporalTabRelay({
       owners: new PostgresTabOwnerStore(database.sql),
@@ -1004,7 +1006,7 @@ const sessionWorker =
 // This replica's own queues (temporal/session/hostWorkers.ts), unversioned (plan Phase 11): a queue
 // only one replica polls is no member of a newer build, so once that build is current Temporal
 // would hand a versioned one's tasks to no one while its replica still runs. A pinned turn tool's calls
-// (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// (#2320), a classic session's Monitor commands and this replica's BridgeCalls on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
 const hostWorkers =
@@ -1022,6 +1024,9 @@ const hostWorkers =
           // Its tabs are claimed once this worker polls (startHosting, below).
           ...(tabRelay ? tabRelay.hostActivities() : {}),
         },
+        // This replica's own browser_* calls for a tab on another replica (#5862): their
+        // workflow tasks never wait on the versioned agent-tools queue's routing.
+        ...(tabRelay ? { pinnedWorkflows: { workflowBundle: { codePath: fileURLToPath(new URL('./temporal/bridge-bundle.js', import.meta.url)) } } } : {}),
         ...(sessionHosting
           ? {
               sessions: {
@@ -1302,18 +1307,24 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
-  // with it, the session host worker with the turns' 17 s as its grace. AgentSession turns get
+  // and at 15 s it stops regardless: inside the turns' 17 s budget. The session host worker stops
+  // with it, with the turns' 17 s as its grace; the pinned host worker only once they end (below).
+  // AgentSession turns get
   // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
   // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
   const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
   await Promise.all([
     temporalWorker?.stop(),
-    hostWorkers?.stop(),
+    hostWorkers?.sessions?.stop(),
     sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
+  // The pinned host worker only now (#5862 review): it runs this replica's own BridgeCalls, whose
+  // workflow tasks a draining turn's browser_* call needs until the turn ends, and its pinned calls.
+  // Not awaited: it runs beside shutdown() below, which closes the tabs first, so its bridge.tab
+  // calls end at once ("gone"); process.exit ends whatever is left, within the pod's grace.
+  void hostWorkers?.pinned.stop()
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()
   stopSessionWake?.()
