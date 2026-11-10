@@ -129,7 +129,15 @@ function outside(body: Body): Response | Listing {
 }
 
 function ensureDraft(): Draft {
-  draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
+  draft ??= {
+    id: 'draft-1',
+    currency: 'USD',
+    minor_exponent: 2,
+    shipping_currency: 'USD',
+    shipping_minor_exponent: 2,
+    items: [],
+    shipping_options: SHIPPING,
+  }
   return draft
 }
 

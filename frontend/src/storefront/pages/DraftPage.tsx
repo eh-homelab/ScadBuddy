@@ -35,6 +35,18 @@ export function DraftPage() {
     }
   }, [draftChanged])
 
+  // The cart was sent from another tab: show what is there now, with the shop's answer.
+  const sentElsewhere = (message: string) => {
+    store.draft().then(
+      (answer) => {
+        setDraft(answer)
+        draftChanged(answer)
+        setError(message)
+      },
+      (caught: unknown) => setError(errorText(caught)),
+    )
+  }
+
   const remove = async (item: DraftItem) => {
     if (removing !== null) return
     setRemoving(item.id)
@@ -131,7 +143,7 @@ export function DraftPage() {
           ))}
         </ul>
       )}
-      {draft && items.length > 0 && <SubmitForm draft={draft} onSubmitted={sent} />}
+      {draft && items.length > 0 && <SubmitForm draft={draft} onSubmitted={sent} onSent={sentElsewhere} />}
     </section>
   )
 }

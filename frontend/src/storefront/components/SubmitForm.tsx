@@ -8,18 +8,23 @@ import { Turnstile } from './Turnstile'
 interface Props {
   draft: Draft
   onSubmitted: (order: SubmittedOrder) => void
+  /** The cart was sent already (409 `order_submitted`, from another tab): the page loads it again. */
+  onSent: (message: string) => void
 }
 
 const EMPTY_ADDRESS = { recipient: '', street: '', street2: '', locality: '', region: '', postalCode: '', country: '' }
 
 /**
- * Submit (spec 2026-11-02 §5.5): a name, an email, one of the shop's shipping options and,
- * when that option ships, the address. The shop mails a link to the order to the email.
+ * Submit (spec 2026-11-02 §5.5): a name, an email, one of the shop's shipping options (priced in the
+ * shop's currency, which the draft names apart from the cart's) and, when that option
+ * ships, the address. The shop mails a link to the order to the email.
  * One `Idempotency-Key` per submit: sent again after a failure, the same form is the
  * same submit to the shop, which makes one order and sends one mail. The bot check
- * (§5.8) shows its widget while it is on, and each send takes a new token.
+ * (§5.8) shows its widget while it is on, and each send takes a new token. A cart sent
+ * already from another tab (409 `order_submitted`) is not an error to stay on: the page
+ * loads the cart again.
  */
-export function SubmitForm({ draft, onSubmitted }: Props) {
+export function SubmitForm({ draft, onSubmitted, onSent }: Props) {
   const id = useId()
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -90,7 +95,8 @@ export function SubmitForm({ draft, onSubmitted }: Props) {
       onSubmitted(order)
     } catch (caught) {
       if (caught instanceof StoreError && caught.slug === 'bot_check_failed') forgetTurnstileSiteKey()
-      setError(errorText(caught))
+      if (caught instanceof StoreError && caught.slug === 'order_submitted') onSent(errorText(caught))
+      else setError(errorText(caught))
     } finally {
       setSending(false)
       setWidget((n) => n + 1)
@@ -138,7 +144,7 @@ export function SubmitForm({ draft, onSubmitted }: Props) {
             {options.map((option) => (
               <label key={option.id} className="sf-choice">
                 <RadioGroupItem value={option.id} />
-                {` ${option.label} — ${formatMoney(option.amount_minor, draft.currency, draft.minor_exponent)}`}
+                {` ${option.label} — ${formatMoney(option.amount_minor, draft.shipping_currency, draft.shipping_minor_exponent)}`}
               </label>
             ))}
           </RadioGroup>
