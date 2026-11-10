@@ -8,6 +8,10 @@ import { TurnTrace } from '../src/telemetry/turn.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { harnessTierOf } from '../src/harness/run.js'
 import { TOOL_SEARCH } from '../src/harness/toolSearch.js'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { hashTree } from '../src/plugins/packages/hash.js'
 import { turnRunnerForTest, type TurnRunnerTestOptions, unusedSql } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
@@ -62,6 +66,61 @@ describe('TurnRunner', () => {
     const names = [TOOL_SEARCH, 'Skill', 'Agent', ...(turn.run.nativeTools ?? []).map((t) => t.name)]
     expect(names).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Write', 'Edit', 'NotebookEdit', 'TaskCreate', 'TaskUpdate']))
     for (const name of names) expect([name, turn.eventTierOf(name, {})]).toEqual([name, gate(name, {})])
+  })
+
+  it.each([
+    ['handed to Claude Code', undefined],
+    ['proxied as activities', ['hindsight__recall', 'hindsight__retain', 'hindsight__forget']],
+  ])("records a remote plugin's and an allowed package's tools at the gate's tier, %s (#5895)", async (_, turnTools) => {
+    // An allowed package (`allow_refused`) that names Bash, so the turn loads its copy and offers Bash.
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'runner-tier-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'shell' }))
+    await mkdir(path.join(dir, 'skills', 'run'), { recursive: true })
+    await writeFile(path.join(dir, 'skills', 'run', 'SKILL.md'), '---\nname: run\ndescription: runs\nallowed-tools: Bash\n---\nrun.\n')
+    const shell = { name: 'shell', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['Bash'] }
+    const { runner, session, principal } = await turnRunnerForTest({
+      tierOf: (name) => (name.startsWith('mcp__scadbuddy__') ? 'read' : undefined),
+      pluginToolTiers: { recall: 'read', retain: 'write' },
+      packages: { paths: [], allowedPaths: [dir], builtinTools: ['Bash'], loaded: [shell], problems: [] },
+      ...(turnTools ? { turnTools } : {}),
+    })
+    const turn = await runner.assemble(session, principal)
+    const { run } = turn
+    // What the assembly computed before #5869 (`pluginTiers`): proxied, it is `run.tierOf` itself;
+    // handed over, the same call over the run's own plugins and paths.
+    const old = turnTools
+      ? run.tierOf!
+      : harnessTierOf({
+          tierOf: run.tierOf!,
+          ...(run.remotePlugins ? { remotePlugins: run.remotePlugins } : {}),
+          ...(run.ownPlugin !== undefined ? { ownPlugin: run.ownPlugin } : {}),
+          ...(run.pluginPaths ? { pluginPaths: run.pluginPaths } : {}),
+          ...(run.allowedPluginPaths ? { allowedPluginPaths: run.allowedPluginPaths } : {}),
+          ...(run.nativeTools ? { nativeTools: run.nativeTools } : {}),
+        })
+    if (turnTools) {
+      expect(run.remotePlugins).toBeUndefined()
+      expect(Object.keys(run.mcpServers ?? {})).toContain('hindsight')
+    } else {
+      expect(run.remotePlugins?.map((p) => p.name)).toEqual(['hindsight'])
+    }
+    expect(run.allowedPluginPaths).toHaveLength(1)
+    expect(run.nativeTools?.find((t) => t.name === 'Bash')).toEqual({ name: 'Bash', tier: 'outward' })
+    const gate = harnessTierOf(run)
+    const expected: Record<string, string> = {
+      mcp__hindsight__recall: 'read',
+      mcp__hindsight__retain: 'write',
+      mcp__hindsight__forget: 'outward',
+      Bash: 'outward',
+    }
+    for (const [name, tier] of Object.entries(expected)) {
+      expect([name, turn.shownTierOf(name, {})]).toEqual([name, tier])
+    }
+    for (const name of [...Object.keys(expected), 'Skill', 'Agent']) {
+      expect([name, turn.shownTierOf(name, {})]).toEqual([name, gate(name, {})])
+      expect([name, turn.shownTierOf(name, {})]).toEqual([name, old(name, {})])
+    }
   })
 
   it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {
