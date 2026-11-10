@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
+import { dirBytes, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
 import { type ExecResult, type Manifest, SHA_HEADER, type Shell, syncPath } from './protocol.js'
 
 // The agent's side of a session's sandbox (#5864, issue comment "Design" §2-§3): the client of the
@@ -20,6 +20,25 @@ export interface Sandboxes {
 
 export class SandboxError extends Error {
   override name = 'SandboxError'
+}
+
+/** A file the sandbox sent past the cap it was read under. */
+export class SandboxTooLarge extends Error {
+  override name = 'SandboxTooLarge'
+}
+
+/** The sandbox's manifest, its entries at sync paths only: a command controls what it says (`bad` lists the rest). */
+async function checkedManifest(client: SandboxClient): Promise<{ files: Manifest['files']; truncated: boolean; bad: string[] }> {
+  const raw = await client.manifest()
+  const files: Manifest['files'] = []
+  const bad: string[] = []
+  for (const f of Array.isArray(raw?.files) ? raw.files : []) {
+    const ok =
+      typeof f?.path === 'string' && syncPath(f.path) && typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.size)
+    if (ok) files.push(f)
+    else bad.push(typeof f?.path === 'string' ? f.path : JSON.stringify(f).slice(0, 200))
+  }
+  return { files, truncated: raw?.truncated === true || bad.length > 0, bad }
 }
 
 const REQUEST_MS = 60_000
@@ -63,9 +82,28 @@ export class SandboxClient {
     })
   }
 
-  async get(rel: string): Promise<Buffer> {
+  /**
+   * The file's bytes, read as a stream and stopped once past `max` (a SandboxTooLarge): the size
+   * the sandbox reports is never trusted.
+   */
+  async get(rel: string, max: number): Promise<Buffer> {
     const res = await this.#call('GET', `/v1/files/${encodeURI(rel)}`)
-    const bytes = Buffer.from(await res.arrayBuffer())
+    const chunks: Buffer[] = []
+    let size = 0
+    const reader = res.body?.getReader()
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > max) {
+          await reader.cancel().catch(() => {})
+          throw new SandboxTooLarge(`the sandbox's ${rel} is past ${max} bytes`)
+        }
+        chunks.push(Buffer.from(value))
+      }
+    }
+    const bytes = Buffer.concat(chunks)
     if (res.headers.get(SHA_HEADER) !== createHash('sha256').update(bytes).digest('hex')) {
       throw new SandboxError(`the sandbox's copy of ${rel} changed while it was read`)
     }
@@ -113,7 +151,7 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
  */
 export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits): Promise<Map<string, string>> {
   const local = await localManifest(dir, limits)
-  const remote = await client.manifest()
+  const remote = await checkedManifest(client)
   const there = new Map(remote.files.map((f) => [f.path, f.sha256]))
   for (const [rel, entry] of local) {
     if ('tooLarge' in entry) continue
@@ -123,6 +161,7 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
     }
   }
   for (const rel of [...there.keys()]) {
+    if (!syncPath(rel)) continue
     const here = local.get(rel)
     if (here === undefined) {
       await client.delete(rel)
@@ -139,24 +178,28 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
  * A truncated manifest removes nothing.
  */
 export async function syncBack(client: SandboxClient, dir: string, before: Map<string, string>, limits: SyncLimits): Promise<SyncBack> {
-  const after = await client.manifest()
+  const after = await checkedManifest(client)
   const out: SyncBack = { written: [], removed: [], left: [] }
-  let budget = limits.workspaceMaxBytes
+  for (const path of after.bad) out.left.push({ path, reason: 'it is not a workspace path that syncs' })
+  // What the directory may still take: the cap less what it holds now. A file brought back over an
+  // older copy is counted whole, so the budget only errs on the small side.
+  let budget = Math.max(limits.workspaceMaxBytes - (await dirBytes(dir)), 0)
   for (const file of after.files) {
     if (before.get(file.path) === file.sha256) continue
-    if (file.size > limits.fileMaxBytes) {
-      out.left.push({ path: file.path, reason: `it is ${file.size} bytes, past the workspace's per-file cap of ${limits.fileMaxBytes}` })
-      continue
-    }
-    if (file.size > budget) {
-      out.left.push({ path: file.path, reason: `it would take the files brought back past the workspace's cap of ${limits.workspaceMaxBytes} bytes` })
-      continue
-    }
+    const max = Math.min(limits.fileMaxBytes, budget)
     let bytes: Buffer
     try {
-      bytes = await client.get(file.path)
+      bytes = await client.get(file.path, max)
     } catch (err) {
-      out.left.push({ path: file.path, reason: err instanceof Error ? err.message : String(err) })
+      const reason =
+        err instanceof SandboxTooLarge
+          ? max === limits.fileMaxBytes
+            ? `it is past the workspace's per-file cap of ${limits.fileMaxBytes} bytes`
+            : `it would take the session directory past the workspace's cap of ${limits.workspaceMaxBytes} bytes`
+          : err instanceof Error
+            ? err.message
+            : String(err)
+      out.left.push({ path: file.path, reason })
       continue
     }
     budget -= bytes.length
@@ -166,7 +209,7 @@ export async function syncBack(client: SandboxClient, dir: string, before: Map<s
   if (!after.truncated) {
     const now = new Set(after.files.map((f) => f.path))
     for (const rel of before.keys()) {
-      if (now.has(rel)) continue
+      if (now.has(rel) || !syncPath(rel)) continue
       await removeDirFile(dir, rel)
       out.removed.push(rel)
     }

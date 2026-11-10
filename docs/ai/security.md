@@ -829,18 +829,29 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
 - **The exec server.** [`agent/src/sandbox/server.ts`](../../agent/src/sandbox/server.ts)
   takes a bearer token that the agent made for that pod. It runs each command in `/work` with
   `bash -c` or `pwsh -NonInteractive -Command`, with an environment of its own (`PATH`,
-  `HOME`, `LANG`, `TERM`, the proxy), `ulimit -u 512`, and its own process group. It kills
-  that group at the deadline (default 120 s, at most 600 s) and when the shell exits. It
+  `HOME`, `LANG`, `TERM`, the proxy), `ulimit -u 512`, and its own process group. It runs one
+  command at a time. At the deadline (default 120 s, at most 600 s) and when the shell exits,
+  it kills that group and then every other process of the sandbox's uid but itself and PID 1
+  (`reapStrays`), so a process that left the group (`setsid`, a double fork) does not outlive
+  its command. A PID namespace per command would be cleaner, but the pod cannot make one:
+  `unshare --user --map-root-user --pid --fork` fails with "Operation not permitted" under
+  the runtime's default seccomp profile, with no capabilities (measured 2026-11-10 in the
+  `sandbox` image under Docker's default profile). A pod is never shared between sessions,
+  so nothing a command leaves can reach another session's commands. It
   keeps at most 1 MiB of each stream; the tool shows the model at most 30,000 characters.
   After 15 minutes with no request it exits, the pod ends, and the workers' sweep deletes it.
   A command can read the token from the server's environment. That token reaches only its own
   pod, and the network policy admits only the agent workers.
 - **The files.** Before each command the worker makes the pod's `/work` match the session's
   directory, and after it copies back each file the command made or changed and removes each
-  one it deleted ([`agent/src/sandbox/client.ts`](../../agent/src/sandbox/client.ts)). Only
+  one it deleted ([`agent/src/sandbox/client.ts`](../../agent/src/sandbox/client.ts)). The
+  pod's manifest is untrusted: an entry that is not a workspace path is never read, written,
+  sent or removed, and the write refuses any path part that is not a workspace segment and
+  any parent that resolves outside the directory, before it makes or removes anything. Only
   workspace paths sync, never through a link, never a scratch tree (`node_modules`,
-  `__pycache__`) or a dot path. A file past `workspace_file_max_bytes`, or past what
-  `workspace_max_bytes` leaves for the call, stays in the pod and the result says so. The
+  `__pycache__`) or a dot path. Each file is read as a stream and stopped past
+  `workspace_file_max_bytes` or past what `workspace_max_bytes` leaves after the directory's
+  own bytes, whatever size the pod claims; such a file stays in the pod and the result says so. The
   turn's write-back then records the directory in `SessionFiles`, as it does for `Write`.
 - **Egress.** The pod reaches only the egress proxy
   ([`agent/src/sandbox/egressProxy.ts`](../../agent/src/sandbox/egressProxy.ts)), a Deployment

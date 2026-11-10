@@ -288,6 +288,11 @@ async function measure(dir: string, limit = Infinity, maxEntries = Infinity): Pr
   return { bytes: total, entries: count }
 }
 
+/** Every byte under a session's directory, never following a link (the sandbox's sync-back budget, #5864). */
+export async function dirBytes(dir: string): Promise<number> {
+  return (await measure(dir)).bytes
+}
+
 /** Every byte under `dir`, never following a link (a link counts as itself). */
 async function sizeOf(dir: string): Promise<number> {
   return (await measure(dir)).bytes
@@ -334,8 +339,14 @@ async function readRegular(inside: string, abs: string, max: number): Promise<{ 
 /** Writes `rel` under `dir`, replacing any entry in its way (a link above all) rather than writing through it. */
 async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise<void> {
   const parts = rel.split('/')
+  // A workspace path only: no `..` or `.`, no empty part, at most MAX_SEGMENTS deep. Checked before
+  // anything is touched, as is each parent below, so nothing outside `dir` is ever made or removed.
+  if (parts.length > MAX_SEGMENTS || rel.length > WORKSPACE_PATH_MAX || !parts.every((p) => SEGMENT.test(p))) {
+    throw new Error(`${JSON.stringify(rel)} is not a workspace path`)
+  }
   let at = dir
   for (const part of parts.slice(0, -1)) {
+    if (!(await within(dir, at))) throw new Error(`${rel} resolves outside the session's directory`)
     at = path.join(at, part)
     const st = await lstat(at).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
     if (st && !st.isDirectory()) await rm(at, { recursive: true, force: true })

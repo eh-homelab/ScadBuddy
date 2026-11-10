@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, readdir, rename, rm, unlink } from 'node:fs/promises'
+import { lstat, mkdir, open, readdir, readFile, rename, rm, unlink } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import path from 'node:path'
 import {
@@ -44,6 +44,56 @@ export type SandboxServerOptions = {
    * other processes count too).
    */
   maxProcesses?: number
+  /**
+   * After each command, kill every process of this uid but the server and PID 1 (`reapStrays`):
+   * a command that left its process group (`setsid`, a double fork) must not outlive it. Set in
+   * the pod (main.ts); never in a test on a shared machine, where it would kill the user's own.
+   */
+  reapUid?: number
+}
+
+/**
+ * Kills every process whose real uid is `uid`, except PID 1 (tini), this process and `keep`, and
+ * looks again until none is left (a process may fork while it is being killed; `ulimit -u` bounds
+ * that), at most 50 rounds. Returns how many it killed. A sandbox runs one session's commands, one
+ * at a time, so between two commands nothing of that uid but the server should run (#5864: the pod
+ * cannot make a PID namespace per command, see the design comment).
+ */
+export async function reapStrays(options: {
+  uid: number
+  keep?: readonly number[]
+  procRoot?: string
+  kill?: (pid: number) => Promise<void> | void
+}): Promise<number> {
+  const root = options.procRoot ?? '/proc'
+  const keep = new Set([1, process.pid, ...(options.keep ?? [])])
+  const kill =
+    options.kill ??
+    ((pid: number) => {
+      try {
+        process.kill(pid, 'SIGKILL')
+      } catch {
+        // Gone already.
+      }
+    })
+  let killed = 0
+  for (let round = 0; round < 50; round++) {
+    const found: number[] = []
+    for (const name of await readdir(root).catch(() => [] as string[])) {
+      if (!/^\d+$/.test(name)) continue
+      const pid = Number(name)
+      if (keep.has(pid)) continue
+      const status = await readFile(path.join(root, name, 'status'), 'utf8').catch(() => '')
+      const uid = /^Uid:\s+(\d+)/m.exec(status)?.[1]
+      if (uid !== undefined && Number(uid) === options.uid) found.push(pid)
+    }
+    if (found.length === 0) break
+    for (const pid of found) await kill(pid)
+    killed += found.length
+    // Killed processes leave /proc once reaped (tini reaps orphans); give them a moment.
+    if (!options.kill) await new Promise((r) => setTimeout(r, 20))
+  }
+  return killed
 }
 
 const BODY_MAX_BYTES = 256 * 1024 * 1024
@@ -71,7 +121,7 @@ function argv(shell: ExecRequest['shell'], command: string, maxProcesses: number
 }
 
 /** Runs one command; never rejects. */
-export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses'>, request: ExecRequest): Promise<ExecResult> {
+export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses' | 'reapUid'>, request: ExecRequest): Promise<ExecResult> {
   const started = Date.now()
   return new Promise((resolve) => {
     const child = spawn('bash', argv(request.shell, request.command, options.maxProcesses), {
@@ -101,17 +151,27 @@ export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' |
         // The group is gone already.
       }
     }
+    // The group, then (in the pod) every other process of the sandbox's uid: what left the group too.
+    const killAll = () => {
+      killGroup()
+      if (options.reapUid !== undefined) void reapStrays({ uid: options.reapUid })
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      killGroup()
+      killAll()
     }, request.timeout_ms)
     let spawnError: Error | undefined
     child.on('error', (err) => (spawnError = err))
     // What the command left running in its group goes as soon as the shell exits: it would hold
     // the pipes open, and its output would arrive after the result.
-    child.on('exit', killGroup)
+    child.on('exit', killAll)
     child.on('close', (code, signal) => {
       clearTimeout(timer)
+      void finish(code, signal)
+    })
+    const finish = async (code: number | null, signal: NodeJS.Signals | null) => {
+      // Nothing of the command runs on once its result is out: a second sweep after the pipes closed.
+      if (options.reapUid !== undefined) await reapStrays({ uid: options.reapUid })
       resolve({
         exit_code: spawnError ? 127 : code,
         signal: signal ?? null,
@@ -122,7 +182,7 @@ export function runCommand(options: Pick<SandboxServerOptions, 'work' | 'home' |
         stderr_bytes: streams.stderr.total,
         duration_ms: Date.now() - started,
       })
-    })
+    }
   })
 }
 
@@ -326,6 +386,8 @@ export function sandboxServer(options: SandboxServerOptions): Server {
           parsed = 'the body is not JSON'
         }
         if (typeof parsed === 'string') return json(res, 400, { error: parsed })
+        // One command at a time: the sweep after each would kill another's processes.
+        if (running > 0) return json(res, 409, { error: 'a command is running in this sandbox' })
         running++
         try {
           return json(res, 200, await runCommand(options, parsed))

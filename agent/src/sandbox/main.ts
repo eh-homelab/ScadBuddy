@@ -29,6 +29,8 @@ async function main(): Promise<void> {
     token,
     proxy: process.env.SCADBUDDY_SANDBOX_PROXY || undefined,
     maxProcesses: MAX_PROCESSES,
+    // Its own uid's other processes die after each command (server.ts reapStrays).
+    reapUid: process.getuid?.(),
     idleMs: Number(process.env.SCADBUDDY_SANDBOX_IDLE_MS ?? IDLE_MS),
     onIdle: () => {
       process.stdout.write('sandbox idle: exiting\n')
