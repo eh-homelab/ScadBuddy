@@ -56,6 +56,37 @@ export function credentialFallbackEvent(
   })
 }
 
+/**
+ * The prompt with `note` before the user's text (turnRunner.ts `directoryNote`, #5867): a string
+ * gets it as its first paragraph, a message stream (images, images.ts `userPrompt`) as a text
+ * block before its first message's own. Each iteration starts afresh, as fallback.ts needs.
+ */
+export function withNote(prompt: string | AsyncIterable<SDKUserMessage>, note: string | undefined): string | AsyncIterable<SDKUserMessage> {
+  if (note === undefined) return prompt
+  if (typeof prompt === 'string') return `${note}\n\n${prompt}`
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      let first = true
+      for await (const message of prompt) {
+        if (!first) {
+          yield message
+          continue
+        }
+        first = false
+        const content = message.message.content
+        let noted: SDKUserMessage['message']['content']
+        if (typeof content === 'string') noted = `${note}\n\n${content}`
+        else {
+          const at = content.findIndex((block) => block.type === 'text')
+          noted = [...content]
+          noted.splice(at < 0 ? content.length : at, 0, { type: 'text', text: note })
+        }
+        yield { ...message, message: { ...message.message, content: noted } } as SDKUserMessage
+      }
+    },
+  }
+}
+
 /** What a turn's process needs besides the session: the manager's, shared by every turn on this replica. */
 export type TurnCoreDeps = {
   runner: Pick<TurnRunner, 'assemble'>
@@ -313,7 +344,7 @@ export class CoreTurn {
       attempts = warm
       const resume = turn.run.resume !== undefined
       const stream = runWithFallback(
-        { ...turn.run, prompt, signal },
+        { ...turn.run, prompt: withNote(prompt, turn.directoryNote), signal },
         {
           candidates: turn.candidates,
           report: deps.credentials.reporter({ sessionId: id, turnId }),

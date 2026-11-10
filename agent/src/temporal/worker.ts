@@ -89,6 +89,8 @@ export type AgentWorkerOptions = {
   deployment?: { name: string; buildId: string; queues?: () => readonly string[] }
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
+  /** The most workflows its sticky cache keeps; the SDK's default (sized by memory) when omitted. */
+  maxCachedWorkflows?: number
   /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
   activityHeartbeatMs?: number
   shutdownGraceMs?: number
@@ -244,6 +246,7 @@ export class AgentWorker {
           ...(options.maxConcurrentActivityTaskExecutions !== undefined
             ? { maxConcurrentActivityTaskExecutions: options.maxConcurrentActivityTaskExecutions }
             : {}),
+          ...(options.maxCachedWorkflows !== undefined ? { maxCachedWorkflows: options.maxCachedWorkflows } : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
           shutdownForceTime: options.shutdownForceMs ?? 15_000,
         })

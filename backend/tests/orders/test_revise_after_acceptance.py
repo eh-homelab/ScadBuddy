@@ -258,12 +258,12 @@ def test_a_print_in_flight_is_refused(shop: Shop) -> None:
     assert refused.value.slug == "print_in_flight"
 
 
-def _backdate(pool: PgPool, attempt: Fulfilment, by: timedelta) -> None:
-    """Pins the attempt before the revision that follows it, so the order of the two rows
-    never rests on the clock between two transactions."""
+def _postdate(pool: PgPool, attempt: Fulfilment, by: timedelta) -> None:
+    """Moves the attempt's time past the revision that follows it, as a clock that steps
+    back between the two writes would (#5704): the revision's number orders them still."""
     with pool.connection() as conn:
         conn.execute(
-            "UPDATE order_item_fulfilments SET created_at = created_at - %s WHERE id = %s",
+            "UPDATE order_item_fulfilments SET created_at = created_at + %s WHERE id = %s",
             (by, attempt.id),
         )
 
@@ -291,7 +291,7 @@ def test_the_old_designs_attempt_is_never_accepted(shop: Shop, pool: PgPool, how
         old = shop.lifecycle.record_fulfilment(
             order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
         )
-    _backdate(pool, old, timedelta(hours=1))
+    _postdate(pool, old, timedelta(hours=1))
     revise(shop, order, item)
     assert shop.get_item(item).status == "draft"
     new = requote(shop, order, item, 1200)
@@ -312,6 +312,62 @@ def test_the_old_designs_attempt_is_never_accepted(shop: Shop, pool: PgPool, how
     )
     shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
     assert shop.get_item(item).status == "fulfilled"
+
+
+@pytest.mark.parametrize("how", ["print", "hand"])
+def test_a_clock_step_back_never_makes_the_priced_designs_attempt_stale(
+    shop: Shop, pool: PgPool, how: str
+) -> None:
+    """#5704: the wall clock steps back (WSL steps it by ±14 s) between the revision's
+    write and the attempt's. The attempt still printed the revision the accepted quote
+    prices, so it is accepted."""
+    order, item = shop.accepted()
+    revision = shop.rows.revisions(item.id)[0]
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_revisions SET created_at = now() + interval '1 minute'"
+            " WHERE id = %s",
+            (revision.id,),
+        )
+    if how == "print":
+        attempt = _printed(shop, pool, order, item)
+    else:
+        attempt = shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+        )
+    shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    assert shop.get_item(item).status == "fulfilled"
+
+
+@pytest.mark.parametrize("how", ["print", "hand"])
+def test_a_production_attempt_names_the_items_current_revision(
+    shop: Shop, pool: PgPool, how: str
+) -> None:
+    """#5704: `OrderStore.insert_fulfilment` stores the item's current revision on a
+    production attempt, by hand and by a print's claim: the design it printed."""
+    order, item = shop.accepted()
+
+    def attempt() -> Fulfilment:
+        if how == "print":
+            return _printed(shop, pool, order, item)
+        return shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="failed"), BY
+        )
+
+    first = attempt()
+    assert first.revision_id == shop.rows.revisions(item.id)[0].id
+    if how == "print":
+        # A print that made the item's quantity refuses another: this one made nothing.
+        shop.lifecycle.update_fulfilment(
+            order.id, item.id, first.id, FulfilmentInput(quantity=0, outcome="failed"), BY
+        )
+    revise(shop, order, item)
+    new = requote(shop, order, item, 1200)
+    shop.lifecycle.accept_quote(order.id, item.id, new.id, BY)
+    second = attempt()
+    assert second.revision_id == shop.rows.revisions(item.id)[1].id
+    stored = {f.id: f.revision_id for f in shop.rows.fulfilments(item.id)}
+    assert stored == {first.id: first.revision_id, second.id: second.revision_id}
 
 
 def test_an_item_with_an_accepted_attempt_refuses_it(shop: Shop) -> None:
@@ -380,8 +436,8 @@ def test_stale_attempt_follows_the_accepted_quotes_revision(shop: Shop, pool: Pg
     old = shop.lifecycle.record_fulfilment(
         order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
     )
-    # Pinned just after the first revision, so before any revision made later.
-    _pin(pool, old, first.created_at + timedelta(microseconds=1))
+    # Its time is after any revision made later: the revision's number orders them (#5704).
+    _pin(pool, old, first.created_at + timedelta(hours=1))
 
     def stale(attempt_id: str) -> bool:
         attempt = next(f for f in shop.rows.fulfilments(item.id) if f.id == attempt_id)

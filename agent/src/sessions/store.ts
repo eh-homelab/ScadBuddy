@@ -88,6 +88,9 @@ type Segment = { owner: string; rows: EntryRow[] }
 /** At most this many rows in one INSERT of `copyForkRanges` (8 parameters each, under the protocol's 65535). */
 const COPY_BATCH = 1000
 
+/** How many of a session's newest user and assistant rows `lastCwd` opens before it reads the whole transcript. */
+const LAST_CWD_ROWS = 20
+
 export const entryTypeOf = (entry: { type?: unknown }): string | null =>
   typeof entry.type === 'string' && ENTRY_TYPE.test(entry.type) ? entry.type : null
 
@@ -210,6 +213,26 @@ export class PostgresSessionStore implements SessionStore {
         AND (entry_type = ${type} OR (entry_type IS NULL AND entry LIKE ${`%"${type}"%`}))
       ORDER BY ai_session_entries.id DESC LIMIT 1`
     return rows.length === 0 ? null : (await this.opened(key.sessionId, subpath, rows))[0]!
+  }
+
+  /**
+   * The working directory the main transcript's newest entry ran in (Claude Code writes its
+   * `cwd` on each user and assistant entry), or undefined when no entry names one (#5867).
+   * The session's own newest rows first; a session with none of its own yet (a fork before its
+   * first turn) reads its transcript as it loads, through its parent's cut.
+   */
+  async lastCwd(sessionId: string): Promise<string | undefined> {
+    const cwdOf = (entries: SessionStoreEntry[]) => entries.findLast((e) => typeof e.cwd === 'string' && e.cwd !== '')?.cwd as string | undefined
+    const rows = await this.sql<EntryRow[]>`
+      SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
+      WHERE session_id = ${sessionId} AND subpath = '' AND NOT inherited
+        AND (entry_type IN ('user', 'assistant') OR entry_type IS NULL)
+      ORDER BY ai_session_entries.id DESC LIMIT ${LAST_CWD_ROWS}`
+    if (rows.length > 0) {
+      const own = cwdOf((await this.opened(sessionId, '', rows)).reverse())
+      if (own !== undefined) return own
+    }
+    return cwdOf(await transcriptOf(this.sql, (id, create) => this.keyOf(id, create), sessionId))
   }
 
   private async opened(sessionId: string, subpath: string, rows: EntryRow[]): Promise<SessionStoreEntry[]> {
