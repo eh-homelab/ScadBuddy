@@ -23,15 +23,22 @@ function State({ mail, now }: { mail: OrderMail; now: number }) {
   }
   if (mail.failed_at) return <span className="text-warn">Failed: {mail.last_error ?? 'no reason was given'}</span>
   // Waiting only while its next try is still ahead; after that the sender owes it, so it reads queued.
+  // Either way the refusal stays visible.
+  const refusal = mail.last_error && <span className="text-muted-foreground"> ({mail.last_error})</span>
   if (mail.attempts > 0 && Date.parse(mail.next_attempt_at) > now) {
     return (
       <>
         Waiting until <When at={mail.next_attempt_at} />
-        {mail.last_error && <span className="text-muted-foreground"> ({mail.last_error})</span>}
+        {refusal}
       </>
     )
   }
-  return <>Queued</>
+  return (
+    <>
+      Queued
+      {refusal}
+    </>
+  )
 }
 
 /**

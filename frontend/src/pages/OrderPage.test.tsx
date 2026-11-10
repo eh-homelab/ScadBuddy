@@ -722,6 +722,7 @@ describe('OrderPage, the customer link (#5283)', () => {
     const [item] = await within(list).findAllByRole('listitem')
     expect(item).toHaveTextContent('Queued')
     expect(item).not.toHaveTextContent('Waiting until')
+    expect(item).toHaveTextContent('try later')
   })
 
   it("shows the mail server's last error, and no note once a host is set", async () => {
