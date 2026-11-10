@@ -447,25 +447,25 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 ### 8.2 The rule
 
 scadify's seam (#5283, `orders/storefront/mail.py`, on main since #5923) is
-`storefront_mail_covers(conn, order_id, event, *, host) -> bool`: true when the order has
-a live order link and a mail host and a sender are set. It does not read `source` or the visitor. This
-design only consumes it (PR 5), in the CRUD service, passing the settings snapshot's
-mail host:
+`storefront_mail_covers(conn, order_id, event, *, ready) -> bool`: true when the order has
+a live order link and ``ready`` (a mail host and a sender are set). It does not read
+`source` or the visitor. This design only consumes it (PR 5), in the CRUD service, passing
+whether the settings snapshot's mail config is ready:
 
 ```python
 STOREFRONT_EVENT = {"quoted": "price_ready", "shipped": "shipped"}
 
-def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | None) -> bool:
+def skipped_for_storefront(conn, order_id: str, template: str, *, ready: bool) -> bool:
     event = STOREFRONT_EVENT.get(template)
-    return event is not None and storefront_mail_covers(conn, order_id, event, host=host)
+    return event is not None and storefront_mail_covers(conn, order_id, event, ready=ready)
 ```
 
 - The claim route (§7.1 step 2) calls it under the order's row lock. `prepareApproval`
   (§5.2) reads the same answer through the read-only `GET …/messages/check`; the agent
   never decides it.
 - As built (PR 5): `orders/messages.py` `STOREFRONT_EVENT` and `_skipped_for_storefront`,
-  with the lifecycle's `mail_host` (the running `storefront_mail_host`; None or empty
-  covers nothing). The seam ignores the event today; the real event is always passed. The
+  with the lifecycle's `mail_ready` (the running mail config has both a host and a
+  sender; otherwise it covers nothing, #5969). The seam ignores the event today; the real event is always passed. The
   agent's `refuseIfTold` refuses `storefront_mail` before anything parks, and a claim that
   comes back `skipped` (the storefront began to mail between the check and the claim)
   sends nothing and says so in its answer's `warning`.
