@@ -87,7 +87,7 @@ const WORKFLOW_SLACK_MS = 15_000
  * Temporal sometimes records a task as started and never delivers it: history's AddWorkflowTask
  * to the throttled matching times out after the start is recorded, its retry is refused "Workflow
  * task already started", and the task waits out its timeout (eh-homelab/clusters#3418). That cost
- * a call 10 s, past the status probe's 6 s (hub.ts STATUS_PROBE_MS); at 3 s the retry, on the same
+ * a call 10 s, past the status probe's budget (hub.ts STATUS_PROBE_MS); at 3 s the retry, on the same
  * worker, has time to run. Every BridgeCall task that completed in prod took at most 2.24 s from
  * start to completion (57 tasks, 2026-11-09/10), and 2.18 s on a dev server beside a busy main
  * worker (#5939). A task that runs past 3 s is retried; one that never fits ends the call at its

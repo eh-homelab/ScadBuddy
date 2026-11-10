@@ -1129,8 +1129,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   (`/api/v1/internal/crud/print/runs`, `…/outcomes`, `…/operations`, `…/events`, #5298):
   the API writes each with its event and activity row, and takes only the
   `print.progress`, `print.settled`, `printer.report` and `printer.changed` events from
-  it, each logged once by its id. The worker does not `LISTEN`. It waits until the API
-  lists the `settings`, `runs`, `operations` and `events` areas before it serves. Its
+  it, each logged once by its id. Its copies in Bambuddy's library, their slices, its
+  slice starts, the print dialog's background slices, the projects' printers, the
+  projects without their folder yet and the destinations' touches go through them as
+  well (`…/uploads`, `…/slices`, `…/slice-starts`, `…/previews`, `…/project-targets`,
+  `…/folderless`, `…/destination-touches`; a slice start, a background slice and its
+  claim take an `Idempotency-Key`). The worker does not `LISTEN`. It waits until the API
+  lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
+  `events`, `printer-ensure`, `reprints`, `uploads` and `previews`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is

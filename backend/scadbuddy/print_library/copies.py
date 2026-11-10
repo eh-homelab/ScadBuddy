@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.send import Printable, Target, _copy_lock, _hinted, _lai
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryListingSource, LibraryReads, NativeCopies
@@ -134,10 +135,10 @@ async def _still_there(
 async def _touch(uploads: BambuddyUploadStore, key: str, copy_id: int) -> None:
     """The copy this subject used last is the one its folder keeps (#4337). Best
     effort: the print goes on without it, and the sweep then judges by the upload's time
-    (a print worker that starts before the API has migrated has no ``used_at`` yet)."""
+    (an API out of reach, or one that refuses the touch, leaves no ``used_at``)."""
     try:
         await uploads.touch(key, copy_id)
-    except psycopg.Error:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
         logger.warning("could not record a native copy's reuse", extra={"library_file_id": copy_id})
 
 

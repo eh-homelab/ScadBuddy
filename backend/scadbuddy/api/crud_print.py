@@ -32,6 +32,19 @@ or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken e
 those writes are the API's, never the worker's role's. Natural: decided under the
 registry's lock, so a call sent again finds the row and writes nothing.
 
+The uploads and slices (Q15, Q17) are `bambuddy/uploads.py` `BambuddyUploadStore`'s, for
+`RemoteUploadStore`. Each write but one is natural: a record is ``ON CONFLICT`` on the
+key the caller names, a touch, a hash and a forget set or delete by key. A slice start is
+a plain insert, so it takes an ``Idempotency-Key`` and runs with its ledger row
+(`crud/idempotency.py`): a resend after a lost answer records one start.
+
+The print dialog's background slices (Q16), the projects' printers, the projects
+created without their folder yet and the destinations' last touches (Q18) are the same
+store's. A background slice's record is a plain insert and its claim answers whether the
+sweep took it first, so both take an ``Idempotency-Key``: a resend after a lost answer
+records one slice, and a claim it won answers true again, though the slice was retired
+since. Every other write sets or deletes by key.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -44,11 +57,14 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Query, Request, status
+from psycopg import Connection
+from psycopg.rows import DictRow
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import (
@@ -57,6 +73,7 @@ from scadbuddy.api.deps import (
     PrintRunsDep,
     SettingsStoreDep,
     StateDep,
+    UploadsDep,
 )
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
@@ -66,10 +83,19 @@ from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import (
+    BambuddyUploadStore,
+    DestinationKind,
+    LibraryCopy,
+    PreviewSlice,
+    ProjectTarget,
+    SlicedCopy,
+)
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.crud.idempotency import MaybeIdempotencyKey, Replay, idempotent_write, required_key
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
 from scadbuddy.printers.component import PrintersDep
@@ -225,9 +251,18 @@ async def find_run(key: str, has_request_id: bool, runs: PrintRunsDep) -> PrintR
 
 @router.get("/runs/lan-waiting", name="crud_print_lan_waiting")
 async def lan_waiting(
-    runs: PrintRunsDep, printers: Annotated[list[UUID], Query(default_factory=list)]
+    runs: PrintRunsDep, printers: Annotated[list[str], Query(default_factory=list)]
 ) -> dict[str, PrintRun]:
-    return await runs.store.lan_waiting([str(printer) for printer in printers])
+    # Registry ids, as `PrintRunStore.lan_waiting` takes them; one that is no UUID would
+    # fail its cast to ``uuid[]`` as a 500.
+    for printer in printers:
+        try:
+            UUID(printer)
+        except ValueError:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a printer id: {printer!r}."
+            ) from None
+    return await runs.store.lan_waiting(printers)
 
 
 @router.get("/runs/running", name="crud_print_running_runs")
@@ -377,3 +412,338 @@ async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     # A test's in-process bus keeps no log to find a resend in.
     emit(events, event)
     return Logged(logged=True)
+
+
+# -- uploads and slices (inventory Q15, Q17) ----------------------------------------
+
+
+class CopyWrite(BaseModel):
+    output_id: str
+    upload: LibraryCopy
+
+
+class CopyKey(BaseModel):
+    output_id: str
+    library_file_id: int
+
+
+class FileIds(BaseModel):
+    ids: list[int]
+
+
+class HeldCopy(BaseModel):
+    """A copy that holds the content asked for, and the output it is recorded under."""
+
+    output_id: str
+    upload: LibraryCopy
+
+
+class SentBetween(BaseModel):
+    first_upload: datetime
+    last_slice: datetime
+
+
+class SliceWrite(BaseModel):
+    output_id: str
+    library_file_id: int
+    sliced: SlicedCopy
+
+
+class SliceHash(BaseModel):
+    output_id: str
+    file_hash: str
+
+
+class SliceStart(BaseModel):
+    library_file_id: int
+    job_id: int | None = None
+
+
+SLICE_START_ROUTE = "POST /slice-starts"
+
+
+@router.get("/uploads", name="crud_print_uploads")
+async def uploads_for(
+    uploads: UploadsDep,
+    output_id: Annotated[list[str], Query(default_factory=list)],
+    native: bool = False,
+) -> dict[str, list[LibraryCopy]]:
+    return await uploads.for_outputs(output_id, native=native)
+
+
+@router.post("/uploads", name="crud_print_record_upload", status_code=status.HTTP_204_NO_CONTENT)
+async def record_upload(body: CopyWrite, uploads: UploadsDep) -> None:
+    await uploads.record(body.output_id, body.upload)
+
+
+@router.get("/uploads/same-content", name="crud_print_same_content")
+async def same_content(
+    uploads: UploadsDep, target_key: str, content_key: str, folder_id: int | None = None
+) -> list[HeldCopy]:
+    found = await uploads.same_content(folder_id, target_key, content_key)
+    return [HeldCopy(output_id=output_id, upload=copy) for output_id, copy in found]
+
+
+@router.get("/uploads/shared", name="crud_print_shared_uploads")
+async def shared_uploads(
+    uploads: UploadsDep, output_id: str, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.shared(id, output_id))
+
+
+@router.get("/uploads/recorded", name="crud_print_recorded_uploads")
+async def recorded_uploads(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded(id))
+
+
+@router.get("/uploads/recorded-files", name="crud_print_recorded_files")
+async def recorded_files(
+    uploads: UploadsDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await uploads.recorded_files(id))
+
+
+@router.get("/uploads/sent-between", name="crud_print_sent_between")
+async def sent_between(output_id: str, uploads: UploadsDep) -> SentBetween | None:
+    window = await uploads.sent_between(output_id)
+    return None if window is None else SentBetween(first_upload=window[0], last_slice=window[1])
+
+
+@router.post(
+    "/uploads/touch", name="crud_print_touch_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def touch_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.touch(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget", name="crud_print_forget_upload", status_code=status.HTTP_204_NO_CONTENT
+)
+async def forget_upload(body: CopyKey, uploads: UploadsDep) -> None:
+    await uploads.forget(body.output_id, body.library_file_id)
+
+
+@router.post(
+    "/uploads/forget-files",
+    name="crud_print_forget_upload_files",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_upload_files(body: FileIds, uploads: UploadsDep) -> None:
+    await uploads.forget_files(body.ids)
+
+
+@router.post("/slices", name="crud_print_record_slice", status_code=status.HTTP_204_NO_CONTENT)
+async def record_slice(body: SliceWrite, uploads: UploadsDep) -> None:
+    await uploads.record_sliced(body.output_id, body.library_file_id, body.sliced)
+
+
+@router.get("/slices", name="crud_print_slices_of")
+async def slices_of(
+    output_id: str, library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[SlicedCopy]:
+    return await uploads.slices_of(output_id, library_file_id, preset_key)
+
+
+@router.post(
+    "/slices/{sliced_id}/forget",
+    name="crud_print_forget_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_slice(sliced_id: int, output_id: str, uploads: UploadsDep) -> None:
+    """One subject's slice in ``sliced_id``."""
+    await uploads.forget_slice(output_id, sliced_id)
+
+
+@router.post(
+    "/slices/{sliced_id}/gone",
+    name="crud_print_forget_gone_slice",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_gone_slice(sliced_id: int, uploads: UploadsDep) -> None:
+    """Every subject's slice in ``sliced_id``: Bambuddy no longer has the file."""
+    await uploads.forget_gone_slice(sliced_id)
+
+
+@router.put(
+    "/slices/{sliced_id}/hash",
+    name="crud_print_record_slice_hash",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def record_slice_hash(sliced_id: int, body: SliceHash, uploads: UploadsDep) -> None:
+    await uploads.record_slice_hash(body.output_id, sliced_id, body.file_hash)
+
+
+def _once(
+    uploads: BambuddyUploadStore,
+    key: str,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[Connection[DictRow]], Any],
+) -> Any:
+    """``write``'s JSON answer, once per Idempotency-Key ``key``: the write and its
+    ledger row in one transaction (plan D5)."""
+    with uploads.pool.connection() as conn:
+        return idempotent_write(
+            conn, "print", key, route, body, lambda: Replay(200, write(conn))
+        ).body
+
+
+@router.post(
+    "/slice-starts", name="crud_print_record_slice_start", status_code=status.HTTP_204_NO_CONTENT
+)
+async def record_slice_start(
+    body: SliceStart, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one start."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        SLICE_START_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_slice_start_in(
+            conn, body.library_file_id, body.job_id
+        ),
+    )
+
+
+# -- background slices, project targets, folderless projects, touches (Q16, Q18) ----
+
+
+class PreviewSliced(BaseModel):
+    sliced_file_id: int
+    name: str | None = None
+
+
+class Claimed(BaseModel):
+    #: False when the sweep took the slice first.
+    claimed: bool
+
+
+class Folderless(BaseModel):
+    name: str
+    parent_id: int | None = None
+
+
+class Touch(BaseModel):
+    kind: DestinationKind
+    target_id: int
+
+
+PREVIEW_ROUTE = "POST /previews"
+CLAIM_ROUTE = "POST /previews/{row_id}/claim"
+
+
+@router.post("/previews", name="crud_print_record_preview", status_code=status.HTTP_204_NO_CONTENT)
+async def record_preview(
+    body: PreviewSlice, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> None:
+    """A plain insert: once per ``Idempotency-Key``, so a resend records one slice."""
+    key = required_key(idempotency_key)
+    await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        PREVIEW_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: BambuddyUploadStore.record_preview_in(conn, body),
+    )
+
+
+@router.get("/previews", name="crud_print_previews_for")
+async def previews_for(
+    library_file_id: int, preset_key: str, uploads: UploadsDep
+) -> list[PreviewSlice]:
+    return await uploads.previews_for(library_file_id, preset_key)
+
+
+@router.get("/previews/find", name="crud_print_find_preview")
+async def find_preview(job_id: int, subject: str, uploads: UploadsDep) -> PreviewSlice | None:
+    return await uploads.preview(job_id, subject)
+
+
+@router.put(
+    "/previews/{row_id}/sliced",
+    name="crud_print_preview_sliced",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def preview_sliced(row_id: int, body: PreviewSliced, uploads: UploadsDep) -> None:
+    await uploads.preview_sliced(row_id, body.sliced_file_id, body.name)
+
+
+@router.post(
+    "/previews/{row_id}/retire",
+    name="crud_print_retire_preview",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def retire_preview(row_id: int, uploads: UploadsDep) -> None:
+    await uploads.retire_preview(row_id)
+
+
+@router.post("/previews/{row_id}/claim", name="crud_print_claim_preview")
+async def claim_preview(
+    row_id: int, uploads: UploadsDep, idempotency_key: MaybeIdempotencyKey = None
+) -> Claimed:
+    """Once per ``Idempotency-Key``: a claim won answers true to its resend, though the
+    slice was retired since, so the run queues the file it holds."""
+    key = required_key(idempotency_key)
+    answer = await asyncio.to_thread(
+        _once,
+        uploads,
+        key,
+        CLAIM_ROUTE,
+        {"row_id": row_id},
+        lambda conn: {"claimed": BambuddyUploadStore.claim_preview_in(conn, row_id)},
+    )
+    return Claimed.model_validate(answer)
+
+
+@router.get("/project-targets/{project_id}", name="crud_print_project_target")
+async def project_target(project_id: int, uploads: UploadsDep) -> ProjectTarget | None:
+    return await uploads.project_target(project_id)
+
+
+@router.put(
+    "/project-targets/{project_id}",
+    name="crud_print_remember_project_target",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_project_target(
+    project_id: int, body: ProjectTarget, uploads: UploadsDep
+) -> None:
+    await uploads.remember_project_target(project_id, body)
+
+
+@router.get("/folderless", name="crud_print_folderless")
+async def folderless(name: str, uploads: UploadsDep, parent_id: int | None = None) -> list[int]:
+    return await uploads.folderless(name, parent_id)
+
+
+@router.put(
+    "/folderless/{project_id}",
+    name="crud_print_remember_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def remember_folderless(project_id: int, body: Folderless, uploads: UploadsDep) -> None:
+    await uploads.remember_folderless(project_id, body.name, body.parent_id)
+
+
+@router.delete(
+    "/folderless/{project_id}",
+    name="crud_print_forget_folderless",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def forget_folderless(project_id: int, uploads: UploadsDep) -> None:
+    await uploads.forget_folderless(project_id)
+
+
+@router.post(
+    "/destination-touches",
+    name="crud_print_touch_destination",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
+    await uploads.touch_destination(body.kind, body.target_id)

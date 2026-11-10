@@ -139,6 +139,12 @@ class BambuddyUploadStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`, #5298)."""
+        return self._pool
+
     @asynccontextmanager
     async def copy_lock(self, key: str) -> AsyncIterator[None]:
         """Held, across every replica on this database, while one caller finds, uploads
@@ -338,18 +344,23 @@ class BambuddyUploadStore:
 
     def _record_preview(self, preview: PreviewSlice) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO print_preview_slices (job_id, subject, library_file_id,"
-                " preset_key, plate_id, job_created) VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    preview.job_id,
-                    preview.subject,
-                    preview.library_file_id,
-                    preview.preset_key,
-                    preview.plate_id,
-                    preview.job_created,
-                ),
-            )
+            self.record_preview_in(conn, preview)
+
+    @staticmethod
+    def record_preview_in(conn: Connection[DictRow], preview: PreviewSlice) -> None:
+        """`record_preview` on ``conn``, in the caller's transaction."""
+        conn.execute(
+            "INSERT INTO print_preview_slices (job_id, subject, library_file_id,"
+            " preset_key, plate_id, job_created) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                preview.job_id,
+                preview.subject,
+                preview.library_file_id,
+                preview.preset_key,
+                preview.plate_id,
+                preview.job_created,
+            ),
+        )
 
     def _preview(self, job_id: int, subject: str) -> PreviewSlice | None:
         with self._pool.connection() as conn:
@@ -385,11 +396,16 @@ class BambuddyUploadStore:
 
     def _claim_preview(self, row_id: int) -> bool:
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "UPDATE print_preview_slices SET printed = true"
-                " WHERE id = %s AND NOT retired RETURNING id",
-                (row_id,),
-            ).fetchone()
+            return self.claim_preview_in(conn, row_id)
+
+    @staticmethod
+    def claim_preview_in(conn: Connection[DictRow], row_id: int) -> bool:
+        """`claim_preview` on ``conn``, in the caller's transaction."""
+        row = conn.execute(
+            "UPDATE print_preview_slices SET printed = true"
+            " WHERE id = %s AND NOT retired RETURNING id",
+            (row_id,),
+        ).fetchone()
         return row is not None
 
     def _previews_to_sweep(self, older_than: timedelta) -> list[PreviewSlice]:
@@ -442,10 +458,17 @@ class BambuddyUploadStore:
 
     def _record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
-                (library_file_id, job_id),
-            )
+            self.record_slice_start_in(conn, library_file_id, job_id)
+
+    @staticmethod
+    def record_slice_start_in(
+        conn: Connection[DictRow], library_file_id: int, job_id: int | None
+    ) -> None:
+        """`record_slice_start` on ``conn``, in the caller's transaction."""
+        conn.execute(
+            "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
+            (library_file_id, job_id),
+        )
 
     def _prune_slice_starts(self, before: datetime) -> int:
         with self._pool.connection() as conn:
