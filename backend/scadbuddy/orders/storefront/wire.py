@@ -351,11 +351,23 @@ class SubmittedOrder(BaseModel):
 
 
 class CustomerPicture(BaseModel):
-    """A picture or a video of a design revision, as a presigned GET of an hour."""
+    """A picture or a video of a design revision, as a presigned GET of an hour; ``url``
+    is null when the picture cannot be shown now (its copy failed, or it is too large to
+    copy). ``caption`` is the shop's caption, else "Design N, picture K": never the
+    file's own name, which may be the shop's internal one."""
 
-    url: str
+    url: str | None
     kind: Literal["image", "video"]
-    filename: str
+    caption: str
+
+
+class CustomerColour(BaseModel):
+    """One colour slot of a design: what the customer accepts with it (spec §4.3).
+    ``name`` is the price book filament's colour name, when it has one."""
+
+    slot: int
+    colour: str
+    name: str | None
 
 
 class CustomerRevision(BaseModel):
@@ -371,6 +383,7 @@ class CustomerRevision(BaseModel):
     #: not answered yet, on an order that is still open.
     can_answer: bool
     pictures: list[CustomerPicture]
+    colours: list[CustomerColour]
 
 
 class CustomerQuote(BaseModel):
@@ -424,7 +437,8 @@ class CustomerOrderView(BaseModel):
     status: str
     currency: str
     minor_exponent: int
-    #: Whether "Cancel order" is offered: nothing is approved yet (spec §5.5).
+    #: Whether "Cancel order" is offered: nothing is approved and nothing paid yet
+    #: (spec §5.5).
     can_cancel: bool
     items: list[CustomerItem]
     payments: list[CustomerPayment]

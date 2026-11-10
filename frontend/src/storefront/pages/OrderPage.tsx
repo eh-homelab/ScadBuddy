@@ -19,7 +19,8 @@ const NO_ORDER = 'This link does not open an order. It may have been replaced by
  * `/o#<token>`: the customer's order (spec §5.2, §5.6). The token is the order link's,
  * read from the URL fragment, which the browser never sends: the page posts it in each
  * request's body and never puts it into a path or the history. Every text the customer or
- * the shop typed is a text node. A payment shows "Paid" only from the shop's own answer,
+ * the shop typed is a text node. Each design shows its pictures (a picture the shop cannot
+ * show now is its caption) and its colours, which are part of what the customer accepts. A payment shows "Paid" only from the shop's own answer,
  * never because the provider sent the browser back here (spec §7): "Check for updates"
  * reads the order again.
  */
@@ -192,12 +193,24 @@ function Revision({
     <div className="sf-panel">
       <h3 className="sf-item-title">{`Design ${revision.number}`}</h3>
       {revision.note && <p className="sf-notes">{revision.note}</p>}
-      {revision.pictures.map((picture) =>
-        picture.kind === 'video' ? (
-          <video key={picture.url} className="sf-file" src={picture.url} controls aria-label={picture.filename} />
+      {revision.pictures.map((picture, index) =>
+        picture.url === null ? (
+          <p key={index} className="sf-hint">{`${picture.caption}: this picture cannot be shown now.`}</p>
+        ) : picture.kind === 'video' ? (
+          <video key={index} className="sf-file" src={picture.url} controls aria-label={picture.caption} />
         ) : (
-          <img key={picture.url} className="sf-file" src={picture.url} alt={picture.filename} />
+          <img key={index} className="sf-file" src={picture.url} alt={picture.caption} />
         ),
+      )}
+      {revision.colours.length > 0 && (
+        <ul className="sf-filelist">
+          {revision.colours.map((colour) => (
+            <li key={colour.slot}>
+              <span className="sf-swatch" style={{ background: colour.colour }} aria-hidden="true" />
+              {`Colour ${colour.slot + 1}: ${colour.name ?? colour.colour}`}
+            </li>
+          ))}
+        </ul>
       )}
       {revision.answer === 'accepted' && <p className="sf-hint">You accepted this design.</p>}
       {revision.answer === 'changes_requested' && (

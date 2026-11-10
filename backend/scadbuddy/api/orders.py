@@ -1417,7 +1417,8 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
         "email contact that is one address, the primary one first. A back-office order "
         "gets one too. Answers the "
         "link's state, never its token. Audit row `order.customer_link_sent`. 422 "
-        "`email_invalid` for a `to` that is not one address, 422 `no_email` with no `to` "
+        "`email_invalid` for a `to` that is not one address, 422 `no_customer` for an order "
+        "with no customer (set one first), 422 `no_email` with no `to` "
         "and no email contact that is one address (a malformed contact is skipped), 409 "
         "`order_not_submitted` for a cart, 409 `kek_missing` with no key to seal the link "
         "with."
@@ -1432,6 +1433,12 @@ async def send_customer_link(
     try:
         return await asyncio.to_thread(orders.lifecycle.send_customer_link, order_id, by, to)
     except LifecycleError as error:
+        if error.slug == "no_customer":
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "This order has no customer. Set its customer before you send a link.",
+                type_=PROBLEMS + "no_customer",
+            ) from None
         if error.slug == "no_email":
             raise _to_problem(
                 "no_email",

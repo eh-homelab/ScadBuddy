@@ -1399,7 +1399,8 @@ ORDER_VIEW: dict[str, Any] = {
                     "answer": None,
                     "answer_note": None,
                     "can_answer": True,
-                    "pictures": [{"url": "https://s3/x", "kind": "image", "filename": "r.png"}],
+                    "pictures": [{"url": "https://s3/x", "kind": "image", "caption": "Design 1"}],
+                    "colours": [{"slot": 0, "colour": "#ff0000", "name": "Red"}],
                 }
             ],
             "quote": {
@@ -1437,8 +1438,8 @@ def test_the_order_view_sends_the_token_in_the_body_and_keeps_the_allowlist(
                             {
                                 "url": "https://s3/x",
                                 "kind": "image",
-                                "filename": "r.png",
-                                "blob_key": "k",
+                                "caption": "Design 1",
+                                "filename": "internal.png",
                             }
                         ],
                     }

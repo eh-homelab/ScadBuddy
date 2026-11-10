@@ -39,9 +39,20 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
     ),
     "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote"}),
     "items.revisions": frozenset(
-        {"id", "number", "note", "sent_at", "answer", "answer_note", "can_answer", "pictures"}
+        {
+            "id",
+            "number",
+            "note",
+            "sent_at",
+            "answer",
+            "answer_note",
+            "can_answer",
+            "pictures",
+            "colours",
+        }
     ),
-    "items.revisions.pictures": frozenset({"url", "kind", "filename"}),
+    "items.revisions.pictures": frozenset({"url", "kind", "caption"}),
+    "items.revisions.colours": frozenset({"slot", "colour", "name"}),
     "items.quote": frozenset(
         {"id", "unit_price_minor", "quantity", "total_minor", "accepted", "can_accept"}
     ),

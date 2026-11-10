@@ -621,7 +621,8 @@ async def order_cancel(
     state: StateDep,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> CustomerOrderView | Response:
-    """The customer cancels the order while nothing is approved (`order_page.cancel`)."""
+    """The customer cancels the order while nothing is approved and nothing is paid
+    (`order_page.cancel`: 409 ``order_approved``, 409 ``order_paid``)."""
     key = required_key(idempotency_key)
     reader, body = order_page.read_body(await request.body())
     return _answered(await order_page.cancel(state, reader, key, body))

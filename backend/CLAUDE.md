@@ -857,7 +857,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `Lifecycle.submit_order` and the back office's `POST /orders/{id}/customer-link`
   (`send_customer_link`: `to`, or the customer's first email contact that is one address,
   primary first, a malformed one skipped; 422
-  `no_email`, `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`).
+  `no_customer` (an order with no customer: every customer write runs as it), `no_email`,
+  `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`).
   `DELETE` revokes (`order.customer_link_revoked`, only when one was live); `GET` and
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
@@ -870,12 +871,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
   view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
   `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
-  `test_order_page.py` pins. A revision's pictures are copied once from the packed blob to
-  `customer-file-<sha256>` on S3, held with the attachment, and presigned (left out on any
-  other store). Writes take an `Idempotency-Key` and run as `customer_actor` (session
-  `link:<link id>`) inside the ledger's transaction (`Lifecycle` `InTransaction`, told by
-  `Lifecycle.tell` after commit); the customer's cancel is refused `order_approved` once
-  anything is approved (`Lifecycle.approved_anything`).
+  `test_order_page.py` pins. A revision's pictures (its `render` and `test_print` files and
+  the customer's `reference` files, never another role) are copied once from the packed
+  blob to `customer-file-<sha256>` on S3, held by every attachment that shows them, and
+  presigned; one that cannot be shown (a failed copy, past `MAX_PICTURE_COPY_BYTES`, a store
+  that is not S3) is listed with no URL, never a 500. Its caption is the shop's caption or
+  "Design N, picture K", never the file name. Each revision lists its colour slots with
+  the price book's names. Writes take an `Idempotency-Key` and run as `customer_actor`
+  (session `link:<link id>`) inside the ledger's transaction (`Lifecycle` `InTransaction`,
+  told by `Lifecycle.tell` after commit; the pre-lock checks and `ensure_revision` run on
+  that connection too). The customer's cancel is refused 409 `order_approved` once anything
+  is approved (`Lifecycle.approved_anything`) and 409 `order_paid` once a payment is
+  recorded, a deposit included (`payments.store.has_payment`).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

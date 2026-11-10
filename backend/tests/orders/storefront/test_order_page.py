@@ -27,12 +27,14 @@ from scadbuddy.orders.attachments import keep_file
 from scadbuddy.orders.lifecycle import Lifecycle, ManualQuoteInput, NewModelItem
 from scadbuddy.orders.models import Actor, Order, OrderItem, Revision
 from scadbuddy.orders.numbers import next_number
+from scadbuddy.orders.storefront import order_page
 from scadbuddy.orders.storefront.links import revoke_order_links
 from scadbuddy.orders.storefront.mail import issue_link
-from scadbuddy.orders.storefront.order_page import ITEM_WORDS, ORDER_WORDS
+from scadbuddy.orders.storefront.order_page import ITEM_WORDS, ORDER_WORDS, customer_file_key
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.orders.storefront.wire import CustomerOrderView
 from scadbuddy.payments import store as payments
+from scadbuddy.store.content import ContentStore
 from scadbuddy.storefront.wire import ORDER_VIEW_FIELDS, STOREFRONT_PROBLEMS
 from tests.orders.storefront.test_drafts import CRUD, CrudCaller, _orders, _state
 from tests.orders.test_lifecycle import resolved
@@ -140,7 +142,15 @@ def make_order(
 
 
 def attach(
-    api: TestClient, order: Order, item: OrderItem, rev: Revision, data: bytes = PNG
+    api: TestClient,
+    order: Order,
+    item: OrderItem,
+    rev: Revision,
+    data: bytes = PNG,
+    *,
+    attachment_id: str | None = None,
+    role: str = "render",
+    caption: str = "",
 ) -> None:
     digest = sha256(data).hexdigest()
     assert api.portal is not None
@@ -149,15 +159,15 @@ def attach(
         order.id,
         item.id,
         BY,
-        attachment_id=f"att-{rev.id}",
+        attachment_id=attachment_id or f"att-{rev.id}",
         kind="image",
-        role="render",
-        filename="render.png",
+        role=role,  # type: ignore[arg-type]
+        filename="internal-name-v3.png",
         media_type="image/png",
         size_bytes=len(data),
         sha256=digest,
         blob_key=key,
-        caption="",
+        caption=caption,
         revision_id=rev.id,
     )
 
@@ -462,6 +472,60 @@ def test_cancel_is_refused_after_an_approval(api: TestClient, crud: CrudCaller) 
     assert _orders(api).store.order(made.order.id).status == "draft"  # type: ignore[union-attr]
 
 
+def test_cancel_is_refused_once_a_request_is_paid(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    with _orders(api).store.transaction() as conn:
+        deposit = payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="deposit",
+            provider="fake",
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        payments.set_request_status(conn, deposit.id, "paid")
+    assert made.reader.view().json()["can_cancel"] is False
+    r = made.reader.cancel(key="k1")
+    assert r.status_code == 409 and slug(r) == "order_paid"
+    assert _orders(api).store.order(made.order.id).status == "draft"  # type: ignore[union-attr]
+
+
+def test_cancel_is_refused_once_a_payment_is_recorded(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    _orders(api).lifecycle.add_payment(made.order.id, BY, amount_minor=500, method="cash")
+    assert made.reader.view().json()["can_cancel"] is False
+    r = made.reader.cancel(key="k1")
+    assert r.status_code == 409 and slug(r) == "order_paid"
+
+
+def test_an_accept_and_a_cancel_sent_again_are_done_once(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud, approval="design_first")
+    [item] = items_of(api, made)
+    made.reader.answer(newest(api, item).id, "accepted", key="k1")
+    [quote] = _orders(api).store.quotes(item.id)
+    first = made.reader.accept(quote.id, key="a1")
+    again = made.reader.accept(quote.id, key="a1")
+    assert (first.status_code, again.status_code) == (200, 200)
+    assert first.json() == again.json()
+    other = make_order(api, crud, visitor="c")
+    one = other.reader.cancel("no", key="c1")
+    two = other.reader.cancel("no", key="c1")
+    assert (one.status_code, two.status_code) == (200, 200)
+    cancels = [
+        e
+        for e in _orders(api).store.events(other.order.id)
+        if e.kind == "order.status" and e.detail["to"] == "cancelled"
+    ]
+    assert len(cancels) == 1
+
+
+def test_a_revision_shows_its_colours(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    [rev] = made.reader.view().json()["items"][0]["revisions"]
+    assert rev["colours"] == [{"slot": 0, "colour": "#ff0000", "name": None}]
+
+
 def test_the_ledger_never_keeps_the_token(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud)
     [item] = items_of(api, made)
@@ -494,18 +558,93 @@ def s3_api(
         yield client
 
 
-def test_a_revisions_pictures_are_presigned(s3_api: TestClient) -> None:
+def _puts(monkeypatch: pytest.MonkeyPatch, fail: bool = False) -> list[str | None]:
+    """Each copy the view puts on the content store, by its key; ``fail`` makes it raise."""
+    keys: list[str | None] = []
+    real = ContentStore.put
+
+    async def put(self: ContentStore, *args: Any, **kwargs: Any) -> Any:
+        keys.append(kwargs.get("key"))
+        if fail:
+            raise OSError("the store is down")
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ContentStore, "put", put)
+    return keys
+
+
+def test_a_revisions_pictures_are_presigned_once(
+    s3_api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     crud = CrudCaller(s3_api)
     made = make_order(s3_api, crud)
+    puts = _puts(monkeypatch)
     [item] = made.reader.view().json()["items"]
     [picture] = item["revisions"][0]["pictures"]
-    assert picture["kind"] == "image" and picture["filename"] == "render.png"
+    # The shop's own file name never reaches the customer.
+    assert picture["kind"] == "image" and picture["caption"] == "Design 1, picture 1"
+    assert "internal-name" not in str(item)
     got = httpx.get(picture["url"])
     assert got.status_code == 200 and got.content == PNG
     assert got.headers["content-type"] == "image/png"
-    # A second view reuses the copy it made.
+    # A second view reuses the copy the first made.
     again = made.reader.view().json()["items"][0]["revisions"][0]["pictures"]
-    assert len(again) == 1
+    assert len(again) == 1 and again[0]["url"]
+    assert puts == [customer_file_key(sha256(PNG).hexdigest())]
+
+
+def test_a_shared_picture_is_held_by_every_attachment_that_shows_it(s3_api: TestClient) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud, count=2)
+    made.reader.view()
+    key = customer_file_key(sha256(PNG).hexdigest())
+    held = rows(s3_api, "SELECT holder_id FROM blob_refs WHERE key = %s ORDER BY holder_id", key)
+    revisions = [newest(s3_api, item).id for item in items_of(s3_api, made)]
+    assert [r["holder_id"] for r in held] == sorted(f"att-{r}" for r in revisions)
+
+
+def test_only_the_designs_own_files_are_shown(s3_api: TestClient) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud)
+    [item] = items_of(s3_api, made)
+    rev = newest(s3_api, item)
+    attach(s3_api, made.order, item, rev, PNG + b"x", attachment_id="own", role="other")
+    attach(
+        s3_api,
+        made.order,
+        item,
+        rev,
+        PNG + b"y",
+        attachment_id="print",
+        role="test_print",
+        caption="The test print",
+    )
+    [shown] = made.reader.view().json()["items"][0]["revisions"]
+    assert [p["caption"] for p in shown["pictures"]] == ["Design 1, picture 1", "The test print"]
+
+
+def test_a_failed_copy_lists_the_picture_without_a_url(
+    s3_api: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud)
+    _puts(monkeypatch, fail=True)
+    r = made.reader.view()
+    assert r.status_code == 200, r.text
+    [picture] = r.json()["items"][0]["revisions"][0]["pictures"]
+    assert picture["url"] is None
+    assert made.token not in caplog.text
+
+
+def test_a_picture_past_the_size_bound_is_not_copied(
+    s3_api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud)
+    monkeypatch.setattr(order_page, "MAX_PICTURE_COPY_BYTES", len(PNG) - 1)
+    puts = _puts(monkeypatch)
+    [picture] = made.reader.view().json()["items"][0]["revisions"][0]["pictures"]
+    assert picture["url"] is None and puts == []
 
 
 def test_the_crud_side_lists_the_order_area(crud: CrudCaller) -> None:

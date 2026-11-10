@@ -30,7 +30,11 @@ const ORDER: CustomerOrder = {
           answer: null,
           answer_note: null,
           can_answer: true,
-          pictures: [{ url: '/mock-files/render.png', kind: 'image', filename: 'render.png' }],
+          pictures: [
+            { url: '/mock-files/render.png', kind: 'image', caption: 'Design 1, picture 1' },
+            { url: null, kind: 'image', caption: 'The test print' },
+          ],
+          colours: [{ slot: 0, colour: '#1b6ca8', name: 'Ocean blue' }],
         },
       ],
       quote: { id: 'q1', unit_price_minor: 1250, quantity: 1, total_minor: 1250, accepted: false, can_accept: false },
@@ -87,7 +91,53 @@ describe('OrderPage', () => {
     renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
     expect(await screen.findByText(HOSTILE)).toBeInTheDocument()
     expect(document.querySelector('img[src="x"]')).toBeNull()
-    expect(screen.getByRole('img', { name: 'render.png' })).toHaveAttribute('src', '/mock-files/render.png')
+    expect(screen.getByRole('img', { name: 'Design 1, picture 1' })).toHaveAttribute('src', '/mock-files/render.png')
+  })
+
+  it('shows a picture it cannot show now as its caption, and the colours', async () => {
+    serve(ORDER)
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByText('The test print: this picture cannot be shown now.')).toBeInTheDocument()
+    expect(screen.getAllByRole('img')).toHaveLength(1)
+    expect(screen.getByText('Colour 1: Ocean blue')).toBeInTheDocument()
+  })
+
+  it('cancels with the reason and a key, and shows a refusal', async () => {
+    const sent: Sent[] = []
+    let calls = 0
+    server.use(
+      http.post('/api/store/v1/order/view', () => HttpResponse.json(ORDER)),
+      http.post('/api/store/v1/order/cancel', async ({ request }) => {
+        sent.push({ path: '', key: request.headers.get('Idempotency-Key'), body: (await request.json()) as Record<string, unknown> })
+        calls += 1
+        if (calls === 1) {
+          return HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/storefront/order_approved',
+              title: 'Conflict',
+              status: 409,
+              detail: 'Part of your order is approved already. Ask the shop to cancel it.',
+            },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return HttpResponse.json({ ...ORDER, status: 'Cancelled', can_cancel: false })
+      }),
+    )
+    const { user } = renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    await user.click(await screen.findByRole('button', { name: 'Cancel order' }))
+    await user.type(screen.getByLabelText('Why are you cancelling? (optional)'), 'Changed my mind')
+    await user.click(screen.getByRole('button', { name: 'Cancel my order' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Part of your order is approved already. Ask the shop to cancel it.')
+    await user.click(screen.getByRole('button', { name: 'Cancel my order' }))
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    expect(sent.map((s) => s.body)).toEqual([
+      { token: TOKEN, reason: 'Changed my mind' },
+      { token: TOKEN, reason: 'Changed my mind' },
+    ])
+    // The same action sent again after a refusal keeps its key.
+    expect(sent[0]!.key).toMatch(/^[0-9a-f-]{36}$/)
+    expect(sent[1]!.key).toBe(sent[0]!.key)
   })
 
   it('says a link that opens nothing opens nothing', async () => {

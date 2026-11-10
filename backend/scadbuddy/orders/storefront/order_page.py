@@ -20,11 +20,15 @@ session ``link:<link id>``, through the lifecycle under the order's lock, in one
 transaction with their ``Idempotency-Key``'s ledger row (`InTransaction`): a retry answers
 once. Each answers the view as it is after the write.
 
-A revision's picture is kept as a packed blob (``attachment-<sha256>``, which no browser
-can open), so the first view copies its bytes to `customer_file_key` on the S3 content
-store, held with the attachment (`hold_with_attachment`), and presigns that. On any store
-but S3 the pictures are left out (`listings.public_content` logs why); the page still
-works.
+A revision's picture (only the design's own files and the customer's, `_SHOWN_ROLES`) is
+kept as a packed blob (``attachment-<sha256>``, which no browser can open), so the first
+view copies its bytes to `customer_file_key` on the S3 content store and presigns that.
+Every attachment that shows the copy holds it (`hold_with_attachment`). A picture that
+cannot be shown now (the copy failed, the file is past `MAX_PICTURE_COPY_BYTES`, or the
+store is not S3, which `listings.public_content` logs) is listed with no URL: the view
+never fails for one. Its caption is the shop's caption or "Design N, picture K", never
+the file's own name. Each revision also lists its colours by slot, with the price book's
+colour names: they are part of the design the customer accepts.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
@@ -45,6 +49,7 @@ from scadbuddy.orders.attachments import blob_path
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import ENDED, SETTLED, InTransaction, LifecycleError
 from scadbuddy.orders.models import (
+    REVISION_ROLES,
     SHOWN_IMAGES,
     Actor,
     Attachment,
@@ -63,6 +68,7 @@ from scadbuddy.orders.storefront.links import link_by_token, mark_opened, token_
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.wire import (
     CancelBody,
+    CustomerColour,
     CustomerItem,
     CustomerOrderView,
     CustomerPayment,
@@ -114,6 +120,14 @@ ITEM_WORDS: Final[dict[ItemStatus, str]] = {
     "failed": "We are making it",
     "cancelled": "Cancelled",
 }
+#: The largest picture the first view copies for the customer: a design's render or a
+#: test print's photo or short video is well below it. A larger file is shown without a
+#: link rather than held up in the view's request.
+MAX_PICTURE_COPY_BYTES: Final = 25 * 1024 * 1024
+#: The roles of a revision's files the customer sees: the design's own (`REVISION_ROLES`)
+#: and the files the customer sent with a request for changes. Never a file the shop
+#: added for itself.
+_SHOWN_ROLES: Final = REVISION_ROLES | {"reference"}
 #: The video types a picture may be; images are `SHOWN_IMAGES`.
 _VIDEOS: Final = frozenset({"video/mp4", "video/webm", "video/quicktime"})
 
@@ -189,10 +203,14 @@ class _Rows:
     open_requests: list[PaymentRequest]
     shipments: list[Shipment]
     approved: bool
-    copies: dict[str, bool] = field(default_factory=dict)
+    paid: bool
+    #: The price book's colour names, by filament id.
+    colour_names: dict[str, str | None]
 
 
 def _picture(attachment: Attachment) -> bool:
+    if attachment.role not in _SHOWN_ROLES:
+        return False
     return (attachment.kind == "image" and attachment.media_type in SHOWN_IMAGES) or (
         attachment.kind == "video" and attachment.media_type in _VIDEOS
     )
@@ -221,6 +239,10 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
         open_requests=payments.open_requests_for_order(conn, order_id),
         shipments=store.shipments(order_id, conn=conn),
         approved=orders.lifecycle.approved_anything(conn, order),
+        paid=payments.has_payment(conn, order_id),
+        colour_names={
+            f.id: f.colour_name for f in store.filaments(include_archived=True, conn=conn)
+        },
     )
 
 
@@ -228,35 +250,60 @@ async def _picture_url(
     state: AppState, content: ContentStore, attachment: Attachment, blob_key: str
 ) -> str | None:
     """A presigned GET of the picture's raw copy, made from its packed blob on the first
-    view; None (logged, never with a URL) when the store has lost it."""
+    view and held by every attachment that shows it. None, logged by the attachment's
+    id only (never a URL or a token), when it cannot be shown now: the blob is lost, the
+    file is past `MAX_PICTURE_COPY_BYTES` with no copy yet, or any step failed. The view
+    then lists the picture with no URL; it never fails for one."""
     key = customer_file_key(attachment.sha256)
-    stat = await asyncio.to_thread(content.index.get, key)
-    if stat is None or stat.ref.backend != content.name:
-        path = await blob_path(state.store.blobs, blob_key)
-        if path is None:
-            logger.warning(
-                "attachment %s has no stored file; its picture is left out",
-                attachment.id,
-                extra={"attachment_id": attachment.id},
-            )
-            return None
-        with path.open("rb") as source:
-            await content.put("media", source, name=attachment.filename, scope=BlobScope(), key=key)
+    try:
+        stat = await asyncio.to_thread(content.index.get, key)
+        if stat is None or stat.ref.backend != content.name:
+            if attachment.size_bytes > MAX_PICTURE_COPY_BYTES:
+                logger.warning(
+                    "attachment %s is too large to copy for the customer; its picture is"
+                    " shown without a link",
+                    attachment.id,
+                    extra={"attachment_id": attachment.id, "size_bytes": attachment.size_bytes},
+                )
+                return None
+            path = await blob_path(state.store.blobs, blob_key)
+            if path is None:
+                logger.warning(
+                    "attachment %s has no stored file; its picture is shown without a link",
+                    attachment.id,
+                    extra={"attachment_id": attachment.id},
+                )
+                return None
+            with path.open("rb") as source:
+                await content.put(
+                    "media", source, name=f"{attachment.id}", scope=BlobScope(), key=key
+                )
+            stat = await asyncio.to_thread(content.index.get, key)
+            if stat is None:
+                return None
         orders = _orders(state)
 
         def hold() -> None:
+            # Every attachment that shows the copy holds it, so deleting one never
+            # sweeps a copy another still shows. Idempotent.
             with orders.store.transaction() as conn:
                 orders.store.hold_with_attachment(conn, key, attachment.id)
 
         await asyncio.to_thread(hold)
-        stat = await asyncio.to_thread(content.index.get, key)
-        if stat is None:
-            return None
-    backend = content.backend
-    assert isinstance(backend, S3ContentBackend)
-    return await backend.presign_get(
-        stat.ref.backend_id, PUBLIC_MEDIA_TTL, media_type=attachment.media_type
-    )
+        backend = content.backend
+        assert isinstance(backend, S3ContentBackend)
+        return await backend.presign_get(
+            stat.ref.backend_id, PUBLIC_MEDIA_TTL, media_type=attachment.media_type
+        )
+    except Exception:
+        logger.warning(
+            "attachment %s could not be copied or signed for the customer; its picture is"
+            " shown without a link",
+            attachment.id,
+            exc_info=True,
+            extra={"attachment_id": attachment.id},
+        )
+        return None
 
 
 def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQuote | None:
@@ -304,17 +351,18 @@ async def _item(
         if revision.sent_at is None:
             continue
         pictures: list[CustomerPicture] = []
-        for attachment, blob_key in rows.pictures.get(revision.id, []) if content else []:
-            assert content is not None
-            url = await _picture_url(state, content, attachment, blob_key)
-            if url is not None:
-                pictures.append(
-                    CustomerPicture(
-                        url=url,
-                        kind="video" if attachment.kind == "video" else "image",
-                        filename=attachment.filename,
-                    )
+        for number, (attachment, blob_key) in enumerate(rows.pictures.get(revision.id, []), 1):
+            url = None
+            if content is not None:
+                url = await _picture_url(state, content, attachment, blob_key)
+            pictures.append(
+                CustomerPicture(
+                    url=url,
+                    kind="video" if attachment.kind == "video" else "image",
+                    caption=attachment.caption.strip()
+                    or f"Design {revision.number}, picture {number}",
                 )
+            )
         shown.append(
             CustomerRevision(
                 id=revision.id,
@@ -325,6 +373,14 @@ async def _item(
                 answer_note=revision.answer_note,
                 can_answer=revision is newest and revision.answer is None and open_item,
                 pictures=pictures,
+                colours=[
+                    CustomerColour(
+                        slot=slot.slot,
+                        colour=slot.colour,
+                        name=rows.colour_names.get(slot.filament_id) if slot.filament_id else None,
+                    )
+                    for slot in revision.colours
+                ],
             )
         )
     return CustomerItem(
@@ -372,7 +428,7 @@ async def _build(state: AppState, rows: _Rows) -> CustomerOrderView:
         status=ORDER_WORDS[order.status],
         currency=order.currency,
         minor_exponent=order.minor_exponent,
-        can_cancel=not rows.approved and order.status not in ("shipped", *ENDED),
+        can_cancel=not rows.approved and not rows.paid and order.status not in ("shipped", *ENDED),
         items=[
             await _item(state, content, item, rows)
             for item in rows.items
@@ -418,6 +474,7 @@ _REFUSALS: Final[dict[str, str]] = {
     "quote_stale": "This price is for an older design. Load the page again.",
     "item_not_open": "This item can no longer change.",
     "order_approved": "Part of your order is approved already. Ask the shop to cancel it.",
+    "order_paid": "You have paid part of this order. Ask the shop to cancel it.",
     "order_not_cancellable": "This order can no longer be cancelled.",
     "order_on_hold": "The shop has paused this order. Ask the shop about it.",
     "payment_in_flight": "A payment is being confirmed. Try again once it is.",
@@ -517,7 +574,8 @@ async def _write(
 
 def _actor(access: Access, order: Order) -> Actor:
     if order.customer_id is None:
-        # A back-office order whose link went to an address with no customer behind it.
+        # A guard only: `Lifecycle.send_customer_link` refuses an order with no customer
+        # (`no_customer`), and a submit always sets one.
         raise problem(
             status.HTTP_409_CONFLICT,
             "order_changed",
@@ -599,9 +657,11 @@ async def accept(
 async def cancel(
     state: AppState, reader: Reader, key: str, body: dict[str, Any]
 ) -> CustomerOrderView | None:
-    """The customer cancels the order while nothing is approved (`Lifecycle.cancel_order`).
-    Refusals: 409 ``order_approved``, 409 ``order_not_cancellable``, 409
-    ``payment_in_flight``, 422 ``cancel_body_invalid``."""
+    """The customer cancels the order while nothing is approved and nothing is paid
+    (`Lifecycle.cancel_order`). Refusals: 409 ``order_approved``, 409 ``order_paid`` (a
+    payment is recorded, a deposit included: the shop refunds, so the customer asks the
+    shop), 409 ``order_not_cancellable``, 409 ``payment_in_flight``, 422
+    ``cancel_body_invalid``."""
     access = await _access(state, reader)
     if access is None:
         return None

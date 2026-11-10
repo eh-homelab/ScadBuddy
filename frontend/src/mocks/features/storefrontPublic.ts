@@ -17,7 +17,8 @@ import { problem } from '../handlers'
  * The customer's order page (#5283): the token `tok` (`/o#tok`) opens one order whose
  * design waits for an answer at $12.50. Accepting it approves the item and opens a
  * payment request with a pay link, as the CRUD side's last accept does; any other token
- * is a 404 with no body.
+ * is a 404 with no body. A cancel is refused 409 `order_approved` once anything is approved
+ * and 409 `order_paid` once a payment is paid, as the CRUD side's.
  */
 
 const base = '/api/store/v1'
@@ -158,6 +159,7 @@ function freshOrder(): CustomerOrder {
             answer_note: null,
             can_answer: true,
             pictures: [],
+            colours: [{ slot: 0, colour: '#1B6CA8', name: 'Ocean blue' }],
           },
         ],
         quote: { id: 'q1', unit_price_minor: 1250, quantity: 1, total_minor: 1250, accepted: false, can_accept: false },
@@ -314,6 +316,9 @@ export const handlers = [
     if (missing) return missing
     const found = await orderOf(request)
     if (found instanceof Response) return found
+    if (found.payments.some((p) => p.status === 'paid')) {
+      return refused(409, 'order_paid', 'You have paid part of this order. Ask the shop to cancel it.')
+    }
     if (!found.can_cancel) return refused(409, 'order_approved', 'Part of your order is approved already. Ask the shop to cancel it.')
     order = { ...found, status: 'Cancelled', can_cancel: false, items: found.items.map((i) => ({ ...i, status: 'Cancelled' })) }
     return HttpResponse.json(order)
