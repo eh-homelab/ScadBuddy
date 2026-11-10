@@ -261,6 +261,7 @@ import type {
   BankStatus,
   BankUnlinked,
   DepositSuggestion,
+  OrderMessage,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2465,6 +2466,11 @@ export const api = {
     request<Payment>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/record`, { method: 'POST' }),
   dismissOrderBankDeposit: (orderId: string, transactionId: string) =>
     request<void>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/dismiss`, { method: 'POST' }),
+  /** #5660 — the order's customer messages, newest first; a stale `sending` one reads `unknown`. */
+  orderMessages: (orderId: string) => request<OrderMessage[]>(`/orders/${seg(orderId)}/messages`),
+  /** #5660 — a person's word that an `unknown` message reached the customer. */
+  markOrderMessageSent: (orderId: string, messageId: string) =>
+    request<OrderMessage>(`/orders/${seg(orderId)}/messages/${seg(messageId)}/mark-sent`, { method: 'POST' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

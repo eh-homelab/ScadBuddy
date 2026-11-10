@@ -16,6 +16,7 @@ import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
+import { OrderMessages } from '../components/orders/OrderMessages'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { itemAnchor } from '../components/orders/itemLink'
@@ -524,6 +525,8 @@ export function OrderPage() {
             </Card>
           )
         )}
+
+        <OrderMessages orderId={order.id} />
 
         <OrderFlowRuns orderId={order.id} />
 
