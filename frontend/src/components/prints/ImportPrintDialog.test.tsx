@@ -190,6 +190,23 @@ describe('ImportPrintDialog', () => {
     expect(asked).toEqual([50, 100])
   })
 
+  it("stops reading at the route's most, 200 archives, when all are ScadBuddy prints (#5994)", async () => {
+    const asked: number[] = []
+    server.use(
+      http.get('/api/v1/farm/archives', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        asked.push(limit)
+        return HttpResponse.json(
+          Array.from({ length: limit }, (_, i) => ({ id: 1000 + i, print_name: `Print ${i}`, status: 'completed', scadbuddy_print: true }) as ArchiveOutcome),
+        )
+      }),
+    )
+    renderPage(<ImportPrintDialog open onOpenChange={() => {}} />)
+    await waitFor(() => expect(asked).toEqual([50, 100, 150, 200]))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(asked).toEqual([50, 100, 150, 200])
+  })
+
   it('follows a slow new model, then shows the import it made (#5992)', async () => {
     printRunPoll.intervalMs = 1
     const keys: (string | null)[] = []
