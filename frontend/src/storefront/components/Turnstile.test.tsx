@@ -98,4 +98,28 @@ describe('Turnstile on a design request', () => {
     await user.click(screen.getByRole('button', { name: 'Send request' }))
     await waitFor(() => expect(tokens).toEqual(['token-1', 'token-2']))
   })
+
+  it('reads the site key again after a send its failed read let through is refused', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/store/v1/turnstile', () => {
+        reads += 1
+        return reads === 1 ? HttpResponse.json({ detail: 'down' }, { status: 503 }) : HttpResponse.json({ site_key: '0x4AAA-site' })
+      }),
+      http.post('/api/store/v1/draft/requests', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/bot_check_failed', status: 403, detail: 'The check that you are not a robot did not pass. Try it again.' },
+          { status: 403 },
+        ),
+      ),
+    )
+    const { user } = renderPage(<RequestForm />)
+    await user.type(await screen.findByLabelText('What should we make?'), 'A hook')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send request' })).toBeEnabled())
+    expect(screen.queryByTestId('turnstile')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send request' }))
+    expect(await screen.findByText('The check that you are not a robot did not pass. Try it again.')).toBeInTheDocument()
+    expect(await screen.findByTestId('turnstile')).toBeInTheDocument()
+    expect(reads).toBe(2)
+  })
 })

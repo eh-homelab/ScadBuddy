@@ -1,5 +1,6 @@
-"""The edge's bot check (#5283, spec 2026-11-02 §5.8): Cloudflare Turnstile on sign-up,
-submit and design requests.
+"""The edge's bot check (#5283, spec 2026-11-02 §5.8): Cloudflare Turnstile. Today only
+design requests take it (action ``request``); ``submit``, ``sign_up`` and ``sign_in`` are
+kept for the submit, code request and sign-in routes still to come.
 
 The edge holds no Turnstile secret: the CRUD service keeps it sealed under its KEK and
 calls Cloudflare's Siteverify itself (`orders/storefront/turnstile.py`). A route that
@@ -45,6 +46,8 @@ BOT_CHECK_FAILED: Final = f"{STOREFRONT_PROBLEMS}bot_check_failed"
 BOT_CHECK_UNAVAILABLE: Final = f"{STOREFRONT_PROBLEMS}bot_check_unavailable"
 #: How long one replica trusts its read of the site key.
 SITE_KEY_TTL: Final = 30.0
+#: How long a failed read is kept: page loads meanwhile do not each wait for the CRUD side.
+SITE_KEY_RETRY: Final = 30.0
 
 
 def bot_check_failed() -> ApiError:
@@ -96,20 +99,30 @@ class SiteKey:
     """The CRUD side's Turnstile site key, or None while the check is off, read at most
     once per `SITE_KEY_TTL`. A read that fails keeps the last value (None before the
     first), so a page still loads while the CRUD service is away; with the check on and
-    the key not yet read, the page cannot make a token, and the check then refuses."""
+    the key not yet read, the page cannot make a token, and the check then refuses. A
+    failed read is not tried again for `SITE_KEY_RETRY`, so while the CRUD service is away
+    each page load does not wait out the read's budget."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._read: tuple[float, str | None] | None = None
+        self._failed_at: float | None = None
+
+    def _last(self) -> str | None:
+        return None if self._read is None else self._read[1]
 
     async def get(self, crud: StorefrontCrud) -> str | None:
         now = self._clock()
         if self._read is not None and now - self._read[0] < SITE_KEY_TTL:
             return self._read[1]
+        if self._failed_at is not None and now - self._failed_at < SITE_KEY_RETRY:
+            return self._last()
         try:
             key = await crud.turnstile_site_key()
         except (CrudUnavailableError, CrudRefusedError) as error:
             logger.warning("could not read the bot check's site key (%s)", type(error).__name__)
-            return None if self._read is None else self._read[1]
+            self._failed_at = now
+            return self._last()
         self._read = (now, key)
+        self._failed_at = None
         return key

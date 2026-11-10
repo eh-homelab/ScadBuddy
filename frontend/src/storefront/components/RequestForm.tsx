@@ -34,9 +34,9 @@ export function RequestForm() {
   const draftChanged = useDraftChanged()
   const problem = filesProblem(files)
   // The bot check (spec §5.8): a widget while it is on, and a new token after each send.
-  const siteKey = useTurnstileSiteKey()
   const [token, setToken] = useState<string | null>(null)
   const [widget, setWidget] = useState(0)
+  const siteKey = useTurnstileSiteKey(widget)
   const checking = siteKey !== null
   const needsCheck = checking && token === null
 
@@ -62,8 +62,8 @@ export function RequestForm() {
       setError(wait ? `${errorText(caught)} Try again in ${(caught as StoreError).retryAfter} seconds.` : errorText(caught))
     } finally {
       setSending(false)
-      // A token passes one check only.
-      if (checking) setWidget((n) => n + 1)
+      // A token passes one check only; a site key that failed to read is read again.
+      setWidget((n) => n + 1)
     }
   }
 

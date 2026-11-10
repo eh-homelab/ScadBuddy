@@ -15,10 +15,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.crud.client import CrudUnavailableError
 from scadbuddy.storefront.app import create_app
+from scadbuddy.storefront.ratelimit import REQUEST_UPLOADS
 from scadbuddy.storefront.static import STOREFRONT_CSP, TURNSTILE_CSP, TURNSTILE_ORIGIN
 from scadbuddy.storefront.turnstile import (
     BOT_CHECK_FAILED,
     BOT_CHECK_UNAVAILABLE,
+    SITE_KEY_RETRY,
     SITE_KEY_TTL,
     SiteKey,
 )
@@ -96,6 +98,28 @@ def test_a_failed_or_unavailable_check_stops_the_request_before_its_body(
     assert not crud_mock["request"].called
 
 
+def test_failed_checks_spend_the_allowance_so_siteverify_calls_are_bounded(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
+    for _ in range(REQUEST_UPLOADS):
+        assert ask(edge).status_code == 403  # type: ignore[attr-defined]
+    calls = crud_mock["turnstile"].call_count
+    r = ask(edge)
+    assert r.status_code == 429  # type: ignore[attr-defined]
+    assert crud_mock["turnstile"].call_count == calls
+
+
+def test_an_unavailable_check_spends_no_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "unavailable"}, headers=CRUD)
+    for _ in range(REQUEST_UPLOADS + 1):
+        assert ask(edge).status_code == 503  # type: ignore[attr-defined]
+
+
 def test_an_oversized_token_fails_before_any_call(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
@@ -138,6 +162,10 @@ async def test_the_site_key_is_read_once_per_ttl_and_kept_through_a_failed_read(
     assert crud.reads == 1
     now[0] += SITE_KEY_TTL
     assert await site_key.get(crud) == "key-1"  # type: ignore[arg-type]
+    # A failed read is not tried again at once: page loads do not each wait for it.
+    assert await site_key.get(crud) == "key-1"  # type: ignore[arg-type]
+    assert crud.reads == 2
+    now[0] += SITE_KEY_RETRY
     assert await site_key.get(crud) == "key-2"  # type: ignore[arg-type]
     assert crud.reads == 3
 

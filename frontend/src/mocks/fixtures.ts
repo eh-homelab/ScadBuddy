@@ -1087,6 +1087,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   git_remote_token: 'live',
+  storefront_turnstile_site_key: 'live',
   storefront_turnstile_secret: 'live',
   // #4249 — copied by each order at create; neither live nor a restart.
   orders_currency: 'next order',

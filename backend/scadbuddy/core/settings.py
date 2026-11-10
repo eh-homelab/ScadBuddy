@@ -222,8 +222,9 @@ class Settings(BaseSettings):
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
-    # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on sign-up,
-    # submit and design requests, on while the site key is set. The secret is sealed at
+    # The storefront's bot check (#5283, spec §5.8): Cloudflare Turnstile on design
+    # requests today (submit, sign-up and sign-in once those routes ship), on while the
+    # site key is set. The secret is sealed at
     # rest like the other secrets, and saving one needs SCADBUDDY_SECRET_KEY_FILE; only
     # this process reads it (`orders/storefront/turnstile.py`), never the edge or a page.
     # SCADBUDDY_STOREFRONT_TURNSTILE_SITE_KEY and _SECRET.

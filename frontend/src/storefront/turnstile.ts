@@ -14,7 +14,7 @@ import { store } from './api/client'
 export const TURNSTILE_SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
 
 /** The forms that take the check, each the widget's `action` (backend `storefront/wire.py`). */
-export type TurnstileAction = 'submit' | 'request' | 'sign_up'
+export type TurnstileAction = 'submit' | 'request' | 'sign_up' | 'sign_in'
 
 export interface TurnstileOptions {
   sitekey: string
@@ -59,10 +59,12 @@ let siteKeyRead: Promise<string | null> | null = null
 
 /**
  * The shop's Turnstile site key: a string while the check is on, null while it is off,
- * undefined until read. Read once per page; a failed read counts as off here, and the
- * edge still refuses a form that needs a token.
+ * undefined until read. Read once per page. A failed read counts as off for now (the edge
+ * still refuses a form that needs a token) and is read again when `retryKey` changes:
+ * a form passes the key it bumps after each send, so a send refused for its missing token
+ * reads the key again and shows the widget.
  */
-export function useTurnstileSiteKey(): string | null | undefined {
+export function useTurnstileSiteKey(retryKey: number = 0): string | null | undefined {
   const [siteKey, setSiteKey] = useState<string | null | undefined>(undefined)
   useEffect(() => {
     let live = true
@@ -77,7 +79,7 @@ export function useTurnstileSiteKey(): string | null | undefined {
     return () => {
       live = false
     }
-  }, [])
+  }, [retryKey])
   return siteKey
 }
 

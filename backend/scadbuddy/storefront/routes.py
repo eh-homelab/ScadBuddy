@@ -215,9 +215,10 @@ def _request_key(request: Request, visitor_id: str) -> str:
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
-    428 ``idempotency_key_required``, 403 ``bot_check_failed`` or 503
-    ``bot_check_unavailable`` (`turnstile.py`), 429 ``request_limited`` (`UploadAllowance`: the
-    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
+    client's allowance is spent, or its one upload is running), then 403
+    ``bot_check_failed`` (which spends one of the allowance, so it bounds the CRUD side's
+    Siteverify calls) or 503 ``bot_check_unavailable`` (`turnstile.py`), 503 ``uploads_busy``
     (`uploads.py` `UploadGate`). The body is then read whole with every cap
     (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
     "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
@@ -234,7 +235,6 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
         )
     key = _request_key(request, visitor_id)
-    await require_turnstile(request, "request")
     allowance: UploadAllowance = state.upload_allowance
     held = allowance.start(client)
     if isinstance(held, int):
@@ -246,6 +246,14 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             retry_after=held,
         )
     try:
+        try:
+            await require_turnstile(request, "request")
+        except ApiError as error:
+            # A failed check spends a turn, so the allowance bounds Siteverify calls too;
+            # an unavailable one is not the visitor's doing.
+            if error.status == 403:
+                allowance.spend(held)
+            raise
         upload = await _read_spent(request, allowance, held)
     finally:
         allowance.finish(held)

@@ -37,8 +37,8 @@ VISITOR_ID_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}visitor_id"
 STORE_CLIENT_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}store_client"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
 #: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
-#: made for one form does not pass another's check.
-TurnstileAction = Literal["submit", "request", "sign_up"]
+#: made for one form does not pass another's check. Only ``request`` has a route today.
+TurnstileAction = Literal["submit", "request", "sign_up", "sign_in"]
 #: The header the page sends the widget's token in.
 TURNSTILE_HEADER: Final = "X-Turnstile-Token"
 #: Cloudflare's bound on a token's length

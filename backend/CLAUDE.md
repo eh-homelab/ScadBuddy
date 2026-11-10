@@ -530,8 +530,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   …/crud/storefront/turnstile/verify` (area `turnstile`) and refuses 403
   `bot_check_failed` or 503 `bot_check_unavailable`. It fails closed: a site key with no
   secret this process can open is `unavailable`, never a pass. A form route awaits it
-  before it reads its body: design requests (`request`), submit (`submit`) and sign-up
-  (`sign_up`). The edge's page CSP (`storefront/static.py`) names
+  before it reads its body. Today only design requests (`request`) take it; the actions
+  `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
+  routes still to come. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
