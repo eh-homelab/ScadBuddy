@@ -348,8 +348,16 @@ export function messageDigest(message: ApprovedMessage): string {
   return createHash('sha256').update(JSON.stringify(message)).digest('hex')
 }
 
-/** A person's own send from the order page (#5660 PR 3): the template, and the message it sends again. */
-export type PersonSend = { order_id: string; template: NotifyTemplate; resend_of?: string | undefined }
+/**
+ * A person's own send from the order page (#5660 PR 3): the template, the message it sends again,
+ * and `also_when_storefront_mails` once the person said yes to sending what the storefront emails.
+ */
+export type PersonSend = {
+  order_id: string
+  template: NotifyTemplate
+  resend_of?: string | undefined
+  also_when_storefront_mails?: boolean | undefined
+}
 
 /** The message a person's send would send now, and its digest; nothing is sent or recorded. */
 export async function previewPersonSend(
@@ -373,6 +381,8 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
         'was sent; preview it again',
     )
   }
+  // The preview's refusals stand at the send too: the storefront may have begun to mail it since.
+  await refuseIfTold(ctx, args)
   return sendMessage(ctx, args, planned)
 }
 

@@ -20,7 +20,8 @@ import type { RouteModule } from './module.js'
 //                                                previewed digest, else 409 message_changed
 //
 // The browser names the template, `resend_of` and the digest it saw; it never supplies the
-// text. Both come only from the UI (guard.ts `uiRequestProblem`) with a person's signed-in
+// text. A template the storefront mails itself is refused 409 `storefront_mail` by both, unless
+// the body has `also_when_storefront_mails` (the person said yes to sending it here too). Both come only from the UI (guard.ts `uiRequestProblem`) with a person's signed-in
 // session (auth/browserSession.ts `requestSession`), as the binding's test send: no tool, no
 // flow and no /mcp client reaches them. A send is claimed and recorded in `order_messages` as
 // the tool's are (tools/orders.ts `personSend`), under the request's `Idempotency-Key`.
@@ -37,6 +38,7 @@ const ID = z.string().min(1).max(200)
 const Body = z.strictObject({
   template: z.enum(['quoted', 'accepted', 'ready', 'shipped']),
   resend_of: ID.optional(),
+  also_when_storefront_mails: z.boolean().optional(),
 })
 const SendBody = Body.extend({ digest: z.string().regex(/^[0-9a-f]{64}$/) })
 const KEY = /^[A-Za-z0-9_-]{8,128}$/

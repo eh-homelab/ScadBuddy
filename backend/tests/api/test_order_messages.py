@@ -390,6 +390,21 @@ def test_a_template_the_storefront_mails_is_skipped(
     assert [asked[1] for asked in fake.asked] == ([event, event] if event else [])
 
 
+def test_the_check_reads_told_and_storefront_mail_in_one_transaction(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _covers(monkeypatch, True)
+    told = claim(client, order_id, "k1", claim_body("shipped", also_when_storefront_mails=True))
+    assert told.status_code == 201, told.text
+    check = client.get(
+        f"/api/v1/orders/{order_id}/messages/check", params={"template": "shipped"}
+    ).json()
+    assert check["already_notified"]["id"] == told.json()["id"]
+    assert check["storefront_mail"] is True
+    # The claim asked nothing (its flag), and the check asked once.
+    assert len(fake.asked) == 1
+
+
 def test_a_skip_does_not_count_as_told(
     client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

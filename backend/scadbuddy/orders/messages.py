@@ -89,13 +89,16 @@ class OrderMessages:
             check_submitted(order)
             return self._told(conn, order_id, template, self._episode(conn, order_id))
 
-    def storefront_mails(self, order_id: str, template: NotifyTemplate) -> bool:
-        """Whether the storefront mails ``template``'s news to this order's customer itself,
-        so a send through the plugin would be skipped. Writes nothing."""
+    def check(self, order_id: str, template: NotifyTemplate) -> tuple[OrderMessage | None, bool]:
+        """What a claim of ``template`` would meet now, read in one transaction: the message
+        that already told the customer since the order's last status change (``told``), and
+        whether the storefront mails this news to the customer itself, so a claim without
+        ``also_when_storefront_mails`` would be skipped. Writes nothing."""
         with self.store.transaction() as conn:
             order = self._order(conn, order_id, lock=False)
             check_submitted(order)
-            return self._skipped_for_storefront(conn, order.id, template)
+            told = self._told(conn, order_id, template, self._episode(conn, order_id))
+            return told, self._skipped_for_storefront(conn, order.id, template)
 
     # -- writes ------------------------------------------------------------------------
 

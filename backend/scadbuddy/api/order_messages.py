@@ -90,9 +90,7 @@ async def check_order_message(
     order_id: str, orders: OrdersDep, template: Annotated[NotifyTemplate, Query()]
 ) -> MessageCheck:
     check_path(order_id)
-    messages = _messages(orders)
-    told = await _run(lambda: messages.told(order_id, template))
-    mails = await _run(lambda: messages.storefront_mails(order_id, template))
+    told, mails = await _run(lambda: _messages(orders).check(order_id, template))
     return MessageCheck(already_notified=told, storefront_mail=mails)
 
 

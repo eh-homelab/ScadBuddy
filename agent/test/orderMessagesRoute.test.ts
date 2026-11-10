@@ -32,6 +32,8 @@ function fakeBackend() {
   /** What the backend answers the claim with instead of a claim (a rival claim won: 409). */
   const race: { refusal: { status: number; body: object } | null } = { refusal: null }
   const claims: { body: Record<string, unknown>; key: string | null; author: string | null }[] = []
+  /** The check's `storefront_mail`: the storefront mails this news to the order itself. */
+  const check = { storefront_mail: false }
   const backend = createBackendClient(BACKEND, async (input) => {
     const request = input as Request
     const path = new URL(request.url).pathname
@@ -45,7 +47,7 @@ function fakeBackend() {
       return Response.json({ display_name: customer.name, contacts: [{ kind: 'email', value: 'ada@example.com', primary: true }] })
     }
     if (request.method === 'GET' && path === '/api/v1/settings') return Response.json({ orders_customer_messaging: BINDING })
-    if (request.method === 'GET' && path.endsWith('/messages/check')) return Response.json({ already_notified: null })
+    if (request.method === 'GET' && path.endsWith('/messages/check')) return Response.json({ already_notified: null, ...check })
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
       const body = (await request.json()) as Record<string, unknown>
       claims.push({ body, key: request.headers.get('idempotency-key'), author: request.headers.get('x-scadbuddy-agent-author') })
@@ -57,7 +59,7 @@ function fakeBackend() {
     }
     return Response.json({ detail: `unexpected ${request.method} ${path}` }, { status: 500 })
   })
-  return { backend, customer, race, claims }
+  return { backend, customer, race, claims, check }
 }
 
 /** The plugin tool's inputSchema as BINDING expects it. */
@@ -83,7 +85,7 @@ function fakeMessaging() {
 }
 
 function app(sessions?: BrowserSessions) {
-  const { backend, customer, race, claims } = fakeBackend()
+  const { backend, customer, race, claims, check } = fakeBackend()
   const { messaging, sends } = fakeMessaging()
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, 'off'))
@@ -92,7 +94,7 @@ function app(sessions?: BrowserSessions) {
     origins: ORIGINS,
     remoteAddress: () => LOOPBACK,
   } as never)
-  return { hono, customer, race, claims, sends }
+  return { hono, customer, race, claims, sends, check }
 }
 
 const post = (hono: Hono, path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -162,6 +164,28 @@ describe('the order page’s Send again (#5660)', () => {
     expect(await lost.json()).toMatchObject({ type: 'already_notified' })
     expect(claims).toHaveLength(1)
     expect(sends).toEqual([])
+  })
+
+  it('answers storefront_mail as 409 on the preview and the send, and sends with the person’s yes', async () => {
+    const { hono, claims, sends, check } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    check.storefront_mail = true
+    const previewed = await post(hono, 'preview', AGAIN, COOKIE)
+    expect(previewed.status).toBe(409)
+    expect(await previewed.json()).toMatchObject({ type: 'storefront_mail' })
+    const refused = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0010' })
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ type: 'storefront_mail' })
+    expect(claims).toEqual([])
+    expect(sends).toEqual([])
+
+    const also = { ...AGAIN, also_when_storefront_mails: true }
+    const again = await post(hono, 'preview', also, COOKIE)
+    expect(again.status).toBe(200)
+    const sent = await post(hono, 'send', { ...also, digest }, { ...COOKIE, 'idempotency-key': 'click-0011' })
+    expect(sent.status).toBe(200)
+    expect(claims[0]!.body).toMatchObject({ also_when_storefront_mails: true })
+    expect(sends).toHaveLength(1)
   })
 
   it('forwards the backend’s 404 as it is', async () => {
