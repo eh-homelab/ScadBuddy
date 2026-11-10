@@ -28,8 +28,9 @@ const N = Number(process.env.TOOL_CALL_BENCH_N ?? 10)
 const REPORT = process.env.TOOL_CALL_BENCH_REPORT === '1'
 /**
  * The most a call's median overhead may be here. Prod's target for a healthy worker is 300 ms
- * (#5865); a dev server on a loaded machine measured up to ~430 ms (load average 90 on 22 cores,
- * 2026-11-09), so this catches prod's 3.4 s class of regression without failing on a busy runner.
+ * (#5865); a dev server on a loaded machine measured medians up to ~520 ms (codec and versioning,
+ * no eager start, load average ~89 on 22 cores, 2026-11-09), so this catches prod's 3.4 s class of
+ * regression without failing on a busy runner.
  */
 const OVERHEAD_LIMIT_MS = 1000
 const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
@@ -179,12 +180,19 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         const session = randomUUID()
         const result = await start({ sessionId: session, toolUseId: 'toolu_bench_gone', tool: 'bench', input: {}, signal: new AbortController().signal })
         expect(result).toEqual({ content: [{ type: 'text', text: 'ok' }] })
-        const phases = await phasesOf(client, toolCallWorkflowId(session, 'toolu_bench_gone'), 0)
-        expect(phases.actRun).toBeGreaterThanOrEqual(0)
+        // And with no worker to start on (`eager` answers undefined), on the starter's client too.
+        const plain = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue, timeoutMs: 60_000, eager: () => undefined })
+        expect(await plain({ sessionId: session, toolUseId: 'toolu_bench_none', tool: 'bench', input: {}, signal: new AbortController().signal })).toEqual({
+          content: [{ type: 'text', text: 'ok' }],
+        })
+        // An unversioned worker's build is current at once: its connection is offered while it polls.
+        expect(worker.connection()).toBeDefined()
       } finally {
         await connection.close()
         await worker.stop()
       }
+      // Never once it has stopped.
+      expect(worker.connection()).toBeUndefined()
     }, 120_000)
   },
 )

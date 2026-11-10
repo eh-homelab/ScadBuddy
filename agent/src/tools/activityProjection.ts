@@ -94,11 +94,12 @@ export async function callToolResult(sessionId: string, result: ToolCallResult, 
 
 /**
  * What `toolCallStarter` starts calls with. `eager` is a client on the connection of this process's
- * own worker on `queue`, while it polls and its build is current (main.ts, AgentWorker
+ * own worker on `queue`, while it polls and once its build has been made current (main.ts, AgentWorker
  * `connection`): a call is then started with `requestEagerStart`, so Temporal hands the call's first
- * workflow task back in the start's answer to that worker, which also runs its activity (eager
- * activity dispatch, the activity's queue being the workflow's). Neither waits on the task queue's
- * matching, and the call is decoded where its session's payload key is already held (#5865).
+ * workflow task back in the start's answer to that worker, with no wait on the task queue's matching,
+ * and the call is decoded where its session's payload key is already held (#5865). Its activity is
+ * dispatched eagerly to the same worker when it is on `queue` and the worker has a free slot; a
+ * pinned call (`activityQueue`) goes through matching to its replica's queue.
  * Without it, or when its connection fails, the call is started on `client` as before.
  */
 export type ToolCallStarterDeps = {
@@ -160,6 +161,9 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
   }
 }
 
+/** Whether this process has said an eager start failed (`startEagerly`). */
+let eagerFailureLogged = false
+
 /**
  * The call started on the worker's own connection with `requestEagerStart` (ToolCallStarterDeps
  * `eager`), its handle on `client`: the result is long-polled on the client's own connection, which
@@ -176,6 +180,11 @@ async function startEagerly(
     await eager.workflow.start(TOOL_CALL_WORKFLOW, { ...options, requestEagerStart: true })
   } catch (err) {
     if (err instanceof WorkflowExecutionAlreadyStartedError) throw err
+    // Once a process: the shared client then starts every call that fails here, as it did before eager starts.
+    if (!eagerFailureLogged) {
+      eagerFailureLogged = true
+      console.warn(`tool calls: an eager start failed (${(err as Error).name}); starting such calls on the shared client`)
+    }
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)
