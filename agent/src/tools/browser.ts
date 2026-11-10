@@ -148,7 +148,12 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           tool: `browser_${spec.tool}`,
           toolUseId: ctx.toolUseId,
           signal: ctx.signal,
-          isBack: async (signal) => (await tabs(ctx).status(target(ctx), { signal })).attached,
+          // A slow owner counts as back (#5962 review): the tab may still be connected, and the
+          // call below finds out; read as gone, it would end the turn's tab waits.
+          isBack: async (signal) => {
+            const status = await tabs(ctx).status(target(ctx), { signal })
+            return status.attached || status.slow === true
+          },
         })
         if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
         if (spec.risk !== 'read') {
@@ -158,7 +163,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // in the hub's own words for why there is none (#1410).
           if (waited.why === 'reconnected') {
             const here = await statusHere(ctx)
-            if (here && !here.attached) throw new ToolError(`${here.reason} ${WHY_STILL_GONE.reconnected}`)
+            if (here && !here.attached) throw new ToolError(`${here.reason} ${here.slow ? WHY_SLOW : WHY_STILL_GONE.reconnected}`)
           }
           throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
         }
@@ -210,6 +215,10 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 }
 
 /** Why a read retried after a tab wait can still find no tab here. */
+/** After a reconnect, when the tab's replica only answered slowly: the tab may well be there (#5962). */
+const WHY_SLOW =
+  "The session's tab reconnected, and the call was not run: take a snapshot to see the page, then call again."
+
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
   // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #4780), so it dropped again,
   // or the replica holding it did not answer.

@@ -78,7 +78,7 @@ export type BrowserTarget = { principal: Principal; sessionId?: string | undefin
 
 export type BrowserStatus =
   | { attached: true; via: 'session' | 'pairing'; route: string; live: string[]; pairing?: PairingView }
-  | { attached: false; reason: string }
+  | { attached: false; reason: string; slow?: true }
 
 /** What the browser_* tools need (ToolServices `browser`). */
 export interface BrowserTabs {
@@ -157,6 +157,8 @@ export type TabHubOptions = {
   callTimeoutMs?: number
   /** `STATUS_PROBE_MS` when omitted. */
   statusProbeMs?: number
+  /** `ATTACH_PROBE_MS` when omitted; never longer than `statusProbeMs`. */
+  attachProbeMs?: number
   pollMs?: number
   log?: (message: string) => void
 }
@@ -326,6 +328,7 @@ export class TabHub implements BrowserTabs {
   readonly #sessionTabsUnstored = new Set<string>()
   readonly #callTimeoutMs: number
   readonly #statusProbeMs: number
+  readonly #attachProbeMs: number
   readonly #pollMs: number
   readonly #log: (message: string) => void
   #poll: NodeJS.Timeout | undefined
@@ -348,6 +351,7 @@ export class TabHub implements BrowserTabs {
     })
     this.#callTimeoutMs = options.callTimeoutMs ?? CALL_TIMEOUT_MS
     this.#statusProbeMs = options.statusProbeMs ?? STATUS_PROBE_MS
+    this.#attachProbeMs = Math.min(options.attachProbeMs ?? ATTACH_PROBE_MS, this.#statusProbeMs)
     this.#pollMs = options.pollMs ?? PAIRINGS_POLL_MS
     this.#log = options.log ?? ((m) => console.error(m))
   }
@@ -519,7 +523,7 @@ export class TabHub implements BrowserTabs {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
     try {
-      const answer = await this.#probe(tabId, undefined, Math.min(this.#statusProbeMs, ATTACH_PROBE_MS))
+      const answer = await this.#probe(tabId, undefined, this.#attachProbeMs)
       // A slow owner counts as not held here, on purpose: a chat attach then pairs the session
       // with the tab the user is sending from, which is known to answer (#5962 review).
       return answer !== 'slow' && answer?.op === 'status'
@@ -677,7 +681,7 @@ export class TabHub implements BrowserTabs {
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {
       const answer = await this.#probe(resolved.tabId, signal, this.#statusProbeMs)
-      if (answer === 'slow') return { attached: false, reason: SLOW_OWNER }
+      if (answer === 'slow') return { attached: false, reason: SLOW_OWNER, slow: true }
       if (answer?.op !== 'status') return { attached: false, reason: NOT_CONNECTED }
       state = answer
     }

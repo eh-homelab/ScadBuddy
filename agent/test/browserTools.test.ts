@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
-import { type BrowserTabs, MAX_SESSION_TABS, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import { ATTACH_PROBE_MS, type BrowserTabs, MAX_SESSION_TABS, STATUS_PROBE_MS, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import type { TabRelay } from '../src/bridge/relay.js'
@@ -487,6 +487,59 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const status = slow.status({ principal: browser, sessionId: 's-new' }, { signal: stop.signal })
     stop.abort()
     await expect(status).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  // #5962 review: a relay whose status answers never come, as a slow owner's on prod's Temporal;
+  // a call finds no tab (the relay answers none), so the tool opens its tab wait.
+  const hungRelay = (): TabRelay => ({
+    serve: () => {},
+    attached: () => {},
+    detached: () => {},
+    forward: (_tab, request, { signal }) =>
+      new Promise((resolve, reject) => {
+        if (request.op !== 'status') return resolve(undefined)
+        if (signal.aborted) return reject(new Error('aborted'))
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      }),
+  })
+
+  it("stops a chat attach's check at its own bound, not browser_status's longer one", async () => {
+    expect(ATTACH_PROBE_MS).toBeLessThan(STATUS_PROBE_MS)
+    const { rows, store } = sharedRows()
+    rows.set('s-new', OTHER_TAB)
+    const here = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 60_000, attachProbeMs: 50, log: () => {} })
+    const started = Date.now()
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  it('counts a slow owner as back after a tab wait, so the read call runs again', async () => {
+    const { rows, store } = sharedRows()
+    rows.set('s1', OTHER_TAB)
+    const hub = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 50, log: () => {} })
+    let back: boolean | undefined
+    await runTool(tool('browser_snapshot'), {}, {
+      ...ctx(hub.forSession('s1'), browser),
+      waitForTab: async ({ isBack }) => {
+        back = await isBack(new AbortController().signal)
+        return { back: false, message: 'x' }
+      },
+    })
+    expect(back).toBe(true)
+  })
+
+  it('a write call whose wait ended reconnected, on a slow owner, says to snapshot and call again', async () => {
+    const { rows, store } = sharedRows()
+    rows.set('s1', OTHER_TAB)
+    const hub = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 50, log: () => {} })
+    const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toMatch(/^no answer from the paired ScadBuddy tab in time.*take a snapshot to see the page, then call again\.$/s)
+    expect(text(result)).not.toMatch(/dropped again/)
   })
 
   it('pairs the attaching tab when the relay fails, and logs the failure', async () => {
