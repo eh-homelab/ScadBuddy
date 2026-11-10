@@ -495,6 +495,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `archive_run_plates`) orders as `_OWNER_ORDER` does.
   Only a source the listing finds is read. A printer file is kept as a Bambuddy library
   file in the inbox folder. A model's delete forgets its imports (`delete_models`).
+  Agent `get_print_sources` and `import_print`; frontend: the Prints page's "Import
+  print" (`components/prints/ImportPrintDialog.tsx`, the unlinked archives through
+  `PastPrintsPicker` `unlinkedOnly`), mocks `src/mocks/features/printImports.ts`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
