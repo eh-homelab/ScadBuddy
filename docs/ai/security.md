@@ -812,6 +812,86 @@ gets:
 - **No open redirects from the backend** stays, since Playwright MCP's origin lists do
   not cover redirects: `backend/tests/api/test_no_open_redirect.py`.
 
+## Bash and PowerShell in a sandbox pod (#5864)
+
+Claude Code's own `Bash` and `PowerShell` run in its process, in the agent worker pod. That
+pod holds the database URL and the KEK, and rule #5295 forbids untrusted code there. Claude
+Code's sandbox cannot run there either (no bwrap; AppArmor refuses `unshare --mount`,
+measured 2026-11-01, `agent/src/access/nativeBuiltins.ts`). So the native tools stay `off`.
+When the deployment sets up a sandbox, every session gets ScadBuddy's own `Bash` and
+`PowerShell` instead, on its in-process `builtin` server (`mcp__builtin__Bash`,
+[`agent/src/builtins/sandboxShell.ts`](../../agent/src/builtins/sandboxShell.ts)). The design
+is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
+
+- **Off until set up.** The agent reads five variables: `SCADBUDDY_SANDBOX_NAMESPACE`,
+  `_IMAGE`, `_EGRESS_PROXY`, `_KUBE_TOKEN_FILE` and `_KUBE_CA_FILE`, all set or none
+  (`agent/src/config.ts`). With none, nothing changes. With all five, the native tools never
+  reach the turn, and the items `Bash` and `PowerShell` of `builtin:claude-code` govern the
+  sandboxed ones, `outward` by default. At `outward`, each call parks for a person's approval,
+  bound to the exact command; a person who sets the item to `read` or `write` lets calls run
+  without asking.
+- **A pod per session.** The worker that runs the turn creates the pod
+  ([`agent/src/sandbox/pods.ts`](../../agent/src/sandbox/pods.ts)) in the sandbox namespace,
+  with its own ServiceAccount token (a Role there: pods only). The pod has no Secret, no
+  service-account token (`automountServiceAccountToken: false`), no service links, no DNS
+  (`dnsPolicy: None`), a read-only root, uid 10001 with no capabilities, seccomp
+  `RuntimeDefault`, its own user namespace (`hostUsers: false`), 1 CPU, 1 GiB, size-capped
+  emptyDirs for `/work` and `/tmp`, and a 4-hour `activeDeadlineSeconds`. No pod is shared
+  between sessions: a process a command leaves behind can never read another session's files.
+  The cluster's admission policy refuses any other pod shape in that namespace.
+- **The exec server.** [`agent/src/sandbox/server.ts`](../../agent/src/sandbox/server.ts)
+  takes a bearer token that the agent made for that pod. It runs each command in `/work` with
+  `bash -c` or `pwsh -NonInteractive -Command`, with an environment of its own (`PATH`,
+  `HOME`, `LANG`, `TERM`, the proxy), `ulimit -u 512`, and its own process group. It runs one
+  command at a time, and kills it when its caller goes away (the request's socket closes). At the deadline (default 120 s, at most 600 s) and when the shell exits,
+  it kills that group and then every other process of the sandbox's uid but itself and PID 1
+  (`reapStrays`), so a process that left the group (`setsid`, a double fork) does not outlive
+  its command. A PID namespace per command would be cleaner, but the pod cannot make one:
+  `unshare --user --map-root-user --pid --fork` fails with "Operation not permitted" under
+  the runtime's default seccomp profile, with no capabilities (measured 2026-11-10 in the
+  `sandbox` image under Docker's default profile). A pod is never shared between sessions,
+  so nothing a command leaves can reach another session's commands. It
+  keeps at most 1 MiB of each stream; the tool shows the model at most 30,000 characters.
+  After 15 minutes with no request it exits, the pod ends, and the workers' sweep deletes it.
+  A command can read the token from the server's environment. That token reaches only its own
+  pod, and the network policy admits only the agent workers.
+- **The files.** Before each command the worker makes the pod's `/work` match the session's
+  directory, and after it copies back each file the command made or changed and removes each
+  one it deleted ([`agent/src/sandbox/client.ts`](../../agent/src/sandbox/client.ts)). The
+  pod's manifest is untrusted: an entry that is not a workspace path is never read, written,
+  sent or removed, and the write refuses any path part that is not a workspace segment and
+  any parent that resolves outside the directory, before it makes or removes anything. Only
+  workspace paths sync (each name letters, digits, `_`, `.` and `-`, not starting with `.`, at
+  most 4 levels), never through a link, never a scratch tree (`node_modules`, `__pycache__`).
+  The result names up to 50 other paths a command made (`files_left_in_sandbox`). Each file
+  is read as a stream and stopped past `workspace_file_max_bytes` or past what
+  `workspace_max_bytes` leaves after the directory's own bytes, whatever size the pod claims.
+  Such a file stays in the pod while the pod lasts, and the result says so: until the
+  session's own copy at that path changes, the sync before each command neither deletes nor
+  overwrites it. The exec server keeps that record (`/v1/kept`, in its memory, outside
+  `/work`), so a later turn on another worker sees it too; a new pod starts from the session
+  directory alone. The record is untrusted like the rest of what the pod says, and it only
+  decides what the pod keeps, never what the session directory gets. A file that could not
+  be read back for any other reason is not kept, and the next command's sync removes it from
+  the pod. The exec server streams each file to disk and back, at most 256 MiB, and keeps a
+  file it is sent only when its sha256 matches. The turn's write-back then records the
+  directory in `SessionFiles`, as it does for `Write`.
+- **Egress.** The pod reaches only the egress proxy
+  ([`agent/src/sandbox/egressProxy.ts`](../../agent/src/sandbox/egressProxy.ts)), a Deployment
+  of the same image. It takes `CONNECT` to ports 80 and 443 only. It runs WebFetch's check on
+  each target (`assertHostAllowed`: link-local and cloud metadata refused; loopback refused),
+  refuses every private and shared address too, and connects to the address it checked. Plain
+  `http://` through the proxy and every other protocol are refused. It holds at most 256
+  tunnels at once, 32 from one pod, and frees a slot as soon as its client leaves. It logs one JSON line per tunnel. Its own NetworkPolicy
+  allows only public addresses on 80 and 443.
+- **Results** are untrusted data (`untrusted_data`, tool `Bash` or `PowerShell`, source "the
+  session sandbox").
+- **Not covered.** `run_in_background` is refused. `Monitor`'s `command` would run on the
+  worker, where Claude Code's native Bash runs, so with the sandbox the turn's `Monitor` refuses
+  a command (`turnRunner.ts` gives it no command queue); a `ws` source still works. The cluster has no
+  gVisor or Kata RuntimeClass (`kubectl get runtimeclass` on `primary`, 2026-11-09: `crun`,
+  `nvidia`, `nvidia-experimental`); the pod shares the node's kernel.
+
 ## HTTP request tool (#827)
 
 The assistant has no shell (`tools: []`) and refuses plugins that start a process, so

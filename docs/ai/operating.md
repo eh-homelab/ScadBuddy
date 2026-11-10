@@ -373,6 +373,7 @@ as unset (`present()`).
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
 | `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
 | `SCADBUDDY_SESSION_DIR` | unset → `work/sessions` under the state directory | `loadConfig()`, `sessionsRoot()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) | Where each session's working directory, `<dir>/<session id>/`, is: the `cwd` of its Claude Code process, a working copy of its workspace (§13). Set it on the workers to a capped emptyDir of the pod's own, never the NAS share (the copies are plaintext, and the share's backup cannot leave a subPath out); every placement refills it from the workspace, so a turn placed on another pod still finds the files the last one wrote back. Must be an absolute path. The process checks at start that it can write there. |
+| `SCADBUDDY_SANDBOX_NAMESPACE`, `SCADBUDDY_SANDBOX_IMAGE`, `SCADBUDDY_SANDBOX_EGRESS_PROXY`, `SCADBUDDY_SANDBOX_KUBE_TOKEN_FILE`, `SCADBUDDY_SANDBOX_KUBE_CA_FILE` | unset → no sandbox: Bash and PowerShell stay `off` | `loadConfig()`; [`agent/src/sandbox/pods.ts`](../../agent/src/sandbox/pods.ts) | The sessions' sandbox pods (#5864, [security.md](security.md), "Bash and PowerShell in a sandbox pod"). All five or none, else a `ConfigError`. The namespace the worker creates one pod per session in; the `sandbox` image (pinned by digest) those pods run; the egress proxy as `http://<host>:<port>`, which the worker resolves and gives each pod as an address (the pods have no DNS); and an apiserver token and the cluster CA, absolute paths re-read on each call. Read only where turns run (`worker`, `all`). The Kubernetes API is `KUBERNETES_SERVICE_HOST`/`_PORT`, which the kubelet sets. |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -1210,9 +1211,11 @@ task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs se
 the session's data key; archiving the chat or marking it done ends its tasks, and
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
-A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
-where the session's Bash runs (a command only while `Bash` is on, above): a command in the session's directory on
-the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
+A `Monitor` is a task of the same kind whose source runs as one heartbeating activity: a
+command (only while Claude Code's own `Bash` is on, above) in the session's directory on the
+replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), never where a
+sandbox is set up (#5864: there the session's Bash runs in its pod, and Monitor's description
+offers only `ws`), a
 WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
 dropped, and so is a batch, so a command that never writes a newline holds no more. The
