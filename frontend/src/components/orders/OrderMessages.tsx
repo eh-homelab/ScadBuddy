@@ -74,13 +74,20 @@ export function OrderMessages({ orderId }: { orderId: string }) {
   const messages = listed.data ?? []
   if (messages.length === 0 && !error) return null
 
-  async function act(action: () => Promise<void>) {
+  /**
+   * Runs one click's action. `still()` says whether this view still shows the order the click
+   * was for; an answer that comes back after the order changed sets nothing.
+   */
+  async function act(action: (still: () => boolean) => Promise<void>) {
+    const asked = orderId
+    const still = () => showing.current === asked
     setBusy(true)
     setError(null)
     setNote(null)
     try {
-      await action()
+      await action(still)
     } catch (err) {
+      if (!still()) return
       if (slugOf(err) === 'message_changed') {
         setPreview(null)
         setError('The message changed since you saw it (the order, the customer or the binding), so nothing was sent. Choose Send again to see it as it is now.')
@@ -120,9 +127,9 @@ export function OrderMessages({ orderId }: { orderId: string }) {
                     variant="outline"
                     disabled={busy}
                     onClick={() =>
-                      void act(async () => {
+                      void act(async (still) => {
                         await api.markOrderMessageSent(orderId, m.id)
-                        setNote('Marked as sent.')
+                        if (still()) setNote('Marked as sent.')
                       })
                     }
                     {...USER_ONLY}
@@ -135,10 +142,9 @@ export function OrderMessages({ orderId }: { orderId: string }) {
                   variant="outline"
                   disabled={busy}
                   onClick={() =>
-                    void act(async () => {
-                      const asked = orderId
-                      const shown = await previewOrderMessage(asked, m.template, m.id)
-                      if (showing.current === asked) setPreview({ of: m, shown, key: newRequestId() })
+                    void act(async (still) => {
+                      const shown = await previewOrderMessage(orderId, m.template, m.id)
+                      if (still()) setPreview({ of: m, shown, key: newRequestId() })
                     })
                   }
                   {...USER_ONLY}
@@ -162,9 +168,10 @@ export function OrderMessages({ orderId }: { orderId: string }) {
               size="sm"
               disabled={busy}
               onClick={() =>
-                void act(async () => {
+                void act(async (still) => {
                   const { of, shown, key } = preview
                   const answer = await sendOrderMessage(orderId, of.template, of.id, shown.digest, key)
+                  if (!still()) return
                   setPreview(null)
                   setNote(answer.warning ?? (answer.sent ? 'Sent.' : `Not sent: ${STATUS[answer.message.status]}.`))
                 })

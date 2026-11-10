@@ -53,15 +53,23 @@ async function parsed<T>(c: Context, schema: z.ZodType<T>): Promise<T | string> 
   return result.success ? result.data : result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
 }
 
+/** The backend's own refusals the route forwards as they are; any other is the agent's problem. */
+const FORWARDED = new Set([404, 409, 422])
+
 /**
  * A refusal as the route's answer. The agent's own (`message_changed: …`) maps its slug: 409 for
- * the order's state, 503 for the plugin, else 422. A backend refusal (a claim that lost a race:
- * 409 `already_notified`) keeps the backend's 4xx status and problem slug; its 5xx is a 502.
+ * the order's state, 503 for the plugin, else 422. A backend 404, 409 or 422 keeps its status and
+ * problem slug (a claim that lost a race: 409 `already_notified`). Any other backend status (a 401
+ * or 403 is the agent's service credential, not the person) is logged and answered 502
+ * `upstream_error`.
  */
 function refusal(c: Context, err: ToolError) {
   if (err.status !== undefined) {
-    const status = err.status >= 400 && err.status < 500 ? err.status : 502
-    return c.json({ detail: err.message, ...(err.problem ? { type: err.problem } : {}) }, status as ContentfulStatusCode)
+    if (FORWARDED.has(err.status)) {
+      return c.json({ detail: err.message, ...(err.problem ? { type: err.problem } : {}) }, err.status as ContentfulStatusCode)
+    }
+    console.error(`order message route: the backend answered HTTP ${err.status}: ${err.summary}`)
+    return c.json({ detail: 'the backend refused the agent; nothing was sent', type: 'upstream_error' }, 502)
   }
   const slug = /^([a-z_]+):/.exec(err.message)?.[1]
   const conflict = slug === 'message_changed' || slug === 'already_notified' || slug === 'no_messaging_plugin' || slug === 'no_contact'

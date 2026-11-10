@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import type { Sql } from 'postgres'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { BrowserSessions, personSessions, SESSION_COOKIE } from '../src/auth/browserSession.js'
 import type { CustomerMessaging, MessagingBinding, MessagingConnection } from '../src/orders/messaging.js'
@@ -29,8 +29,8 @@ function signedIn(): BrowserSessions {
 /** The backend as a send reads and writes it; `customer.name` may change between calls. */
 function fakeBackend() {
   const customer = { name: 'Ada' }
-  /** A rival claim won between the preview and this send: the backend answers 409. */
-  const race = { lost: false }
+  /** What the backend answers the claim with instead of a claim (a rival claim won: 409). */
+  const race: { refusal: { status: number; body: object } | null } = { refusal: null }
   const claims: { body: Record<string, unknown>; key: string | null; author: string | null }[] = []
   const backend = createBackendClient(BACKEND, async (input) => {
     const request = input as Request
@@ -49,12 +49,7 @@ function fakeBackend() {
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
       const body = (await request.json()) as Record<string, unknown>
       claims.push({ body, key: request.headers.get('idempotency-key'), author: request.headers.get('x-scadbuddy-agent-author') })
-      if (race.lost) {
-        return Response.json(
-          { type: 'https://scadbuddy.dev/problems/orders/already_notified', title: 'Conflict', detail: "ORD-2026-7's customer was already sent 'ready'" },
-          { status: 409 },
-        )
-      }
+      if (race.refusal) return Response.json(race.refusal.body, { status: race.refusal.status })
       return Response.json({ id: 'm2', status: 'sending', ...body }, { status: 201 })
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {
@@ -158,11 +153,42 @@ describe('the order page’s Send again (#5660)', () => {
   it('answers a claim that lost a race with the backend’s 409 already_notified', async () => {
     const { hono, race, claims, sends } = app(signedIn())
     const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
-    race.lost = true
+    race.refusal = {
+      status: 409,
+      body: { type: 'https://scadbuddy.dev/problems/orders/already_notified', title: 'Conflict', detail: "ORD-2026-7's customer was already sent 'ready'" },
+    }
     const lost = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0004' })
     expect(lost.status).toBe(409)
     expect(await lost.json()).toMatchObject({ type: 'already_notified' })
     expect(claims).toHaveLength(1)
+    expect(sends).toEqual([])
+  })
+
+  it('forwards the backend’s 404 as it is', async () => {
+    const { hono, race, sends } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    race.refusal = { status: 404, body: { type: 'https://scadbuddy.dev/problems/orders/order_not_found', title: 'Not Found', detail: 'no order' } }
+    const gone = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0005' })
+    expect(gone.status).toBe(404)
+    expect(await gone.json()).toMatchObject({ type: 'order_not_found' })
+    expect(sends).toEqual([])
+  })
+
+  it('answers the backend’s 403 to the agent as 502 upstream_error, not as the person’s', async () => {
+    const { hono, race, sends } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    race.refusal = { status: 403, body: { title: 'Forbidden', detail: 'the service credential lacks orders.write' } }
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const refused = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0006' })
+      expect(refused.status).toBe(502)
+      const body = (await refused.json()) as { type: string; detail: string }
+      expect(body.type).toBe('upstream_error')
+      expect(body.detail).not.toMatch(/service credential/)
+      expect(logged).toHaveBeenCalledWith(expect.stringMatching(/HTTP 403/))
+    } finally {
+      logged.mockRestore()
+    }
     expect(sends).toEqual([])
   })
 
