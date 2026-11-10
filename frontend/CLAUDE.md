@@ -84,7 +84,8 @@ same way, `vite.config.ts`).
   address; Turnstile `sign_in`) and `pages/AccountPage.tsx` (`/account`; "Your orders",
   each linking through `api/client.ts` `ACCOUNT_ORDER_URL` to `/o?order=<id>`, and
   sign-out, which on a 503 `sign_out_incomplete` shows the edge's text). Each order's
-  status reads from the page's `STATUS_LABELS`, and a status it lacks reads "In progress".
+  status reads from the page's `STATUS_LABELS`, typed by the spec's status enum (backend
+  `OrderStatus`, so tsc names a missing label); a value outside it reads "In progress".
   The edge's two `sign_out_incomplete` bodies are
   `test-fixtures/storefront/sign-out-incomplete.json`: `backend/tests/storefront/
   test_accounts_edge.py` checks the real edge answers them, and the page's test serves
