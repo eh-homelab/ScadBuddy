@@ -1134,9 +1134,10 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   projects without their folder yet and the destinations' touches go through them as
   well (`…/uploads`, `…/slices`, `…/slice-starts`, `…/previews`, `…/project-targets`,
   `…/folderless`, `…/destination-touches`; a slice start, a background slice and its
-  claim take an `Idempotency-Key`). The worker does not `LISTEN`. It waits until the API
+  claim take an `Idempotency-Key`), and so does its copy lock, a lease on the API
+  (`…/copy-leases/{key}`). The worker does not `LISTEN`. It waits until the API
   lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
-  `events`, `printer-ensure`, `reprints`, `uploads` and `previews`) before it serves. Its
+  `events`, `printer-ensure`, `reprints`, `uploads`, `previews` and `copy-leases`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is

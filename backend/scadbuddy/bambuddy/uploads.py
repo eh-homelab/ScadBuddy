@@ -23,10 +23,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.copy_leases import (
+    COPY_LOCK_PREFIX,
+    CopyLease,
+    CopyLeases,
+    LeaseLostError,
+    held_in,
+    hold_lease,
+)
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
-
-#: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
-COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
 #: What a print or a Generate is filed into (#3651): a Bambuddy project (its folder), or
 #: a library folder of its own.
@@ -146,18 +151,29 @@ class BambuddyUploadStore:
         return self._pool
 
     @asynccontextmanager
-    async def copy_lock(self, key: str) -> AsyncIterator[None]:
-        """Held, across every replica on this database, while one caller finds, uploads
-        and records a library copy under ``key`` (#317).
+    async def copy_lock(self, key: str) -> AsyncIterator[CopyLease]:
+        """Held, across every replica and the print worker, while one caller finds,
+        uploads and records a library copy under ``key`` (#317): the copy lease
+        (`copy_leases.py`, #5298 Task 27), renewed while the section runs. Pass the
+        lease it yields to `record`, which refuses once another holder took it.
 
-        A session-level advisory lock on a connection of its own, closed on the way
-        out, rather than a transaction-level one on the pool's. The section spans a
-        Bambuddy upload (up to its upload timeout), and the pool is the render queue's:
-        a pooled connection held that long takes a slot from it, and the store's own
-        queries inside the section need further slots, so enough folders locked at
-        once would exhaust the pool against itself. Closing the connection releases
-        the lock however the section ends, cancellation and a lost connection included.
+        Until #5298 Task 35 the API also holds the old session advisory lock after the
+        lease, so an old print pod that still takes only that lock waits for it too
+        (`_session_lock`).
         """
+        async with hold_lease(CopyLeases(self._pool), key) as lease, self._session_lock(key):
+            yield lease
+
+    @asynccontextmanager
+    async def _session_lock(self, key: str) -> AsyncIterator[None]:
+        """The old copy lock: a session-level advisory lock on a connection of its own,
+        closed on the way out, rather than a transaction-level one on the pool's. The
+        section spans a Bambuddy upload (up to its upload timeout), and the pool is the
+        render queue's: a pooled connection held that long takes a slot from it, and the
+        store's own queries inside the section need further slots, so enough folders
+        locked at once would exhaust the pool against itself. Closing the connection
+        releases the lock however the section ends, cancellation and a lost connection
+        included."""
         pool = self._pool
         conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
         conn = await AsyncConnection.connect(conninfo, autocommit=True)
@@ -182,9 +198,13 @@ class BambuddyUploadStore:
         """:meth:`for_output` for several outputs in two queries, not two per output."""
         return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)), native)
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
-        """Record an upload, replacing the folder and target of one with the same id."""
-        await asyncio.to_thread(self._record, output_id, copy)
+    async def record(
+        self, output_id: str, copy: LibraryCopy, lease: CopyLease | None = None
+    ) -> None:
+        """Record an upload, replacing the folder and target of one with the same id.
+        With the ``lease`` of the `copy_lock` it was uploaded under, only while that
+        lease holds: else `LeaseLostError`, and nothing is written."""
+        await asyncio.to_thread(self._record, output_id, copy, lease)
 
     async def same_content(
         self, folder_id: int | None, target_key: str, content_key: str
@@ -707,8 +727,10 @@ class BambuddyUploadStore:
             )
         return found
 
-    def _record(self, output_id: str, copy: LibraryCopy) -> None:
-        with self._pool.connection() as conn:
+    def _record(self, output_id: str, copy: LibraryCopy, lease: CopyLease | None) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            if lease is not None and not held_in(conn, lease):
+                raise LeaseLostError(f"the copy lease on {lease.key} is not held")
             conn.execute(
                 "INSERT INTO output_bambuddy_uploads"
                 " (output_id, library_file_id, folder_id, target_key, content_key)"

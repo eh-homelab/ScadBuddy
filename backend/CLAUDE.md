@@ -464,8 +464,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), as do
   its Bambuddy uploads, their slices, its slice starts, the dialog's background slices,
   the projects' printers, folderless projects and destination touches
-  (`RemoteUploadStore`, a `BambuddyUploadStore` whose pool holds only the copy lock; a
-  method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
+  (`RemoteUploadStore`, a `BambuddyUploadStore` with no pool, whose copy lock is the API's
+  copy lease, `bambuddy/copy_leases.py`, #5298 Task 27; a method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
   its claim take an `Idempotency-Key`), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names

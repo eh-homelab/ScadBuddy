@@ -531,6 +531,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "reprints",
         "uploads",
         "previews",
+        "copy-leases",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:
