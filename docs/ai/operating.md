@@ -307,7 +307,7 @@ main on 2026-11-01:
     ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
     tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
     Every session turn also gets a note on the session's own built-ins it serves (`WebFetch`,
-    `WebSearch` and, outside a flow, the background ones; #5870), after the fixed part; it is
+    `WebSearch` and, where the session keeps background tasks, the background ones; #5870), after the fixed part; it is
     per turn, so not in `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
     before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
     static and its cache is shared across sessions
@@ -1079,8 +1079,12 @@ session's Claude Code process offers its own built-ins, each an item of the acce
 The last three rows are the session's own built-ins (`SESSION_BUILTINS`), served in place of
 Claude Code's (below) and listed in the same source, so an admin sees and sets them there.
 Every turn offers each one that is not `off`, whether or not a plugin package names it (#2726
-R2; before, only a turn with an allowed package that named one got it). A flow's turn keeps
-no background tasks, so it is offered `WebFetch` and `WebSearch` only. The tiers:
+R2; before, only a turn with an allowed package that named one got it). A session a flow run
+started (`sessions_start` with the run's call) and a Workflow agent's chat
+(`SessionManager.startChild`) keep no background tasks, nor does a fork of one
+(`ai_sessions.background_tools`), so their turns are offered `WebFetch` and `WebSearch` only,
+whatever a package names; so is every turn on an agent without Temporal or a database. A
+session a flow only sends to (`ask_session`) keeps its own. The tiers:
 `WebFetch` and `WebSearch` reach the internet, so each call asks first. `CronCreate`,
 `ScheduleWakeup` and `Workflow` start turns or agents that spend after this one, and
 `CronDelete` and `TaskStop` end them: each changes what the session keeps, so `write`.

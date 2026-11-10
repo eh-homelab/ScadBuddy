@@ -55,8 +55,10 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
-  /** Whether the session keeps background tasks (a chat's does, a flow's does not); none when undefined. */
+  /** Whether the agent keeps background tasks (`deps.background`: Temporal and a database); none when undefined. */
   background?: boolean
+  /** The session's `backgroundTools` (false: flow-started, or a Workflow agent's chat); true when undefined. */
+  backgroundTools?: boolean
   /** The registry's tiers; every tool `read` when undefined. */
   tierOf?: TurnRunnerDeps['tierOf']
   /** The turn's calls as activities, with these tools listed as its turn tools (`<server>__<tool>`): its plugins are then proxied. */
@@ -102,6 +104,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     agentModel: null,
     agentEffort: null,
     agentType: null,
+    backgroundTools: options.backgroundTools ?? true,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}

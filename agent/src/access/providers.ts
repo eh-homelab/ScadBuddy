@@ -10,7 +10,7 @@ import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, tool
 import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
 import { skillItem, subagentItem } from './items.js'
-import { BUILTIN_ITEMS, type NativeBuiltin, SERVED_PREFIX, SESSION_NAMES } from './nativeBuiltins.js'
+import { BUILTIN_ITEMS, MONITOR, type NativeBuiltin, SERVED_PREFIX, SESSION_NAMES } from './nativeBuiltins.js'
 import type { ListedTool, ToolListings } from './listings.js'
 import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource, type ToolAccess } from './model.js'
 import { isRegistrySource, sourceEnabled, toolAccess } from './resolve.js'
@@ -99,7 +99,7 @@ function nativeItem(builtin: NativeBuiltin, rows: readonly AccessRow[]): ItemVie
     label: builtin.label,
     description: builtin.description,
     default: builtin.access,
-    default_note: builtin.access === 'off' ? NATIVE_OFF_NOTE : builtin.name === 'Monitor' ? MONITOR_NOTE : null,
+    default_note: builtin.access === 'off' ? NATIVE_OFF_NOTE : builtin.name === MONITOR ? MONITOR_NOTE : null,
     suggested: null,
     access,
     own_access: access,

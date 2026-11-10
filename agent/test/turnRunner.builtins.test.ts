@@ -27,8 +27,13 @@ async function allowed(name: string, builtins: string[]): Promise<Omit<PackagesF
   return { paths: [], allowedPaths: [dir], builtinTools: builtins, loaded: [pkg], problems: [] }
 }
 
-async function assemble(options: { access?: AccessRow[]; background?: boolean; packages?: Omit<PackagesForRun, 'release'> } = {}) {
-  const rig = await turnRunnerForTest({ packages: options.packages ?? NONE, access: options.access ?? [], background: options.background ?? true })
+async function assemble(options: { access?: AccessRow[]; background?: boolean; backgroundTools?: boolean; packages?: Omit<PackagesForRun, 'release'> } = {}) {
+  const rig = await turnRunnerForTest({
+    packages: options.packages ?? NONE,
+    access: options.access ?? [],
+    background: options.background ?? true,
+    ...(options.backgroundTools !== undefined ? { backgroundTools: options.backgroundTools } : {}),
+  })
   const turn = await rig.runner.assemble(rig.session, rig.principal)
   turn.release()
   return turn
@@ -79,7 +84,7 @@ describe("the session's own built-ins in every turn", () => {
     expect(await turn.run.live!.access('mcp__builtin__CronCreate', { cron: '1 * * * *', prompt: 'p' })).toBe('off')
   })
 
-  it("a flow's turn (no background tasks) offers WebFetch and WebSearch only", async () => {
+  it('an agent with no background tasks offers WebFetch and WebSearch only', async () => {
     const turn = await assemble({ background: false })
     expect(turn.fingerprintParts.servedBuiltins).toEqual(['WebFetch', 'WebSearch'])
     expect(turn.run.systemPromptAppend).not.toContain('The session keeps the jobs')
@@ -104,6 +109,16 @@ describe("the session's own built-ins in every turn", () => {
     expect(shell.run.systemPromptAppend).not.toContain('which is off here')
   })
 
+  it("a flow-started session's turn, or a Workflow agent's chat's, offers WebFetch and WebSearch only", async () => {
+    // ClaimedSession.backgroundTools is false for both (SessionManager.start startedByFlow, startChild).
+    const turn = await assemble({ backgroundTools: false })
+    expect(turn.fingerprintParts.servedBuiltins).toEqual(['WebFetch', 'WebSearch'])
+    expect(turn.run.systemPromptAppend).not.toContain('The session keeps the jobs')
+    const named = await assemble({ backgroundTools: false, packages: await allowed('loop', ['Workflow', 'CronCreate']) })
+    expect(named.fingerprintParts.servedBuiltins).toEqual(['WebFetch', 'WebSearch'])
+    expect(named.run.builtinTools ?? []).toEqual([])
+  })
+
   it('runs a Monitor command at write when an admin set Bash on at write', async () => {
     const turn = await assemble({ access: [row('Bash', 'write')] })
     expect(turn.run.nativeTools?.find((t) => t.name === 'Bash')).toEqual({ name: 'Bash', tier: 'write' })
@@ -116,8 +131,10 @@ describe("the session's own built-ins in every turn", () => {
   it("answers off for one of the session's own the turn does not serve, even when a package names it", async () => {
     const turn = await assemble({ access: [row('WebFetch', 'off')], packages: await allowed('fetcher', ['WebFetch']) })
     expect(await turn.run.live!.access('mcp__builtin__WebFetch', { url: 'https://example.com', prompt: 'p' })).toBe('off')
-    const flow = await assemble({ background: false })
-    expect(await flow.run.live!.access('mcp__builtin__CronCreate', { cron: '1 * * * *', prompt: 'p' })).toBe('off')
+    const none = await assemble({ background: false })
+    expect(await none.run.live!.access('mcp__builtin__CronCreate', { cron: '1 * * * *', prompt: 'p' })).toBe('off')
+    const flow = await assemble({ backgroundTools: false })
+    expect(await flow.run.live!.access('mcp__builtin__ScheduleWakeup', { delaySeconds: 60 })).toBe('off')
   })
 
   it('refuses a Monitor command, never asking, when Bash is switched on after the turn was assembled', async () => {

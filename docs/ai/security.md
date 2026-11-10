@@ -721,7 +721,10 @@ A turn that loads an allowed pin also gets two more things:
   a package could name them). So an MCP-origin principal that holds `write` can schedule later
   turns, or a Workflow's agents, that spend the session's budget with no human approval. A
   session keeps at most 10 background tasks. An admin who wants a person to approve each call
-  sets those items to `outward` in Settings → Tools & plugins. Claude Code's own
+  sets those items to `outward` in Settings → Tools & plugins. A session a flow run started and
+  a Workflow agent's chat (and a fork of either) get none of the background built-ins
+  (`ai_sessions.background_tools`), so a flow cannot schedule turns through its sessions and a
+  Workflow agent cannot start a nested Workflow or a cron. Claude Code's own
   `WebFetch` is never offered (#2684): it fetches inside Claude Code, outside the agent's
   egress checks, and resolves the name again as it connects. The agent's (`builtins/web.ts`)
   connects only to the addresses its check passed, on every hop, and refuses the pod's

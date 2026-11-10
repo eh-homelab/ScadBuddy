@@ -4,7 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
-import { monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS, SESSION_NAMES } from './nativeBuiltins.js'
+import { BASH, MONITOR, monitorAccess, NATIVE_BUILTINS, SERVED_PREFIX, SESSION_BUILTINS, SESSION_NAMES } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -64,7 +64,7 @@ export function liveAccess(
   turn: LiveTurn,
 ): LiveAccess {
   const native = new Map(turn.native ? NATIVE_BUILTINS.map((b) => [b.name, b.access]) : [])
-  const bashDeclared = NATIVE_BUILTINS.find((b) => b.name === 'Bash')!.access
+  const bashDeclared = NATIVE_BUILTINS.find((b) => b.name === BASH)!.access
   const served = new Map(SESSION_BUILTINS.filter((b) => turn.served?.includes(b.name)).map((b) => [`${SERVED_PREFIX}${b.name}`, b]))
   const registry = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
   const sources: { prefix: string; source: string }[] = [
@@ -89,9 +89,9 @@ export function liveAccess(
     if (!own && turn.served && harnessName.startsWith(SERVED_PREFIX) && SESSION_NAMES.has(harnessName.slice(SERVED_PREFIX.length))) return 'off'
     if (own) {
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
-      if (own.name !== 'Monitor' || access === 'off') return access
+      if (own.name !== MONITOR || access === 'off') return access
       const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
-      const shell = command ? await resolver.native('Bash', bashDeclared, builtins.get('Bash') ?? []) : undefined
+      const shell = command ? await resolver.native(BASH, bashDeclared, builtins.get(BASH) ?? []) : undefined
       if (shell === 'off') return { off: MONITOR_SHELL_OFF }
       // Bash on now but off when the turn was assembled: its server has no command queue, so refused, never asked.
       if (command && !turn.shell) return { off: MONITOR_SHELL_NEXT_TURN }

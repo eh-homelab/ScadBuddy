@@ -17,7 +17,7 @@ import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, ty
 import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import { NATIVE_NAMES, SESSION_NAMES, TASK_TOOLS, sessionTierOf, turnBuiltins } from '../access/nativeBuiltins.js'
+import { BASH, NATIVE_NAMES, SESSION_NAMES, TASK_TOOLS, sessionTierOf, turnBuiltins } from '../access/nativeBuiltins.js'
 import { liveAccess } from '../access/live.js'
 import { SeamLedger } from '../harness/seamLedger.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
@@ -457,10 +457,12 @@ export class TurnRunner {
       // Claude Code's own built-ins (plan 2026-10-13 Step 9.6) and the session's (WebFetch,
       // WebSearch and, where the session keeps background tasks, the background ones): every one
       // not off under `builtin:claude-code`, which a package that names one can only switch on.
-      const { native: nativeTools, served: servedTools } = await turnBuiltins(access, callBuiltins, { background: this.deps.background !== undefined })
+      const { native: nativeTools, served: servedTools } = await turnBuiltins(access, callBuiltins, {
+        background: this.deps.background !== undefined && session.backgroundTools,
+      })
       const served = servedTools.map((t) => t.name)
       /** Bash's tier when the turn offers it: a Monitor's command runs a shell where Bash runs (nativeBuiltins.ts `SESSION_BUILTINS`). */
-      const shellTier = nativeTools.find((t) => t.name === 'Bash')?.tier
+      const shellTier = nativeTools.find((t) => t.name === BASH)?.tier
       servedTier = sessionTierOf(servedTools, shellTier)
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).

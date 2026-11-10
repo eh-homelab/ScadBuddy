@@ -54,6 +54,28 @@ describe('the sessions_* tools', () => {
     expect(firstText(result)).toMatch(/need the database/)
   })
 
+  it("marks a session a flow run starts, with or without a prompt, so its turns get no background built-in (#5870)", async () => {
+    const tool = sessionTools.find((t) => t.name === 'sessions_start')!
+    const starts: Record<string, unknown>[] = []
+    const sessions = {
+      start: async (_owner: unknown, options: Record<string, unknown>) => {
+        starts.push(options)
+        return { session: { id: S } }
+      },
+    }
+    const ctx = (flowTurn?: { run_id: string; call_id: string }) => ({
+      ...services(),
+      sessions: sessions as never,
+      principal: { id: 'token:a', kind: 'bearer' as const, tiers: ['read', 'write'] as ('read' | 'write')[] },
+      progress: async () => {},
+      signal: new AbortController().signal,
+      ...(flowTurn ? { flowTurn } : {}),
+    })
+    await runTool(tool, { title: 'from a flow' }, ctx({ run_id: 'r1', call_id: 'c1' }))
+    await runTool(tool, { title: 'by hand' }, ctx())
+    expect(starts.map((o) => o.startedByFlow)).toEqual([true, undefined])
+  })
+
   it('hand off only to principal ids that can exist (PR #715 review)', () => {
     for (const to of [
       'browser',

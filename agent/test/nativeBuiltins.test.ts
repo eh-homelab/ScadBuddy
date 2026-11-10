@@ -70,7 +70,7 @@ describe("the session's own built-ins by default (#2726 R2)", () => {
     })
   })
 
-  it('offers no background one where the session keeps no background tasks (a flow)', async () => {
+  it('offers no background one where the session keeps no background tasks', async () => {
     const { served } = await turnBuiltins(declared, [{ name: 'CronCreate', packages: ['p'] }], { background: false })
     expect(served.map((t) => t.name)).toEqual(['WebFetch', 'WebSearch'])
   })

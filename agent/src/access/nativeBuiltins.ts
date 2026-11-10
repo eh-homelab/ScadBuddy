@@ -19,9 +19,15 @@ import { type AccessRow, BUILTIN_SOURCES, type ToolAccess } from './model.js'
 // and CronCreate, CronDelete, CronList, ScheduleWakeup, Monitor, Workflow and TaskStop the
 // session's own (src/background/): SESSION_BUILTINS, served by the turn's `builtin` server
 // (builtins/server.ts), items of this source too. Every session turn offers each one not
-// `off`, the background ones only where the session keeps background tasks (not a flow's).
+// `off`, the background ones only where the session keeps background tasks (not a session a
+// flow run started, nor a Workflow agent's chat, nor any on an agent without Temporal or a database).
 
 export type NativeBuiltin = { name: string; access: ToolAccess; label: string; description: string }
+
+/** The shell built-in a Monitor's `command` source needs on (`monitorAccess`, live.ts). */
+export const BASH = 'Bash'
+/** The session built-in whose access its source raises (`monitorAccess`, `sessionTierOf`). */
+export const MONITOR = 'Monitor'
 
 export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
   { name: 'Read', access: 'read', label: 'Read a file', description: "Reads a file of the session's working directory." },
@@ -36,7 +42,7 @@ export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
   { name: 'Edit', access: 'write', label: 'Edit a file', description: "Replaces exact text in a file of the session's working directory." },
   { name: 'NotebookEdit', access: 'write', label: 'Edit a notebook', description: "Edits a notebook cell in the session's working directory." },
   {
-    name: 'Bash',
+    name: BASH,
     access: 'off',
     label: 'Run a shell command',
     description: 'Runs a shell command in the worker pod. Off: no sandbox can run there yet (#779), so it could read every session and the key.',
@@ -75,7 +81,7 @@ export const SESSION_BUILTINS: readonly SessionBuiltin[] = [
   { name: 'CronList', access: 'read', background: true, label: 'List the scheduled prompts', description: "Lists the session's scheduled jobs." },
   { name: 'ScheduleWakeup', access: 'write', background: true, label: 'Wake the session later', description: 'Sends a prompt to the session again after a delay, to pace a loop.' },
   {
-    name: 'Monitor',
+    name: MONITOR,
     access: 'write',
     background: true,
     label: 'Watch a source',
@@ -110,7 +116,8 @@ export type BuiltinTier = { name: string; tier: RiskTier }
 /**
  * The built-ins a turn offers, each at its tier: every one whose access is not `off`. `native`
  * are Claude Code's own, `served` the session's (SESSION_BUILTINS), the background ones only
- * with `background` (the session keeps background tasks; a flow's turn does not). `named` is
+ * with `background` (the session keeps background tasks: ClaimedSession.backgroundTools on an agent with
+ * them). `named` is
  * each built-in the turn's allowed packages name, with those packages: a package can switch on
  * one `off` by default, never one a person switched off, and never one off (resolver.ts `native`).
  */
@@ -153,7 +160,7 @@ export function sessionTierOf(served: readonly BuiltinTier[], shell: RiskTier | 
   const tiers = new Map(served.map((t) => [`${SERVED_PREFIX}${t.name}`, t.tier]))
   return (toolName, input) => {
     const tier = tiers.get(toolName)
-    if (tier === undefined || toolName !== `${SERVED_PREFIX}Monitor`) return tier
+    if (tier === undefined || toolName !== `${SERVED_PREFIX}${MONITOR}`) return tier
     const now = monitorAccess(tier, input, shell)
     // A command with Bash off is refused by the tool itself (no command queue); tiered `outward` until then.
     return now === 'off' ? 'outward' : now

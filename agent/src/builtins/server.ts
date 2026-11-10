@@ -23,7 +23,7 @@ export const BUILTIN_SERVER = 'builtin'
 
 export type BuiltinContext = {
   web: WebContext
-  /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
+  /** The session's background tasks (CronCreate and the rest); absent where the agent keeps none (no Temporal or no database). */
   background?: BackgroundContext | undefined
   /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
   callId?: string | undefined

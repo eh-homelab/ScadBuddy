@@ -417,6 +417,8 @@ export const sessionTools: Tool[] = [
           ...(resolved ? { images: resolved.images } : {}),
           // A flow run's call (#2481): its turn is the run's, so the run's grant may cover it.
           ...(prompt !== undefined && ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
+          // Started by a flow run (#5870): its turns get no background built-in.
+          ...(ctx.flowTurn ? { startedByFlow: true } : {}),
         }),
       )
       if (resolved?.attached.length) {

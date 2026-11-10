@@ -442,6 +442,11 @@ export type ClaimedSession = SessionRecord & {
   agentModel: string | null
   agentEffort: EffortLevel | null
   agentType: string | null
+  /**
+   * Whether its turns are offered the session's background built-ins (`ai_sessions.background_tools`,
+   * #5870): false for a session a flow run started and a Workflow agent's chat; a fork keeps its parent's.
+   */
+  backgroundTools: boolean
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
   claimedAt: string
 }
@@ -455,7 +460,7 @@ export type ClaimedSession = SessionRecord & {
  */
 export const CLAIMED_AT = `to_char(coalesce(turn_started_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
-type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
+type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null; background_tools: boolean }
 
 const claimed = (row: ClaimRow): ClaimedSession => ({
   ...record(row),
@@ -463,6 +468,7 @@ const claimed = (row: ClaimRow): ClaimedSession => ({
   agentModel: row.agent_model,
   agentEffort: row.agent_effort,
   agentType: row.agent_type,
+  backgroundTools: row.background_tools,
   claimedAt: row.claimed_at,
 })
 
@@ -479,7 +485,7 @@ export async function runningDurableTurn(
   if (!isUuid(id)) return undefined
   // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
   const [row] = await sql.unsafe<(ClaimRow & { turn_tiers: { tiers?: Tier[] } | null })[]>(
-    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
+    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
      WHERE id = $1 AND durable_turn_id = $2 AND status IN ('running', 'waiting_approval', 'waiting_input')`,
     [id, turnId],
   )
@@ -513,6 +519,8 @@ export type StartOptions = {
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
   flow?: FlowTurn
+  /** A flow run starts it (#5870): its turns are not offered the background built-ins (ClaimedSession.backgroundTools). */
+  startedByFlow?: boolean
   /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode?: SessionMode
 }
@@ -738,7 +746,9 @@ export type SessionManagerDeps = {
   /**
    * A session's background tasks (src/background/): every turn gets the session's CronCreate
    * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
-   * which end with the turn. Without it (a flow) the turn has none of them.
+   * which end with the turn, unless the session keeps none (ClaimedSession.backgroundTools: a
+   * flow-started session, a Workflow agent's chat). Without it (no Temporal or no database)
+   * no turn has them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner
@@ -1074,7 +1084,7 @@ export class SessionManager {
     return this.warm.revalidate(async (entry) => {
       // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
       const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
-        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
         [entry.sessionId],
       )
       if (!row) return undefined
@@ -1197,6 +1207,8 @@ export class SessionManager {
       runtime?: SessionRuntime
       /** A fork that reads its parent's transcript through the cut (store.ts): the parent, and how many of its entries. */
       forkOf?: { parentId: string; cut: number }
+      /** `ai_sessions.background_tools` (#5870): false given; else the parent's, for a session with one; else true. */
+      backgroundTools?: false
     },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
@@ -1210,12 +1222,19 @@ export class SessionManager {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
                                  status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
-                                 fork_parent_id, fork_cut)
+                                 fork_parent_id, fork_cut, background_tools)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
                 ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null},
-                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null})`
+                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null},
+                ${
+                  fields.backgroundTools === false
+                    ? false
+                    : fields.parentId
+                      ? sql`coalesce((SELECT background_tools FROM ai_sessions WHERE id = ${fields.parentId}), true)`
+                      : true
+                })`
     }
     if (options.rateLimited || forkOf) {
       await this.deps.sql.begin(async (tx) => {
@@ -1275,6 +1294,7 @@ export class SessionManager {
       scope: options.scope ?? {},
       parentId: null,
       runtime: 'unified',
+      ...(options.startedByFlow ? { backgroundTools: false as const } : {}),
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -1315,7 +1335,8 @@ export class SessionManager {
     const session = await this.insert(
       id,
       principal,
-      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, runtime: 'unified' },
+      // A Workflow agent's chat starts no background task of its own (#5870): no nested Workflow or cron without a person.
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, runtime: 'unified', backgroundTools: false },
       { budgetOf: parent },
     )
     const agent = options.agent

@@ -487,6 +487,39 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     classic.abortAll()
   })
 
+  it("gives a flow-started session's turns, a Workflow agent's chat's and their forks' only WebFetch and WebSearch (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const served = async (sessionId: string, text: string) => {
+      await (await classic.send(sessionId, browser, text)).done
+      // The session's process: a later turn of the same session runs on the one its first spawned.
+      const run = scripted.runs.filter((r) => (r.sessionId ?? r.resume) === sessionId).at(-1)!
+      const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+      const names = (await turnClient.listTools()).tools.map((t) => t.name).sort()
+      await turnClient.close()
+      return names
+    }
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000001', call_id: 'toolu_flow' }
+    const { session: byFlow, turn } = await classic.start(browser, { origin: 'chat', prompt: 'from a flow', flow: flowRun, startedByFlow: true })
+    await turn!.done
+    expect(await served(byFlow.id, 'again')).toEqual(['WebFetch', 'WebSearch'])
+    // A Workflow agent's chat, under a session that keeps background tasks.
+    const { session: parent } = await classic.start(browser, { origin: 'chat' })
+    expect(await served(parent.id, 'hello')).toContain('Workflow')
+    const child = await classic.startChild(parent.id, browser, { title: 'wf · a', tags: ['workflow'] })
+    expect(await served(child.id, 'do the step')).toEqual(['WebFetch', 'WebSearch'])
+    // A fork keeps its parent's (the scripted runner writes no transcript, so one is given here).
+    await classic.store.append({ projectKey: 'p', sessionId: byFlow.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const fork = await classic.fork(byFlow.id, browser, {})
+    expect(await served(fork.id, 'go on')).toEqual(['WebFetch', 'WebSearch'])
+    classic.abortAll()
+  })
+
   it('gives every classic turn the background ones, with no package; a Monitor command needs Bash (#5870)', async () => {
     const scripted = scriptedRunner(() => ({ reply: 'ok' }))
     const classic = manager({
