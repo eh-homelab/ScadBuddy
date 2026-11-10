@@ -944,7 +944,7 @@ def test_covers_needs_a_live_link_and_a_ready_mail_config(rows: OrderStore, shop
 
 @pytest.fixture
 def mailing(shop: Shop) -> Iterator[list[int]]:
-    """The shop's lifecycle with a mail host set; each after-commit kick counted."""
+    """The shop's lifecycle with the mail config ready; each after-commit kick counted."""
     kicks: list[int] = []
     shop.lifecycle.mail_ready = lambda: True
     shop.lifecycle.on_mail = lambda: kicks.append(1)

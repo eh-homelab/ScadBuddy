@@ -78,7 +78,7 @@ messaging plugin keeps the compose-only tool as it is.
   - Storefront mail goes to **every order with a live (unrevoked) order link**,
     `back_office` orders included ("Send customer link", spec §5.2). A revoked link stops
     it. It does not depend on `orders.source` or `orders.storefront_visitor_id`.
-  - The seam is `storefront_mail_covers(conn, order_id, event, *, host) -> bool`
+  - The seam is `storefront_mail_covers(conn, order_id, event, *, ready) -> bool`
     (`orders/storefront/mail.py`): true when the order has a live order link and a mail
     host and a sender are set. Its events are
     `order_link`, `revision_ready`, `price_ready`, `payment_requested`, `shipped`. It lands
@@ -569,7 +569,7 @@ The owner approved this design on 2026-11-09 with these calls:
    `order_notify_customer_send` is the `outward` send (§5.1).
 2. **Storefront mail** is the CRUD service's, sent after the causing transaction commits;
    it goes to every order with a live order link, `back_office` orders included; the seam
-   is scadify's `storefront_mail_covers(conn, order_id, event, *, host)` (§2, §8). The plugin skips
+   is scadify's `storefront_mail_covers(conn, order_id, event, *, ready)` (§2, §8). The plugin skips
    `quoted` and `shipped` when the seam says the storefront mail sends them, whatever the
    plugin's channel; `also_when_storefront_mails` sends both on purpose.
 3. **The built-in flow** sends only with a new opt-in input `send` (default false). `notify`

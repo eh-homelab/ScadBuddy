@@ -556,14 +556,14 @@ export function OrderPage() {
             <CardContent>
               <div className="flex flex-col gap-4">
                 <CustomerLink
-                  key={order.id}
+                  key={`link-${order.id}`}
                   orderId={order.id}
                   onChanged={() => {
                     setLinkVersion((v) => v + 1)
                     reload()
                   }}
                 />
-                <CustomerMail key={order.id} orderId={order.id} version={linkVersion} />
+                <CustomerMail key={`mail-${order.id}`} orderId={order.id} version={linkVersion} />
               </div>
             </CardContent>
           </Card>

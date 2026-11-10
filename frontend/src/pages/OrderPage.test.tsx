@@ -744,6 +744,73 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
   })
 
+  describe('mail refresh', () => {
+    const WAITING = {
+      event: 'shipped' as const,
+      to: 'ada@example.test',
+      created_at: '2026-11-04T10:00:00Z',
+      next_attempt_at: '2026-11-04T10:00:00Z',
+      attempts: 0,
+      last_error: null,
+      sent_at: null,
+      failed_at: null,
+    }
+
+    function countMailReads() {
+      const reads = { count: 0 }
+      server.use(
+        http.get('/api/v1/orders/:id/mail', () => {
+          reads.count += 1
+          return HttpResponse.json([WAITING])
+        }),
+      )
+      return reads
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('does not poll the mail while the mail server is not set up', async () => {
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      await within(list).findAllByRole('listitem')
+      const before = reads.count
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(reads.count).toBe(before)
+    })
+
+    it('reads the settings and the server error again on the poll', async () => {
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      await within(list).findAllByRole('listitem')
+      expect(within(list).queryByRole('alert')).toBeNull()
+      const before = reads.count
+      setMockMailServerError('login refused')
+      await vi.advanceTimersByTimeAsync(16_000)
+      await waitFor(() => expect(reads.count).toBeGreaterThan(before))
+      expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
+    })
+
+    it('reads the settings again when a link send changes the page', async () => {
+      const { user } = render(ORDER_ACCEPTED)
+      const card = await screen.findByRole('region', { name: 'Customer link' })
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      await within(card).findByText('No link sent yet.')
+      await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+      await user.click(within(card).getByRole('button', { name: 'Send link' }))
+      await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
+    })
+  })
+
   it('lists the mail a link send queues', async () => {
     const { user } = render(ORDER_ACCEPTED)
     const card = await screen.findByRole('region', { name: 'Customer link' })

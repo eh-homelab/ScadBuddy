@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { OrderMail } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
@@ -62,13 +62,27 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
   // The sender needs a host and a sender address (`MailConfig.ready`); without both it sends nothing.
   const unset = settings.data !== undefined && (!settings.data.storefront_mail_host || !settings.data.storefront_mail_sender)
   // A row the sender stamps publishes nothing, so read again while a row waits.
-  const waiting = mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false
-  const refresh = mail.refresh
+  // With no mail server set up, nothing is sent, so there is nothing to wait for.
+  const waiting = !unset && (mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false)
+  const refreshMail = mail.refresh
+  const refreshSettings = settings.refresh
+  const refreshServer = server.refresh
   useEffect(() => {
     if (!waiting) return
-    const timer = setInterval(() => refresh(), WAITING_REFRESH_MS)
+    const timer = setInterval(() => {
+      refreshMail()
+      refreshSettings()
+      refreshServer()
+    }, WAITING_REFRESH_MS)
     return () => clearInterval(timer)
-  }, [waiting, refresh])
+  }, [waiting, refreshMail, refreshSettings, refreshServer])
+  // The settings and the server's error are read again when the page changes the link.
+  const firstVersion = useRef(version)
+  useEffect(() => {
+    if (version === firstVersion.current) return
+    refreshSettings()
+    refreshServer()
+  }, [version, refreshSettings, refreshServer])
 
   return (
     <section className="flex flex-col gap-2" aria-label="Customer mail">
