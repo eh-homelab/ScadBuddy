@@ -1447,8 +1447,8 @@ with the forwarder).
 
 - **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
-  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
-  logged.
+  10 s (`RECALL_TIMEOUT_MS`; prod's bank answered in 4.2 to 8.8 s on 2026-11-09, #5866);
+  on a timeout or error nothing is added and the failure is logged.
 - **The recall query's length** (#2655). Only the start of the redacted query is sent:
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's

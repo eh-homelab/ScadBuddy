@@ -49,8 +49,10 @@ export const RECALL_SPAN = 'agent.memory.recall'
 //     a message shown to the user. The memories are untrusted data (#258,
 //     safety/untrusted.ts): they go inside the untrusted-data envelope, in a
 //     `<hindsight_memories>` block that retain strips again.
-//   - Recall has a short timeout (RECALL_TIMEOUT_MS), since it delays the
-//     turn; on timeout or error nothing is injected and the reason is logged.
+//   - Recall has a timeout (RECALL_TIMEOUT_MS, 10 s), since it delays the turn: prod's
+//     Hindsight answered in 4.2-8.8 s on 2026-11-09 (#5866). Lower it once
+//     eh-homelab/clusters#3421 makes recall fast. On timeout or error nothing is injected
+//     and the reason is logged.
 //   - Retain is fire-and-forget: the Stop hook returns at once and the
 //     request runs on, so a slow or failing Hindsight never delays or fails a
 //     turn. A failure is logged (upstream logs a warning too). Retains of one
@@ -100,8 +102,15 @@ export const RECALL_SPAN = 'agent.memory.recall'
 // (hindsight-integrations/paperclip/src/client.ts at the same commit) and the
 // coding-agents plugin's `retain` (dist/claude-stop-hook.js).
 
-/** How long recall may hold up a user's turn before it is given up on. */
-export const RECALL_TIMEOUT_MS = 3_000
+/**
+ * How long recall may hold up a user's turn before it is given up on. Measured on
+ * 2026-11-09 (#5866) with 18 recall-shaped requests to prod's bank `scadbuddy` (budget
+ * `mid`, `max_tokens` 4096, the Gateway host, curl from the LAN): 4.2 to 8.8 s end to end,
+ * p50 4.9 s, p90 6.9 s; Hindsight's own `trace` put 3.3 to 7.6 s of that in its parallel
+ * retrieval, and 2.8 s even on a bank of 6 memories. The old 3 s timed out on every one
+ * of them. 10 s covers the slowest seen, with room for the worker's TLS handshake.
+ */
+export const RECALL_TIMEOUT_MS = 10_000
 /** A retain runs after the turn; the coding-agents plugin gives a request 15 s. */
 export const RETAIN_TIMEOUT_MS = 15_000
 
