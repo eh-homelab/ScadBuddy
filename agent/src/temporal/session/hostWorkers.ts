@@ -54,6 +54,16 @@ export type HostWorkersOptions = {
 
 export type HostWorkers = { pinned: AgentWorker; sessions: AgentWorker | undefined; stop(): Promise<void> }
 
+/**
+ * Stops `worker` only once `drained` settles (#5862 review): the pinned worker runs this replica's
+ * own BridgeCalls, whose workflow tasks a draining turn's browser_* call needs until the turn ends.
+ * Its promise is the stop's, for a shutdown to await before the database closes.
+ */
+export async function stopAfter(worker: { stop(): Promise<void> }, drained: Promise<unknown>): Promise<void> {
+  await drained.catch(() => undefined)
+  await worker.stop()
+}
+
 export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
   const common = {
     address: options.address,
