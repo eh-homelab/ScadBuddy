@@ -362,15 +362,18 @@ export function PrintHistory({ fixedSlug, live }: { fixedSlug?: string; live?: r
 }
 
 /**
+ * #3745 — how long after a job's change the history's first page is read once more:
+ * time for Bambuddy to record the outcome of a job the printer has already ended.
+ */
+export const REFRESH_AGAIN_MS = 5_000
+
+/**
  * #3745 — reads the history's first page again when a working job ends or ScadBuddy
  * links its archive: the print's row then needs the archive's own state (its outcome,
  * or the print ScadBuddy made of it) to stay in the list in place. It reads at once,
  * and once more {@link REFRESH_AGAIN_MS} later. Two reads per change of a job, never
  * per poll of the printers.
  */
-/** #3745 — how long after a job's change the history's first page is read once more. */
-export const REFRESH_AGAIN_MS = 5_000
-
 function useRefreshOnJobChange(live: readonly LiveJob[] | undefined, refresh: () => void) {
   const seen = useRef<Set<string> | null>(null)
   const latest = useLatest(refresh)

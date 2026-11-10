@@ -21,7 +21,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { JobPicture } from './JobPicture'
-import { mergeCards, type NowCard } from './nowCards'
+import { lastSeen, mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
 import { printPath, scadbuddyJobPath } from './prints'
@@ -222,7 +222,7 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
         </div>
         {stale && (
           <p className="mt-0.5 text-[11.5px] text-muted-foreground" data-testid={`printer-now-stale-${printer.printer_id ?? printer.id}`}>
-            Last seen at {new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {stale}
+            {lastSeen(card)}
           </p>
         )}
         <PrinterState printer={printer} />

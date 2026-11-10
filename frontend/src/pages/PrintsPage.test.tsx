@@ -16,6 +16,7 @@ import { intersect } from '../test/intersection'
 import { optionNames, selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
 import { setHotPath } from '../mocks/features/hotPath'
+import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
 
@@ -1006,6 +1007,22 @@ describe('one list (#3745): the printers above, each print once below', () => {
     await waitFor(async () => expect(await rows()).toEqual(['36']))
     expect(await screen.findByTestId('farm-totals')).toBeInTheDocument()
     expect(screen.queryByTestId('print-queue-more')).toBeNull()
+  })
+
+  it("says nothing of the queue on a filtered list, and keeps the farm's totals (#5940)", async () => {
+    setBambuddyLinks({ bambuddy_url: 'http://bambuddy.local', bambuddy_web_urls: null })
+    onTestFinished(resetBambuddyLinks)
+    setPrintQueue([])
+    const { unmount } = render()
+    expect(await screen.findByText('Nothing is waiting to print.')).toBeInTheDocument()
+    unmount()
+
+    render('/prints?status=failed')
+    // The totals are the farm's, whatever the list shows.
+    expect(await screen.findByTestId('farm-totals')).toBeInTheDocument()
+    await waitFor(async () => expect(await rows()).toEqual(['36']))
+    expect(screen.queryByText('Nothing is waiting to print.')).toBeNull()
+    expect(screen.queryByRole('link', { name: "Bambuddy's queue" })).toBeNull()
   })
 
   it('reads the history once more a little later, when Bambuddy had not yet recorded the outcome', async () => {

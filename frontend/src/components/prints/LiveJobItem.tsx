@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { JobPicture } from './JobPicture'
 import { liveLabel, type LiveJob } from './liveJobs'
 import { JobAnchor, JobProgress } from './NowPrinting'
+import { lastSeen } from './nowCards'
 import { queueItemPath, scadbuddyJobPath } from './prints'
 import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
@@ -46,13 +47,24 @@ export function LiveStatus({ job }: { job: LiveJob }) {
 
 /**
  * Under a live row's name: the "Queued from ScadBuddy" mark (#3741), and a working job's
- * progress, or a queued item's printer, estimate and why it waits.
+ * progress, or a queued item's printer, estimate and why it waits. #5940 — a working
+ * job whose printer's card is stale says so, in the card's words: its state is the
+ * last one read.
  */
 export function LiveDetails({ job }: { job: LiveJob }) {
   const scadbuddy = job.kind === 'queued' ? job.item.scadbuddy : job.card.printer.scadbuddy
+  const stale = job.kind === 'working' && job.card.stale ? job.card : null
   return (
     <>
       {scadbuddy && <QueuedFromScadBuddy job={scadbuddy} className="mt-1" />}
+      {stale && (
+        <p
+          className="mt-1 text-xs text-muted-foreground"
+          data-testid={`printer-job-stale-${stale.printer.printer_id ?? stale.printer.id}`}
+        >
+          {lastSeen(stale)}
+        </p>
+      )}
       {job.kind === 'working' ? <JobProgress printer={job.card.printer} /> : <QueueFacts item={job.item} />}
     </>
   )
