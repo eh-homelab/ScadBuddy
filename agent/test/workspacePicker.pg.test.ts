@@ -163,11 +163,6 @@ describe.skipIf(skip !== undefined)(`the workspace file picker${skip ? ` (skippe
   it('lists a sealed file it cannot open as unavailable, with the reason', async () => {
     const s = (await m.start(browser, { origin: 'chat', title: 'sealed' })).session
     await put(s.id, 'gone.png', 'x', 'image/png')
-    // The backend's own table, which the row's trigger writes (as workspaceBlobs.pg.test.ts makes it).
-    await db.sql`
-      CREATE TABLE IF NOT EXISTS blob_refs (
-        key text NOT NULL, holder_kind text NOT NULL, holder_id text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, holder_kind, holder_id))`
     await db.sql`
       UPDATE ai_session_files SET data = NULL, blob_key = ${`workspace-${'a'.repeat(64)}`}, key_sealed = ${Buffer.from([0])}
       WHERE session_id = ${s.id}`

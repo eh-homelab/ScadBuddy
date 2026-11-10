@@ -110,6 +110,32 @@ describe('NowPrinting (#977)', () => {
     expect(card).not.toHaveTextContent('archive 90')
   })
 
+  it("shows a working job's picture: ScadBuddy's, Bambuddy's cover, or a placeholder (#3742)", async () => {
+    const [paused, ours, idle] = PRINTERS_NOW
+    setPrintersNow([
+      paused!,
+      ours!,
+      idle!,
+      { ...paused!, id: '00000000-0000-4000-8000-000000000008', printer_id: 8, name: 'LAN', picture: null },
+    ])
+    renderPage(<NowPrinting />)
+
+    const cover = within(await screen.findByTestId('printer-now-1')).getByTestId('job-picture')
+    expect(cover.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/printers/1/cover?archive=90')
+    // The job's name is beside it.
+    expect(cover.querySelector('img')).toHaveAttribute('alt', '')
+    const render = within(screen.getByTestId('printer-now-2')).getByTestId('job-picture')
+    expect(render.querySelector('img')).toHaveAttribute('src', '/api/v1/outputs/luna-0001/thumbnail')
+    const none = within(screen.getByTestId('printer-now-8')).getByTestId('job-picture')
+    expect(within(none).getByTestId('job-picture-placeholder')).toBeInTheDocument()
+    // An idle printer has no job to picture.
+    expect(within(screen.getByTestId('printer-now-3')).queryByTestId('job-picture')).toBeNull()
+
+    fireEvent.error(cover.querySelector('img')!)
+    expect(cover.querySelector('img')).toBeNull()
+    expect(within(cover).getByTestId('job-picture-placeholder')).toBeInTheDocument()
+  })
+
   it("links ScadBuddy's job to its subject's page until Bambuddy archives it (#3743)", async () => {
     const [, ours] = PRINTERS_NOW
     const job = ours!.scadbuddy!

@@ -8,6 +8,7 @@
 // assembly with it; each turn that process serves sets that assembly's slot
 // before it pushes its prompt (sessions/warmTurn.ts) and clears it when it ends.
 
+import { realpath } from 'node:fs/promises'
 import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
@@ -36,6 +37,7 @@ import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import type { SessionFiles } from '../workspace/store.js'
+import { directoryNote } from './directoryNote.js'
 import type { EventLog } from './eventLog.js'
 import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal } from './manager.js'
 import { event } from './protocol.js'
@@ -85,7 +87,7 @@ export type TurnRunnerDeps = Pick<
   | 'stderr'
 > & {
   /** The transcript mirror (store.ts): the run's `sessionStore`, and whether a session has a transcript to resume. */
-  store: SessionStore & Pick<PostgresSessionStore, 'exists'>
+  store: SessionStore & Pick<PostgresSessionStore, 'exists' | 'lastCwd'>
   events: Pick<EventLog, 'append'>
   /** The workspace http_request's `save_to_workspace` writes to (#2329). */
   files: SessionFiles
@@ -180,6 +182,8 @@ export type AssembledTurn = {
   observe(message: SDKMessage): Promise<void>
   /** The turn's automatic memory hooks, recalled against `userText`; only when a Hindsight plugin is loaded. */
   memory?: (userText: string, turnId: string) => MemoryHooks
+  /** What the turn's prompt starts with when the transcript it resumes ran in another directory (directoryNote.ts, #5867). */
+  directoryNote?: string
   /**
    * Ends the upstream MCP sessions the plugins' routes saw, then releases the routes: Claude
    * Code sends no session DELETE when its process ends (spec 2026-10-13 §5.3 E7), so the
@@ -314,8 +318,8 @@ export class TurnRunner {
     // The session's own built-ins' tiers (nativeBuiltins.ts `sessionTierOf`), once read below.
     let servedTier: TierResolver = () => undefined
     const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? servedTier(name, input) ?? registryTierOf(name, input)
-    // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies.
+    // Replaced by the gate's own resolver once the run is built below, so the
+    // panel shows every tool at the tier the permission seam applies.
     // Settings → Tools & plugins' raised tiers (#1953), once read below, over every tier shown.
     let builtIn: BuiltInPolicy | undefined
     const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
@@ -492,7 +496,6 @@ export class TurnRunner {
         allowedPluginPaths: packages?.allowedPaths ?? [],
         nativeTools,
       })
-      eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
       // A plugin left out of this turn is said so in the session, not only in the log.
       const unavailable = (message: string) =>
         this.deps.events.append(id, [
@@ -563,6 +566,11 @@ export class TurnRunner {
           this.deps.settings ? readToolLoadings(this.deps.settings) : {},
         ]),
       )
+      // The directory the transcript last ran in, against this one as Claude Code records it (its
+      // real path): a fork's first turn is told its parent's is gone (#5867).
+      const ranIn = resume ? await this.deps.store.lastCwd(id) : undefined
+      const here = ranIn === undefined ? cwd : await realpath(cwd)
+      const movedNote = ranIn !== undefined && ranIn !== here ? directoryNote(ranIn, here) : undefined
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
       if (nativeTools.some((t) => TASK_TOOLS.has(t.name))) await linkTaskList(this.deps.paths, cwd, id)
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
@@ -796,6 +804,10 @@ export class TurnRunner {
         onSpend: (usd) => slot.meter(usd),
       }
       inProcessServers = Object.keys(run.mcpServers ?? {})
+      // The gate's own resolver over the run it is given (run.ts buildHarness), so each step shows
+      // the tier the gate applied: ToolSearch, Skill, Agent and the native tools too (#5869).
+      const gateTiers = harnessTierOf(run)
+      eventTierOf = (name, input) => raised(name, gateTiers(name, input))
       const first = candidates[0]
       const fingerprintParts: FingerprintParts = {
         credentialId: first?.id ?? '',
@@ -843,6 +855,7 @@ export class TurnRunner {
         shownTierOf,
         observe: pluginCheck,
         ...(memory ? { memory: memory.hooks } : {}),
+        ...(movedNote ? { directoryNote: movedNote } : {}),
         terminate: async () => {
           await Promise.all([forwarded?.terminate(), packageServers?.terminate()])
         },

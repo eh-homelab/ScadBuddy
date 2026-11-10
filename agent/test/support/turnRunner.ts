@@ -57,6 +57,8 @@ export type TurnRunnerTestOptions = {
   toolLoadings?: Record<string, ToolLoading>
   /** Whether the session keeps background tasks (a chat's does, a flow's does not); none when undefined. */
   background?: boolean
+  /** The registry's tiers; every tool `read` when undefined. */
+  tierOf?: TurnRunnerDeps['tierOf']
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -125,7 +127,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       },
     },
     access: new AccessResolver(options.reader ? options.reader(store.access) : store.access),
-    tierOf: () => 'read',
+    tierOf: options.tierOf ?? (() => 'read'),
     mcpServers: (_session, _turn, extras) => {
       serverExtras.push(extras)
       return { scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }
@@ -181,6 +183,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),
+      lastCwd: () => Promise.resolve(undefined),
       append: () => Promise.resolve(),
       load: () => Promise.resolve(null),
     },

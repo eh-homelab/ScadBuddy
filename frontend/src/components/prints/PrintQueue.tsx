@@ -6,6 +6,7 @@ import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
 import { NEW_TAB } from '../../lib/embed'
+import { JobPicture } from './JobPicture'
 import { scadbuddyJobPath } from './prints'
 import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
@@ -148,20 +149,24 @@ function QueueRow({ item, queueUrl }: { item: QueueItem; queueUrl: string | null
   if (item.manual_start) notes.push('Waits for a manual start')
   if (item.waiting_reason) notes.push(item.waiting_reason)
   return (
-    <li className="px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <ItemName item={item} name={name} queueUrl={queueUrl} />
-          {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
-        </span>
-        <span className="sb-num shrink-0 text-xs text-muted-foreground">
-          {where}
-          {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}
-          {item.filament_used_grams ? ` · ${Math.round(item.filament_used_grams)} g` : ''}
-        </span>
+    <li className="flex items-start gap-3 px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
+      {/* #3742 — ScadBuddy's picture of its own item, else Bambuddy's thumbnail. */}
+      <JobPicture src={item.picture} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ItemName item={item} name={name} queueUrl={queueUrl} />
+            {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
+          </span>
+          <span className="sb-num shrink-0 text-xs text-muted-foreground">
+            {where}
+            {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}
+            {item.filament_used_grams ? ` · ${Math.round(item.filament_used_grams)} g` : ''}
+          </span>
+        </div>
+        {item.filament_short && <p className="mt-0.5 text-xs text-warn">Not enough filament loaded for this print.</p>}
+        {notes.length > 0 && <p className="mt-0.5 text-xs text-muted-foreground">{notes.join(' · ')}</p>}
       </div>
-      {item.filament_short && <p className="mt-0.5 text-xs text-warn">Not enough filament loaded for this print.</p>}
-      {notes.length > 0 && <p className="mt-0.5 text-xs text-muted-foreground">{notes.join(' · ')}</p>}
     </li>
   )
 }

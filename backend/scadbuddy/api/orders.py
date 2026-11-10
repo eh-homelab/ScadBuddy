@@ -2746,9 +2746,9 @@ async def copy_archive_media(
     description=(
         "The attempt's quantity counts as made; the item is fulfilled once its accepted "
         "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
-        "`item_not_open`, and `fulfilment_stale` for an attempt made before the revision "
-        "the accepted quote prices (an item revised after acceptance, #5350): it printed "
-        "an earlier design."
+        "`item_not_open`, and `fulfilment_stale` for an attempt that printed a revision "
+        "earlier than the one the accepted quote prices (an item revised after acceptance, "
+        "#5350): it printed an earlier design."
     ),
 )
 async def accept_fulfilment(

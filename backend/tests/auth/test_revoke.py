@@ -11,7 +11,14 @@ import pytest
 from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 
-from scadbuddy.auth.revoke import RETIRED_ROLES, revoke_retired, revoke_role
+from scadbuddy.auth.caller_grants import AGENT_GRANTS
+from scadbuddy.auth.revoke import (
+    RETIRED_GRANTS,
+    RETIRED_ROLES,
+    revoke_retired,
+    revoke_role,
+    revoke_tables,
+)
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.worker_role import grant_role
 
@@ -117,6 +124,24 @@ def test_a_second_revoke_does_nothing(conn: Conn, role: str) -> None:
     assert revoke_role(conn, role)
     assert revoke_role(conn, role) == []
     assert _held(conn, role) == {"relations": set(), "schema": set(), "policies": set()}
+
+
+def test_a_table_dropped_from_a_callers_list_is_taken_back_at_start(
+    conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5299: the agent's role held `blob_refs` for its trigger; `grant_role` never revokes,
+    so the start takes the table back and leaves the rest of the list."""
+    assert RETIRED_GRANTS == {"scadbuddy_agent": ("blob_refs",)}
+    assert "blob_refs" not in AGENT_GRANTS
+    assert grant_role(conn, role, {**AGENT_GRANTS, "blob_refs": ("SELECT", "INSERT", "DELETE")})
+    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", ())
+    monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_GRANTS", {role: ("blob_refs",)})
+    assert revoke_retired(conn) == [role]
+    assert revoke_retired(conn) == []
+    held = _held(conn, role)
+    assert held["relations"] == set(AGENT_GRANTS)
+    assert held["schema"]
+    assert revoke_tables(conn, f"absent_{role}", ("blob_refs",)) == []
 
 
 def test_a_missing_role_is_no_op(conn: Conn) -> None:

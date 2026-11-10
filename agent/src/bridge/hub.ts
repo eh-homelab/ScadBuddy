@@ -49,7 +49,10 @@ export const CALL_TIMEOUT_MS = 30_000
  * How long a status read of a tab on another replica waits for that replica's answer
  * (#4950): the relay's ack timeout (relay.ts ACK_TIMEOUT_MS, 3 s) and the owner's
  * immediate reply. Past it the tab reads as not connected, so a dead or slow owner
- * cannot hold a probe for the whole BridgeCall workflow (about 21 s).
+ * cannot hold a probe for the whole BridgeCall workflow (about 21 s). With both replicas
+ * healthy a read answers in well under a second: the workflow's tasks run on this replica's
+ * own host queue, never the versioned `agent-tools`, whose routing once took 3.4 s of these
+ * 6 s before the activity was even scheduled (#5862).
  */
 export const STATUS_PROBE_MS = 6_000
 /** How often connected tabs are sent the pairing requests, when they changed. */
