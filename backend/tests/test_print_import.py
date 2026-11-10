@@ -7,7 +7,8 @@ from scadbuddy.bambuddy.print_import import SourceChoice
 
 
 @pytest.mark.parametrize(
-    "path", ["/cache/a.3mf", "/a.3mf", "/c/x.gcode.3mf", "/.hidden/x.3mf", "/..a/x.3mf"]
+    "path",
+    ["/cache/a.3mf", "/a.3mf", "/c/x.gcode.3mf", "/.hidden/x.3mf", "/..a/x.3mf", "/cache/A.3MF"],
 )
 def test_an_absolute_3mf_path_is_taken(path: str) -> None:
     assert SourceChoice(kind="printer", path=path).path == path

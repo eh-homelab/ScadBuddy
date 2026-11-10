@@ -66,7 +66,8 @@ _SUFFIXES = (SLICED_SUFFIX, ".3mf")
 #: another character, or with two dots and then more (no lookahead: the pattern is also
 #: the OpenAPI ``pattern``, checked by pydantic-core's Rust regex).
 _PRINTER_SEGMENT = r"(?:[^/\\.][^/\\]*|\.[^/\\.][^/\\]*|\.\.[^/\\]+)"
-_PRINTER_PATH = re.compile(rf"^/(?:{_PRINTER_SEGMENT}/)*[^/\\]+\.3mf$", re.IGNORECASE)
+# The flag is inline, so the field's ``pattern`` (pydantic, OpenAPI) ignores case too.
+_PRINTER_PATH = re.compile(rf"(?i)^/(?:{_PRINTER_SEGMENT}/)*[^/\\]+\.3mf$")
 
 NOT_CHECKED = (
     "not checked: reading the printer's storage reaches the printer, so it is read only "
