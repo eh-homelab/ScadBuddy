@@ -22,14 +22,20 @@ def _send_refusal_source() -> str:
 
 
 def _in_monty(code: str) -> Any:
-    """`code`'s last expression, run in Monty's sandbox as the flows harness runs a script."""
+    """`code`'s last expression, run in Monty's sandbox. The flows harness runs a script the
+    same way: `temporal_agent_harness.harness.code_mode.monty_stepper` `ScriptRun` checks a
+    session out of a `pydantic_monty.Monty` pool (`_Pool`) and runs the script with
+    `MontySession.feed_start`; `feed_run` is the same session's run-to-the-end entry point."""
     with pydantic_monty.Monty() as pool, pool.checkout() as session:
         return session.feed_run(code)
 
 
 def test_send_refusal_runs_in_the_real_sandbox() -> None:
     """Review of #5919: the script runs in Monty, not CPython, so `send_refusal`'s string
-    methods are checked there: one missing fails here, not in a customer's run."""
+    methods are checked there: one missing fails here, not in a customer's run. Each text
+    is a failure as the script sees it: the harness's
+    `temporal_agent_harness.harness.code_mode.driver` `_script_outcome` hands a failed host
+    call over as `Exception("<type>: <text>")`."""
     cases = {
         "ToolFailedError: already_notified: told": "already_notified: told",
         "ToolFailedError: record the message to order o1's customer failed (HTTP 409): told": (
@@ -39,6 +45,10 @@ def test_send_refusal_runs_in_the_real_sandbox() -> None:
             "order_notify_customer_send was not run: no worker"
         ),
         "ToolApprovalDenied: timed out": "the send was not approved: timed out",
+        "ToolFailedError: order_notify_customer_send needs an approval, and none is recorded "
+        "for this call": (
+            "order_notify_customer_send needs an approval, and none is recorded for this call"
+        ),
         "ToolFailedError: order_notify_customer_send may have run: no heartbeat": None,
         "ToolFailedError: record the message failed (HTTP 503)": None,
         "TimeoutError: no answer": None,
