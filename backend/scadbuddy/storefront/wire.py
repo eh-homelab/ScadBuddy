@@ -124,8 +124,8 @@ STORE_CLIENT_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}store_client"
 SESSION_HEADER: Final = "X-ScadBuddy-Store-Session"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
 #: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
-#: made for one form does not pass another's check. ``request`` and ``sign_in`` have
-#: routes today.
+#: made for one form does not pass another's check. ``submit``, ``request`` and
+#: ``sign_in`` have routes today; ``sign_up`` has none yet.
 TurnstileAction = Literal["submit", "request", "sign_up", "sign_in"]
 #: The header the page sends the widget's token in.
 TURNSTILE_HEADER: Final = "X-Turnstile-Token"
