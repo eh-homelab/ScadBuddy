@@ -39,7 +39,7 @@ from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, SubmitInput
 from scadbuddy.orders.models import Order
 from scadbuddy.orders.storefront.accounts import Account
-from scadbuddy.orders.storefront.addresses import EmailInvalidError
+from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import SubmitBody, SubmittedOrder
@@ -123,7 +123,9 @@ async def submit_draft(
             )
             changes.append(order)
             assert order.number is not None
-            answer = SubmittedOrder(id=order.id, number=order.number, email=entry.email.strip())
+            # The address the link was mailed to: `submit_order` checked it the same way.
+            sent_to = check_address(entry.email)
+            answer = SubmittedOrder(id=order.id, number=order.number, email=sent_to)
             return Replay(200, answer.model_dump(mode="json"))
 
         with state.projection.pool.connection() as conn:
