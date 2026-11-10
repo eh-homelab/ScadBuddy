@@ -539,6 +539,23 @@ def submitting_customer(conn: Conn, account_id: str, visitor_row: str | None) ->
     return str(row["customer_id"])
 
 
+def account_email(conn: Conn, account_id: str) -> str:
+    """The verified address of the account (`submitting_customer` found it)."""
+    row = conn.execute(
+        "SELECT email FROM storefront_accounts WHERE id = %s", (account_id,)
+    ).fetchone()
+    assert row is not None
+    return str(row["email"])
+
+
+def relink_account(conn: Conn, account_id: str, customer_id: str) -> None:
+    """The account links to ``customer_id`` from now on: its customer was archived, and a
+    signed-in submit made a new one."""
+    conn.execute(
+        "UPDATE storefront_accounts SET customer_id = %s WHERE id = %s", (customer_id, account_id)
+    )
+
+
 @dataclass(frozen=True)
 class AccountOrderRow:
     """One order as "Your orders" lists it: never a cost, a note or an event."""

@@ -49,15 +49,14 @@ edge's checks.
 
 Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
 token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
-reads into the request's account; submit takes the account from there, never from a
-body, and so does the order page (``/o?order=<id>``). ``POST …/account/verify`` signs
-in by a mailed code and sends the new session's token back in `SESSION_HEADER` (never in the body, so no
-logged or relayed JSON holds it), ending the session the browser held; one refusal, 400
-``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``. ``POST
-…/account/sign-out`` deletes the session's row. ``GET …/account`` is the account's email
-or ``null``, and ``GET …/account/orders`` its submitted orders (401 ``sign_in_required``
-with no live session).
-
+reads into the request's account; submit takes the account from there, never from a body,
+and so does the order page (``/o?order=<id>``). ``POST …/account/verify`` signs in by a
+mailed code and sends the new session's token back in `SESSION_HEADER` (never in the body,
+so no logged or relayed JSON holds it), ending the session the browser held; one refusal,
+400 ``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``.
+``POST …/account/sign-out`` deletes the session's row. ``GET …/account`` is the account's
+email or ``null``, and ``GET …/account/orders`` its submitted orders (401
+``sign_in_required`` with no live session).
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
 edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).

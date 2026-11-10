@@ -108,7 +108,12 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.storefront.accounts import attach_order, submitting_customer
+from scadbuddy.orders.storefront.accounts import (
+    account_email,
+    attach_order,
+    relink_account,
+    submitting_customer,
+)
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import (
@@ -886,7 +891,8 @@ class Lifecycle:
            customer, whatever its contacts: a typed email proves nothing (spec §5.2; only
            a verified account links a customer, and the shop merges customers by hand).
            With ``body.account_id`` (from the CRUD side's session, never a body) it takes
-           the account's customer (`_account_customer`) and makes none;
+           the account's customer (`_account_customer`) and makes none, unless the shop
+           has archived that customer: then it makes a new one and the account links to it;
         2. takes the year's number (`OrderStore.claim_draft`);
         3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
            one that ships with no address), which
@@ -1053,18 +1059,25 @@ class Lifecycle:
         (`submitting_customer`), its name and contacts left as they are. The given address
         is the customer's equal one (`_same_address`: case, spaces and empty lines aside),
         and then the customer is not touched; with none, it is added, never as a default.
-        The customer's row is locked first, so two submits at once add one row. Its id,
-        and the address's (None without one). `order_not_found` when the cart's visitor
-        belongs to another account."""
+        The customer's row is locked first, so two submits at once add one row and an
+        archive waits for this submit. A customer the shop has archived takes no order, as
+        in `create_order`: the submit makes a new customer as an anonymous one does
+        (`_new_customer`, with the account's verified email as its contact), and the account
+        links to it from then on. Its id, and the address's (None without one).
+        `order_not_found` when the cart's visitor belongs to another account."""
         assert body.account_id is not None
         customer_id = submitting_customer(conn, body.account_id, order.storefront_visitor_id)
         if customer_id is None:
             raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        customer = self.store.customer(customer_id, conn=conn, lock=True)
+        assert customer is not None
+        if customer.archived_at is not None:
+            made, address_id = self._new_customer(conn, body, account_email(conn, body.account_id))
+            relink_account(conn, body.account_id, made)
+            return made, address_id
         if body.address is None:
             return customer_id, None
         given = AddressInput(**body.address.model_dump())
-        customer = self.store.customer(customer_id, conn=conn, lock=True)
-        assert customer is not None
         for kept in customer.addresses:
             if _same_address(kept, given):
                 return customer_id, kept.id
