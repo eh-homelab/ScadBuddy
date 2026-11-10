@@ -4,7 +4,7 @@ import { fieldProblem, now, problem } from './orders/state'
 
 /**
  * #5283 — `/storefront/mail`: the storefront's SMTP password, sealed under the KEK, bound
- * to the host, port and user set when it was saved, and reported only as set; and the
+ * to the host, port, user and TLS mode set when it was saved, and reported only as set; and the
  * last failure of the mail server. Without the key file a save is 409 `kek_missing`, and
  * before a host and a user it is 409 `mail_connection_unset`.
  */
@@ -50,7 +50,7 @@ export const handlers = [
     if (!settings.storefront_mail_host || !settings.storefront_mail_user) {
       return problem(request, 409, 'set the SMTP host and user before the password', PROBLEMS + 'mail_connection_unset')
     }
-    passwordFor = `${settings.storefront_mail_user}@${settings.storefront_mail_host}:${settings.storefront_mail_port}`
+    passwordFor = `${settings.storefront_mail_user}@${settings.storefront_mail_host}:${settings.storefront_mail_port} (${settings.storefront_mail_tls})`
     return HttpResponse.json({ set: true })
   }),
   http.delete(`${base}/storefront/mail/password`, () => {

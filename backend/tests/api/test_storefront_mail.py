@@ -46,7 +46,7 @@ def test_the_storefront_mail_password_is_write_only(client: TestClient) -> None:
     assert client.get("/api/v1/storefront/mail/password").json() == {"set": True}
     assert client.get("/api/v1/storefront/mail").json() == {
         "password_set": True,
-        "password_for": "shop@smtp.example.com:587",
+        "password_for": "shop@smtp.example.com:587 (starttls)",
         "server_error": None,
         "server_error_at": None,
     }
@@ -80,7 +80,7 @@ def test_the_password_needs_the_key_file(settings: Settings) -> None:
         {"storefront_mail_port": 2525},
         {"storefront_mail_user": "attacker"},
         {"storefront_mail_sender": "x@evil.example.com"},
-        {"storefront_mail_starttls": False},
+        {"storefront_mail_tls": "none"},
         {"storefront_mail_tls": "implicit"},
         {"reset": ["storefront_mail_host"]},
     ],
@@ -109,8 +109,27 @@ def test_only_a_person_sets_or_forgets_the_password(client: TestClient) -> None:
         assert refused.status_code == 403 and refused.json()["type"] == PROBLEMS + "person_only"
 
 
-def test_the_tls_mode_is_starttls_or_implicit(client: TestClient) -> None:
+def test_the_tls_mode_is_starttls_implicit_or_none(client: TestClient) -> None:
     assert client.get("/api/v1/settings").json()["storefront_mail_tls"] == "starttls"
     ok = client.put("/api/v1/settings", json={"storefront_mail_tls": "implicit"})
     assert ok.status_code == 200 and ok.json()["storefront_mail_tls"] == "implicit"
     assert client.put("/api/v1/settings", json={"storefront_mail_tls": "plain"}).status_code == 422
+    assert "storefront_mail_starttls" not in client.get("/api/v1/settings").json()
+
+
+def test_no_tls_is_only_for_a_relay_with_no_login(client: TestClient) -> None:
+    relay = client.put(
+        "/api/v1/settings",
+        json={"storefront_mail_host": "relay.lan", "storefront_mail_tls": "none"},
+    )
+    assert relay.status_code == 200 and relay.json()["storefront_mail_tls"] == "none"
+    login = client.put("/api/v1/settings", json={"storefront_mail_user": "shop"})
+    assert login.status_code == 422
+    assert client.get("/api/v1/settings").json()["storefront_mail_user"] is None
+    both = client.put(
+        "/api/v1/settings",
+        json={"storefront_mail_user": "shop", "storefront_mail_tls": "starttls"},
+    )
+    assert both.status_code == 200
+    back = client.put("/api/v1/settings", json={"storefront_mail_tls": "none"})
+    assert back.status_code == 422

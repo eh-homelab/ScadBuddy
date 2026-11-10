@@ -3,7 +3,8 @@ plain-text body per event. Customer text (an item's title, a carrier) goes in as
 typed and is never HTML: the message is ``text/plain``. A subject is one line, whatever
 its values hold. Every order mail carries the order link, ``{public_url}/o#{token}``
 (ruling R1), which the sender builds from the env-only ``storefront_public_url`` and the
-link's sealed token; a sign-in code mail carries the code and no link.
+link's sealed token. A sign-in code mail carries the code and the sign-in link the
+caller put in its context (``link``), not an order link.
 """
 
 from __future__ import annotations
@@ -42,6 +43,14 @@ def _text(context: Mapping[str, Any], name: str, default: str = "") -> str:
     return default if value is None else str(value)
 
 
+def _required(context: Mapping[str, Any], name: str) -> str:
+    """``context[name]`` as text; ValueError when it is missing or empty."""
+    value = _text(context, name)
+    if not value:
+        raise ValueError(f"the mail needs {name}")
+    return value
+
+
 def _amount(context: Mapping[str, Any]) -> str:
     currency = _text(context, "currency")
     minor = context.get("amount_minor")
@@ -53,13 +62,16 @@ def _amount(context: Mapping[str, Any]) -> str:
 
 def render(event: MailEvent, context: Mapping[str, Any], link: str | None) -> Rendered:
     """The mail for ``event`` with ``context``. ``link`` is the order link, which every
-    order mail needs (ValueError without one); a sign-in code takes none."""
+    order mail needs (ValueError without one); a sign-in code takes none: its context
+    carries ``code`` and its own ``link`` (``{public_url}/account/sign-in#code=<code>``),
+    each required."""
     order = _text(context, "order")
     if event == "sign_in_code":
-        code = _text(context, "code")
+        code = _required(context, "code")
+        sign_in = _required(context, "link")
         return Rendered(
             "Your sign-in code",
-            f"Your sign-in code is {code}.\n\n"
+            f"Sign in here:\n{sign_in}\n\nOr type this code: {code}\n\n"
             "It works for 10 minutes. If you did not ask for it, you can ignore this mail.\n",
         )
     if not link:

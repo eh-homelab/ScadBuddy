@@ -16,7 +16,7 @@ function connected() {
 describe('Settings → Storefront mail (#5283)', () => {
   beforeEach(() => resetMockState())
 
-  it('saves the SMTP host, port, user, sender and STARTTLS', async () => {
+  it('saves the SMTP host, port, user and sender', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderSettingsSection(<StorefrontMail />, { route })
     await user.type(await screen.findByLabelText('SMTP host'), 'smtp.example.com')
@@ -40,7 +40,7 @@ describe('Settings → Storefront mail (#5283)', () => {
     expect(field).toHaveAttribute('autocomplete', 'new-password')
     await enter(user, field, 'hunter2')
     await user.click(screen.getByRole('button', { name: 'Save password' }))
-    expect(await screen.findByText('Password set for shop@smtp.example.com:587')).toBeInTheDocument()
+    expect(await screen.findByText('Password set for shop@smtp.example.com:587 (starttls)')).toBeInTheDocument()
     expect(screen.queryByDisplayValue('hunter2')).not.toBeInTheDocument()
     expect(JSON.stringify(await api.storefrontMailPassword())).not.toContain('hunter2')
     await user.click(screen.getByRole('button', { name: 'Forget password' }))
@@ -70,8 +70,20 @@ describe('Settings → Storefront mail (#5283)', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/SMTPAuthenticationError/)
   })
 
-  it('offers STARTTLS or implicit TLS', async () => {
-    renderSettingsSection(<StorefrontMail />, { route })
-    expect(await screen.findByLabelText('TLS')).toBeInTheDocument()
+  it('offers one TLS setting: STARTTLS, implicit TLS or none', async () => {
+    const { user } = renderSettingsSection(<StorefrontMail />, { route })
+    await user.click(await screen.findByRole('combobox', { name: 'TLS' }))
+    expect((await screen.findAllByRole('option')).map((option) => option.textContent)).toEqual([
+      'STARTTLS on the port (usually 587)',
+      'Implicit TLS (usually 465)',
+      'None, a relay with no login',
+    ])
+    expect(screen.queryByLabelText('Use STARTTLS')).not.toBeInTheDocument()
+  })
+
+  it('refuses a user on a plain connection', async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_tls: 'none' })
+    await expect(api.putSettings({ storefront_mail_user: 'shop' })).rejects.toThrow(/relay with no login/)
+    expect(mockSettings().storefront_mail_user).toBeNull()
   })
 })

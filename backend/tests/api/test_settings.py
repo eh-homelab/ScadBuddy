@@ -855,7 +855,6 @@ def test_the_storefront_mail_settings_have_their_defaults(client: TestClient) ->
         "storefront_mail_port": 587,
         "storefront_mail_user": None,
         "storefront_mail_sender": None,
-        "storefront_mail_starttls": True,
         "storefront_mail_tls": "starttls",
     }
     assert all(body["applies"][name] == "live" for name in MAIL_FIELDS)
@@ -868,7 +867,6 @@ MAIL_FIELDS = (
     "storefront_mail_port",
     "storefront_mail_user",
     "storefront_mail_sender",
-    "storefront_mail_starttls",
     "storefront_mail_tls",
 )
 
@@ -879,7 +877,7 @@ def test_the_storefront_mail_settings_are_written_through_put(client: TestClient
         "storefront_mail_port": 465,
         "storefront_mail_user": "shop",
         "storefront_mail_sender": "shop@example.com",
-        "storefront_mail_starttls": False,
+        "storefront_mail_tls": "implicit",
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent

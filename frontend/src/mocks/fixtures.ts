@@ -1048,7 +1048,6 @@ export const settingsDefaults = {
   storefront_mail_port: 587,
   storefront_mail_user: null,
   storefront_mail_sender: null,
-  storefront_mail_starttls: true,
   storefront_mail_tls: 'starttls',
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,

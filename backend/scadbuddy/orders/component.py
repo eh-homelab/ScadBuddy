@@ -147,7 +147,6 @@ class OrdersComponent:
             port=values["storefront_mail_port"],
             user=values["storefront_mail_user"],
             sender=values["storefront_mail_sender"],
-            starttls=values["storefront_mail_starttls"],
             tls=values["storefront_mail_tls"],
         )
 

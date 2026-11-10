@@ -818,10 +818,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`shipped`) queue only when `storefront_mail_covers` (a live link and a
   `storefront_mail_host`), to the link's `sent_to`. The SMTP settings are env-seeded
   `storefront_mail_*` (Settings → Storefront mail), a person's to change
-  (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). A login goes only over TLS
-  (STARTTLS, or `storefront_mail_tls` `implicit`, `SMTP_SSL`). The password is sealed in
-  `storefront_mail_secret`, bound to the host, port and user it was saved for (columns and
-  AAD); `PUT`/`DELETE /storefront/mail/password` are a person's only.
+  (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). One setting picks the TLS,
+  `storefront_mail_tls`: `starttls` (the server must offer it; without it, a server
+  failure, never plain), `implicit` (`SMTP_SSL`) or `none` (plain, only with no user:
+  `SettingsStore.save` refuses a user with it, 422, on the merged result, and the sender
+  refuses it as a server failure). The password is sealed in `storefront_mail_secret`,
+  bound to the host, port, user and TLS mode it was saved for (columns and AAD);
+  `PUT`/`DELETE /storefront/mail/password` are a person's only. A `sign_in_code` row's
+  context carries `code` and `link` (`{storefront_public_url}/account/sign-in#code=<code>`,
+  built by the caller), both required by the template. One not sent within `CODE_TTL`
+  (10 min) of `created_at` is given up as `expired` with both cleared, at the start of
+  every pass (the sweep's too), and the claim never takes one.
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

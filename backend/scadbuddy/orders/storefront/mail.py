@@ -20,11 +20,17 @@ Failures (review I2):
   `MAX_ATTEMPTS`;
 - fixed (a template that cannot be built, a revoked link): the row fails at once.
 
-A login is only ever sent over TLS: STARTTLS (``storefront_mail_starttls``) or implicit
-TLS (``storefront_mail_tls`` ``implicit``, ``SMTP_SSL``), each with a verifying context.
-The password is sealed under the KEK in `storefront_mail_secret` and bound to the host,
-port and user it was saved for (stored beside it and in the seal's AAD); the sender logs
-in only while the live settings name the same three.
+One setting, ``storefront_mail_tls``, picks the connection: ``starttls`` (the server
+must offer STARTTLS; without it that is a server failure, never a fall back to plain),
+``implicit`` (``SMTP_SSL``), each with a verifying context, or ``none``, a plain
+connection, allowed only with no user (a LAN relay with no login). A login is never sent
+in plain text. The password is sealed under the KEK in `storefront_mail_secret` and bound
+to the host, port, user and TLS mode it was saved for (stored beside it and in the seal's
+AAD); the sender logs in only while the live settings name the same four.
+
+A sign-in code is good for `CODE_TTL`: a `sign_in_code` row not sent within it of
+``created_at`` is given up as ``expired`` and its code and sign-in link cleared, before
+every pass sends (`send_queued`, so the sweep too), and the claim never takes a late code.
 
 Every order mail carries the order link: its row names the link (``link_id``), and the
 sender opens the link's sealed token to build ``{storefront_public_url}/o#{token}``. With
@@ -81,6 +87,8 @@ MAX_ATTEMPTS = 8
 SMTP_TIMEOUT = 20.0
 #: How long a claimed row is left to its sender.
 LEASE = "2 minutes"
+# How long a sign-in code may wait in the outbox before it is given up as expired.
+CODE_TTL = "10 minutes"
 #: The process's wait after a server failure: a minute, doubling to an hour.
 SERVER_BACKOFF_FIRST = 60.0
 SERVER_BACKOFF_MAX = 3600.0
@@ -89,7 +97,7 @@ PASS_BUDGET = 480.0
 #: The longest ``last_error`` kept.
 _ERROR_MAX = 500
 #: What a sent or given-up row no longer needs: a secret only the send read.
-_SECRETS = ["code"]
+_SECRETS = ["code", "link"]
 
 #: The env-seeded settings the sender reads (`core/settings.py`).
 MAIL_SETTINGS = (
@@ -97,11 +105,10 @@ MAIL_SETTINGS = (
     "storefront_mail_port",
     "storefront_mail_user",
     "storefront_mail_sender",
-    "storefront_mail_starttls",
     "storefront_mail_tls",
 )
 
-MailTls = Literal["starttls", "implicit"]
+MailTls = Literal["starttls", "implicit", "none"]
 
 
 @dataclass(frozen=True)
@@ -110,18 +117,12 @@ class MailConfig:
     port: int
     user: str | None
     sender: str | None
-    starttls: bool
     tls: MailTls = "starttls"
 
     @property
     def ready(self) -> bool:
         """Whether a mail can be sent: a host and a sender."""
         return bool(self.host) and bool(self.sender)
-
-    @property
-    def encrypted(self) -> bool:
-        """Whether the session runs over TLS: implicit, or STARTTLS."""
-        return self.tls == "implicit" or self.starttls
 
 
 @dataclass(frozen=True)
@@ -150,8 +151,8 @@ class _FixedFailureError(Exception):
     """A failure no retry mends: the row fails at once."""
 
 
-def secret_aad(row_id: str, host: str, port: int, user: str) -> str:
-    return f"storefront_mail_secret:{row_id}:{host}:{port}:{user}"
+def secret_aad(row_id: str, host: str, port: int, user: str, tls: MailTls) -> str:
+    return f"storefront_mail_secret:{row_id}:{host}:{port}:{user}:{tls}"
 
 
 def queue_mail(
@@ -243,7 +244,7 @@ class StorefrontMail:
     def status(self) -> MailStatus:
         with self._store.transaction() as conn:
             secret = conn.execute(
-                "SELECT host, port, username FROM storefront_mail_secret"
+                "SELECT host, port, username, tls FROM storefront_mail_secret"
             ).fetchone()
             server = conn.execute(
                 "SELECT last_error, last_error_at FROM storefront_mail_server"
@@ -252,14 +253,14 @@ class StorefrontMail:
             password_set=secret is not None,
             password_for=None
             if secret is None
-            else f"{secret['username']}@{secret['host']}:{secret['port']}",
+            else f"{secret['username']}@{secret['host']}:{secret['port']} ({secret['tls']})",
             server_error=None if server is None else server["last_error"],
             server_error_at=None if server is None else server["last_error_at"],
         )
 
     def set_password(self, password: str) -> None:
-        """Seal ``password`` for the live host, port and user (R2): it is sent to no
-        other connection."""
+        """Seal ``password`` for the live host, port, user and TLS mode (R2): it is sent to
+        no other connection."""
         if self._kek is None:
             raise KekMissingError()
         config = self.config()
@@ -269,13 +270,14 @@ class StorefrontMail:
             conn.execute("LOCK TABLE storefront_mail_secret IN EXCLUSIVE MODE")
             found = conn.execute("SELECT id FROM storefront_mail_secret").fetchone()
             row_id = str(found["id"]) if found else str(uuid.uuid4())
-            aad = secret_aad(row_id, config.host, config.port, config.user)
+            aad = secret_aad(row_id, config.host, config.port, config.user, config.tls)
             sealed = seal_secret(self._kek, password, aad)
             conn.execute(
-                "INSERT INTO storefront_mail_secret (id, host, port, username, secret_sealed,"
-                " dek_sealed, kek_id) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                "INSERT INTO storefront_mail_secret (id, host, port, username, tls,"
+                " secret_sealed, dek_sealed, kek_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE SET host = excluded.host, port = excluded.port,"
-                " username = excluded.username, secret_sealed = excluded.secret_sealed,"
+                " username = excluded.username, tls = excluded.tls,"
+                " secret_sealed = excluded.secret_sealed,"
                 " dek_sealed = excluded.dek_sealed, kek_id = excluded.kek_id,"
                 " saved_at = clock_timestamp()",
                 (
@@ -283,6 +285,7 @@ class StorefrontMail:
                     config.host,
                     config.port,
                     config.user,
+                    config.tls,
                     sealed.secret_sealed,
                     sealed.dek_sealed,
                     sealed.kek_id,
@@ -301,23 +304,25 @@ class StorefrontMail:
         that will not open."""
         if not config.user:
             return None
-        if not config.encrypted:
-            raise _ServerFailureError("a login needs TLS: turn STARTTLS on, or use implicit TLS")
+        if config.tls == "none":
+            raise _ServerFailureError("a login needs TLS: use STARTTLS or implicit TLS")
         assert config.host is not None
         with self._store.transaction() as conn:
             row = conn.execute(
-                "SELECT id, host, port, username, secret_sealed, dek_sealed, kek_id"
+                "SELECT id, host, port, username, tls, secret_sealed, dek_sealed, kek_id"
                 " FROM storefront_mail_secret"
             ).fetchone()
         if row is None:
             raise _ServerFailureError("no SMTP password is set")
-        if (row["host"], row["port"], row["username"]) != (
+        if (row["host"], row["port"], row["username"], row["tls"]) != (
             config.host,
             config.port,
             config.user,
+            config.tls,
         ):
             raise _ServerFailureError(
-                "the SMTP password was saved for another host, port or user; save it again"
+                "the SMTP password was saved for another host, port, user or TLS mode;"
+                " save it again"
             )
         if self._kek is None:
             raise _ServerFailureError("the SMTP password needs SCADBUDDY_SECRET_KEY_FILE")
@@ -326,7 +331,7 @@ class StorefrontMail:
             dek_sealed=bytes(row["dek_sealed"]),
             kek_id=row["kek_id"],
         )
-        aad = secret_aad(str(row["id"]), config.host, config.port, config.user)
+        aad = secret_aad(str(row["id"]), config.host, config.port, config.user, config.tls)
         try:
             return open_secret(self._kek, envelope, aad)
         except SealError:
@@ -337,11 +342,13 @@ class StorefrontMail:
     def send_queued(self, limit: int = 50, *, budget: float = PASS_BUDGET) -> int:
         """Send up to ``limit`` due rows, oldest first, for at most ``budget`` seconds; how
         many were sent. A pass already running in this process takes this one on after
-        it. With no host or sender, or in the server's backoff, nothing is sent."""
+        it. Late sign-in codes expire first, whatever the settings. With no host or
+        sender, or in the server's backoff, nothing is sent."""
         if not self._pass.acquire(blocking=False):
             self._rerun = True
             return 0
         try:
+            self._expire_codes()
             sent = self._send(limit, budget)
             while self._rerun:
                 self._rerun = False
@@ -407,9 +414,11 @@ class StorefrontMail:
                 " AND failed_at IS NULL AND next_attempt_at <= clock_timestamp()"
                 " AND (lease_until IS NULL OR lease_until < clock_timestamp())"
                 " AND (template = 'sign_in_code' OR %s)"
+                " AND (template <> 'sign_in_code'"
+                " OR created_at >= clock_timestamp() - %s::interval)"
                 " ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 " RETURNING id, to_address, template, context",
-                (LEASE, links),
+                (LEASE, links, CODE_TTL),
             ).fetchone()
             if row is None:
                 return None
@@ -461,15 +470,30 @@ class StorefrontMail:
         else:
             session = self._smtp(config.host, config.port, timeout=SMTP_TIMEOUT)
         with session as smtp:
-            if config.tls == "starttls" and config.starttls:
+            if config.tls == "starttls":
+                # Raises SMTPNotSupportedError when the server offers no STARTTLS: a
+                # server failure, never a fall back to plain.
                 smtp.starttls(context=ssl.create_default_context())
             if config.user:
                 # `_login_password` refused a login without TLS before connecting.
-                assert config.encrypted and password is not None
+                assert config.tls != "none" and password is not None
                 smtp.login(config.user, password)
             smtp.send_message(message)
 
     # -- the stamps -----------------------------------------------------------------------
+
+    def _expire_codes(self) -> None:
+        """Give up every sign-in code not sent within `CODE_TTL` and clear its code and
+        link. A row a live sender holds is left to it."""
+        with self._store.transaction() as conn:
+            conn.execute(
+                "UPDATE storefront_mail SET failed_at = clock_timestamp(), lease_until = NULL,"
+                " last_error = 'expired', context = context - %s::text[]"
+                " WHERE template = 'sign_in_code' AND sent_at IS NULL AND failed_at IS NULL"
+                " AND created_at < clock_timestamp() - %s::interval"
+                " AND (lease_until IS NULL OR lease_until < clock_timestamp())",
+                (_SECRETS, CODE_TTL),
+            )
 
     def _sent(self, row_id: str) -> None:
         with self._store.transaction() as conn:

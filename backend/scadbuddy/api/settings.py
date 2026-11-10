@@ -55,6 +55,7 @@ from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableErro
 from scadbuddy.library.settings_store import (
     DestinationSort,
     DisplayUnit,
+    MailLoginNeedsTlsError,
     ModelPrintChoices,
     ModelProject,
     PrinterPlate,
@@ -134,15 +135,14 @@ class SettingsView(BaseModel):
     storefront_render_concurrency: int = 2
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
-    #: The storefront's mail (#5283): SMTP host, port, user, From, STARTTLS and the TLS
-    #: mode. The
-    #: password is sealed apart (`GET /storefront/mail/password` says whether it is set).
+    #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
+    #: (`starttls`, `implicit` or `none`). The password is sealed apart
+    #: (`GET /storefront/mail/password` says whether it is set).
     storefront_mail_host: str | None = None
     storefront_mail_port: int = 587
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
-    storefront_mail_starttls: bool = True
-    storefront_mail_tls: Literal["starttls", "implicit"] = "starttls"
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
@@ -539,7 +539,7 @@ async def put_settings(
         )
     try:
         await asyncio.to_thread(store.save, patch)
-    except StoreNotReadyError as error:
+    except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
     apply_runtime(state, snapshot.runtime)
@@ -557,7 +557,6 @@ MAIL_CONNECTION = frozenset(
         "storefront_mail_port",
         "storefront_mail_user",
         "storefront_mail_sender",
-        "storefront_mail_starttls",
         "storefront_mail_tls",
     }
 )

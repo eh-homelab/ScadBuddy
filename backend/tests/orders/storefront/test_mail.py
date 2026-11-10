@@ -40,10 +40,8 @@ pytestmark = pytest.mark.requires_postgres
 
 PUBLIC = "https://shop.example"
 LINK = f"{PUBLIC}/o#"
-HOST = MailConfig(
-    host="smtp.example", port=587, user="shop", sender="shop@example.com", starttls=True
-)
-NO_HOST = MailConfig(host=None, port=587, user=None, sender=None, starttls=True)
+HOST = MailConfig(host="smtp.example", port=587, user="shop", sender="shop@example.com")
+NO_HOST = MailConfig(host=None, port=587, user=None, sender=None)
 
 
 def verifying(context: Any) -> None:
@@ -175,9 +173,17 @@ def link(rows: OrderStore, order: Order, *, revoked: bool = False) -> tuple[str,
     return made
 
 
-def code(rows: OrderStore, to: str = "ada@example.com", value: str = "123456") -> str:
+CODE = "ABCD-EFGH-JKLM-NPQR"
+
+
+def sign_in(value: str = CODE) -> dict[str, str]:
+    """A sign-in code's context: the code and its link (the accounts caller builds both)."""
+    return {"code": value, "link": f"{PUBLIC}/account/sign-in#code={value}"}
+
+
+def code(rows: OrderStore, to: str = "ada@example.com", value: str = CODE) -> str:
     with rows.transaction() as conn:
-        return queue_mail(conn, "sign_in_code", to, {"code": value}, None)
+        return queue_mail(conn, "sign_in_code", to, sign_in(value), None)
 
 
 def sends(log: list[Any]) -> list[EmailMessage]:
@@ -195,7 +201,7 @@ def due_now(rows: OrderStore) -> None:
 
 def test_a_queued_row_in_a_transaction_that_rolls_back_is_gone(rows: OrderStore) -> None:
     with pytest.raises(RuntimeError), rows.transaction() as conn:
-        queue_mail(conn, "sign_in_code", "ada@example.com", {"code": "123456"}, None)
+        queue_mail(conn, "sign_in_code", "ada@example.com", sign_in(), None)
         raise RuntimeError("the transition failed after it queued mail")
     assert mail_rows(rows) == []
     # The rollback took the kick with it.
@@ -215,7 +221,7 @@ def test_a_queued_row_in_a_transaction_that_rolls_back_is_gone(rows: OrderStore)
 )
 def test_queue_mail_takes_exactly_one_address(rows: OrderStore, to: str) -> None:
     with pytest.raises(EmailInvalidError) as refused, rows.transaction() as conn:
-        queue_mail(conn, "sign_in_code", to, {"code": "1"}, None)
+        queue_mail(conn, "sign_in_code", to, sign_in(), None)
     assert refused.value.slug == "email_invalid"
     assert mail_rows(rows) == []
 
@@ -277,9 +283,7 @@ def test_without_a_user_no_login_is_sent(
     rows: OrderStore, log: list[Any], failures: list[Exception]
 ) -> None:
     code(rows)
-    relay = MailConfig(
-        host="smtp.example", port=25, user=None, sender="s@example.com", starttls=False
-    )
+    relay = MailConfig(host="smtp.example", port=25, user=None, sender="s@example.com", tls="none")
     assert outbox(rows, relay, log, failures).send_queued() == 1
     assert ("starttls",) not in log and not [e for e in log if e[0] == "login"]
 
@@ -289,7 +293,7 @@ def test_a_login_is_never_sent_without_tls(
 ) -> None:
     code(rows)
     plain = MailConfig(
-        host="smtp.example", port=25, user="shop", sender="s@example.com", starttls=False
+        host="smtp.example", port=25, user="shop", sender="s@example.com", tls="none"
     )
     mail = outbox(rows, plain, log, failures, clock)
     mail.set_password("pw")
@@ -323,7 +327,6 @@ def test_implicit_tls_connects_over_tls_with_a_verifying_context(
         port=465,
         user="shop",
         sender="s@example.com",
-        starttls=True,
         tls="implicit",
     )
     mail = outbox(rows, implicit, log, failures)
@@ -371,7 +374,7 @@ def test_a_refused_recipient_counts_backs_off_and_gives_up(
             assert mail.send_queued() == 0 and len(log) == tried
             due_now(rows)
     [row] = mail_rows(rows)
-    assert row["failed_at"] is not None and "code" not in row["context"]
+    assert row["failed_at"] is not None and not {"code", "link"} & row["context"].keys()
     assert sends(log) == []
     # 1, 2, 4 ... minutes, at most an hour.
     assert [round(w / 60) for w in waits] == [1, 2, 4, 8, 16, 32, 60]
@@ -530,11 +533,16 @@ def test_the_password_is_sealed_and_reported_only_as_set(
     mail.set_password("hunter2")
     mail.set_password("hunter3")
     status = mail.status()
-    assert status.password_set is True and status.password_for == "shop@smtp.example:587"
+    assert status.password_set is True and status.password_for == "shop@smtp.example:587 (starttls)"
     with rows.transaction() as conn:
         [row] = conn.execute("SELECT * FROM storefront_mail_secret").fetchall()
     assert b"hunter3" not in bytes(row["secret_sealed"])
-    assert (row["host"], row["port"], row["username"]) == ("smtp.example", 587, "shop")
+    assert (row["host"], row["port"], row["username"], row["tls"]) == (
+        "smtp.example",
+        587,
+        "shop",
+        "starttls",
+    )
     assert mail.clear_password() is True
     assert mail.status().password_set is False
     assert mail.clear_password() is False
@@ -548,7 +556,7 @@ def test_the_password_needs_the_kek(rows: OrderStore) -> None:
 
 
 def test_the_password_needs_a_host_and_a_user(rows: OrderStore) -> None:
-    for config in (NO_HOST, MailConfig("smtp.example", 587, None, "s@example.com", True)):
+    for config in (NO_HOST, MailConfig("smtp.example", 587, None, "s@example.com")):
         with pytest.raises(MailConnectionUnsetError):
             outbox(rows, config, [], []).set_password("pw")
 
@@ -556,9 +564,10 @@ def test_the_password_needs_a_host_and_a_user(rows: OrderStore) -> None:
 @pytest.mark.parametrize(
     "moved",
     [
-        MailConfig("evil.example", 587, "shop", "shop@example.com", True),
-        MailConfig("smtp.example", 2525, "shop", "shop@example.com", True),
-        MailConfig("smtp.example", 587, "attacker", "shop@example.com", True),
+        MailConfig("evil.example", 587, "shop", "shop@example.com"),
+        MailConfig("smtp.example", 2525, "shop", "shop@example.com"),
+        MailConfig("smtp.example", 587, "attacker", "shop@example.com"),
+        MailConfig("smtp.example", 587, "shop", "shop@example.com", tls="implicit"),
     ],
 )
 def test_the_password_is_never_sent_to_another_connection(
@@ -581,9 +590,20 @@ def test_a_moved_binding_does_not_open(rows: OrderStore, log: list[Any]) -> None
     mail.set_password("hunter2")
     with rows.transaction() as conn:
         conn.execute("UPDATE storefront_mail_secret SET host = 'evil.example'")
-    moved = outbox(rows, MailConfig("evil.example", 587, "shop", "s@example.com", True), log, [])
+    moved = outbox(rows, MailConfig("evil.example", 587, "shop", "s@example.com"), log, [])
     assert moved.send_queued() == 0
     assert not [e for e in log if e[0] == "login"]
+
+
+def test_a_moved_tls_mode_does_not_open(rows: OrderStore, log: list[Any]) -> None:
+    """The TLS mode is in the AAD: editing the stored mode does not move the password."""
+    code(rows)
+    outbox(rows, HOST, log, []).set_password("hunter2")
+    with rows.transaction() as conn:
+        conn.execute("UPDATE storefront_mail_secret SET tls = 'implicit'")
+    implicit = MailConfig("smtp.example", 587, "shop", "s@example.com", tls="implicit")
+    assert outbox(rows, implicit, log, []).send_queued() == 0
+    assert not [e for e in log if e[0] in ("connect", "login")]
 
 
 def test_a_user_with_no_password_sends_nothing_and_counts_nothing(
@@ -611,9 +631,19 @@ def test_a_subject_never_carries_a_line_break() -> None:
     assert "\r" not in rendered.subject and "\n" not in rendered.subject
 
 
-def test_a_sign_in_code_carries_the_code_and_no_link() -> None:
-    rendered = render("sign_in_code", {"code": "123456"}, PUBLIC)
-    assert "123456" in rendered.body and PUBLIC not in rendered.body
+def test_a_sign_in_code_carries_its_link_and_its_code() -> None:
+    rendered = render("sign_in_code", sign_in(), None)
+    assert f"{PUBLIC}/account/sign-in#code={CODE}" in rendered.body
+    assert CODE in rendered.body.replace(f"#code={CODE}", "")
+    assert f"{PUBLIC}/o#" not in rendered.body
+
+
+@pytest.mark.parametrize("missing", ["code", "link"])
+def test_a_sign_in_code_refuses_a_missing_field(missing: str) -> None:
+    context = sign_in()
+    del context[missing]
+    with pytest.raises(ValueError, match=missing):
+        render("sign_in_code", context, None)
 
 
 def test_a_customer_title_is_sent_as_plain_text(
@@ -777,7 +807,58 @@ def test_a_second_lock_in_the_transaction_keeps_the_kick(shop: Shop, mailing: li
     order = shop.order()
     with shop.rows.transaction() as conn:
         shop.lifecycle._lock(conn, order.id)
-        queue_mail(conn, "sign_in_code", "ada@example.com", {"code": "1"}, None)
+        queue_mail(conn, "sign_in_code", "ada@example.com", sign_in(), None)
         shop.lifecycle._lock(conn, order.id)
     shop.lifecycle.told(shop.get(order))
     assert mailing == [1]
+
+
+def test_a_sign_in_code_not_sent_within_ten_minutes_expires(
+    rows: OrderStore, log: list[Any], failures: list[Exception]
+) -> None:
+    late = code(rows, "late@example.com", "AAAA-AAAA-AAAA-AAAA")
+    code(rows, "fresh@example.com", "BBBB-BBBB-BBBB-BBBB")
+    with rows.transaction() as conn:
+        conn.execute(
+            "UPDATE storefront_mail SET created_at = clock_timestamp() - interval '11 minutes'"
+            " WHERE id = %s",
+            (late,),
+        )
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    assert mail.send_queued() == 1
+    assert [m["To"] for m in sends(log)] == ["fresh@example.com"]
+    expired = next(row for row in mail_rows(rows) if row["id"] == late)
+    assert expired["failed_at"] is not None and expired["last_error"] == "expired"
+    assert "code" not in expired["context"] and "link" not in expired["context"]
+    assert expired["sent_at"] is None
+
+
+def test_a_late_code_expires_even_with_no_host(rows: OrderStore) -> None:
+    late = code(rows)
+    with rows.transaction() as conn:
+        conn.execute(
+            "UPDATE storefront_mail"
+            " SET created_at = clock_timestamp() - interval '10 minutes 1 second'"
+        )
+    outbox(rows, NO_HOST, [], []).send_queued()
+    [row] = mail_rows(rows)
+    assert row["id"] == late and row["last_error"] == "expired"
+    assert "code" not in row["context"] and "link" not in row["context"]
+
+
+def test_a_code_that_expires_while_leased_is_not_sent(
+    rows: OrderStore, log: list[Any], failures: list[Exception]
+) -> None:
+    """A leased row past its ten minutes (its sender lost) is not claimed again."""
+    code(rows)
+    with rows.transaction() as conn:
+        conn.execute(
+            "UPDATE storefront_mail SET created_at = clock_timestamp() - interval '11 minutes',"
+            " lease_until = clock_timestamp() - interval '1 second'"
+        )
+    mail = outbox(rows, HOST, log, failures)
+    mail.set_password("pw")
+    assert mail.send_queued() == 0 and sends(log) == []
+    [row] = mail_rows(rows)
+    assert row["last_error"] == "expired"

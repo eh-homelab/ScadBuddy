@@ -188,6 +188,13 @@ STORE_READINESS = frozenset(
 )
 #: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
 STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
+#: The storefront mail's login and TLS mode (#5283): a user with `none` (a plain
+#: connection) is refused, checked on the merged result as the store's are.
+MAIL_LOGIN_TLS = frozenset({"storefront_mail_user", "storefront_mail_tls"})
+MAIL_LOGIN_NEEDS_TLS = (
+    "a plain connection (storefront_mail_tls none) is for a relay with no login:"
+    " clear the user, or use starttls or implicit"
+)
 
 
 class RackAlgorithmSupersededError(Exception):
@@ -199,6 +206,11 @@ class StoreNotReadyError(ValueError):
     """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
     `store_backend = s3` without the endpoint, bucket, both keys and a prefix, or
     `library_backend = native` on `store_backend = local`."""
+
+
+class MailLoginNeedsTlsError(ValueError):
+    """A storefront mail user with `storefront_mail_tls = none`: a login is never sent in
+    plain text (#5283)."""
 
 
 S3_NOT_READY = (
@@ -765,8 +777,7 @@ class SettingsPatch(BaseModel):
     storefront_mail_port: int | None = None
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
-    storefront_mail_starttls: bool | None = None
-    storefront_mail_tls: Literal["starttls", "implicit"] | None = None
+    storefront_mail_tls: Literal["starttls", "implicit", "none"] | None = None
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None
@@ -1082,7 +1093,7 @@ class SettingsStore:
             if problem is not None:
                 raise StoreNotReadyError(problem)
         with self._pool.connection() as conn, conn.transaction():
-            if (changes.keys() | set(reset)) & STORE_READINESS:
+            if (changes.keys() | set(reset)) & (STORE_READINESS | MAIL_LOGIN_TLS):
                 self._check_store_ready(conn, changes, reset)
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
@@ -1109,12 +1120,14 @@ class SettingsStore:
         Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
         safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
         second sees the first. A row lock would not do: a value that follows the
-        environment has no row to lock."""
+        environment has no row to lock. The storefront mail's user and TLS mode are
+        checked the same way (`MAIL_LOGIN_TLS`)."""
         conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
         )
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
+            "SELECT name, value FROM settings WHERE name = ANY(%s)",
+            (list(STORE_READINESS | MAIL_LOGIN_TLS),),
         ).fetchall()
         # Opened, so a sealed secret counts as the value it holds; one this process
         # cannot open follows the environment, as `snapshot` reads it.
@@ -1150,6 +1163,8 @@ class SettingsStore:
             raise StoreNotReadyError(problem)
         if merged("library_backend") == "native" and backend == "local":
             raise StoreNotReadyError(NATIVE_LIBRARY_NOT_READY)
+        if merged("storefront_mail_user") and merged("storefront_mail_tls") == "none":
+            raise MailLoginNeedsTlsError(MAIL_LOGIN_NEEDS_TLS)
 
     def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
         """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""

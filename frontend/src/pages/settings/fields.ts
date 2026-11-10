@@ -416,15 +416,9 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     choices: [
       { value: 'starttls', label: 'STARTTLS on the port (usually 587)' },
       { value: 'implicit', label: 'Implicit TLS (usually 465)' },
+      { value: 'none', label: 'None, a relay with no login' },
     ],
-    help: 'A login is only ever sent over TLS.',
-  },
-  {
-    name: 'storefront_mail_starttls',
-    section: 'storefront-mail',
-    label: 'Use STARTTLS',
-    kind: 'bool',
-    help: 'Off only for a relay that takes mail with no login.',
+    help: 'STARTTLS needs a server that offers it. A login is never sent without TLS.',
   },
   {
     name: 'log_level',

@@ -4,8 +4,9 @@
 -- that causes it and sent after the commit (`orders/storefront/mail.py`). `context` is
 -- what the template reads. An order mail names its link by `link_id`; the token is never
 -- in the outbox (the sender opens `storefront_order_links.token_sealed`). A sign-in code's
--- `code` is dropped once the mail is sent or given up. `order_id` is null for a sign-in
--- code. A sender leases a row (`lease_until`) and sends with no transaction open.
+-- `code` and `link` are dropped once the mail is sent, given up, or expired (not sent
+-- within 10 minutes of `created_at`). `order_id` is null for a sign-in code. A sender
+-- leases a row (`lease_until`) and sends with no transaction open.
 -- `attempts` counts the recipient's refusals only; `next_attempt_at` backs them off;
 -- `failed_at` is a row given up (its attempts spent, or a failure no retry mends).
 CREATE TABLE storefront_mail (
@@ -31,15 +32,16 @@ CREATE INDEX storefront_mail_order ON storefront_mail (order_id, created_at);
 
 -- The SMTP password, sealed under the CRUD service's KEK (core/secrets.py), as payment
 -- credentials are. One row at most. It is bound to the connection it was saved for: the
--- host, port and user beside it are also in the seal's AAD
--- (`storefront_mail_secret:<id>:<host>:<port>:<user>`), and the sender logs in only while
--- the live settings name the same three.
+-- host, port, user and TLS mode beside it are also in the seal's AAD
+-- (`storefront_mail_secret:<id>:<host>:<port>:<user>:<tls>`), and the sender logs in only
+-- while the live settings name the same four.
 CREATE TABLE storefront_mail_secret (
   id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
   singleton boolean NOT NULL DEFAULT true UNIQUE CHECK (singleton),
   host text NOT NULL,
   port integer NOT NULL,
   username text NOT NULL,
+  tls text NOT NULL CHECK (tls IN ('starttls', 'implicit', 'none')),
   secret_sealed bytea NOT NULL,
   dek_sealed bytea NOT NULL,
   kek_id text NOT NULL,
