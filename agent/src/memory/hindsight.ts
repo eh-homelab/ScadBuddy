@@ -48,8 +48,10 @@ export const RECALL_SPAN = 'agent.memory.recall'
 //     a message shown to the user. The memories are untrusted data (#258,
 //     safety/untrusted.ts): they go inside the untrusted-data envelope, in a
 //     `<hindsight_memories>` block that retain strips again.
-//   - Recall has a short timeout (RECALL_TIMEOUT_MS), since it delays the
-//     turn; on timeout or error nothing is injected and the reason is logged.
+//   - Recall has a timeout (RECALL_TIMEOUT_MS, 10 s), since it delays the turn: prod's
+//     Hindsight answered in 4.2-8.8 s on 2026-11-09 (#5866). Lower it once
+//     eh-homelab/clusters#3421 makes recall fast. On timeout or error nothing is injected
+//     and the reason is logged.
 //   - Retain is fire-and-forget: the Stop hook returns at once and the
 //     request runs on, so a slow or failing Hindsight never delays or fails a
 //     turn. A failure is logged (upstream logs a warning too). Retains of one
