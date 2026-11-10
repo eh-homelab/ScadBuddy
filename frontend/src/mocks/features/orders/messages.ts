@@ -146,16 +146,17 @@ export const handlers = [
       also_when_storefront_mails?: boolean
     }
     const { template, resend_of, digest } = body
+    // As the agent's: a key that already claimed is answered from its claim before any refusal,
+    // the digest's included (#5978).
+    const key = request.headers.get('idempotency-key') ?? ''
+    const claimed = claims.get(key)
+    if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
     if (digest !== digestOf(version)) {
       return HttpResponse.json(
         { detail: 'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing was sent; preview it again', type: 'message_changed' },
         { status: 409 },
       )
     }
-    // As the agent's: a key that already claimed is answered from its claim before any refusal.
-    const key = request.headers.get('idempotency-key') ?? ''
-    const claimed = claims.get(key)
-    if (claimed) return HttpResponse.json({ sent: claimed.status === 'sent', message: claimed })
     const refused = storefrontRefusal(body)
     if (refused) return refused
     const message = composed(String(params.id), template)
