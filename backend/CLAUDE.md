@@ -1044,6 +1044,21 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+- Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
+  passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
+  - `request_code` makes a six-digit code. It does the same for every address, whether or
+    not an account exists (enumeration-safe). Only a salted sha256 is kept, and a code lives
+    10 minutes for 5 tries. The limits are per address, per client and per client's wrong
+    guesses (`SignInLimitedError`).
+  - `verify_code` makes the account at the first sign-in. It links the one unarchived
+    customer with that email contact, else makes a new customer. It joins a visitor of no
+    account, rotates the session (the old row is deleted), and stores only the 256-bit
+    token's sha256.
+  - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
+    The order page attaches an order whose link was opened while signed in, in its own
+    transaction.
+  - Old code, failure and expired-session rows are pruned as new rows are written. There
+    is no sweep.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by
