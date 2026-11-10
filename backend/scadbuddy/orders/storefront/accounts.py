@@ -501,13 +501,14 @@ class AccountOrderRow:
 
 
 def account_orders(conn: Conn, account_id: str) -> list[AccountOrderRow]:
-    """`orders_of_account`'s orders, newest first, as "Your orders" lists them, less a
-    storefront cart not yet submitted (the cart page shows that one)."""
+    """`orders_of_account`'s submitted orders, newest first, as "Your orders" lists them.
+    An order never submitted (a cart, or one attached by its link before it was) is left
+    out."""
     rows = conn.execute(
         "SELECT o.id, o.number, o.status, o.created_at, o.submitted_at,"
         " (SELECT count(*) FROM order_items i WHERE i.order_id = o.id) AS items"
         f" FROM orders o WHERE o.id IN (SELECT id FROM ({_OWNED}) owned)"
-        " AND NOT (o.source = 'storefront' AND o.submitted_at IS NULL)"
+        " AND o.submitted_at IS NOT NULL"
         " ORDER BY o.created_at DESC, o.id",
         {"a": account_id},
     ).fetchall()

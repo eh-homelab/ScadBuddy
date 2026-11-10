@@ -1108,11 +1108,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
     Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
     CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
-    session, and submit and the order page take the account from it, never from a body.
+    session, and submit and the order page are to take the account from it (a later PR),
+    never from a body.
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
     deletes the session, and the edge also gives the browser a new visitor. `GET
-    …/account` and `…/account/orders` list submitted orders only, with no cost or note.
+    …/account` answers the account's email or null, and `…/account/orders` lists
+    submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by

@@ -68,7 +68,7 @@ def _cookie(headers: list[tuple[bytes, bytes]]) -> str | None:
 class VisitorCookie:
     """ASGI middleware for the paths under ``prefix``: puts the verified visitor id on
     ``request.state.visitor_id``, and sets a new signed cookie when the request had none
-    that verifies."""
+    that verifies, unless the route's response sets one itself."""
 
     def __init__(self, app: ASGIApp, *, key: bytes, prefix: str) -> None:
         self.app = app
@@ -96,7 +96,11 @@ class VisitorCookie:
 
         async def send_with_cookie(message: Message) -> None:
             if message["type"] == "http.response.start":
-                MutableHeaders(scope=message).append("set-cookie", value)
+                headers = MutableHeaders(scope=message)
+                # A route that gives the browser a visitor itself (sign-out) sets the one cookie.
+                own = f"{VISITOR_COOKIE}="
+                if not any(c.startswith(own) for c in headers.getlist("set-cookie")):
+                    headers.append("set-cookie", value)
             await send(message)
 
         await self.app(scope, receive, send_with_cookie)

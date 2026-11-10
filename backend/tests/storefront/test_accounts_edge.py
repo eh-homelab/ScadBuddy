@@ -145,6 +145,18 @@ def test_sign_out_ends_the_session_clears_the_cookie_and_starts_a_new_visitor(
     assert crud_mock["account"].call_count == calls
 
 
+def test_sign_out_with_no_visitor_cookie_sets_one_visitor(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    sign_in(edge)
+    # The visitor cookie is gone: the middleware would make a visitor, and so does the route.
+    edge.cookies.delete(VISITOR_COOKIE)
+    r = edge.post(f"{STORE}/sign-out", headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 204
+    assert len([c for c in set_cookies(r) if c.startswith(f"{VISITOR_COOKIE}=")]) == 1
+
+
 @pytest.mark.parametrize(
     "cookie",
     [

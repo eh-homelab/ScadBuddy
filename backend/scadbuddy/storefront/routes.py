@@ -14,8 +14,8 @@ spooled, then sent on as multipart a chunk at a time.
 Accounts (#5283): ``POST /account/verify`` (the bot check ``sign_in`` first) sets the
 ``sb_session`` cookie from the CRUD side's answer (`accounts.py`), ``POST
 /account/sign-out`` clears it and gives the browser a new visitor, and ``GET /account``
-and ``GET /account/orders`` send the cookie's session on. Each is checked by
-`CrossSiteGate` as every write is."""
+and ``GET /account/orders`` send the cookie's session on. The two POSTs are checked by
+`CrossSiteGate`, as every write is."""
 
 from __future__ import annotations
 

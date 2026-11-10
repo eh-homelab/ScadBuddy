@@ -28,6 +28,7 @@ from scadbuddy.orders.storefront.accounts import (
     SignedIn,
     SignInLimitedError,
     account_for_session,
+    account_orders,
     account_owns_order,
     attach_order,
     end_session,
@@ -513,6 +514,24 @@ def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Con
     attach_order(conn, signed.account.id, stranger)
     attach_order(conn, signed.account.id, stranger)
     assert sorted(orders_of_account(conn, signed.account.id)) == sorted([mine, stranger])
+
+
+def test_an_attached_order_never_submitted_is_not_listed(conn: Conn) -> None:
+    signed = sign_in(conn)
+    bob = customer(conn, "Bob", "bob@example.com")
+    row = conn.execute(
+        "INSERT INTO orders (source, customer_id, number, currency, created_by)"
+        """ VALUES ('back_office', %s, 9002, 'USD', '{"kind": "user", "principal": "shop"}')"""
+        " RETURNING id",
+        (bob,),
+    ).fetchone()
+    assert row is not None
+    unsubmitted = str(row["id"])
+    attach_order(conn, signed.account.id, unsubmitted)
+    assert unsubmitted in orders_of_account(conn, signed.account.id)
+    assert account_orders(conn, signed.account.id) == []
+    conn.execute("UPDATE orders SET submitted_at = now() WHERE id = %s", (unsubmitted,))
+    assert [o.id for o in account_orders(conn, signed.account.id)] == [unsubmitted]
 
 
 def test_a_visitor_of_another_account_is_not_moved(conn: Conn) -> None:
