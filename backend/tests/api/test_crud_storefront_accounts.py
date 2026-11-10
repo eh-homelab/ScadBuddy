@@ -5,8 +5,10 @@ and what it sees. Only the ``storefront`` credential reaches them."""
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -30,6 +32,13 @@ VISITOR = "v" * 43
 HEADERS = {VISITOR_HEADER: VISITOR, CLIENT_HEADER: "203.0.113.9"}
 PROBLEMS = "https://scadbuddy.dev/problems/storefront/"
 SHOP = "https://shop.example.com"
+#: The two 429 details, which the sign-in page's test serves (#5283, review of #5970):
+#: the wait is the page's to state, from ``retry_after``, never the detail's.
+LIMITED = json.loads(
+    (
+        Path(__file__).resolve().parents[3] / "test-fixtures/storefront/sign-in-limited.json"
+    ).read_text()
+)
 CODE_SHAPE = re.compile(r"[2-9A-HJKMNP-TV-Z]{4}(-[2-9A-HJKMNP-TV-Z]{4}){3}")
 
 
@@ -162,6 +171,8 @@ def test_too_many_wrong_codes_from_a_client_at_an_address_are_429(client: TestCl
     assert answer.status_code == 429
     assert answer.json()["type"] == f"{PROBLEMS}sign_in_limited"
     assert int(answer.headers["Retry-After"]) > 0
+    assert answer.json()["detail"] == LIMITED["verify"]
+    assert answer.json()["retry_after"] == int(answer.headers["Retry-After"])
 
 
 def test_sign_out_ends_the_session(client: TestClient, settings: Settings) -> None:
@@ -293,6 +304,8 @@ def test_code_requests_are_limited_per_address_and_client_and_per_client(
     assert over.status_code == 429
     assert over.json()["type"] == f"{PROBLEMS}sign_in_limited"
     assert int(over.headers["Retry-After"]) > 0
+    assert over.json()["detail"] == LIMITED["code"]
+    assert over.json()["retry_after"] == int(over.headers["Retry-After"])
     for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS_CLIENT):
         assert ask_code(client, f"other{n}@example.com").status_code == 204
     assert ask_code(client, "last@example.com").status_code == 429

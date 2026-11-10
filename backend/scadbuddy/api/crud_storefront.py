@@ -565,7 +565,8 @@ async def account_verify(
         raise problem(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "sign_in_limited",
-            f"Too many wrong codes. Try again in {error.retry_after} seconds.",
+            # The page states the wait, from `retry_after` (review of #5970).
+            "Too many wrong codes.",
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
         ) from None
@@ -645,7 +646,8 @@ async def account_code(
         raise problem(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "sign_in_limited",
-            f"Too many codes asked for. Try again in {error.retry_after} seconds.",
+            # The page states the wait, from `retry_after` (review of #5970).
+            "Too many codes asked for.",
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
         ) from None

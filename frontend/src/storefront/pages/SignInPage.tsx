@@ -47,6 +47,8 @@ export function SignInPage() {
 
   const goTo = (next: Step) => {
     setStep(next)
+    // The note names the address the last code went to; asking again starts over.
+    if (next === 'ask') setMailedTo(null)
     setError(null)
     setToken(null)
     setWidget((n) => n + 1)
@@ -109,7 +111,11 @@ export function SignInPage() {
         autoComplete="email"
         maxLength={320}
         value={email}
-        onChange={(event) => setEmail(event.target.value)}
+        onChange={(event) => {
+          setEmail(event.target.value)
+          // The note named the address as it was; another address has no code on its way.
+          setMailedTo(null)
+        }}
       />
     </div>
   )

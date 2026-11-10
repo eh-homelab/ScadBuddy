@@ -376,7 +376,7 @@ def test_a_code_request_passes_on_the_crud_sides_limit(
             "type": "https://scadbuddy.dev/problems/storefront/sign_in_limited",
             "title": "Too Many Requests",
             "status": 429,
-            "detail": "Too many codes asked for. Try again in 60 seconds.",
+            "detail": "Too many codes asked for.",
             "retry_after": 60,
         },
         headers={**CRUD, "Retry-After": "60", "Content-Type": "application/problem+json"},

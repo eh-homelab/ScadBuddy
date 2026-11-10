@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { useLocation } from 'react-router'
@@ -7,6 +8,21 @@ import { renderPage } from '../../test/utils'
 import { SignInPage } from './SignInPage'
 
 const CODE = 'ABCD-EFGH-JKMN-PQRS'
+
+/**
+ * The CRUD side's two 429 details, as `backend/tests/api/test_crud_storefront_accounts.py`
+ * checks it sends them (#5283, review of #5970): no wait in them, so the page states it once.
+ */
+const LIMITED = JSON.parse(
+  readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sign-in-limited.json`, 'utf8'),
+) as Record<'code' | 'verify', string>
+
+function limited(detail: string, seconds: string) {
+  return HttpResponse.json(
+    { type: 'https://scadbuddy.dev/problems/storefront/sign_in_limited', title: 'Too Many Requests', status: 429, detail },
+    { status: 429, headers: { 'Content-Type': 'application/problem+json', 'Retry-After': seconds } },
+  )
+}
 
 function Where() {
   const location = useLocation()
@@ -61,18 +77,35 @@ describe('SignInPage', () => {
 
   it('says how long to wait after too many codes', async () => {
     server.use(
-      http.post('/api/store/v1/account/code', () =>
-        HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/storefront/sign_in_limited', title: 'Too Many Requests', status: 429, detail: 'Too many codes asked for.' },
-          { status: 429, headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '300' } },
-        ),
-      ),
+      http.post('/api/store/v1/account/code', () => limited(LIMITED.code, '300')),
     )
     const { user } = page()
     await user.type(screen.getByLabelText('Email'), 'ada@example.com')
     await user.click(screen.getByRole('button', { name: 'Send me a code' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Too many codes asked for. Try again in 300 seconds.')
+    expect((await screen.findByRole('alert')).textContent).toBe('Too many codes asked for. Try again in 300 seconds.')
     expect(screen.queryByLabelText('Code')).toBeNull()
+  })
+
+  it('names only the address the code went to', async () => {
+    const { user } = page()
+    await user.type(screen.getByLabelText('Email'), 'a@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send me a code' }))
+    expect(await screen.findByText(/We emailed a code to a@example.com\./)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Send me a new code' }))
+    await user.clear(screen.getByLabelText('Email'))
+    await user.type(screen.getByLabelText('Email'), 'b@example.com')
+    await user.click(screen.getByRole('button', { name: 'I have a code' }))
+    expect(screen.getByLabelText('Email')).toHaveValue('b@example.com')
+    expect(screen.queryByText(/We emailed a code to/)).toBeNull()
+  })
+
+  it('drops the note when the address changes on the code step', async () => {
+    const { user } = page()
+    await user.type(screen.getByLabelText('Email'), 'a@example.com')
+    await user.click(screen.getByRole('button', { name: 'Send me a code' }))
+    expect(await screen.findByText(/We emailed a code to a@example.com\./)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Email'), 'x')
+    expect(screen.queryByText(/We emailed a code to/)).toBeNull()
   })
 
   it('goes back to ask for a new code, keeping the address', async () => {
@@ -120,18 +153,13 @@ describe('SignInPage', () => {
 
   it('says how long to wait after too many tries', async () => {
     server.use(
-      http.post('/api/store/v1/account/verify', () =>
-        HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/storefront/sign_in_limited', title: 'Too Many Requests', status: 429, detail: 'Too many tries.' },
-          { status: 429, headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '120' } },
-        ),
-      ),
+      http.post('/api/store/v1/account/verify', () => limited(LIMITED.verify, '120')),
     )
     const { user } = page()
     await user.click(screen.getByRole('button', { name: 'I have a code' }))
     await user.type(screen.getByLabelText('Email'), 'ada@example.com')
     await user.type(screen.getByLabelText('Code'), CODE)
     await user.click(screen.getByRole('button', { name: 'Sign in' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Too many tries. Try again in 120 seconds.')
+    expect((await screen.findByRole('alert')).textContent).toBe('Too many wrong codes. Try again in 120 seconds.')
   })
 })
