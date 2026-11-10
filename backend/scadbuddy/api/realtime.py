@@ -282,8 +282,10 @@ def topics_of(event: Event) -> list[str]:
 
 def event_frame(event: Event, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
-    # spec 2026-10-18 §7.1's fields.
+    # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})
+    if isinstance(event, OrderChanged) and not event.deleted:
+        del data["deleted"]
     return {"type": "event", "id": event.id, "kind": event.kind, "topics": topics, "data": data}
 
 

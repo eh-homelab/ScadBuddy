@@ -304,6 +304,11 @@ the customer's view.
   housekeeping sweep: its attachment rows first (the FK is `RESTRICT`), then their holds,
   then the order. This is the one exception to the orders spec's Ruling 6 (nothing the
   process produced is deleted): an unsubmitted cart is not yet a record of the shop's.
+  A cart with a time or cost entry is never swept (the lifecycle refuses those on a cart,
+  `order_not_submitted`). Once a delete commits, the bus is told `order.changed` with
+  `deleted: true`: an open orders list reads again without it, and an open `order:<id>`
+  page shows the order as not found when that frame arrives (a page that missed it keeps
+  its last view until it reads the order again).
 
 ### 5.5 Submit
 

@@ -1092,7 +1092,7 @@ export const orderTools: Tool[] = [
       ),
   }),
   // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
-  // order status. Removing one is the order page's (coverage.ts).
+  // order status except a storefront cart not yet submitted. Removing one is the order page's (coverage.ts).
   defineTool({
     name: 'order_time_add',
     label: 'Log time on an order',
@@ -1101,7 +1101,8 @@ export const orderTools: Tool[] = [
       "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
       "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
       'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
-      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included, except a ' +
+      'storefront cart not yet submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
@@ -1134,7 +1135,8 @@ export const orderTools: Tool[] = [
       "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
       "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
       'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
-      'this call names, and writes nothing. Allowed in every order status.',
+      'this call names, and writes nothing. Allowed in every order status, except a storefront cart not yet ' +
+      'submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),

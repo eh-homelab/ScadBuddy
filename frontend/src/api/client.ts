@@ -2424,7 +2424,8 @@ export const api = {
   /** #4251 §6.4 — the accepted quotes beside the attempts. */
   orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
   /** #5326 — time on the order or (with `order_item_id`) one of its items, at today's
-   * labour rate, which the entry keeps. Allowed in every order status. */
+   * labour rate, which the entry keeps. Allowed in every order status, except a storefront
+   * cart not yet submitted (409 `order_not_submitted`). */
   addTimeEntry: (orderId: string, body: TimeEntryCreate) =>
     request<TimeEntry>(`/orders/${seg(orderId)}/time-entries`, { method: 'POST', body: JSON.stringify(body) }),
   removeTimeEntry: (orderId: string, id: string) =>
