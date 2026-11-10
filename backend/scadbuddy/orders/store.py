@@ -1790,6 +1790,10 @@ class OrderStore:
         kind, _, key = str(row["subject"]).partition(":")
         if kind == "library":
             return ArchiveOrigin(output_id=None, library_file_id=int(key))
+        if kind == "model":
+            # A print imported onto a model (#4698): no output or library file printed
+            # it, so its file is copied as any other archive's.
+            return None
         return ArchiveOrigin(output_id=key, library_file_id=None)
 
     def archive_run_plates(

@@ -474,6 +474,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
+  be (the archive's file and slicer project, Bambuddy library files by name and hash, the
+  printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
+  links the archive to a model as a `print_links` row with the subject `model:<slug>` and
+  `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  Only a source the listing finds is read. A printer file is kept as a Bambuddy library
+  file in the inbox folder. A model's delete forgets its imports (`delete_models`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -1017,8 +1024,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
   422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
   the output whose `print_links` row owns it, else a `library_file` item of the library file
-  that owns it, else (an output or file gone since, or an output whose template was deleted,
-  falls through too) a `library_file` item of
+  that owns it, else (an output or file gone since, an output whose template was deleted,
+  or a print imported onto a model, #4698, falls through too) a `library_file` item of
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is

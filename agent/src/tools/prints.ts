@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { command, isRunning } from './command.js'
 import { binary } from './binary.js'
@@ -18,7 +19,7 @@ export const printHistoryTools: Tool[] = [
     description:
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
       'parameters that differ from the template defaults; a Bambuddy library file\'s print names the file ' +
-      '(`library_file_name`). Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
+      '(`library_file_name`); a print imported onto a model (import_print) names that model (`slug`). Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
       'Bambuddy `status` (completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day ' +
       '(`from`/`to`, inclusive) and text `q` (output, library file or print name, parameter values). Pass ' +
       '`next_cursor` back as `cursor` for the next page: with a narrow filter a page can be short or empty and ' +
@@ -44,7 +45,8 @@ export const printHistoryTools: Tool[] = [
     name: 'get_print',
     label: "Read a print's details",
     description:
-      'One print: the output it came from (template, revision, exact parameters), its files, photos, timelapse, ' +
+      'One print: the output it came from (template, revision, exact parameters; for an imported print, `imported`: ' +
+      'the model and the source its 3MF came from), its files, photos, timelapse, ' +
       'outcome (status, failure reason, times, filament, cost), runs, the slicing (printer model, bed, layers, ' +
       'nozzle, temperatures, filament per slot), the slicer settings per filament slot the ScadBuddy run set ' +
       '(`part_settings`, #5627: only the request\'s; pass them to print_output again to print with them. A ' +
@@ -111,6 +113,91 @@ export const printHistoryTools: Tool[] = [
         }),
       )
       return json(isRunning(pulled) ? pulled : { attached: filename })
+    },
+  }),
+
+  // ── #4698: import a print ScadBuddy did not start (backend/scadbuddy/api/print_imports.py) ──
+  defineTool({
+    name: 'list_print_sources',
+    label: "Find a print's 3MF to import it",
+    description:
+      'For a Bambuddy archive ScadBuddy did not start (list_print_archives rows with `scadbuddy_print: false`; one ' +
+      'still printing too): every place its 3MF can be, each with its name, size, date and whether it is sliced. ' +
+      '`archive` is the sliced file Bambuddy keeps, `archive_source` the slicer project attached to the archive, ' +
+      '`library` a Bambuddy library file with the same name (`matched_by: hash` when its bytes are the printed ' +
+      'file), `printer` the printer\'s storage. A source that cannot be used says why (`reason`). `printer: true` ' +
+      'also reads the printer over FTP, which reaches the printer, so that call waits for a person\'s approval. ' +
+      'Also `linked` (what the archive is a print of already) and `suggested_models` from the job\'s name. Show ' +
+      'the sources to the user and let them choose; then import_print.',
+    input: z.object({
+      archive_id: archiveId.describe("A Bambuddy archive's id, as list_print_archives returns it"),
+      printer: z.boolean().optional(),
+    }),
+    risk: 'read',
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/print-imports/{archive_id}/sources'],
+    summarize: ({ archive_id, printer }) =>
+      printer ? `Read the printer's storage for the 3MF of print ${archive_id}` : `List the sources of print ${archive_id}`,
+    handler: async ({ archive_id, printer }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print-imports/{archive_id}/sources', {
+            params: { path: { archive_id }, query: printer === undefined ? {} : { printer } },
+          }),
+          `list the sources of print ${archive_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'import_print',
+    label: 'Import a print onto a model',
+    description:
+      'Make a Bambuddy archive ScadBuddy did not start a ScadBuddy print of a model, so get_print, its photos, ' +
+      'timelapse, attachments, workspace_save print_image/print_timelapse and Print again work, and it shows on ' +
+      "the model's Prints tab. `source` is one list_print_sources lists as available, the one the user chose: " +
+      '`{kind: archive}`, `{kind: archive_source}`, `{kind: library, library_file_id}` or `{kind: printer, path}`. ' +
+      'Link it to a model that exists (`slug`), or make a new mesh model from the 3MF (`new_model: {name}`; a ' +
+      'sliced file has no meshes, so choose an unsliced one). A `printer` source reads the file over FTP and keeps ' +
+      "it in Bambuddy's library inbox, so that call waits for a person's approval. Importing the same archive onto " +
+      'the same model again answers the first import; another model is refused, naming the owner.',
+    input: z.object({
+      archive_id: archiveId.describe("A Bambuddy archive's id, as list_print_archives returns it"),
+      source: z.object({
+        kind: z.enum(['archive', 'archive_source', 'library', 'printer']),
+        library_file_id: z.number().int().min(1).optional(),
+        path: z.string().min(1).max(1024).optional(),
+      }),
+      slug: slug.optional(),
+      new_model: z
+        .object({ name: z.string().min(1).max(200), description: z.string().max(10_000).default('') })
+        .optional(),
+    }),
+    risk: 'write',
+    bambuddyScope: ['Read Status'],
+    routes: ['POST /api/v1/print-imports/{archive_id}'],
+    summarize: ({ archive_id, source, slug: model, new_model }) =>
+      `Import print ${archive_id} from its ${source.kind} file onto ${model ? `model ${model}` : `a new model "${new_model?.name ?? ''}"`}`,
+    handler: async ({ archive_id, ...body }, ctx) => {
+      if ((body.slug === undefined) === (body.new_model === undefined)) throw new ToolError('give slug or new_model, not both')
+      // One key for both sends below, so the second finds the model the first made.
+      const keyed = { ...ctx, callKey: ctx.callKey ?? randomUUID() }
+      const send = () =>
+        command(keyed, `import print ${archive_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/print-imports/{archive_id}', { params: { path: { archive_id } }, body, headers }),
+        )
+      const first = await send()
+      if (isRunning(first)) {
+        return json({
+          ...first,
+          next:
+            `The new model for print ${archive_id} is still being made. Follow it with get_operation; once it is done, ` +
+            `call import_print with the new model's slug.`,
+        })
+      }
+      // A new model's operation answers the model; the same call again (its key) then links the print.
+      if (body.new_model !== undefined && (first as { archive_id?: unknown }).archive_id === undefined) return json(await send())
+      return json(first)
     },
   }),
 

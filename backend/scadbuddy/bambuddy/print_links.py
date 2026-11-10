@@ -29,6 +29,11 @@ share both tables (#1750).
 ``output_bambuddy_prints`` and ``library_bambuddy_prints``, which
 ``*_drop_legacy_print_links.sql`` (#1772) drops.
 
+``print_imports`` holds what each import read (#4698): an archive ScadBuddy did not
+start, that a person linked to a model. Its ``print_links`` row has the subject
+``model:<slug>`` and ``matched_by`` ``import``, and both rows are written in one
+transaction (`PrintLinkStore.record_import`), only while no link names the archive.
+
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
@@ -56,7 +61,14 @@ from pydantic import BaseModel
 
 from scadbuddy.bambuddy.subject import PrintSubject
 
-MatchedBy = Literal["queue_item", "content_hash"]
+MatchedBy = Literal["queue_item", "content_hash", "import"]
+
+#: Where an imported print's 3MF was read from (#4698, `bambuddy/print_import.py`).
+ImportSource = Literal["archive", "archive_source", "library", "printer"]
+
+#: The first key of ``pg_advisory_xact_lock(int, int)`` that serialises the imports of
+#: one archive ("SBPI").
+IMPORT_LOCK_CLASS = 0x5342_5049
 
 
 class PrintLink(BaseModel):
@@ -79,6 +91,26 @@ class LinkedPrint(PrintLink):
     library_file_id: int | None = None
     #: A library file's name as its queue item reported it; None for an output's.
     name: str | None = None
+    #: The model an imported print is linked to (#4698); None for an output's or a
+    #: library file's print.
+    slug: str | None = None
+
+
+class PrintImport(BaseModel):
+    """What an import read (#4698): the model, the source the person chose, and the file."""
+
+    archive_id: int
+    slug: str
+    source: ImportSource
+    #: The library file chosen, or the library copy a printer file was kept as.
+    library_file_id: int | None = None
+    printer_id: int | None = None
+    printer_path: str | None = None
+    filename: str
+    size: int | None = None
+    sha256: str | None = None
+    #: Set by the database.
+    imported_at: datetime | None = None
 
 
 class PrintSend(BaseModel):
@@ -141,7 +173,8 @@ class ScadBuddyJob(BaseModel):
     subject: str
     output_id: str | None = None
     library_file_id: int | None = None
-    #: The output's template, when ScadBuddy knows it; ``None`` for a library file.
+    #: The output's template, when ScadBuddy knows it, or the model an imported print is
+    #: linked to (#4698, its reprint); ``None`` for a library file.
     slug: str | None = None
     #: The print run that queued or started it. ``None`` for ScadBuddy's reprint of an
     #: archive (an operation, not a run), and for an item only a link names (a send from
@@ -172,7 +205,7 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
         subject=subject.key,
         output_id=subject.output_id,
         library_file_id=subject.file_id,
-        slug=row["slug"] if subject.output_id is not None else None,
+        slug=row["slug"] if subject.output_id is not None else subject.slug,
         run_id=row["run_id"],
         archive_id=row["archive_id"],
         matched_by=matched_by,
@@ -282,7 +315,12 @@ def _last_run(sends: list[PrintSend]) -> list[PrintSend]:
 def _linked_print(row: dict[str, Any]) -> LinkedPrint:
     subject = PrintSubject.parse(row["subject"])
     return LinkedPrint.model_validate(
-        {**row, "output_id": subject.output_id, "library_file_id": subject.file_id}
+        {
+            **row,
+            "output_id": subject.output_id,
+            "library_file_id": subject.file_id,
+            "slug": subject.slug,
+        }
     )
 
 
@@ -335,6 +373,31 @@ class PrintLinkStore:
             for link in await self.for_subject(subject)
             if link.queue_item_id is not None
         }
+
+    async def record_import(
+        self, record: PrintImport, *, printer_id: int | None = None, plate_id: int | None = None
+    ) -> LinkedPrint | None:
+        """Link ``record.archive_id`` to its model (#4698), with ``record``: None once
+        both rows are written. When a link names the archive already, nothing is written
+        and that link (its owner) is returned. Imports of one archive are serialised, so
+        two at once cannot both win."""
+        return await asyncio.to_thread(self._record_import, record, printer_id, plate_id)
+
+    async def import_of(self, archive_id: int) -> PrintImport | None:
+        """What the import of ``archive_id`` read, or None when it was not imported."""
+        return await asyncio.to_thread(self._import_of, archive_id)
+
+    async def linked_among(self, archive_ids: Sequence[int]) -> set[int]:
+        """Which of ``archive_ids`` any link names (#4698: the unlinked archives)."""
+        if not archive_ids:
+            return set()
+        return await asyncio.to_thread(self._linked_among, sorted(set(archive_ids)))
+
+    async def delete_models(self, slugs: Iterable[str]) -> None:
+        """Forget the imports onto deleted models (#4698), as `delete_outputs` forgets
+        their outputs' prints."""
+        keys = [PrintSubject.model(slug).key for slug in slugs]
+        await asyncio.to_thread(self._delete_subjects, keys)
 
     async def delete_outputs(self, output_ids: Iterable[str]) -> None:
         """Forget deleted outputs' links and sends, and the attachments of each print no
@@ -488,6 +551,74 @@ class PrintLinkStore:
                     " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
                     (sorted({row["archive_id"] for row in unlinked}),),
                 )
+                conn.execute(
+                    "DELETE FROM print_imports AS i WHERE i.archive_id = ANY(%s) AND NOT"
+                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = i.archive_id)",
+                    (sorted({row["archive_id"] for row in unlinked}),),
+                )
+
+    def _record_import(
+        self, record: PrintImport, printer_id: int | None, plate_id: int | None
+    ) -> LinkedPrint | None:
+        subject = PrintSubject.model(record.slug)
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
+            )
+            owner = conn.execute(
+                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
+                (record.archive_id,),
+            ).fetchone()
+            if owner is not None:
+                return _linked_print(dict(owner))
+            # A row left by a link forgotten since (a model deleted while its copy of
+            # this row stayed) is replaced.
+            conn.execute(
+                "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
+                " printer_id, printer_path, filename, size, sha256)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
+                " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
+                " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
+                " filename = EXCLUDED.filename, size = EXCLUDED.size,"
+                " sha256 = EXCLUDED.sha256, imported_at = now()",
+                (
+                    record.archive_id,
+                    record.slug,
+                    record.source,
+                    record.library_file_id,
+                    record.printer_id,
+                    record.printer_path,
+                    record.filename,
+                    record.size,
+                    record.sha256,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO print_links"
+                " (subject, archive_id, matched_by, plate_id, printer_id, name)"
+                " VALUES (%s, %s, 'import', %s, %s, %s)",
+                (subject.key, record.archive_id, plate_id, printer_id, record.filename),
+            )
+        return None
+
+    def _import_of(self, archive_id: int) -> PrintImport | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT archive_id, slug, source, library_file_id, printer_id, printer_path,"
+                " filename, size, sha256, imported_at FROM print_imports WHERE archive_id = %s",
+                (archive_id,),
+            ).fetchone()
+        return None if row is None else PrintImport.model_validate(dict(row))
+
+    def _linked_among(self, archive_ids: list[int]) -> set[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT archive_id FROM print_links WHERE archive_id = ANY(%s)",
+                (archive_ids,),
+            ).fetchall()
+        return {row["archive_id"] for row in rows}
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:

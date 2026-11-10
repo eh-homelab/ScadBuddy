@@ -1,7 +1,9 @@
-"""What a print is of (#1749, #1750): an output ScadBuddy rendered, or a file already in
-Bambuddy's library. Every record of a print is keyed by its subject's ``key``
-(``output:<id>`` or ``library:<file id>``), so the two kinds share one shape; the only
-difference between them is how the 3MF to slice is obtained (``print_source``).
+"""What a print is of (#1749, #1750): an output ScadBuddy rendered, a file already in
+Bambuddy's library, or (#4698) a model, for a print ScadBuddy did not start that a person
+imported onto that model. Every record of a print is keyed by its subject's ``key``
+(``output:<id>``, ``library:<file id>`` or ``model:<slug>``), so the kinds share one
+shape. An output and a library file differ only in how the 3MF to slice is obtained
+(``print_source``); a model subject is never printed by a run of ScadBuddy's.
 """
 
 from __future__ import annotations
@@ -11,9 +13,20 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-SubjectKind = Literal["output", "library"]
+from scadbuddy.library.slugs import MODEL_ID_PATTERN
 
-_KEY = re.compile(r"(?P<kind>output|library):(?P<id>.+)")
+SubjectKind = Literal["output", "library", "model"]
+
+_KEY = re.compile(r"(?P<kind>output|library|model):(?P<id>.+)")
+_MODEL_ID = re.compile(MODEL_ID_PATTERN)
+
+
+def _valid_id(kind: str, value: str) -> bool:
+    if kind == "library":
+        return value.isdecimal()
+    if kind == "model":
+        return _MODEL_ID.fullmatch(value) is not None
+    return bool(value)
 
 
 class PrintSubject(BaseModel):
@@ -25,7 +38,7 @@ class PrintSubject(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> Self:
-        if not self.id or (self.kind == "library" and not self.id.isdecimal()):
+        if not self.id or not _valid_id(self.kind, self.id):
             raise ValueError(f"{self.id!r} is not a {self.kind} print subject's id")
         return self
 
@@ -38,17 +51,22 @@ class PrintSubject(BaseModel):
         return cls(kind="library", id=str(file_id))
 
     @classmethod
+    def model(cls, slug: str) -> PrintSubject:
+        """A print imported onto the model ``slug`` (#4698): no output of it printed it."""
+        return cls(kind="model", id=slug)
+
+    @classmethod
     def parse(cls, key: str) -> PrintSubject:
         """The subject a :attr:`key` names; ``ValueError`` for anything else."""
         match = _KEY.fullmatch(key)
-        if match is None or (match["kind"] == "library" and not match["id"].isdecimal()):
+        if match is None or not _valid_id(match["kind"], match["id"]):
             raise ValueError(f"{key!r} is not a print subject")
         return cls(kind=match["kind"], id=match["id"])  # type: ignore[arg-type]
 
     @classmethod
     def from_run_subject(cls, value: str) -> PrintSubject:
         """The subject a :attr:`run_subject` names."""
-        return cls.parse(value) if value.startswith("library:") else cls.output(value)
+        return cls.parse(value) if value.startswith(("library:", "model:")) else cls.output(value)
 
     @property
     def key(self) -> str:
@@ -69,6 +87,11 @@ class PrintSubject(BaseModel):
     @property
     def file_id(self) -> int | None:
         return int(self.id) if self.kind == "library" else None
+
+    @property
+    def slug(self) -> str | None:
+        """The model a model subject names; None for an output's or a library file's."""
+        return self.id if self.kind == "model" else None
 
 
 def library_slug(subject: PrintSubject) -> str:
