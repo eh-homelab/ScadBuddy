@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ApiError, api } from '../../api/client'
 import type { ArchiveOutcome, FoundSource, ImportedPrint, PrintImportRequest } from '../../api/types'
@@ -52,12 +52,23 @@ export function ImportPrintDialog({
 }) {
   const [archive, setArchive] = useState<ArchiveOutcome | null>(null)
   const [done, setDone] = useState<ImportedPrint | null>(null)
-  useEffect(() => {
-    if (!open) {
+  // Each open starts on the picker. An import still running when the dialog closes may
+  // answer later: it reloads the history, but shows its "done" only in the open it began
+  // in (#4698 review).
+  const [opens, setOpens] = useState(0)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (open !== wasOpen) {
+    setWasOpen(open)
+    if (open) {
       setArchive(null)
       setDone(null)
+      setOpens((n) => n + 1)
     }
-  }, [open])
+  }
+  const live = useRef<number | null>(null)
+  useEffect(() => {
+    live.current = open ? opens : null
+  }, [open, opens])
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
@@ -93,7 +104,7 @@ export function ImportPrintDialog({
             archive={archive}
             onBack={() => setArchive(null)}
             onImported={(imported) => {
-              setDone(imported)
+              if (live.current === opens) setDone(imported)
               onImported?.(imported)
             }}
           />
@@ -121,7 +132,8 @@ function ImportForm({
   onImported: (imported: ImportedPrint) => void
 }) {
   const [printer, setPrinter] = useState(false)
-  const found = useAsync(() => api.getPrintSources(archive.id, { printer }), [archive.id, printer])
+  const [asks, setAsks] = useState(0)
+  const found = useAsync(() => api.getPrintSources(archive.id, { printer }), [archive.id, printer, asks])
   // The last answer stays while the printer is read, so the list never blinks.
   const [last, setLast] = useState(found.data)
   if (found.data && found.data !== last) setLast(found.data)
@@ -130,6 +142,9 @@ function ImportForm({
 
   const [picked, setPicked] = useState<string | null>(null)
   const preselected = sources?.sources.find((s) => s.preselected)
+  // The choice made for the person stays theirs when the printer's files arrive and
+  // nothing is preselected any more (#4698 review).
+  if (picked === null && preselected) setPicked(sourceKey(preselected))
   const choice = picked ?? (preselected ? sourceKey(preselected) : null)
   const source = sources?.sources.find((s) => sourceKey(s) === choice && s.available) ?? null
 
@@ -224,10 +239,16 @@ function ImportForm({
                 )
               })}
             </RadioGroup>
-            {!printer && (
+            {(!printer || (found.error && !found.loading)) && (
               <div className="flex flex-col items-start gap-1">
-                <Button type="button" variant="outline" size="sm" onClick={() => setPrinter(true)} disabled={busy}>
-                  Also look on the printer
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => (printer ? setAsks((n) => n + 1) : setPrinter(true))}
+                  disabled={busy}
+                >
+                  {printer ? 'Ask the printer again' : 'Also look on the printer'}
                 </Button>
                 <span className="text-xs text-muted-foreground">
                   Lists the printer's storage. Its file is copied into Bambuddy's library if you import from it.
