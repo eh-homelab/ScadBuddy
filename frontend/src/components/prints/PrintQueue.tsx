@@ -5,12 +5,11 @@ import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
-import { NEW_TAB } from '../../lib/embed'
 import { JobPicture } from './JobPicture'
-import { scadbuddyJobPath } from './prints'
+import { queueItemPath, scadbuddyJobPath } from './prints'
 import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
-/** An outside link of the queue's (opens Bambuddy beside the frame, #2351). */
+/** A link of the queue's: an item's page, or Bambuddy's queue and stats beside the frame (#2351). */
 const LINK = 'font-medium text-primary underline-offset-4 hover:underline'
 
 /** How often the queue is read while the page is visible. */
@@ -31,7 +30,8 @@ function byPosition(a: QueueItem, b: QueueItem): number {
 /**
  * #2351 — Bambuddy's print queue on `/prints`: what is waiting to print, whoever
  * queued it, and why it is waiting; with the farm's totals under it. Read only: the
- * queue is managed in Bambuddy, which the links open.
+ * queue is managed in Bambuddy, which the "Bambuddy's queue" link opens. Each row opens
+ * its item's page (#3744).
  */
 export function PrintQueue() {
   const [items, setItems] = useState<QueueItem[] | null>(null)
@@ -101,7 +101,7 @@ export function PrintQueue() {
         <Card className="gap-0 py-0">
           <ol className="divide-y" aria-label="Waiting to print">
             {shown.map((item) => (
-              <QueueRow key={item.id} item={item} queueUrl={base ? `${base}/queue` : null} />
+              <QueueRow key={item.id} item={item} />
             ))}
           </ol>
         </Card>
@@ -117,32 +117,22 @@ export function PrintQueue() {
 }
 
 /**
- * #3743 — the item's name, as a link: ScadBuddy's own item to its ScadBuddy page
- * ({@link scadbuddyJobPath}: its print once linked, else its queue item page, #3744);
- * any other to Bambuddy's queue page, which has no route for one item
- * (`frontend/src/App.tsx` and `QueuePage.tsx` at maziggy/bambuddy@2ce0d93), in a new
- * tab, which escapes the frame's sandbox.
+ * #3743, #3744 — the item's name, as a link in ScadBuddy: ScadBuddy's own item to its
+ * ScadBuddy page ({@link scadbuddyJobPath}: its print once linked, else its queue item
+ * page); any other to its queue item page, which links on to Bambuddy's queue. Bambuddy
+ * has no route for one item (`frontend/src/App.tsx` and `QueuePage.tsx` at
+ * maziggy/bambuddy@2ce0d93).
  */
-function ItemName({ item, name, queueUrl }: { item: QueueItem; name: string; queueUrl: string | null }) {
-  if (item.scadbuddy) {
-    return (
-      <Link to={scadbuddyJobPath(item.scadbuddy, item.id)} className={`min-w-0 truncate ${LINK}`}>
-        {name}
-      </Link>
-    )
-  }
-  if (queueUrl) {
-    return (
-      <a href={queueUrl} {...NEW_TAB} className={`min-w-0 truncate ${LINK}`}>
-        {name}
-        <span className="sr-only">, in Bambuddy's queue</span>
-      </a>
-    )
-  }
-  return <span className="min-w-0 truncate font-medium">{name}</span>
+function ItemName({ item, name }: { item: QueueItem; name: string }) {
+  const to = item.scadbuddy ? scadbuddyJobPath(item.scadbuddy, item.id) : queueItemPath(item.id)
+  return (
+    <Link to={to} className={`min-w-0 truncate ${LINK}`}>
+      {name}
+    </Link>
+  )
 }
 
-function QueueRow({ item, queueUrl }: { item: QueueItem; queueUrl: string | null }) {
+function QueueRow({ item }: { item: QueueItem }) {
   const name = item.archive_name ?? item.library_file_name ?? `Queue item ${item.id}`
   const where = item.printer_name ?? (item.target_model ? `Any ${item.target_model}` : 'No printer yet')
   const notes: string[] = []
@@ -156,7 +146,7 @@ function QueueRow({ item, queueUrl }: { item: QueueItem; queueUrl: string | null
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3">
           <span className="flex min-w-0 items-center gap-1.5">
-            <ItemName item={item} name={name} queueUrl={queueUrl} />
+            <ItemName item={item} name={name} />
             {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
           </span>
           <span className="sb-num shrink-0 text-xs text-muted-foreground">

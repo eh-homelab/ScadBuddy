@@ -70,7 +70,7 @@ describe('PrintQueue (#2351)', () => {
     expect(within(screen.getByTestId('queue-item-260')).queryByText('Queued from ScadBuddy')).toBeNull()
   })
 
-  it("links ScadBuddy's items to ScadBuddy, and any other to Bambuddy's queue (#3743)", async () => {
+  it("links ScadBuddy's items to ScadBuddy, and any other to its queue item page (#3743, #3744)", async () => {
     setBambuddyLinks({ bambuddy_url: 'http://bambuddy.local', bambuddy_web_urls: null })
     const ours = PRINT_QUEUE.find((item) => item.id === 259)!
     setPrintQueue([
@@ -87,12 +87,18 @@ describe('PrintQueue (#2351)', () => {
       'href',
       '/prints/35',
     )
-    // Bambuddy has no page per queue item, so the row opens its queue page.
-    const bracket = within(screen.getByTestId('queue-item-260')).getByRole('link', {
-      name: "Bracket.gcode.3mf, in Bambuddy's queue",
-    })
-    expect(bracket).toHaveAttribute('href', 'http://bambuddy.local/queue')
-    expect(bracket).toHaveAttribute('target', '_blank')
+    // Any other item: ScadBuddy's page of the item (#3744), in the frame, which links on
+    // to Bambuddy's queue. Bambuddy has no page per queue item.
+    const bracket = within(screen.getByTestId('queue-item-260')).getByRole('link', { name: 'Bracket.gcode.3mf' })
+    expect(bracket).toHaveAttribute('href', '/prints/queue/260')
+    expect(bracket).not.toHaveAttribute('target')
+  })
+
+  it('links an item ScadBuddy did not queue to its page without a Bambuddy address (#3744)', async () => {
+    renderPage(<PrintQueue />)
+
+    const bracket = within(await screen.findByTestId('queue-item-260')).getByRole('link', { name: 'Bracket.gcode.3mf' })
+    expect(bracket).toHaveAttribute('href', '/prints/queue/260')
   })
 
   it("shows each row's picture: ScadBuddy's, Bambuddy's, or a placeholder (#3742)", async () => {
@@ -120,8 +126,8 @@ describe('PrintQueue (#2351)', () => {
     Object.defineProperty(document, 'referrer', { value: 'http://bambuddy.lan:8000/external/3', configurable: true })
     renderPage(<PrintQueue />)
 
-    const bracket = await screen.findByTestId('queue-item-260')
-    expect(within(bracket).getByRole('link', { name: "Bracket.gcode.3mf, in Bambuddy's queue" })).toHaveAttribute(
+    await screen.findByTestId('queue-item-260')
+    expect(screen.getByRole('link', { name: "Bambuddy's queue" })).toHaveAttribute(
       'href',
       'http://bambuddy.lan:8000/queue',
     )
