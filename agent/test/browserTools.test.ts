@@ -547,7 +547,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
       waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
     })
     expect(result.isError).toBe(true)
-    expect(text(result)).toMatch(/^no answer from the paired ScadBuddy tab in time.*take a snapshot to see the page, then call again\.$/s)
+    expect(text(result)).toMatch(/^no answer from the paired ScadBuddy tab in time.*The session.s tab may be connected.*take a snapshot to see the page, then call again\.$/s)
     expect(text(result)).not.toMatch(/dropped again/)
   })
 

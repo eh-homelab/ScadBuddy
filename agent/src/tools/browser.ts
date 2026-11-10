@@ -215,9 +215,12 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
   )
 }
 
-/** After a reconnect, when the tab's replica only answered slowly: the tab may well be there (#5962). */
+/**
+ * After a wait that ended `reconnected`, when the tab's replica only answered slowly: the tab may
+ * well be there, and no reconnect need have happened (a slow probe also ends a wait, #5974).
+ */
 const WHY_SLOW =
-  "The session's tab reconnected, and the call was not run: take a snapshot to see the page, then call again."
+  "The session's tab may be connected (its agent replica was slow to answer), and the call was not run: take a snapshot to see the page, then call again."
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
