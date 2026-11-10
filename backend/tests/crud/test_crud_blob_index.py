@@ -327,7 +327,7 @@ async def test_a_backend_id_with_slashes_is_one_path_part(
 
 
 def test_outside_an_activity_each_write_takes_a_key_of_its_own() -> None:
-    keys = WriteKeys()
+    keys = WriteKeys("blob-index")
     assert len({keys.next() for _ in range(3)}) == 3
 
 
@@ -337,14 +337,27 @@ def test_inside_an_activity_the_keys_are_its_ordinals(monkeypatch: pytest.Monkey
     info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7", attempt=1)
     monkeypatch.setattr(activity, "in_activity", lambda: True)
     monkeypatch.setattr(activity, "info", lambda: info)
-    keys = WriteKeys()
+    keys = WriteKeys("blob-index")
     first = [keys.next() for _ in range(2)]
     info.attempt = 2
     second = [keys.next() for _ in range(2)]
-    assert first == second == [activity_key(0), activity_key(1)]
+    assert first == second == [activity_key(0, "blob-index"), activity_key(1, "blob-index")]
     # Another run of the workflow (a render key's next run) is not a retry.
     info.workflow_run_id = "run-2"
     assert keys.next() != first[0]
+
+
+def test_two_stores_in_one_attempt_never_share_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each store counts its own writes: at the same ordinal, in the same attempt, the
+    namespace keeps their keys apart, so one store's request is never answered with
+    another's reply."""
+    info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7", attempt=1)
+    monkeypatch.setattr(activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activity, "info", lambda: info)
+    index, previews = WriteKeys("blob-index"), WriteKeys("previews")
+    assert index.next() != previews.next()
+    assert index.next() != previews.next()
+    assert WriteKeys("previews").next() == activity_key(0, "previews")
 
 
 async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
