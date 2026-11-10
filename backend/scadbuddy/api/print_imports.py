@@ -65,6 +65,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.store import Operation
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +122,10 @@ class ImportedPrint(BaseModel):
     slug: str
     #: The print's record: ``GET /prints/{archive_id}``.
     print_url: str
-    #: Whether this request made the model (``new_model``).
+    #: Whether the import made the model (``new_model``); a repeat answers the same.
     created_model: bool
+    #: Whether this request made the import (201), not a repeat answering it (200).
+    made_now: bool
     imported: PrintImport
 
 
@@ -221,6 +224,7 @@ async def _answer(
         slug=slug,
         print_url=f"/api/v1/prints/{archive_id}",
         created_model=record.created_model,
+        made_now=new,
         imported=record,
     )
 
@@ -424,6 +428,32 @@ async def _forget_copy(client: BambuddyClient, file_id: int) -> None:
         )
 
 
+def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
+    """The 409 of a new-model retry whose source changed since its first send (#5979):
+    what that send's operation (``first``) did, and whether its model is there now."""
+    changed = f"{name} changed since this request was first sent"
+    again = (
+        "send the request with a new Idempotency-Key to make the model from the file as it"
+        " is now, or choose another source"
+    )
+    if first.status == "running":
+        return (
+            f"{changed}, and the model {slug!r} that request started is still being made"
+            f" (operation {first.id}, `GET /api/v1/operations/{first.id}`): once it is done,"
+            " import the print onto it with `slug`, or choose another source"
+        )
+    if first.status == "failed":
+        return (
+            f"{changed}, and that request made no model: its operation {first.id} failed; {again}"
+        )
+    if made:
+        return (
+            f"{changed}, so it is no longer the file the model {slug!r} was made from: that"
+            " model stays; import the print onto it with `slug`, or choose another source"
+        )
+    return f"{changed}; that request made the model {slug!r}, which was deleted since; {again}"
+
+
 async def _new_model(
     ops: OperationsDep,
     response: Response,
@@ -447,6 +477,11 @@ async def _new_model(
         description=new_model.description,
         source={"kind": "upload", "claim": read.sha256, "name": read.name},
         claim=claim,
+        # A retry reads its source again, and a printer overwrites its files: a model the
+        # first read made is no longer this file's, so it is named, never linked.
+        changed=lambda first, made: _source_changed(
+            read.name, _slug_from_name(new_model.name), first, made
+        ),
     )
     if isinstance(made, JSONResponse):
         return made

@@ -204,17 +204,22 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
     // Only once the latch and the limit allow a new wait (#5981 review): a slow owner opens none.
     if (!open && started < TAB_WAITS_PER_TURN && slow) {
       const message = await slow(signal).catch(() => undefined)
+      // Another call may have latched the turn while this check ran: the latch wins.
+      const latched = stopped()
+      if (latched) return latched
       if (message !== undefined) {
         if (++slowSeen >= TAB_WAITS_PER_TURN && gaveUp === undefined) {
           gaveUp =
             `The tab's agent replica was slow to answer ${TAB_WAITS_PER_TURN} times this turn. Carry on without the tab ` +
             'for the rest of this turn.'
+          // The call that latches says so, not "call again" (#5981 review).
+          return { back: false, message: gaveUp }
         }
         return { back: false, message }
       }
-      const late = stopped()
-      if (late) return late
     }
+    // Another call may have opened a wait while this one's check ran: it joins that wait, its
+    // check already paid for. Harmless, and the join keeps one card for the turn's calls.
     return joinOrOpen(tool, toolUseId, signal, isBack)
   }
 

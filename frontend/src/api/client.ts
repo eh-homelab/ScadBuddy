@@ -1960,11 +1960,14 @@ export const api = {
   importPrint: async (archiveId: number, body: PrintImportRequest): Promise<ImportedPrint> => {
     const key = newRequestId()
     const send = () =>
-      command<ImportedPrint | ModelSummary>(`/print-imports/${archiveId}`, { method: 'POST', body: JSON.stringify(body) }, '/operations', key)
+      command<ImportedPrint | ModelSummary | null>(`/print-imports/${archiveId}`, { method: 'POST', body: JSON.stringify(body) }, '/operations', key)
+    // An operation that succeeded with no result is not the import either (#5992).
+    const imported = (answer: ImportedPrint | ModelSummary | null): answer is ImportedPrint =>
+      answer !== null && typeof answer === 'object' && 'archive_id' in answer
     const first = await send()
-    if ('archive_id' in first) return first
+    if (imported(first)) return first
     const again = await send()
-    if ('archive_id' in again) return again
+    if (imported(again)) return again
     throw new Error('The model was made, but the print was not linked to it: import it onto the model again.')
   },
 

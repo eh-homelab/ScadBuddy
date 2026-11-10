@@ -77,6 +77,12 @@ export function PastPrintsPicker({
   const [lastPage, setLastPage] = useState(listed.data)
   if (listed.data && listed.data !== lastPage) setLastPage(listed.data)
   const page = listed.data ?? (listed.loading ? lastPage : undefined)
+  // #5992: with `unlinkedOnly`, a full page of ScadBuddy's own prints lists nothing to
+  // pick, so the next page is read until one passes, or the route's most.
+  const allLinked = unlinkedOnly && !!listed.data && listed.data.length === limit && listed.data.every((a) => a.scadbuddy_print === true)
+  useEffect(() => {
+    if (allLinked && limit < MOST) setLimit((n) => Math.min(n + PAGE, MOST))
+  }, [allLinked, limit])
   const rows = useMemo(() => {
     const q = text.trim().toLocaleLowerCase()
     return (page ?? []).filter(
