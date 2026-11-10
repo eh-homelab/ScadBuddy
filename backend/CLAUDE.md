@@ -826,7 +826,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `revoke_order_links` drops the sealed token) and `addresses.py` (`check_address`: exactly
   one addr-spec, else `EmailInvalidError`, slug `email_invalid`). A change writes a
   `storefront_mail` row in its own transaction (`queue_mail`), so a rollback leaves none;
-  `OrderStore.MAIL_QUEUED` stays set until `Lifecycle._told` kicks
+  `orders/store.py` `MAIL_QUEUED` stays set until `Lifecycle._told` kicks
   `StorefrontMail.send_queued` on the API's loop (a top-level rollback clears it). A pass
   (one at a time per process; one asked for meanwhile runs after it, also when asked for
   at the release; a call and the passes it takes on stop claiming `PASS_BUDGET` after the
@@ -835,7 +835,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   failure (anything the SMTP session raises that is not the recipient's: connect, TLS and
   a certificate error, login and a non-ASCII password, sender, timeout; or a password
   bound to another connection) charges no row: the process backs off (1 min, doubling to
-  1 h) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). One the
+  1 h; the backoff is per process, which fits the one API replica: several replicas
+  would each back off on their own, while the shared `storefront_mail_server` row stays
+  the shop's view of the last error) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). One the
   server answered to the row's own mail counts on the row (`server_failures`): at 3 in a
   row it charges the row an attempt, so one crafted row cannot hold the queue's head. A
   recipient refusal (`SMTPRecipientsRefused`, or a 5xx `SMTPDataError` about the

@@ -446,7 +446,7 @@ class ItemPatch(BaseModel):
     #: Whether a custom item's new price is accepted (true) or left `quoted` for an
     #: `outward` accept (false, the agent's); nothing else reads it. Unset is true on a
     #: `back_office` order and false on a `storefront` one, where true is 409
-    #: `customer_accepts` (#5283).
+    #: `customer_accepts` (#5283), with or without a new price.
     accept: bool | None = None
     #: Whether the item's design is approved before it is priced (`design_first`) or
     #: with its quote (`together`), in any open state.
@@ -592,6 +592,25 @@ async def _run_linked[T](call: Callable[[], T], order_id: str, payments: Payment
         return await payments.service.run_linking(order_id, call)
     except LifecycleError as error:
         raise refused(error) from None
+
+
+async def _run_closing_linked[T](
+    call: Callable[[], T], order_id: str, orders: OrdersComponent, payments: PaymentsComponent
+) -> T:
+    """``_run`` for an accept that may accept the order (#5283), with what ``POST …/accept``
+    does after its commit: the pages of the requests it cancels are closed, the balance
+    request it opens is linked (``Payments.run_closing_linked``), and when it accepted the
+    order its Bambuddy projects are made, best effort (``_ensure_projects``)."""
+    before = await asyncio.to_thread(orders.store.order, order_id)
+    try:
+        result = await payments.service.run_closing_linked(order_id, call)
+    except LifecycleError as error:
+        raise refused(error) from None
+    if before is not None and before.status != "accepted":
+        after = await asyncio.to_thread(orders.store.order, order_id)
+        if after is not None and after.status == "accepted":
+            await _ensure_projects(orders, after)
+    return result
 
 
 def check_path(*values: str) -> None:
@@ -1288,13 +1307,19 @@ async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -
     except LifecycleError as error:
         raise refused(error) from None
     await service.service.link_pending(accepted.id)
+    await _ensure_projects(orders, accepted)
+    return accepted
+
+
+async def _ensure_projects(orders: OrdersComponent, accepted: Order) -> None:
+    """The accepted order's Bambuddy projects, best effort: waited for at most
+    `PROJECTS_WAIT_SECONDS`, then left to finish."""
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
     # leave it unrecorded, and the next ensure would make a second of the same name.
     ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
     _ENSURING.add(ensuring)
     ensuring.add_done_callback(lambda task: _ensured(task, accepted.label))
     await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
-    return accepted
 
 
 #: The accepts' project ensures still running past the wait, kept from the collector.
@@ -2205,9 +2230,10 @@ async def answer_revision(
 ) -> Revision:
     check_path(order_id, item_id, revision_id)
     by = current_actor()
-    return await _run_linked(
+    return await _run_closing_linked(
         lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by),
         order_id,
+        orders,
         service,
     )
 
@@ -2236,11 +2262,12 @@ async def accept_for_customer(
 ) -> OrderItem:
     check_path(order_id, item_id, body.target_id)
     by = current_actor()
-    return await _run_linked(
+    return await _run_closing_linked(
         lambda: orders.lifecycle.accept_for_customer(
             order_id, item_id, body.what, body.target_id, body.reason, by
         ),
         order_id,
+        orders,
         service,
     )
 
@@ -2467,8 +2494,11 @@ async def accept_quote(
 ) -> OrderItem:
     check_path(order_id, item_id, quote_id)
     by = current_actor()
-    return await _run_linked(
-        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by), order_id, service
+    return await _run_closing_linked(
+        lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by),
+        order_id,
+        orders,
+        service,
     )
 
 

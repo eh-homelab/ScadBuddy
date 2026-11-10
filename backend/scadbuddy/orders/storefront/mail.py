@@ -18,11 +18,13 @@ Failures (review I2):
   encode, sender refused, a timeout; and a password saved for another connection, no
   password or no key): not charged to a row. The row is let go, the process waits
   (`SERVER_BACKOFF_FIRST`, doubling to `SERVER_BACKOFF_MAX`) and the error is kept in
-  `storefront_mail_server` for the shop. Only a server failure the server answered to
-  the row's own mail (an ``SMTPResponseException`` from the send, not the sender
-  refused) counts on the row (``server_failures``): at `SERVER_FAILURES_MAX` in a row
-  the row is charged an attempt, so a crafted address or message cannot hold the head
-  of the queue for good;
+  `storefront_mail_server` for the shop. The backoff is kept per process, which fits the
+  one API replica: with several, each would back off on its own, while the shared
+  `storefront_mail_server` row stays the shop's view of the last error. Only a server
+  failure the server answered to the row's own mail (an ``SMTPResponseException`` from
+  the send, not the sender refused) counts on the row (``server_failures``): at
+  `SERVER_FAILURES_MAX` in a row the row is charged an attempt, so a crafted address or
+  message cannot hold the head of the queue for good;
 - of the recipient or this message (``SMTPRecipientsRefused``, or an ``SMTPDataError``
   `_recipients_fault` reads as about them): charged to the row, which waits 1, 2, 4 ...
   minutes (at most an hour) and is given up after `MAX_ATTEMPTS`;

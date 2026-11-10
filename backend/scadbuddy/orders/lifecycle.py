@@ -3123,6 +3123,17 @@ class Lifecycle:
             )
         return item
 
+    @staticmethod
+    def _customer_accepts_price(order: Order, by: Actor, accept: bool | None) -> None:
+        """An explicit ``accept`` on a storefront order is the customer's to give
+        (`customer_accepts`, storefront spec §4.5)."""
+        if accept and order.source == "storefront" and by.kind != "customer":
+            raise LifecycleError(
+                "customer_accepts",
+                f"the customer accepts a price on storefront order {order.label};"
+                " the shop accepts only with Accept for the customer",
+            )
+
     def _custom_price(
         self,
         conn: Conn,
@@ -3139,12 +3150,7 @@ class Lifecycle:
         order's default (:func:`price_accepted`); on a storefront order only the
         customer accepts it (`customer_accepts`, storefront spec §4.5)."""
         check_submitted(order)
-        if accept and order.source == "storefront" and by.kind != "customer":
-            raise LifecycleError(
-                "customer_accepts",
-                f"the customer accepts a price on storefront order {order.label};"
-                " the shop accepts only with Accept for the customer",
-            )
+        self._customer_accepts_price(order, by, accept)
         accept = price_accepted(order, accept)
         line = QuoteLine(
             kind="manual",
@@ -3213,9 +3219,10 @@ class Lifecycle:
         new `manual` quote at the price sent, else at the price it has (its accepted
         quote's, or its newest's). With ``accept`` that quote is accepted and the item
         stays `approved` (refused on hold, as an accepted quote is); without (the
-        agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
-        on the normal flow: its quote is dropped as any reference change drops one. A
-        custom item takes no ``approval`` (422): it has no design to approve.
+        agent's) the item is `quoted`. On a storefront order an explicit ``accept`` is
+        `customer_accepts`, with or without a price. A ``reference`` given to it makes it
+        a model item, on the normal flow: its quote is dropped as any reference change
+        drops one. A custom item takes no ``approval`` (422): it has no design to approve.
 
         With ``expected_revision_id`` (the quote's run) it writes nothing once the item's
         current revision is another (`revision_not_newest`): the caller's work was of a
@@ -3223,6 +3230,8 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
+            # Refused with or without a price: without one it would change nothing.
+            self._customer_accepts_price(order, by, accept)
             explicit = accept is True
             accept = price_accepted(order, accept)
             item = self._item_of(conn, order, item_id)

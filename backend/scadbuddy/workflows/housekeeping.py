@@ -203,10 +203,11 @@ BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
 STOREFRONT_DRAFTS_SWEEP = "housekeeping_sweep_storefront_drafts"
 STOREFRONT_DRAFTS_PATCH = "housekeeping-sweep-storefront-drafts"
 #: #5283: send the storefront mail the after-commit send left queued
-#: (`orders.storefront.mail.StorefrontMail.send_queued`), each row at most `MAX_ATTEMPTS`
-#: times. Last, behind its own patch; on the prune Schedule too, as the payment closes are
-#: though they call a provider: a mail that failed reaches the customer within
-#: `PRUNE_INTERVAL`, not the sweeps' interval, and with no SMTP host it sends nothing.
+#: (`orders.storefront.mail.StorefrontMail.send_queued`); a row is given up after
+#: `MAX_ATTEMPTS` charged refusals. Last, behind its own patch; on the prune Schedule too,
+#: as the payment closes are though they call a provider: a mail that failed reaches the
+#: customer within `PRUNE_INTERVAL`, not the sweeps' interval, and with no SMTP host it
+#: sends nothing.
 STOREFRONT_MAIL_SWEEP = "housekeeping_send_storefront_mail"
 STOREFRONT_MAIL_PATCH = "housekeeping-send-storefront-mail"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
