@@ -489,7 +489,10 @@ export class ToolError extends Error {
   readonly untrusted: string | undefined
   /** The ScadBuddy-authored part of the message. */
   readonly summary: string
-  /** The last segment of the backend problem's `type` (`already_notified`), when it has one. */
+  /**
+   * The slug a ScadBuddy problem `type` ends in (`…/problems/orders/already_notified`), set by
+   * call.ts `ok` only for types under `https://scadbuddy.dev/problems/` (`PROBLEM_TYPE`).
+   */
   readonly problem: string | undefined
 
   constructor(message: string, status?: number, untrusted?: string, problem?: string) {

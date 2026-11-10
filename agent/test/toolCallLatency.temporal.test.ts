@@ -289,8 +289,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(
         await connection.close()
         // Never from the moment stop() is called: a terminating pod takes no more eager calls.
         const stopping = worker.stop()
-        expect(worker.connection()).toBeUndefined()
+        const whileStopping = worker.connection()
         await stopping
+        expect(whileStopping).toBeUndefined()
       }
       expect(worker.connection()).toBeUndefined()
     }, 120_000)

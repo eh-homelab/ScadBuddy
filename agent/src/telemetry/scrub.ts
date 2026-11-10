@@ -9,9 +9,10 @@ import type { ReadableSpan, SpanExporter, TimedEvent } from '@opentelemetry/sdk-
 // HTTP instrumentation records a request's query string and user agent on its
 // own. So the rule is enforced here, once, in front of the exporter, not at
 // each call site:
-//   - `exception.message` is dropped from every exception event;
-//   - `exception.stacktrace` keeps only its V8 frame lines, after the
-//     message is cut out of the stack's head (a message can imitate a frame);
+//   - `exception.message` is dropped from every event, whatever its name;
+//   - an exception event's `exception.stacktrace` keeps only its V8 frame lines,
+//     after the message is cut out of the stack's head (a message can imitate a
+//     frame); any other event's is dropped;
 //   - a non-empty status description becomes the exception's type, or `error`;
 //   - `url.query` and user agents are dropped;
 //   - the Host header (`http.host`, `http.server_name`, `server.address`), the
@@ -128,8 +129,11 @@ export function scrubAttributes(attributes: Attributes, kind?: SpanKind): Attrib
 
 function scrubEvent(event: TimedEvent): TimedEvent {
   if (!event.attributes) return event
-  if (event.name !== 'exception') return { ...event, attributes: scrubAttributes(event.attributes) }
   const { 'exception.message': message, ...rest } = scrubAttributes(event.attributes)
+  if (event.name !== 'exception') {
+    delete rest['exception.stacktrace']
+    return { ...event, attributes: rest }
+  }
   const stack = rest['exception.stacktrace']
   if (typeof stack === 'string') {
     rest['exception.stacktrace'] = framesOnly(stack, typeof message === 'string' ? message : undefined)

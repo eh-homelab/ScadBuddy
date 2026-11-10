@@ -144,6 +144,9 @@ class SettingsView(BaseModel):
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
     storefront_mail_tls: Literal["starttls", "implicit", "none"] = "starttls"
+    #: The bot check (#5283): the public site key, and only whether a secret is set.
+    storefront_turnstile_site_key: str | None = None
+    has_storefront_turnstile_secret: bool = False
     #: Job cost (#5326).
     pricing_labour_rate_per_hour: str = "0"
     pricing_usd_rate: str = "1"
@@ -452,6 +455,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         orders_customer_messaging=stored.orders_customer_messaging,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
+        has_storefront_turnstile_secret=bool(runtime.storefront_turnstile_secret),
         sources=snapshot.sources,
         applies=dict(APPLIES),
         restart_required=restart_required(state, runtime),
@@ -540,6 +544,14 @@ async def put_settings(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             msg,
             errors=[{"loc": ["body", "git_remote_token"], "msg": msg}],
+        )
+    if patch.storefront_turnstile_secret and store.kek is None:
+        # #5283: the bot check's secret is only ever stored sealed under the KEK.
+        msg = "The Turnstile secret is stored sealed: set SCADBUDDY_SECRET_KEY_FILE first."
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            msg,
+            errors=[{"loc": ["body", "storefront_turnstile_secret"], "msg": msg}],
         )
     try:
         await asyncio.to_thread(store.save, patch)

@@ -530,8 +530,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
         {
           PreToolUse: [
             makePreToolUseHook(tierOf, run.onDecision, gate, guard, run.live),
-            // Claude Code's own WebFetch, which an allowed package may be given, fetches
-            // where the agent's egress check does not reach; this checks it first.
+            // Claude Code's own WebFetch fetches where the agent's egress check does not reach;
+            // a session turn is given the agent's instead (builtins/server.ts), so this is a second line.
             webFetchEgressHook(run.resolve),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],

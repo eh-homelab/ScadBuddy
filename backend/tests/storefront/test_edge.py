@@ -68,7 +68,9 @@ def crud_mock() -> Iterator[respx.Router]:
             200, json={"access_token": TOKEN, "expires_in": 900}
         )
         router.get("/api/v1/internal/crud/storefront/areas", name="areas").respond(
-            200, json={"areas": ["listings", "renders", "drafts", "requests", "pay"]}, headers=CRUD
+            200,
+            json={"areas": ["listings", "renders", "drafts", "requests", "pay", "turnstile"]},
+            headers=CRUD,
         )
         router.get("/api/v1/internal/crud/storefront/listings", name="listings").respond(
             200, json=LISTINGS, headers=CRUD
@@ -79,6 +81,13 @@ def crud_mock() -> Iterator[respx.Router]:
         router.get(
             "/api/v1/internal/crud/storefront/requests-enabled", name="requests_enabled"
         ).respond(200, json={"enabled": True}, headers=CRUD)
+        # The bot check, off (#5283): no site key, and every token passes.
+        router.get("/api/v1/internal/crud/storefront/turnstile", name="site_key").respond(
+            200, json={"site_key": None}, headers=CRUD
+        )
+        router.post("/api/v1/internal/crud/storefront/turnstile/verify", name="turnstile").respond(
+            200, json={"verdict": "off"}, headers=CRUD
+        )
         yield router
 
 

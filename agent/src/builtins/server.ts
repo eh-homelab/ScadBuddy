@@ -11,15 +11,19 @@ import { CALL_ID_META } from './callId.js'
 
 // The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
 // WebSearch and the background ones, as one MCP server named `builtin`. Each takes
-// Claude Code's own input and answers in its words. Since Step 9.6 Claude Code's file
-// tools and task list run in its own process (access/nativeBuiltins.ts), so a package
-// that named `builtin__Read` and the like gets the native tool instead.
+// Claude Code's own input and answers in its words. Every session turn offers each one
+// whose item under `builtin:claude-code` is not off (access/nativeBuiltins.ts
+// `SESSION_BUILTINS`, the same names as BUILTINS), the background ones where the session
+// keeps background tasks; a package that names one no longer decides whether it exists.
+// Since Step 9.6 Claude Code's file tools and task list run in its own process
+// (`NATIVE_BUILTINS`), so a package that named `builtin__Read` and the like gets the native
+// tool instead.
 
 export const BUILTIN_SERVER = 'builtin'
 
 export type BuiltinContext = {
   web: WebContext
-  /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
+  /** The session's background tasks (CronCreate and the rest); absent where the agent keeps none (no Temporal or no database). */
   background?: BackgroundContext | undefined
   /** The call's tool_use id, when its turn tool sends one (CALL_ID_META): a retried call is the same call. */
   callId?: string | undefined
@@ -178,13 +182,14 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
 
 /**
  * The built-ins a classic turn gets from the session instead of Claude Code, served
- * in-process. The background ones (CronCreate and the rest) live in Claude Code's own
- * process, which the turn ends ("Session-only (not written to disk, dies when Claude
- * exits)"), while these are kept by the session (src/background/). WebFetch's fetch
- * connects only to the addresses its egress check passed (#2684; Claude Code's resolves
- * the name again as it connects). Each call is outward, as every package built-in is.
+ * in-process: every one of BUILTINS. The background ones (CronCreate and the rest) live in
+ * Claude Code's own process, which the turn ends ("Session-only (not written to disk, dies
+ * when Claude exits)"), while these are kept by the session (src/background/). WebFetch's
+ * fetch connects only to the addresses its egress check passed (#2684; Claude Code's
+ * resolves the name again as it connects), and WebSearch is ScadBuddy's too (decision Q2).
+ * Each call is at its item's tier (access/nativeBuiltins.ts `sessionTierOf`).
  */
-export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
+export const CLASSIC_BUILTINS: readonly string[] = Object.keys(BUILTINS)
 
 /** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`. */
 export function classicBuiltinServer(
@@ -204,16 +209,28 @@ export function classicBuiltinServer(
   })
 }
 
-/** What a classic turn's model is told about the built-ins it gets that way. */
-export function classicBuiltinNote(names: readonly string[]): string {
+/**
+ * What a classic turn's model is told about the built-ins it gets that way: `served` with
+ * their tiers, and `shell`, Bash's tier when it is on (a Monitor may run a command, at the stricter of the two), else undefined.
+ */
+export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined): string {
+  const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
+  const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)
+  const asks = asking.length ? ` A call of ${asking.join(', ')} asks the user first.` : ''
   const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
     ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
       'session as a new message when it is due and the session is idle.'
     : ''
+  const monitor = names.includes('Monitor')
+    ? shell !== undefined
+      ? shell === 'outward'
+        ? ' A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).'
+        : ' A Monitor with a `ws` source asks the user first.'
+      : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'
+    : ''
   return (
-    `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
-    'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
-    `the same input. Every call of one asks the user first.${kept}`
+    `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server. Use them ` +
+    `wherever you would use the built-in of that name, and where a plugin's skills or agents say to: they take the same input.${asks}${kept}${monitor}`
   )
 }

@@ -70,6 +70,10 @@ same way, `vite.config.ts`).
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
+  The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
+  and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
+  takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
+  after each send, because a token passes one check only. The mocks keep the check off.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

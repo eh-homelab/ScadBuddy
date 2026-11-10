@@ -150,6 +150,23 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'Converts the assistant\'s spend, which is in US dollars, into a job\'s cost for orders in the shop\'s currency (#5330). 1 when the shop prices in US dollars. More than 0.',
     advanced: true,
   },
+  // #5283 — the storefront's bot check (storefront spec §5.8): Cloudflare Turnstile on
+  // design requests today (submit, sign-up and sign-in once those forms ship), on while a
+  // site key is set.
+  {
+    name: 'storefront_turnstile_site_key',
+    section: 'orders',
+    label: 'Storefront bot check: Turnstile site key',
+    kind: 'text',
+    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests (and on submit, sign-up and sign-in once those forms ship), and refuses them while the secret below is not set. Empty turns the check off.',
+  },
+  {
+    name: 'storefront_turnstile_secret',
+    section: 'orders',
+    label: 'Storefront bot check: Turnstile secret key',
+    kind: 'secret',
+    help: 'The widget\'s secret key, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again. Only this server sends it, to Cloudflare; the storefront and its page never see it.',
+  },
   // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.
   {
     name: 'lan_require_plate_clear',
@@ -456,6 +473,7 @@ const HAS_KEY = {
   bambuddy_render_api_key: 'has_render_api_key',
   google_fonts_api_key: 'has_google_fonts_api_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 } as const
 export type SecretName = keyof typeof HAS_KEY
 
@@ -475,7 +493,8 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'bambuddy_render_api_key' ||
     name === 'google_fonts_api_key' ||
     name === 'store_s3_secret_access_key' ||
-    name === 'git_remote_token'
+    name === 'git_remote_token' ||
+    name === 'storefront_turnstile_secret'
   )
     return ''
   const value = (settings as Record<string, unknown>)[name]

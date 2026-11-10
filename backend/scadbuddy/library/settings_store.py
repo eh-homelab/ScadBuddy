@@ -797,6 +797,10 @@ class SettingsPatch(BaseModel):
     storefront_mail_user: str | None = None
     storefront_mail_sender: str | None = None
     storefront_mail_tls: Literal["starttls", "implicit", "none"] | None = None
+    #: The bot check (#5283): the site key is public; the secret is write-only, ``""``
+    #: clears it, and saving one needs the KEK (`api/settings.py`).
+    storefront_turnstile_site_key: str | None = Field(default=None, max_length=200)
+    storefront_turnstile_secret: str | None = Field(default=None, max_length=200)
     #: Job cost (#5326): the labour rate per hour, one USD in the shop's currency, and
     #: the thin-margin threshold percent.
     pricing_labour_rate_per_hour: str | None = None

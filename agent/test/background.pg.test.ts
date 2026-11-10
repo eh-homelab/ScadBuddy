@@ -458,7 +458,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     const dir = await mkdtemp(path.join(os.tmpdir(), 'bg-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'loop' }))
-    const pkg = { name: 'loop', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['CronCreate', 'Monitor', 'Read'] }
+    // Bash too: a Monitor's command runs only while Bash is on (#5870), and the package switches it on.
+    const pkg = { name: 'loop', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['Bash', 'CronCreate', 'Monitor', 'Read'] }
     const scripted = scriptedRunner(() => ({ reply: 'ok' }))
     const classic = manager({
       sql: db.sql,
@@ -471,9 +472,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.send(session.id, browser, 'loop it')
     await expect.poll(() => scripted.runs.length).toBe(1)
     const run = scripted.runs[0]!
-    // Read is Claude Code's own in every session since Step 9.6, not the package's.
+    // Read and Bash are Claude Code's own in every session since Step 9.6, not the package's.
     expect(run.builtinTools).toEqual([])
-    expect(run.nativeTools?.map((t) => t.name)).toContain('Read')
+    expect(run.nativeTools?.map((t) => t.name)).toEqual(expect.arrayContaining(['Read', 'Bash']))
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('CronCreate (mcp__builtin__CronCreate)')
     // The turn's Monitor runs its command on this replica's own queue, where the turn's Bash runs.
@@ -482,6 +483,127 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
       content: { text: string }[]
     }
     expect((await store.get(idOf(watch.content[0]!.text)))!.spec).toMatchObject({ queue: 'agent-tools.pod-b' })
+    await turnClient.close()
+    classic.abortAll()
+  })
+
+  it("gives a flow-started session's turns, a Workflow agent's chat's and their forks' only WebFetch and WebSearch (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const served = async (sessionId: string, text: string) => {
+      await (await classic.send(sessionId, browser, text)).done
+      // The session's process: a later turn of the same session runs on the one its first spawned.
+      const run = scripted.runs.filter((r) => (r.sessionId ?? r.resume) === sessionId).at(-1)!
+      const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+      const names = (await turnClient.listTools()).tools.map((t) => t.name).sort()
+      await turnClient.close()
+      return names
+    }
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000001', call_id: 'toolu_flow' }
+    const { session: byFlow, turn } = await classic.start(browser, { origin: 'chat', prompt: 'from a flow', flow: flowRun, withoutBackground: true })
+    await turn!.done
+    expect(await served(byFlow.id, 'again')).toEqual(['WebFetch', 'WebSearch'])
+    // A Workflow agent's chat, under a session that keeps background tasks.
+    const { session: parent } = await classic.start(browser, { origin: 'chat' })
+    expect(await served(parent.id, 'hello')).toContain('Workflow')
+    const child = await classic.startChild(parent.id, browser, { title: 'wf · a', tags: ['workflow'] })
+    expect(await served(child.id, 'do the step')).toEqual(['WebFetch', 'WebSearch'])
+    // A fork keeps its parent's (the scripted runner writes no transcript, so one is given here).
+    await classic.store.append({ projectKey: 'p', sessionId: byFlow.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    const fork = await classic.fork(byFlow.id, browser, {})
+    expect(await served(fork.id, 'go on')).toEqual(['WebFetch', 'WebSearch'])
+    // A flow run's fork of an ordinary session keeps none; the person's own fork of it keeps them.
+    await classic.store.append({ projectKey: 'p', sessionId: parent.id }, [{ type: 'user', uuid: 'u2', message: {} }])
+    const flowFork = await classic.fork(parent.id, browser, { withoutBackground: true })
+    expect(await served(flowFork.id, 'go on')).toEqual(['WebFetch', 'WebSearch'])
+    const ownFork = await classic.fork(parent.id, browser, {})
+    expect(await served(ownFork.id, 'go on')).toContain('Workflow')
+    classic.abortAll()
+  })
+
+  it("revalidates an idle process against the session's own shape, not a flow turn's, so the person's process is kept and reused (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const spawned = (id: string) => scripted.runs.filter((r) => (r.sessionId ?? r.resume) === id).length
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await (await classic.send(session.id, browser, 'mine')).done
+    expect(spawned(session.id)).toBe(1)
+    // A flow's turn has another tool set, so it runs on a process of its own shape.
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000003', call_id: 'toolu_ask' }
+    await (await classic.send(session.id, browser, 'from the flow', { flow: flowRun })).done
+    expect(spawned(session.id)).toBe(2)
+    // The resync checks the idle process against the session's next own turn: the flow-shaped one goes.
+    await classic.revalidateWarm()
+    expect(classic.warm.size()).toBe(0)
+    await (await classic.send(session.id, browser, 'mine again')).done
+    expect(spawned(session.id)).toBe(3)
+    // And the person's process stays through the resync, and the next turn reuses it.
+    await classic.revalidateWarm()
+    expect(classic.warm.size()).toBe(1)
+    await (await classic.send(session.id, browser, 'and again')).done
+    expect(spawned(session.id)).toBe(3)
+    classic.abortAll()
+  })
+
+  it("gives a turn a flow run sends to an ordinary session no background built-in, and the person's next turn them all (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const listed = async (sessionId: string) => {
+      const run = scripted.runs.filter((r) => (r.sessionId ?? r.resume) === sessionId).at(-1)!
+      const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+      const names = (await turnClient.listTools()).tools.map((t) => t.name).sort()
+      await turnClient.close()
+      return names
+    }
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await (await classic.send(session.id, browser, 'mine')).done
+    expect(await listed(session.id)).toContain('ScheduleWakeup')
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000002', call_id: 'toolu_ask' }
+    await (await classic.send(session.id, browser, 'from the flow', { flow: flowRun })).done
+    expect(await listed(session.id)).toEqual(['WebFetch', 'WebSearch'])
+    await (await classic.send(session.id, browser, 'mine again')).done
+    expect(await listed(session.id)).toContain('ScheduleWakeup')
+    classic.abortAll()
+  })
+
+  it('gives every classic turn the background ones, with no package; a Monitor command needs Bash (#5870)', async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await classic.send(session.id, browser, 'wake me later')
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const run = scripted.runs[0]!
+    expect(run.systemPromptAppend).toContain('ScheduleWakeup (mcp__builtin__ScheduleWakeup)')
+    const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+    const listed = (await turnClient.listTools()).tools.map((t) => t.name).sort()
+    expect(listed).toEqual(['CronCreate', 'CronDelete', 'CronList', 'Monitor', 'ScheduleWakeup', 'TaskStop', 'WebFetch', 'WebSearch', 'Workflow'])
+    // Bash is off: the turn gives Monitor no command queue.
+    const watch = (await turnClient.callTool({ name: 'Monitor', arguments: { description: 'log', command: 'tail -f x.log' } })) as {
+      content: { text: string }[]
+      isError?: boolean
+    }
+    expect(watch).toMatchObject({ isError: true })
+    expect(watch.content[0]!.text).toContain('cannot run monitor commands')
     await turnClient.close()
     classic.abortAll()
   })
@@ -503,10 +625,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.send(session.id, browser, 'fetch it')
     await expect.poll(() => scripted.runs.length).toBe(1)
     const run = scripted.runs[0]!
-    // Claude Code's WebSearch stays (a server tool: the API searches, not this pod).
-    expect(run.builtinTools).toEqual(['WebSearch'])
+    // WebSearch is the session's too (decision Q2, #5870): neither is Claude Code's own.
+    expect(run.builtinTools).toEqual([])
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('WebFetch (mcp__builtin__WebFetch)')
+    expect(run.systemPromptAppend).toContain('WebSearch (mcp__builtin__WebSearch)')
     expect(run.systemPromptAppend).not.toContain('jobs, wakeups')
     classic.abortAll()
   })
