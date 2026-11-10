@@ -19,6 +19,7 @@ import {
   retryQueryLength,
 } from '../src/memory/hindsight.js'
 import { CONTINUE_PROMPT } from '../src/harness/fallback.js'
+import { DIRECTORY_NOTE_MARK, directoryNote } from '../src/sessions/directoryNote.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -394,6 +395,31 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(String(item.content)).not.toContain('HUGE TOOL OUTPUT')
     expect(String(item.content)).not.toContain(CREDENTIAL)
     expect(logs).toEqual([])
+  })
+
+  // #5867: a fork's first turn starts with the directory note (sessions/directoryNote.ts), as a
+  // paragraph before a string prompt's text or as a text block of its own (withNote). It is
+  // ScadBuddy's text, never the user's words.
+  it("retains a fork's first turn without the directory note, in either form (#5867)", async () => {
+    const h = hooks()
+    const note = directoryNote('/sessions/parent', '/sessions/child')
+    const file = await transcript([
+      { type: 'user', timestamp: '2026-11-10T10:00:00.000Z', message: { role: 'user', content: `${note}\n\nRead notes/test.txt` } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'It says hello.' }] } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: note }, { type: 'text', text: 'And notes/b.txt?' }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'It is empty.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: 'Read notes/test.txt', timestamp: '2026-11-10T10:00:00.000Z' },
+      { role: 'assistant', content: 'It says hello.' },
+      { role: 'user', content: 'And notes/b.txt?' },
+      { role: 'assistant', content: 'It is empty.' },
+    ])
+    expect(String(item.content)).not.toContain(DIRECTORY_NOTE_MARK)
   })
 
   // #3701: a turn that failed over to another credential (harness/fallback.ts) leaves in

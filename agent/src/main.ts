@@ -94,7 +94,7 @@ import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
-import { startHostWorkers } from './temporal/session/hostWorkers.js'
+import { startHostWorkers, stopAfter } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
@@ -434,6 +434,8 @@ const workspaceBlobStore = new BackendWorkspaceBlobs(
 const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
+      // The hourly reconcile runs on one replica at a time, its lock on a lock connection.
+      locks: database.locks,
       blobs: {
         store: workspaceBlobStore,
         ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
@@ -1345,17 +1347,21 @@ async function stop(): Promise<void> {
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
   // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
   const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
-  await Promise.all([
+  const drained = Promise.all([
     temporalWorker?.stop(),
     hostWorkers?.sessions?.stop(),
     sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
-  // The pinned host worker only now (#5862 review): it runs this replica's own BridgeCalls, whose
-  // workflow tasks a draining turn's browser_* call needs until the turn ends, and its pinned calls.
-  // Not awaited: it runs beside shutdown() below, which closes the tabs first, so its bridge.tab
-  // calls end at once ("gone"); process.exit ends whatever is left, within the pod's grace.
-  void hostWorkers?.pinned.stop()
+  // The pinned host worker only once those end (#5862 review, stopAfter): it runs this replica's own
+  // BridgeCalls, whose workflow tasks a draining turn's browser_* call needs until the turn ends, and
+  // its pinned calls. It runs beside shutdown() below, which closes the tabs first, so its bridge.tab
+  // calls end at once ("gone"). Its stop ends within PINNED_SHUTDOWN_FORCE_MS (8 s) of the drain, and
+  // shutdown()'s 10 s deadline starts later, so closeDatabase, which awaits it, never closes the pool
+  // under a pinned call still in its grace (a classic Monitor's appendEvent). The server's own close
+  // does not wait for it.
+  const pinnedStopped = hostWorkers ? stopAfter(hostWorkers.pinned, drained) : undefined
+  await drained
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()
   stopSessionWake?.()
@@ -1394,6 +1400,8 @@ async function stop(): Promise<void> {
     // never wake (#715 review; busEvents.ts).
     closeDatabase: database
       ? async () => {
+          // The pinned host worker's running activities, bounded by its 8 s force time, before the pool closes.
+          await pinnedStopped
           sessionEvents?.close()
           await database.close()
         }
