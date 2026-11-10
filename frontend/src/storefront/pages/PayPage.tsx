@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { StoreError, errorText, store, type PayCheckout } from '../api/client'
 import { formatMoney } from '../../lib/money'
+import { clearPayFromOrder, payCameFromOrder } from '../payReturn'
 
 /** What a link that opens no payment reads (an unknown, spent or replaced link). */
 const NO_PAYMENT =
@@ -28,17 +29,11 @@ declare global {
 }
 
 /**
- * Whether the payer came from this site's order page (`/o`; a referrer holds no fragment)
- * and has a page to go back to: a pay link opened in a tab of its own has none.
+ * Whether the payer clicked the order page's pay link (`payReturn.ts`) and has a page to
+ * go back to: a pay link opened in a tab of its own has none.
  */
 function cameFromOrderPage(): boolean {
-  if (window.history.length <= 1) return false
-  try {
-    const from = new URL(document.referrer)
-    return from.origin === window.location.origin && from.pathname === '/o'
-  } catch {
-    return false
-  }
+  return window.history.length > 1 && payCameFromOrder()
 }
 
 /**
@@ -84,6 +79,9 @@ export function PayPage() {
   const [error, setError] = useState<string | null>(null)
   const [approved, setApproved] = useState(false)
   const container = useRef<HTMLDivElement>(null)
+  const [canGoBack] = useState(cameFromOrderPage)
+
+  useEffect(() => clearPayFromOrder(), [])
 
   useEffect(() => {
     if (!token) return
@@ -155,7 +153,7 @@ export function PayPage() {
           {approved ? (
             <>
               <p role="status">Thanks. We will confirm your payment shortly.</p>
-              {cameFromOrderPage() ? (
+              {canGoBack ? (
                 <button type="button" className="sf-button" onClick={() => navigate(-1)}>
                   Back to your order
                 </button>

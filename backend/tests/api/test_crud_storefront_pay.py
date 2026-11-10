@@ -21,7 +21,6 @@ FOUND = VenmoCheckout(
     currency="USD",
     order_number="ORD-2026-1",
     client_id="client",
-    environment="sandbox",
     paypal_order_id="5O190127TN364715T",
     minor_exponent=2,
 )

@@ -1574,7 +1574,6 @@ CHECKOUT = {
     "currency": "USD",
     "order_number": "2026-7",
     "client_id": "AYSq3RDGsmBLJE-otTkBtM",
-    "environment": "sandbox",
     "paypal_order_id": "5O190127TN364715T",
     "minor_exponent": 2,
 }

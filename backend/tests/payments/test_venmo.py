@@ -134,7 +134,6 @@ def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
         currency="USD",
         order_number=order.number,
         client_id=SETTINGS["client_id"],
-        environment="sandbox",
         paypal_order_id=PAYPAL_ORDER,
         minor_exponent=2,
     )

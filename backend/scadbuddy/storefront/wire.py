@@ -27,7 +27,6 @@ PAY_CHECKOUT_FIELDS: Final = frozenset(
         "currency",
         "order_number",
         "client_id",
-        "environment",
         "paypal_order_id",
         "minor_exponent",
     }

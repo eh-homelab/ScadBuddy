@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router'
 import { formatMoney } from '../../lib/money'
+import { markPayFromOrder } from '../payReturn'
 import {
   ActionKey,
   StoreError,
@@ -325,7 +326,10 @@ function Payments({ order }: { order: CustomerOrder }) {
               {payment.status === 'pending' && <span>We are confirming your payment.</span>}
               {payment.status === 'open' &&
                 (payment.pay_url ? (
-                  <a className="sf-button" href={payment.pay_url} rel="noreferrer">
+                  <a className="sf-button" href={payment.pay_url}
+                    rel="noreferrer"
+                    onClick={() => markPayFromOrder(payment.pay_url!)}
+                  >
                     {payment.kind === 'deposit' ? `Pay deposit ${amount}` : `Pay ${amount}`}
                   </a>
                 ) : (

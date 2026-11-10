@@ -7,10 +7,12 @@ vi.mock('react-router', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useNavigate: () => navigate,
 }))
-import type { PayCheckout } from '../api/client'
+import type { CustomerOrder, PayCheckout } from '../api/client'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { OrderPage } from './OrderPage'
 import { PayPage } from './PayPage'
+import userEvent from '@testing-library/user-event'
 
 const TOKEN = 'T'.repeat(43)
 
@@ -19,7 +21,6 @@ const CHECKOUT: PayCheckout = {
   currency: 'USD',
   order_number: '2026-7',
   client_id: 'AYSq3RDGsmBLJE-otTkBtM',
-  environment: 'sandbox',
   paypal_order_id: '5O190127TN364715T',
   minor_exponent: 2,
 }
@@ -55,6 +56,22 @@ function serve(answer: () => Response): { bodies: unknown[]; urls: string[] } {
   return seen
 }
 
+function serveOrder(): void {
+  const order: CustomerOrder = {
+    number: '2026-7',
+    status: 'We are reviewing your order',
+    currency: 'USD',
+    minor_exponent: 2,
+    can_cancel: false,
+    items: [],
+    payments: [
+      { id: 'p1', kind: 'balance', amount_minor: 1250, currency: 'USD', status: 'open', pay_url: `/pay#${TOKEN}` },
+    ],
+    shipments: [],
+  }
+  server.use(http.post('/api/store/v1/order/view', () => HttpResponse.json(order)))
+}
+
 async function sdk(): Promise<HTMLScriptElement> {
   return waitFor(() => {
     const script = document.querySelector<HTMLScriptElement>('script[src*="paypal.com/sdk/js"]')
@@ -67,13 +84,9 @@ function history(length: number) {
   Object.defineProperty(window.history, 'length', { value: length, configurable: true })
 }
 
-function referrer(value: string) {
-  Object.defineProperty(document, 'referrer', { value, configurable: true })
-}
-
 afterEach(() => {
-  referrer('')
   history(1)
+  sessionStorage.clear()
   navigate.mockReset()
   delete (window as unknown as { paypal?: unknown }).paypal
   document.querySelectorAll('script[src*="paypal.com"]').forEach((node) => node.remove())
@@ -123,33 +136,41 @@ describe('PayPage', () => {
     expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
   })
 
-  it('goes back to the order when the payer came from this site\'s order page', async () => {
-    referrer(`${window.location.origin}/o`)
+  it('goes back to the order when the payer clicked the order page\'s pay link', async () => {
+    serveOrder()
+    const { unmount } = renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    const link = await screen.findByRole('link', { name: 'Pay $12.50' })
+    expect(link).toHaveAttribute('rel', 'noreferrer')
+    // jsdom cannot navigate; the click is all the page sees.
+    link.addEventListener('click', (event) => event.preventDefault())
+    await userEvent.setup().click(link)
+    unmount()
     history(2)
     await approve()
-    const { default: userEvent } = await import('@testing-library/user-event')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Back to your order' }))
     expect(navigate).toHaveBeenCalledWith(-1)
     expect(screen.queryByText(/Open your order from the link in your mail/)).not.toBeInTheDocument()
+    expect(sessionStorage.getItem('sb_pay_from_order')).toBeNull()
   })
 
   it('offers no way back when the pay link opened in a tab of its own', async () => {
-    referrer(`${window.location.origin}/o`)
+    sessionStorage.setItem('sb_pay_from_order', '1')
     history(1)
     await approve()
     expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
     expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
   })
 
-  it.each(['https://elsewhere.example/o', `${window.location.origin}/draft`, `${window.location.origin}/order`])(
-    'offers no way back from %s',
-    async (from) => {
-      referrer(from)
-      await approve()
-      expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
-      expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
-    },
-  )
+  it('offers no way back when the storage refuses', async () => {
+    history(2)
+    const refuse = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked')
+    })
+    await approve()
+    refuse.mockRestore()
+    expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
+    expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
+  })
 
   it.each([
     ['JPY', 0, '¥1,250'],

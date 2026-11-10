@@ -70,7 +70,6 @@ class VenmoCheckout(BaseModel):
     currency: str
     order_number: str
     client_id: str
-    environment: str
     paypal_order_id: str
     #: The currency's decimal places (`orders/currency.py`), so the page never asks the
     #: browser's `Intl` for them.
