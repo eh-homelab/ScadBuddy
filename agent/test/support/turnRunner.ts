@@ -54,6 +54,10 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** The registry's tiers; every tool `read` when undefined. */
+  tierOf?: TurnRunnerDeps['tierOf']
+  /** The turn's calls as activities, with these tools listed as its turn tools (`<server>__<tool>`): its plugins are then proxied. */
+  turnTools?: string[]
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -122,7 +126,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       },
     },
     access: new AccessResolver(options.reader ? options.reader(store.access) : store.access),
-    tierOf: () => 'read',
+    tierOf: options.tierOf ?? (() => 'read'),
     mcpServers: (_session, _turn, extras) => {
       serverExtras.push(extras)
       return { scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }
@@ -173,9 +177,19 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    ...(options.turnTools
+      ? {
+          toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),
+          turnTools: () =>
+            Promise.resolve({
+              tools: options.turnTools!.map((name) => ({ name, description: name, input_schema: { type: 'object' }, may_park: true })),
+            }),
+        }
+      : {}),
     stderr: () => {},
     store: {
       exists: () => Promise.resolve(options.resume ?? false),
+      lastCwd: () => Promise.resolve(undefined),
       append: () => Promise.resolve(),
       load: () => Promise.resolve(null),
     },

@@ -152,6 +152,12 @@ _ORDER = (
     " deposit_waived_reason, balance_waived_reason, source, submitted_at,"
     " storefront_visitor_id"
 )
+#: The draft sweep's guard (#5282): ``{order}`` has no time or cost entry, which the
+#: cart's delete would cascade away.
+_NO_ENTRIES = (
+    "NOT EXISTS (SELECT 1 FROM order_time_entries t WHERE t.order_id = {order})"
+    " AND NOT EXISTS (SELECT 1 FROM order_cost_entries c WHERE c.order_id = {order})"
+)
 
 
 class ArchiveOrigin(NamedTuple):
@@ -873,13 +879,15 @@ class OrderStore:
     def idle_drafts(self, conn: Conn, *, before: datetime, limit: int) -> list[str]:
         """Up to ``limit`` unsubmitted storefront carts that neither changed nor had
         their visitor seen since ``before`` (#5282), locked for the caller's
-        transaction. A cart a visitor's write holds is skipped, not waited for. Only the
-        order is locked: `claim_idle_draft` checks each one again before it goes."""
+        transaction. A cart a visitor's write holds is skipped, not waited for. A cart
+        with a time or cost entry is never listed (`_NO_ENTRIES`). Only the order is
+        locked: `claim_idle_draft` checks each one again before it goes."""
         rows = conn.execute(
             "SELECT o.id FROM orders o"
             " LEFT JOIN storefront_visitors v ON v.id = o.storefront_visitor_id"
             " WHERE o.source = 'storefront' AND o.submitted_at IS NULL"
             " AND GREATEST(o.updated_at, v.last_seen_at) < %s"
+            f" AND {_NO_ENTRIES.format(order='o.id')}"
             " ORDER BY o.updated_at, o.id LIMIT %s FOR UPDATE OF o SKIP LOCKED",
             (before, limit),
         ).fetchall()
@@ -890,10 +898,13 @@ class OrderStore:
         ``before``, read under locks held to the end of the caller's transaction: the
         order's (skipped, not waited for, while a visitor's write holds it) and its
         visitor's (``FOR SHARE``: a touch waits for the commit, and one committed before
-        is read). A touch or a change after the listing keeps the cart."""
+        is read). A touch or a change after the listing keeps the cart, and so does a time
+        or cost entry (`_NO_ENTRIES`): the lifecycle refuses them on a cart, and one there
+        anyway is never dropped with it."""
         order = conn.execute(
             "SELECT storefront_visitor_id, updated_at FROM orders WHERE id = %s"
-            " AND source = 'storefront' AND submitted_at IS NULL FOR UPDATE SKIP LOCKED",
+            " AND source = 'storefront' AND submitted_at IS NULL"
+            f" AND {_NO_ENTRIES.format(order='orders.id')} FOR UPDATE SKIP LOCKED",
             (order_id,),
         ).fetchone()
         if order is None:
@@ -1652,13 +1663,15 @@ class OrderStore:
         """The item's next attempt; numbered under the order's lock, which every writer
         of an item holds. ``print_request_id`` and the rest are the print path's claim
         (#4719), made before its print starts; ``archive_ids`` the archive a person
-        named (#4251). A ``test`` attempt names the ``revision_id`` it printed."""
+        named (#4251). A ``test`` attempt names the ``revision_id`` it printed; a production
+        attempt names the item's current revision, the design it prints (#5704)."""
         row = conn.execute(
             "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
             " failure_reason, started_at, finished_at, notes, created_by, print_request_id,"
             " copies, sliced_sha256, sliced_blob_key, archive_ids, purpose, revision_id)"
             " VALUES (%s, (SELECT COALESCE(MAX(attempt) + 1, 1) FROM order_item_fulfilments"
-            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+            " COALESCE(%s, (SELECT current_revision_id FROM order_items WHERE id = %s)))"
             f" RETURNING {_FULFILMENT}",
             (
                 item_id,
@@ -1677,6 +1690,7 @@ class OrderStore:
                 list(archive_ids),
                 purpose,
                 revision_id,
+                item_id,
             ),
         ).fetchone()
         assert row is not None

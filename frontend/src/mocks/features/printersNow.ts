@@ -1,10 +1,11 @@
 import { HttpResponse, http } from 'msw'
 import type { PrinterNow, PrintersNow } from '../../api/types'
+import { pngResponse } from './library'
 import { printersState } from './printers'
 
 /**
  * #977 — what each printer is doing now: the H2C paused on the 2026-10-01 spaghetti
- * detection, a print ScadBuddy linked, and an idle printer.
+ * detection, a print ScadBuddy queued and linked (#3741), and an idle printer.
  */
 export const PRINTERS_NOW: PrinterNow[] = [
   {
@@ -26,8 +27,12 @@ export const PRINTERS_NOW: PrinterNow[] = [
     awaiting_plate_clear: false,
     archive_id: 90,
     linked: false,
-    bambuddy_url: 'http://bambuddy.local/archives',
+    bambuddy_url: 'http://bambuddy.local/archives/90',
+    // #5840: a Bambuddy with a page per archive (1.3.0 or later).
+    bambuddy_archive_page: true,
     error: null,
+    // #3742 — Bambuddy's cover of the job, through ScadBuddy's farm proxy.
+    picture: '/api/v1/farm/printers/1/cover?archive=90',
   },
   {
     id: '00000000-0000-4000-8000-000000000002',
@@ -46,7 +51,21 @@ export const PRINTERS_NOW: PrinterNow[] = [
     archive_id: 35,
     linked: true,
     bambuddy_url: null,
+    bambuddy_archive_page: false,
     error: null,
+    // #3741 — ScadBuddy queued it: a run of the keychain output sent the queue item
+    // this printer prints.
+    scadbuddy: {
+      subject: 'output:luna-0001',
+      output_id: 'luna-0001',
+      library_file_id: null,
+      slug: 'keychain',
+      run_id: 'run-luna',
+      archive_id: 35,
+      matched_by: 'queue_item',
+    },
+    // #3742 — ScadBuddy's own picture of its job.
+    picture: '/api/v1/outputs/luna-0001/thumbnail',
   },
   {
     id: '00000000-0000-4000-8000-000000000003',
@@ -65,6 +84,7 @@ export const PRINTERS_NOW: PrinterNow[] = [
     archive_id: null,
     linked: false,
     bambuddy_url: null,
+    bambuddy_archive_page: false,
     error: null,
   },
 ]
@@ -110,8 +130,18 @@ function withLan(cards: PrinterNow[]): PrinterNow[] {
 
 const IDLE = PRINTERS_NOW[2]!
 
+/** #3742 — the mocked jobs' pictures: their output thumbnails and Bambuddy's images. */
+const PICTURED_OUTPUTS = new Set(['luna-0001', 'luna-0002'])
+
 export const handlers = [
   http.get('/api/v1/print/printers/now', () =>
     HttpResponse.json({ printers: withLan(state.printers) } satisfies PrintersNow),
+  ),
+  http.get('/api/v1/farm/library/:id/thumbnail', () => pngResponse()),
+  http.get('/api/v1/farm/archives/:id/thumbnail', () => pngResponse()),
+  http.get('/api/v1/farm/printers/:id/cover', () => pngResponse()),
+  // Any other output's thumbnail falls through to the handlers that know it.
+  http.get('/api/v1/outputs/:id/thumbnail', ({ params }) =>
+    PICTURED_OUTPUTS.has(String(params.id)) ? pngResponse() : undefined,
   ),
 ]

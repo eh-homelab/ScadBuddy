@@ -28,7 +28,7 @@ const RETRY_CAP_MS = 30_000
 
 const SLOW = 'This preview is taking longer than usual. Try Render again in a few minutes.'
 
-function wait(ms: number) {
+function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
@@ -65,7 +65,19 @@ function changedListing(error: unknown): boolean {
  * sent; every locked value and every default comes from the listing's published snapshot
  * on the shop's side, never from this page.
  */
-export function CustomizePage({ id, timing = POLL }: { id: string; timing?: PollTiming }) {
+export function CustomizePage({
+  id,
+  timing = POLL,
+  wait = sleep,
+  now = Date.now,
+}: {
+  id: string
+  timing?: PollTiming
+  /** How a poll waits; a test passes one that fires early, as a real timer can (#5902). */
+  wait?: (ms: number) => Promise<void>
+  /** The clock the time limit is read on; a test passes one that moves only when `wait` does. */
+  now?: () => number
+}) {
   const [listing, setListing] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
@@ -142,17 +154,25 @@ export function CustomizePage({ id, timing = POLL }: { id: string; timing?: Poll
   const follow = async (first: StoreRender): Promise<StoreRender | null> => {
     let next = first
     let delay = timing.firstMs
-    const started = Date.now()
+    const started = now()
     const timedOut = () => {
-      if (Date.now() - started < timing.limitMs) return false
+      if (now() - started < timing.limitMs) return false
       setRenderError(SLOW)
       return true
     }
     while (!terminal(next)) {
       if (timedOut()) return null
-      // Never past the time limit, however long the edge asked to wait.
-      await wait(Math.min(delay, Math.max(0, started + timing.limitMs - Date.now())))
-      if (!alive.current || timedOut()) return null
+      // Never past the time limit, however long the edge asked to wait. A wait cut to the
+      // time left ends at the limit: a timer can fire a millisecond before Date.now()
+      // shows it (#5875), so that wait stops the reads without asking the clock.
+      const left = started + timing.limitMs - now()
+      await wait(Math.min(delay, Math.max(0, left)))
+      if (!alive.current) return null
+      if (delay >= left) {
+        setRenderError(SLOW)
+        return null
+      }
+      if (timedOut()) return null
       try {
         next = await store.render(next.id)
         if (!alive.current) return null

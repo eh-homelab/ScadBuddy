@@ -172,6 +172,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'POST /api/v1/payments/webhooks/{provider}',
     reason: "A payment provider's call, signed with its own secret (#4957); never an agent's.",
   },
+  {
+    operation: 'POST /api/v1/payments/bank/webhook',
+    reason: "Plaid's call for the linked bank account, signed with its own key (#4961); never an agent's.",
+  },
   ...(
     [
       'GET /api/v1/payments/providers',
@@ -202,10 +206,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'POST /api/v1/payments/bank/link-token',
       'POST /api/v1/payments/bank/link',
       'DELETE /api/v1/payments/bank/link',
+      'POST /api/v1/payments/bank/reconnected',
     ] as const
   ).map((operation) => ({
     operation,
     reason: "Settings → Payments' bank account (#4961): a person links it in Plaid Link in their own browser; the Plaid keys and the link are never an agent's.",
+  })),
+  ...(
+    [
+      'GET /api/v1/orders/{order_id}/bank-deposits',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/record',
+      'POST /api/v1/orders/{order_id}/bank-deposits/{transaction_id}/dismiss',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "The order page's suggested bank deposits (#4961): a suggestion is never recorded by itself, and only the shop confirms or dismisses one there.",
   })),
   ...(
     [
@@ -216,6 +231,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation,
     reason: "The order page's (#4957): a person cancels a request or retries its link; the agent opens one with order_request_payment.",
   })),
+  {
+    operation: 'POST /api/v1/orders/{order_id}/messages/{message_id}/mark-sent',
+    reason: "Only a person says a message whose outcome is unknown reached the customer (#5660), on the order page.",
+  },
   {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
@@ -452,6 +471,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ).map((operation) => ({
     operation,
     reason: "Serves Bambuddy's image of a library file to the browser; an agent has no use for the bytes (#313).",
+  })),
+  ...(
+    [
+      'GET /api/v1/farm/library/{file_id}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/printers/{printer_id}/cover',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "Serves Bambuddy's picture of a queue item or a printer's job to the Prints page (#3742); list_print_queue " +
+      'and get_printers_now give its URL as `picture`, and an agent has no use for the bytes.',
   })),
   ...(['GET /api/v1/print/models/{slug}/projects', 'PUT /api/v1/print/models/{slug}/project'] as const).map(
     (operation) => ({

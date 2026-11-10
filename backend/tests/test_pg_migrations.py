@@ -281,6 +281,94 @@ def _index(slug: str) -> int:
     return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
 
 
+_DOT3 = "\u2022\u2022\u2022"
+
+
+def _deposit(conn: psycopg.Connection[tuple[object, ...]], tx: str, text: str) -> None:
+    conn.execute(
+        "INSERT INTO bank_deposits (transaction_id, item_id, amount_minor, currency,"
+        " posted_on, description) VALUES (%s, 'item', 100, 'USD', '2026-11-01', %s)",
+        (tx, text),
+    )
+
+
+@pytest.mark.requires_postgres
+def test_the_remask_migration_masks_text_stored_under_the_old_rule(pg_conninfo: str) -> None:
+    # #5852 review: before it, the mask kept any order-number match as written, so an
+    # account number written as one could be stored. Every order number and every run of
+    # four or more digits, counted across single spaces and hyphens as `mask` counts
+    # them, is masked; a real order's number goes too.
+    column = _index("bank_deposits_remask")
+    stored = [
+        "PAY ORD-2026-000123456789 THANKS",
+        "PAY ORD-2026-12 3456",
+        "pay ord-2026-12-34 and ORD-2026-7",
+        "ACCT 1234 REF 567",
+        f"REF 123 ACCT {_DOT3}",
+        "ACCT 12 34 56 78 END",
+        "ACCT 12-34-5 REF 1 2",
+    ]
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:column])
+        for i, text in enumerate(stored):
+            _deposit(conn, f"t{i}", text)
+        assert migrate(conn)[0] == MIGRATIONS[column].id
+        rows = conn.execute(
+            "SELECT description FROM bank_deposits ORDER BY transaction_id"
+        ).fetchall()
+    assert [r[0] for r in rows] == [
+        f"PAY ORD-{_DOT3} THANKS",
+        f"PAY ORD-{_DOT3}",
+        f"pay ORD-{_DOT3} and ORD-{_DOT3}",
+        f"ACCT {_DOT3} REF 567",
+        f"REF 123 ACCT {_DOT3}",
+        f"ACCT {_DOT3} END",
+        f"ACCT {_DOT3} REF 1 2",
+    ]
+
+
+@pytest.mark.requires_postgres
+def test_the_remask_migration_masks_the_notes_a_confirmed_deposit_copied(
+    pg_conninfo: str,
+) -> None:
+    # #5852 security review: "Record this deposit as payment" copies the description
+    # into the payment's notes (`record_deposit`), so that copy is masked too: the
+    # payment the deposit row names, and a `bank_transfer` payment whose reference is a
+    # deposit's transaction id. A payment typed by hand keeps its notes.
+    column = _index("bank_deposits_remask")
+    leaked = "PAY ORD-2026-000123456789"
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:column])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        _deposit(conn, "t-linked", leaked)
+        _deposit(conn, "t-ref", leaked)
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, amount_minor, method, reference, notes)"
+            " VALUES ('linked', 'o', 100, 'bank_transfer', 'other', %(n)s),"
+            "        ('ref', 'o', 100, 'bank_transfer', 't-ref', %(n)s),"
+            "        ('cash', 'o', 100, 'cash', 't-ref', 'TILL 12345678'),"
+            "        ('typed', 'o', 100, 'bank_transfer', 'cheque 9', 'CHEQUE 12345678')",
+            {"n": leaked},
+        )
+        conn.execute(
+            "UPDATE bank_deposits SET payment_id = 'linked' WHERE transaction_id = 't-linked'"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[column].id
+        notes: dict[object, object] = dict(
+            conn.execute("SELECT id, notes FROM order_payments").fetchall()
+        )
+    assert notes == {
+        "linked": f"PAY ORD-{_DOT3}",
+        "ref": f"PAY ORD-{_DOT3}",
+        "cash": "TILL 12345678",
+        "typed": "CHEQUE 12345678",
+    }
+
+
 @pytest.mark.requires_postgres
 def test_the_contract_migration_drops_only_what_the_previous_build_never_names(
     pg_conninfo: str,
@@ -471,9 +559,61 @@ def test_the_revisions_migration_gives_every_model_item_revision_one(pg_conninfo
         assert dict(
             conn.execute("SELECT order_item_id, revision_id FROM order_item_quotes").fetchall()
         ) == {"model": rev_id, "custom": None}
+        # #5704's later backfill names the revision a production attempt printed.
         assert conn.execute(
             "SELECT purpose, revision_id FROM order_item_fulfilments"
-        ).fetchone() == ("production", None)
+        ).fetchone() == ("production", rev_id)
+
+
+@pytest.mark.requires_postgres
+def test_the_printed_revision_backfill_names_the_newest_revision_before_each_attempt(
+    pg_conninfo: str,
+) -> None:
+    # #5704: a production attempt from before the file names the item's newest revision
+    # written no later than it; a test print keeps its own, and an item with no revision
+    # names none.
+    backfill = _index("order_attempt_printed_revision")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:backfill])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind, slug,"
+            " commit, inputs, template_name, render_key) VALUES"
+            " ('model', 'o', 0, 1, 'Demo', 'model', 'demo', %s, '{\"params\": {}}', 'Demo', 'k')",
+            ("a" * 40,),
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('custom', 'o', 1, 1, 'B', 'custom')"
+        )
+        for rev, number, at in (("r1", 1, "1 hour"), ("r2", 2, "0 hours")):
+            conn.execute(
+                "INSERT INTO order_item_revisions (id, item_id, number, slug, commit, inputs,"
+                " template_name, render_key, created_at, created_by) VALUES"
+                " (%s, 'model', %s, 'demo', %s, '{}', 'Demo', 'k', now() - %s::interval, '{}')",
+                (rev, number, "a" * 40, at),
+            )
+        conn.execute(
+            "INSERT INTO order_item_fulfilments"
+            " (id, order_item_id, attempt, quantity, outcome, created_by, created_at,"
+            "  purpose, revision_id) VALUES"
+            " ('first', 'model', 1, 1, 'succeeded', '{}', now() - interval '2 hours',"
+            "  'production', NULL),"
+            " ('one', 'model', 2, 1, 'succeeded', '{}', now() - interval '30 minutes',"
+            "  'production', NULL),"
+            " ('two', 'model', 3, 1, 'succeeded', '{}', now(), 'production', NULL),"
+            " ('test', 'model', 4, 1, 'succeeded', '{}', now(), 'test', 'r1'),"
+            " ('none', 'custom', 1, 1, 'succeeded', '{}', now(), 'production', NULL)"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[backfill].id
+        rows: dict[object, object] = dict(
+            conn.execute("SELECT id, revision_id FROM order_item_fulfilments").fetchall()
+        )
+    assert rows == {"first": None, "one": "r1", "two": "r2", "test": "r1", "none": None}
 
 
 @pytest.mark.requires_postgres

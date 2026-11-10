@@ -603,7 +603,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   a payment or a plain edit), `actor.py` (`created_by` and an audit row's `by` from the
   author header, never a body). The bus events are `OrderChanged` (`order.changed`) and
   `OrderItemChanged` (`order_item.changed`), ids and the new status only, on the realtime
-  topics `orders` and `order:<id>`. Every item's `inputs` join `referenced_asset_ids`, and
+  topics `orders` and `order:<id>`; a frame for a cart the draft sweep deleted also
+  carries `deleted: true` (and `cart`, a flag flow triggers read, marks a storefront cart). Every item's `inputs` join `referenced_asset_ids`, and
   `main.sweep_assets` skips the pass when they cannot be read. Routes `api/customers.py`,
   `api/orders.py` (plain reads and writes; the slice quote is phase 2). Agent tools
   `agent/src/tools/orders.ts` (`read` lists and gets, `write` records the shop keeps,
@@ -877,7 +878,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Job cost phase 1 (#5326, spec `2026-11-05-job-cost-design.md`, plan
   `2026-11-05-job-cost-phase-1.md`): `order_time_entries` and `order_cost_entries`, written
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
-  in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
+  in every order status, ended and on hold included, except that adding one to a storefront cart not yet submitted is 409 `order_not_submitted` (`time.added`, `cost.removed`, … on the
   audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
   currency), and an entry's `source` (a timer's `timer:<item or order>:<started_at>`, a form's
   `manual:<uuid>`, a writer's id) makes a retry write once (200 with the first entry; a time
@@ -1059,6 +1060,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   of `quantity`, `succeeded`, recorded and accepted through the same `_insert_attempt` and
   `_accept_attempt` as the single routes, in one transaction; an item not `approved` or
   `failed`, or named twice, refuses all). Both refuse a visitor's cart (`order_not_submitted`).
+  Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md` §7): the agent
+  sends through a messaging plugin and the API keeps the record, `order_messages`
+  (`orders/messages.py` `OrderMessages`, shapes `orders/message_models.py`, routes
+  `api/order_messages.py`), each write under the order's lock with its `order_events` row
+  (`message.sending`, `.sent`, `.failed`, `.unknown`, `.marked_sent`). The agent claims a
+  `sending` row under its `Idempotency-Key` before it calls the plugin (a key seen before
+  answers its row, 200), then posts the outcome, taken from `sending` or `unknown` only. One
+  template is told once per status change (`episode`, the order's newest
+  `order_status_changes` row): a second claim is `already_notified` unless it names
+  `resend_of`; `GET …/messages/check` answers the same and writes nothing. A `sending` row
+  older than `STALE_SENDING_MINUTES` reads `unknown`, is never sent again by itself and has
+  no sweep; only a person marks it sent (`…/mark-sent`, `PERSON_ENDPOINTS`). The plugin
+  binding is the stored setting `orders_customer_messaging` (`MessagingBinding`; no secret,
+  a secret-looking `fixed_args` key is refused; an unreadable one loads as none).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
@@ -1270,7 +1285,64 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   is stored only when the link and the cursor are still the ones it started from. Posted
   deposits on the linked account only, kept in `bank_deposits` with the bank's text masked
   (`mask`: every run of five or more digits, a run going on across single spaces or
-  hyphens; order numbers kept) and suggested in `bank_deposit_matches`
+  hyphens; an order number is a run too, and only the canonical `ORD-yyyy-n` of an
+  order that exists is put back, `_existing`, with digits run on after it still masked; rows stored before that rule were re-masked by
+  `20261109T1420Z_bank_deposits_remask.sql`, every order number and every run of four or more digits, counted as
+  `mask` counts them, in `bank_deposits.description` and in the notes of the payment a confirmed
+  deposit recorded; `order_events.detail` holds ids only) and suggested in `bank_deposit_matches`
   (`order_number`, or `amount`: the balance of an order past `draft`, made on or before the
   deposit's date); nothing is recorded. A Plaid failure keeps its `error_code` as
-  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits.
+  `bank_links.sync_error`, which Settings shows. Unlink drops the Item's deposits but the
+  recorded ones (`bank.py` `_drop_deposits`), which keep their warnings below, and every
+  suggestion; nothing prunes a kept row while its payment stands.
+  The order page (`api/order_bank_deposits.py`, `GET /orders/{id}/bank-deposits`; frontend
+  `components/orders/DepositSuggestions.tsx`, mocks `src/mocks/features/orders/bankDeposits.ts`)
+  lists an order's suggestions; "Record this deposit as payment" (`…/{tx}/record`,
+  `deposits.record_deposit`) is `Lifecycle.add_payment` through `Payments.add_payment`,
+  method `bank_transfer`, reference the transaction id, under the deposit's row lock, so a
+  deposit is recorded once on any order (`deposit_recorded`; `deposit_currency` for another
+  currency; `deposit_changed` when a sync changed its amount meanwhile); the lock is taken in the payment's own transaction (`add_payment`'s
+  `on_insert`), so a confirmation holds one connection. "Not this order" (`…/{tx}/dismiss`)
+  writes a `bank_deposit_dismissals` row (transaction id and order), kept apart from the
+  Item's deposits, so a later sync, an unlink and a new link all keep it. Both are in
+  `PERSON_ENDPOINTS`; a deposit already recorded (by `bank_transfer` and its reference) is
+  never suggested again, after a new link too. A recorded deposit Plaid changed since is
+  listed with `reason` `changed`, and one Plaid removed (its row kept, `removed_at`) with
+  `removed`, each with `recorded_minor`, the sum of the order's `bank_transfer` payments
+  whose reference is the transaction id, while that sum is not the deposit's amount (0 when
+  removed), and only once the bank moved it (removed, or `changed_at`: set the first time a
+  sync reads a new amount for a recorded deposit and kept, so a change back after the
+  shop's correction warns again). Payments are never edited, so the page's warning asks the shop to
+  record the difference with that reference, which clears it. A cancelled order takes no
+  payment and shows no such warning; a removed row whose payment is gone is deleted by the
+  next sync. A sync emits `order.bank_deposits` (`OrderBankDepositsChanged`,
+  topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
+  deposit whose amount it changed or that it removed, so an open order page reloads.
+  Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
+  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
+  `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
+  asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
+  the body's SHA-256 compared in constant time; `BankLinks.handle_webhook`, which reads the
+  `bank_links` row only after the key caches and the bucket, so a forged `kid` costs no
+  database read or unseal); a bad one is 400 and changes nothing, a key Plaid could not
+  give, or a link whose keys or access token cannot be read, is 503 (Plaid sends it
+  again). Only a key that verified a webhook is kept by `kid`
+  (at most `MAX_WEBHOOK_KEYS`, least recently used dropped first), and asked for again
+  `KEY_RECHECK_SECONDS` (a day) after Plaid gave it; a key with `expired_at` set verifies
+  nothing and is kept with the unknown ones; a `kid` Plaid does not
+  have (`INVALID_WEBHOOK_VERIFICATION_KEY_ID`) is 400 and goes in a cache of its own for
+  `UNKNOWN_KEY_SECONDS`, so forged `kid`s never evict a verified key. A `kid` in neither
+  cache takes a token from `_KEY_LOOKUPS` (`KeyLookups`): the sender's bucket first (the
+  address `relay_client` trusts, never a raw `X-Forwarded-For`), then the process's
+  (a burst of `KEY_LOOKUP_BURST`); a refusal is 429 with `Retry-After`, which Plaid honours
+  ([webhook retries](https://plaid.com/docs/api/webhooks/#webhook-retries)). A webhook
+  whose `kid` is already being looked up waits for that lookup and takes no token.
+  `SYNC_UPDATES_AVAILABLE` runs `sync_deposits` after the answer (`BackgroundTasks`), the
+  sync's cursor check keeping it apart from the sweep's; an `ITEM` `ERROR` with
+  `ITEM_LOGIN_REQUIRED` (or a sync that gets that code) sets `bank_links.login_required_at`
+  and Settings shows "Reconnect": the link token is then for Link's update mode (the
+  Item's `access_token`, no `products`; a linked row with no token is 409
+  `access_token_missing`, never a fresh Link), and `POST …/reconnected` (person) clears it,
+  with a `sync_error` that was `ITEM_LOGIN_REQUIRED`, and syncs after the answer;
+  `LOGIN_REPAIRED` clears both too, and any sync that reads Plaid clears it. A webhook for another Item is `ignored`.

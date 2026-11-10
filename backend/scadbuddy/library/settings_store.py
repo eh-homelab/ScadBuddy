@@ -89,6 +89,7 @@ from scadbuddy.core.secrets import (
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
+from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
@@ -458,6 +459,9 @@ class StoredSettings(BambuddyIds):
     storefront_shipping_options: list[ShippingOption] | None = None
     #: How a customer pays by hand (shown as text, never HTML).
     storefront_payment_instructions: str | None = None
+    #: The messaging plugin tool bound to "customer messages" (#5660); ``None`` is none,
+    #: so `order_notify_customer` only composes. No secret: the plugin's stay in the agent.
+    orders_customer_messaging: MessagingBinding | None = None
 
     #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
     #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
@@ -566,6 +570,19 @@ class StoredSettings(BambuddyIds):
             except ValidationError:
                 logger.warning("unreadable money setting entry", extra={"setting": name})
         return kept
+
+    @field_validator("orders_customer_messaging", mode="before")
+    @classmethod
+    def _readable_binding(cls, value: Any) -> Any:
+        """A binding this version cannot read (#5660) is none, so it cannot stop the
+        settings loading; the agent then only composes."""
+        if value is None:
+            return None
+        try:
+            return MessagingBinding.model_validate(value)
+        except ValidationError:
+            logger.warning("unreadable messaging binding")
+            return None
 
     @field_validator("model_print_choices", mode="before")
     @classmethod
@@ -710,6 +727,8 @@ class SettingsPatch(BaseModel):
     #: The ids are unique; ``null`` offers none.
     storefront_shipping_options: list[ShippingOption] | None = Field(default=None, max_length=20)
     storefront_payment_instructions: str | None = Field(default=None, max_length=2000)
+    #: ``null`` unbinds the messaging plugin (#5660).
+    orders_customer_messaging: MessagingBinding | None = None
 
     # -- the runtime settings (#322), each env-seeded ---------------------------------
     render_timeout: float | None = None

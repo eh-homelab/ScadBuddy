@@ -162,7 +162,7 @@ function libraryRefusal(fileId: number) {
   return null
 }
 
-function pngResponse() {
+export function pngResponse() {
   const bytes = Uint8Array.from(atob(fixtures.MEDIA_PNG_BASE64), (char) => char.charCodeAt(0))
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }

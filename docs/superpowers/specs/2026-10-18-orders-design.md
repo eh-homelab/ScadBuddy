@@ -465,18 +465,20 @@ its old price (seen on ORD-2026-3).
 - An attempt of the old design (a `printed` item's print, or one recorded by hand) stays
   on the item, not accepted. Once a quote of the new design is accepted, the item is
   `approved` again, and accepting that old attempt is refused (`fulfilment_stale`): an
-  attempt made before the revision the accepted quote prices printed an earlier design
-  (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
+  attempt that printed a revision earlier than the one the accepted quote prices printed
+  an earlier design (#5582, `Lifecycle.accept_fulfilment`). The rule is `lifecycle.py` `stale_attempt`.
   `GET /orders/{id}` marks such an attempt `stale: true` by the same rule (#5592), and
   the drawer shows it as "Old design" with no Accept (`FulfilmentForm`).
-- The rule compares the attempt's `created_at` (`now()`, the start of its transaction)
-  with the revision's (`clock_timestamp()`). The two come from separate transactions.
-  Their order holds because every writer of an item takes the order's row lock and reads
-  the item after it. The revision is refused while a print of the item is open
-  (`print_in_flight`), and it puts the item back to `draft`. No attempt is recorded or
-  claimed on a `draft` item (`_fulfillable`, `claim_print`). So an attempt whose
-  transaction started before the revision and waited on the lock is refused. Every
-  attempt made after the revision starts after the new quote's acceptance.
+- The rule compares revision numbers, never wall-clock times (#5704). A production
+  attempt names the revision it printed (`revision_id`): the item's current revision,
+  which `OrderStore.insert_fulfilment` reads under the order's row lock when the attempt
+  is recorded or claimed. The attempt is stale when that revision's number is below the
+  number of the revision the accepted quote prices, or when it names no revision (it was
+  made before the item had one). Two `created_at` values written by two transactions
+  are not ordered when the clock steps back between them, which made accepted designs
+  read as stale. Production attempts from before #5704 were backfilled by `created_at`
+  (`20261109T0030Z_order_attempt_printed_revision.sql`): each names the newest revision
+  written no later than it.
 - While the mark stands, the lock is `requote_open` (`orders/lifecycle.py`), not
   `item_open`. The item takes a quote (manual or slice), a quote's acceptance, a
   customer's answer, and more revisions on either route. Its quantity stays pinned.
@@ -888,7 +890,8 @@ the agent reads it with `order_costs`.
 
 ### 7.1 Events and the trigger
 
-Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`) and
+Two bus events (`core/events.py`, ids only): `order.changed` (`order_id`, `status`; a
+storefront cart the draft sweep deleted also carries `deleted: true`, storefront spec §5.4) and
 `order_item.changed` (`order_id`, `item_id`, `status`, `attempt`). **A trigger's event
 kind is the bus event's own name.** The existing two kinds are renamings
 (`render.finished` for `job.done`, `model.changed` for `version.committed`, F12); the

@@ -1,5 +1,6 @@
 """``/api/v1/farm/…`` — the farm's context from Bambuddy (#1912): the queue, every
-archive with its outcome, aggregate stats and the spool inventory.
+archive with its outcome, aggregate stats and the spool inventory, and (#3742) the
+pictures of the queue's items and the printers' jobs.
 
 Read only: nothing here writes to Bambuddy, and every call needs only the ``Read
 Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
@@ -7,12 +8,15 @@ Status`` scope, which a 401/403 names (``bambuddy/errors.py``).
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
+from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.farm import (
     ArchiveOutcome,
@@ -22,6 +26,11 @@ from scadbuddy.bambuddy.farm import (
     spool_summary,
 )
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
+from scadbuddy.bambuddy.pictures import queue_item_picture
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
+from scadbuddy.core.problems import DATABASE_ERRORS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/farm", tags=["farm"])
 
@@ -34,18 +43,178 @@ DateFrom = Annotated[date | None, Query(description="First day, inclusive (creat
 DateTo = Annotated[date | None, Query(description="Last day, inclusive (created_at)")]
 
 
-@router.get("/queue", response_model=list[QueueItem], summary="Bambuddy's print queue")
+#: The queue item states that can carry the "Queued from ScadBuddy" mark (#3741, #5833):
+#: a job still to print or printing. Bambuddy's queue item states are pending, printing,
+#: completed, failed, skipped and cancelled; it has no "paused" state. Source:
+#: maziggy/bambuddy `backend/app/models/print_queue.py` line 140 at commit 918353a
+#: (https://github.com/maziggy/bambuddy/blob/918353a945d2993a475d5cf1ce135c52c9e11932/backend/app/models/print_queue.py#L140).
+#: A finished or skipped item is history and is not looked up.
+MARKED_STATUSES = frozenset({"pending", "printing"})
+
+
+class FarmQueueItem(QueueItem):
+    """A queue item, and whether ScadBuddy queued it (#3741)."""
+
+    #: The output or library file ScadBuddy queued this item for, found only by a record
+    #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
+    #: the item. In the list, set only on a pending or printing item (`MARKED_STATUSES`);
+    #: the one item's read (`get_queue_item`, #3744) looks it up in any state.
+    #: ``None`` for a finished item in the list, for an item queued from Bambuddy (its
+    #: reprint of an archive ScadBuddy linked too), or when ScadBuddy's records cannot be
+    #: read. Never taken from Bambuddy's answer.
+    scadbuddy: ScadBuddyJob | None = None
+    #: The item's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's for its
+    #: own item (`scadbuddy`), else Bambuddy's thumbnail of the item's library file or
+    #: archive through this router (`bambuddy/pictures.py`). ``None`` when there is none.
+    picture: str | None = None
+
+
+@router.get("/queue", response_model=list[FarmQueueItem], summary="Bambuddy's print queue")
 async def get_queue(
     store: SettingsStoreDep,
+    links: PrintLinksDep,
     printer_id: Annotated[
         int | None, Query(description="One printer's items; -1 for items not assigned to one")
     ] = None,
     status: Annotated[QueueStatus | None, Query(description="Only items in this state")] = None,
-) -> list[QueueItem]:
+) -> list[FarmQueueItem]:
     """The queue in Bambuddy's order. Finished items stay in it, so an unfiltered read
-    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come."""
+    is mostly history: ask for ``status=pending`` or ``printing`` for what is to come.
+    Each pending or printing item ScadBuddy queued carries ``scadbuddy`` (#3741); only
+    those items are looked up (#5833). Each item's ``picture`` (#3742) is built from
+    this one read."""
     async with client_for(store.load()) as client:
-        return await client.queue(printer_id=printer_id, status=status)
+        items = await client.queue(printer_id=printer_id, status=status)
+    matches = await _jobs(links, [item for item in items if item.status in MARKED_STATUSES])
+
+    def row(item: QueueItem) -> FarmQueueItem:
+        job = matches.queue_items.get(item.id)
+        picture = queue_item_picture(item, job)
+        return FarmQueueItem(**item.model_dump(), scadbuddy=job, picture=picture)
+
+    return [row(item) for item in items]
+
+
+#: How long the browser keeps a picture (#3742). A library file's or an archive's
+#: thumbnail is the same image while its id stands; a printer's cover is kept only when
+#: its URL names the job's archive, one per print (`get_printer_cover`).
+PICTURE_CACHE_CONTROL = "private, max-age=3600"
+PictureId = Annotated[int, Path(ge=1)]
+
+
+@router.get(
+    "/library/{file_id}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="A Bambuddy library file's thumbnail",
+)
+async def get_library_thumbnail(
+    file_id: PictureId, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's thumbnail of a file in its own library (#3742), for a queue item not
+    ScadBuddy's. Always Bambuddy's library, whichever library ScadBuddy serves: the
+    queue's ids are Bambuddy's."""
+    return await _proxy(
+        store,
+        request,
+        f"/library/files/{file_id}/thumbnail",
+        operation="library.thumbnail",
+        what="show the file's thumbnail",
+        cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+@router.get(
+    "/archives/{archive_id}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="A Bambuddy archive's thumbnail",
+)
+async def get_archive_thumbnail(
+    archive_id: PictureId, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's thumbnail of any of its archives (#3742), for a queue item not
+    ScadBuddy's. ``/archives`` above already lists every archive; this serves its
+    thumbnail only, none of its other files (those stay ``/prints/{id}``'s, which takes
+    only an archive ScadBuddy printed)."""
+    return await _proxy(
+        store,
+        request,
+        f"/archives/{archive_id}/thumbnail",
+        operation="media.thumbnail",
+        what="show the thumbnail",
+        cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+@router.get(
+    "/printers/{printer_id}/cover",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="The cover of a printer's job",
+)
+async def get_printer_cover(
+    printer_id: PictureId,
+    request: Request,
+    store: SettingsStoreDep,
+    archive: Annotated[
+        int | None,
+        Query(ge=1, description="The job's archive, one per print: the browser keeps it"),
+    ] = None,
+    job: Annotated[
+        str | None,
+        Query(max_length=512, description="The job's name, with no archive: never kept"),
+    ] = None,
+) -> Response:
+    """Bambuddy's cover image of the job a Bambuddy printer prints (#3742), the status's
+    ``cover_url``: maziggy/bambuddy f9080d1 ``backend/app/api/routes/printers.py``
+    lines 506-509 (set while it runs or is paused) and 1128 (the route, which takes an
+    API key with ``printers:read``). Neither ``archive`` nor ``job`` is sent to Bambuddy:
+    they key the browser's copy (`bambuddy/pictures.py` `printer_cover`). Only a cover
+    keyed by its archive is kept; job names repeat, so one keyed by its name, or by
+    nothing, is fetched again on each load (``no-store``)."""
+    del job
+    return await _proxy(
+        store,
+        request,
+        f"/printers/{printer_id}/cover",
+        operation="printers.cover",
+        what="show the cover of the printer's job",
+        cache_control=PICTURE_CACHE_CONTROL if archive is not None else "no-store",
+    )
+
+
+@router.get(
+    "/queue/{item_id}",
+    response_model=FarmQueueItem,
+    summary="One item of Bambuddy's print queue",
+    responses={404: {"description": "Bambuddy has no such queue item (any more)"}},
+)
+async def get_queue_item(
+    item_id: Annotated[int, Path(ge=1)], store: SettingsStoreDep, links: PrintLinksDep
+) -> FarmQueueItem:
+    """One queue item, whoever queued it, in any state (#3744): Bambuddy's own
+    ``GET /queue/{id}``, one call. A job ScadBuddy queued carries ``scadbuddy`` even
+    once it has finished, so its page can go on to the print. A 404 is an item Bambuddy
+    no longer has: deleted, or gone with its archive. Its ``picture`` (#3742) is the
+    list's."""
+    async with client_for(store.load()) as client:
+        item = await client.queue_item(item_id)
+    job = (await _jobs(links, [item])).queue_items.get(item.id)
+    picture = queue_item_picture(item, job)
+    return FarmQueueItem(**item.model_dump(), scadbuddy=job, picture=picture)
+
+
+async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
+    """Which of ``items`` ScadBuddy queued, in one read; none when its records cannot be
+    read, so a database blip costs the marks, never the queue."""
+    if not items:
+        return JobMatches()
+    try:
+        return await links.jobs(queue_items=[item.id for item in items])
+    except DATABASE_ERRORS:
+        logger.warning("print links unreadable; the queue shows no ScadBuddy marks")
+        return JobMatches()
 
 
 @router.get("/stats", response_model=ArchiveStats, summary="The farm's print statistics")

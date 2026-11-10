@@ -243,6 +243,17 @@ class OrderChanged(BaseEvent):
     status: str
     #: A storefront visitor's cart, not yet submitted (#5282): it starts no flow.
     cart: bool = False
+    #: The draft sweep deleted this cart (#5282): ``GET /orders/{order_id}`` is 404.
+    deleted: bool = False
+
+
+class OrderBankDepositsChanged(BaseEvent):
+    """The deposit sync (#4961) suggested a deposit for the order, or changed or removed a
+    deposit recorded on it: re-read ``GET /orders/{order_id}/bank-deposits``. Published on
+    ``order:<order id>``."""
+
+    kind: Literal["order.bank_deposits"] = "order.bank_deposits"
+    order_id: str
 
 
 class OrderItemChanged(BaseEvent):
@@ -398,6 +409,7 @@ Event = Annotated[
     | ActivityEvent
     | OrderChanged
     | OrderItemChanged
+    | OrderBankDepositsChanged
     | AgentOperationEvent
     | AuthSessionRevoked
     | LibraryChanged

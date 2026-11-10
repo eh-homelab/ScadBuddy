@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { components } from '../api/schema.js'
 import { ok } from './call.js'
@@ -16,7 +17,8 @@ import {
   supportsChoice,
   tier,
 } from './print.js'
-import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { messageArguments, openChecked } from '../orders/messaging.js'
+import { defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 /** A request body as sent: every field may be left out, each with the schema's type. */
@@ -96,6 +98,8 @@ export function composeNotice(
   detail: NoticeOrder,
   customer: NoticeCustomer,
   note?: string,
+  /** The bound channel's contact kind (#5660): only contacts of that kind are addressed. */
+  contactKind?: string,
 ): {
   template: NotifyTemplate
   to: { kind: string; value: string }[]
@@ -113,15 +117,231 @@ export function composeNotice(
     shipped: [`Order ${number} has shipped`, `Order ${number} has shipped.`],
   }
   const [subject, body] = lines[template]
-  const primary = customer.contacts.filter((c) => c.primary)
-  const to = (primary.length > 0 ? primary : customer.contacts).map(({ kind, value }) => ({ kind, value }))
+  const reachable = contactKind === undefined ? customer.contacts : customer.contacts.filter((c) => c.kind === contactKind)
+  const primary = reachable.filter((c) => c.primary)
+  const to = (primary.length > 0 ? primary : reachable).map(({ kind, value }) => ({ kind, value }))
   const text = [`Hello ${customer.display_name},`, '', body, ...(note ? ['', note] : [])].join('\n')
   // Review of #5682: an unaddressed message says so, so a sender (#5660) never sends it blind.
   if (to.length === 0) {
-    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no contacts to send it to.` }
+    const which = contactKind === undefined ? 'contacts' : `${contactKind} contacts`
+    return { template, to, subject, text, sent: false, warning: `${customer.display_name} has no ${which} to send it to.` }
   }
   return { template, to, subject, text, sent: false }
 }
+// #5660 (spec 2026-11-08-order-notify-customer-design.md §5-§7): sending a notice through the
+// messaging plugin the shop bound (the stored setting `orders_customer_messaging`). The
+// backend keeps the record (`/orders/{id}/messages`); the plugin is called here, once per
+// claimed message, through orders/messaging.ts.
+
+type Binding = components['schemas']['MessagingBinding']
+type Notice = ReturnType<typeof composeNotice>
+type OrderMessage = components['schemas']['OrderMessage']
+/** What the send helpers read of a call's context: the order page's own send (routes/orderMessages.ts) has no more. */
+type SendContext = Pick<ToolContext, 'backend' | 'messaging' | 'callKey'>
+
+/** What a person approves: the message itself, so what runs is what was approved. */
+const APPROVED_MESSAGE = z.object({
+  source: z.string().max(300),
+  tool: z.string().max(128),
+  to: z.array(z.object({ kind: z.string().max(40), value: z.string().max(320) })).max(20),
+  subject: z.string().max(300).nullable(),
+  text: z.string().max(12_000),
+})
+export type ApprovedMessage = z.infer<typeof APPROVED_MESSAGE>
+
+/** The order's notice, composed for the bound channel when there is one. */
+async function composeFor(
+  ctx: SendContext,
+  order_id: string,
+  template: NotifyTemplate,
+  note: string | undefined,
+): Promise<{ binding: Binding | null; notice: Notice }> {
+  const { backend } = ctx
+  const detail = await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)
+  const { customer_id, number } = detail.order
+  // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
+  if (customer_id == null || number == null) {
+    throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+  }
+  const customer = await ok(
+    backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
+    `get customer ${customer_id}`,
+  )
+  const settings = await ok(backend.GET('/api/v1/settings', {}), 'read the settings')
+  const binding = settings.orders_customer_messaging ?? null
+  const order = { order: { ...detail.order, number }, totals: detail.totals }
+  return { binding, notice: composeNotice(template, order, customer, note, binding?.contact_kind) }
+}
+
+/** `message_models.py` `MessageClaim.recipients`' bound. */
+const MAX_RECIPIENTS = 20
+
+type SendArgs = { order_id: string; template: NotifyTemplate; note?: string | undefined; resend_of?: string | undefined }
+type SendPlan = { binding: Binding; notice: Notice; approved: ApprovedMessage }
+
+/** The message a send would send now, or why it cannot be sent (nothing sent, nothing recorded). */
+async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
+  const { binding, notice } = await composeFor(ctx, args.order_id, args.template, args.note)
+  if (!binding) {
+    throw new ToolError(
+      'no_messaging_plugin: the shop bound no messaging plugin (Settings → Orders), so nothing was sent; ' +
+        `send this by hand to the customer: subject "${notice.subject}", text:\n${notice.text}`,
+    )
+  }
+  if (notice.to.length === 0) {
+    throw new ToolError(`no_contact: ${notice.warning ?? 'the customer has no contact of the plugin’s kind'} Nothing was sent.`)
+  }
+  // The record takes at most MAX_RECIPIENTS (the backend's `MessageClaim.recipients`).
+  if (notice.to.length > MAX_RECIPIENTS) {
+    throw new ToolError(
+      `too_many_recipients: the customer has ${notice.to.length} ${binding.contact_kind} contacts to address and a ` +
+        `message goes to at most ${MAX_RECIPIENTS}; mark the ones to use as primary. Nothing was sent.`,
+    )
+  }
+  const subject = binding.args.subject ? notice.subject : null
+  return {
+    binding,
+    notice,
+    approved: { source: binding.source, tool: binding.tool, to: notice.to, subject, text: notice.text },
+  }
+}
+
+/** `already_notified` before anything parks (§5.2), from the backend's read-only check. */
+async function refuseIfTold(ctx: SendContext, order_id: string, template: NotifyTemplate): Promise<void> {
+  const check = await ok(
+    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', { params: { path: { order_id }, query: { template } } }),
+    `check order ${order_id}'s messages`,
+  )
+  const told = check.already_notified
+  if (told) {
+    throw new ToolError(
+      `already_notified: the customer was already sent "${template}" (message ${told.id}, ${told.status}) since the ` +
+        'order last changed status; name it in resend_of to send it again',
+    )
+  }
+}
+
+/** The approval's line: who gets it, through what, and the text. */
+function approvalLine(message: ApprovedMessage): string {
+  const to = message.to.map((r) => r.value).join(', ')
+  const subject = message.subject === null ? '' : ` "${message.subject}"`
+  return `Send${subject} to ${to} through ${message.source}:\n${message.text}`
+}
+
+/** What a send answers: the recorded message, and whether the plugin reached the customer. */
+export type SendAnswer = { sent: boolean; message: OrderMessage; warning?: string }
+
+/**
+ * Claims the message, calls the plugin once, records the outcome (§7.2). A claim that comes
+ * back as an earlier one (the same call retried) never sends again, unless the binding
+ * gives the plugin a dedupe key: then the plugin drops the copy.
+ */
+async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Promise<SendAnswer> {
+  const { backend } = ctx
+  const order_id = args.order_id
+  if (!ctx.messaging) {
+    throw new ToolError('messaging_plugin_unavailable: this agent cannot reach plugins, so nothing was sent')
+  }
+  // §4.3: the binding is checked again against the tool as it is now, before anything is claimed.
+  const connection = await openChecked(ctx.messaging, plan.binding)
+  if (typeof connection === 'string') throw new ToolError(`messaging_plugin_unavailable: ${connection}; nothing was sent`)
+  try {
+    const claimed = await backend.POST('/api/v1/orders/{order_id}/messages', {
+      params: { path: { order_id }, header: { 'Idempotency-Key': idempotencyKey(ctx) } },
+      body: {
+        template: args.template,
+        source: plan.approved.source,
+        tool: plan.approved.tool,
+        recipients: plan.approved.to,
+        subject: plan.approved.subject,
+        text: plan.approved.text,
+        ...(args.resend_of === undefined ? {} : { resend_of: args.resend_of }),
+      },
+    })
+    const message = await ok(Promise.resolve(claimed), `record the message to order ${order_id}'s customer`)
+    const fresh = claimed.response.status === 201
+    if (!fresh && (message.status === 'sent' || message.status === 'failed' || message.status === 'skipped')) {
+      return { sent: message.status === 'sent', message }
+    }
+    const keyed = plan.binding.args.idempotency_key != null
+    // A replayed claim still `sending` and fresh is another call's send in flight: without a dedupe
+    // key it is neither sent again nor given an outcome here (#5858 review). Past the stale limit
+    // the backend reads it `unknown`, and that is recorded below.
+    if (!fresh && message.status === 'sending' && !keyed) {
+      return {
+        sent: false,
+        message,
+        warning:
+          'this message is being sent by an earlier call right now; nothing was sent again. Check the order’s ' +
+          'messages (order_messages_list) for its outcome',
+      }
+    }
+    const resendable = fresh || keyed
+    const outcome = resendable
+      ? await connection.send(
+          messageArguments(plan.binding, { to: plan.approved.to, subject: plan.approved.subject, text: plan.approved.text, key: message.id }),
+        )
+      : ({ status: 'unknown', reason: 'no_answer' } as const)
+    const recorded = await backend.POST('/api/v1/orders/{order_id}/messages/{message_id}/outcome', {
+      params: { path: { order_id, message_id: message.id } },
+      body:
+        outcome.status === 'sent'
+          ? { status: 'sent', ...(outcome.providerMessageId ? { provider_message_id: outcome.providerMessageId } : {}) }
+          : { status: outcome.status, reason: outcome.reason },
+    })
+    // §7.2 step 4: a replayed claim with no dedupe key is not sent again; a person checks.
+    const notResent =
+      'this send was tried before and may have reached the customer; it was not sent again. Ask a person to ' +
+      'check the inbox, then "Mark sent" on the order page, or send it again with resend_of'
+    if (!recorded.response.ok) {
+      // The plugin's answer stands; the record keeps `sending`, which reads `unknown` later.
+      const unrecorded = `the order's record could not be updated (HTTP ${recorded.response.status})`
+      return {
+        sent: outcome.status === 'sent',
+        message,
+        warning: resendable ? `the plugin answered ${outcome.status}, but ${unrecorded}` : `${notResent}; ${unrecorded}`,
+      }
+    }
+    const answer: SendAnswer = { sent: outcome.status === 'sent', message: recorded.data as OrderMessage }
+    return resendable ? answer : { ...answer, warning: notResent }
+  } finally {
+    await connection.close().catch(() => {})
+  }
+}
+
+/** The digest of an approved message, which the order page's preview gives and its send names. */
+export function messageDigest(message: ApprovedMessage): string {
+  return createHash('sha256').update(JSON.stringify(message)).digest('hex')
+}
+
+/** A person's own send from the order page (#5660 PR 3): the template, and the message it sends again. */
+export type PersonSend = { order_id: string; template: NotifyTemplate; resend_of?: string | undefined }
+
+/** The message a person's send would send now, and its digest; nothing is sent or recorded. */
+export async function previewPersonSend(
+  ctx: SendContext,
+  args: PersonSend,
+): Promise<{ message: ApprovedMessage; digest: string }> {
+  const planned = await sendPlan(ctx, args)
+  if (args.resend_of === undefined) await refuseIfTold(ctx, args.order_id, args.template)
+  return { message: planned.approved, digest: messageDigest(planned.approved) }
+}
+
+/**
+ * Sends the message composed now, only when it is the one the person previewed (`digest`):
+ * the browser names what it saw and never supplies the text.
+ */
+export async function personSend(ctx: SendContext, args: PersonSend, digest: string): Promise<SendAnswer> {
+  const planned = await sendPlan(ctx, args)
+  if (messageDigest(planned.approved) !== digest) {
+    throw new ToolError(
+      'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing ' +
+        'was sent; preview it again',
+    )
+  }
+  return sendMessage(ctx, args, planned)
+}
+
 const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
@@ -760,8 +980,9 @@ export const orderTools: Tool[] = [
     description:
       "Compose a message to an order's customer from a template (`quoted`, `accepted`, `ready`, `shipped`), " +
       "addressed to the customer's primary contacts, with an optional `note` added. It sends nothing: the " +
-      'answer is the text (`sent: false`) for a person to send. Sending through a messaging plugin is a ' +
-      'later change (#5660).',
+      'answer is the text (`sent: false`) for a person to send. When the shop bound a messaging plugin ' +
+      '(Settings → Orders, #5660), `channel` names it, `to` holds only contacts of its kind, and `send_ready` ' +
+      'says order_notify_customer_send can send it; with none, `channel` is null.',
     input: z.object({
       order_id: orderId,
       template: z.enum(NOTIFY_TEMPLATES),
@@ -770,22 +991,82 @@ export const orderTools: Tool[] = [
     // It composes text and changes nothing; the person who sends it decides.
     risk: 'read',
     source: 'the order and the customer record, which anyone who edits them can write',
-    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}'],
-    handler: async ({ order_id, template, note }, { backend }) => {
-      const detail = await ok(
-        backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }),
-        `get order ${order_id}`,
-      )
-      const { customer_id, number } = detail.order
-      // A visitor's cart (#5282) has no customer and no number yet: nobody to address.
-      if (customer_id == null || number == null) {
-        throw new ToolError(`order ${order_id} has no customer or number yet (a cart), so there is no one to notify`)
+    routes: ['GET /api/v1/orders/{order_id}', 'GET /api/v1/customers/{customer_id}', 'GET /api/v1/settings'],
+    handler: async ({ order_id, template, note }, ctx) => {
+      const { binding, notice } = await composeFor(ctx, order_id, template, note)
+      const channel = binding ? { source: binding.source, contact_kind: binding.contact_kind } : null
+      return json({ ...notice, channel, send_ready: binding !== null && notice.to.length > 0 })
+    },
+  }),
+  defineTool({
+    name: 'order_messages_list',
+    label: 'List the messages sent to an order’s customer',
+    description:
+      "The messages sent, or tried, to an order's customer through the messaging plugin (#5660), newest first, " +
+      'as the order page lists them: each id, template, recipients, text and status (`sending`, `sent`, ' +
+      '`failed`, `unknown`, `skipped`; a `sending` one older than 15 minutes reads `unknown`). An id here is ' +
+      "what order_notify_customer_send's `resend_of` takes.",
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: ['GET /api/v1/orders/{order_id}/messages'],
+    handler: async ({ order_id }, ctx) =>
+      json(
+        await ok(
+          ctx.backend.GET('/api/v1/orders/{order_id}/messages', { params: { path: { order_id } } }),
+          `list order ${order_id}'s messages`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_notify_customer_send',
+    label: 'Send a message to an order’s customer',
+    description:
+      "Send a template message (`quoted`, `accepted`, `ready`, `shipped`) to an order's customer through the " +
+      'messaging plugin the shop bound in Settings → Orders (#5660, spec 2026-11-08 §5): the text ' +
+      "order_notify_customer composes, addressed to the customer's contacts of the plugin's kind. Outward: a " +
+      'person approves the exact recipients and text, or a grant covers it; if the order, the customer or the ' +
+      'binding changes before it runs, it is refused `message_changed` and nothing is sent. Each send is recorded ' +
+      'on the order. A template is sent once per status change of the order: a second send is refused ' +
+      "`already_notified` unless `resend_of` names the earlier message (a person's \"Send again\"). With no " +
+      'plugin bound it is refused with the text, for a person to send by hand. The answer is the recorded ' +
+      'message: `sent`, `failed` (the plugin refused it), or `unknown` (no answer came: it may have reached the ' +
+      'customer, and it is never sent again by itself).',
+    input: z.object({
+      order_id: orderId,
+      template: z.enum(NOTIFY_TEMPLATES),
+      note: z.string().min(1).max(2000).optional().describe('A line added after the template’s text'),
+      resend_of: ID.optional().describe(
+        'An earlier message of this order to send again, as order_messages_list (and the order page) lists it',
+      ),
+      approved: APPROVED_MESSAGE.optional().describe('Filled by the approval: what the person approved. Leave it out.'),
+    }),
+    risk: 'outward',
+    source: 'the order and the customer record, which anyone who edits them can write',
+    routes: [
+      'GET /api/v1/orders/{order_id}/messages/check',
+      'POST /api/v1/orders/{order_id}/messages',
+      'POST /api/v1/orders/{order_id}/messages/{message_id}/outcome',
+    ],
+    title: ({ template }) => `Send the "${template}" message`,
+    summarize: ({ order_id, template }) => `Send the "${template}" message of order ${order_id}`,
+    // #4442: the approval holds the message itself, so what runs is what the person saw.
+    prepareApproval: async (args, ctx) => {
+      const planned = await sendPlan(ctx, args)
+      if (args.resend_of === undefined) await refuseIfTold(ctx, args.order_id, args.template)
+      return { input: { ...args, approved: planned.approved }, summary: approvalLine(planned.approved) }
+    },
+    // A flow's approval binds the message too (#4445), so a change since it is not run.
+    flowBinding: (_args, resolved) => ({ approved: resolved.approved ?? null }),
+    handler: async (args, ctx) => {
+      const planned = await sendPlan(ctx, args)
+      if (args.approved !== undefined && JSON.stringify(args.approved) !== JSON.stringify(planned.approved)) {
+        throw new ToolError(
+          'message_changed: the order, the customer or the messaging binding changed since this message was ' +
+            'approved, so nothing was sent; ask for a new approval',
+        )
       }
-      const customer = await ok(
-        backend.GET('/api/v1/customers/{customer_id}', { params: { path: { customer_id } } }),
-        `get customer ${customer_id}`,
-      )
-      return json(composeNotice(template, { order: { ...detail.order, number }, totals: detail.totals }, customer, note))
+      return json(await sendMessage(ctx, args, planned))
     },
   }),
   defineTool({
@@ -811,7 +1092,7 @@ export const orderTools: Tool[] = [
       ),
   }),
   // Job cost (#5326, spec 2026-11-05 §4.3, §4.4): a record of what the job took, in any
-  // order status. Removing one is the order page's (coverage.ts).
+  // order status except a storefront cart not yet submitted. Removing one is the order page's (coverage.ts).
   defineTool({
     name: 'order_time_add',
     label: 'Log time on an order',
@@ -820,7 +1101,8 @@ export const orderTools: Tool[] = [
       "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
       "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
       'a second call with the same source returns the first entry as it was recorded, whatever its kind, and ' +
-      'writes nothing. Allowed in every order status, closed, cancelled and on hold included.',
+      'writes nothing. Allowed in every order status, closed, cancelled and on hold included, except a ' +
+      'storefront cart not yet submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
@@ -853,7 +1135,8 @@ export const orderTools: Tool[] = [
       "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
       "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
       'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
-      'this call names, and writes nothing. Allowed in every order status.',
+      'this call names, and writes nothing. Allowed in every order status, except a storefront cart not yet ' +
+      'submitted (409 order_not_submitted).',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),

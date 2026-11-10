@@ -1,10 +1,11 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { Route, Routes, useLocation } from 'react-router'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { Link, Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
@@ -49,6 +50,15 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it('shows a swept cart as not found once its deleted frame arrives (#5282)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    state.orders = state.orders.filter((o) => o.id !== ORDER_DRAFT)
+    emitRealtime('order.changed', [`order:${ORDER_DRAFT}`], { order_id: ORDER_DRAFT, status: 'draft', cart: true, deleted: true })
+    expect(await screen.findByText(/This order was not found/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'ORD-2026-3' })).toBeNull()
   })
 
   it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {
@@ -106,6 +116,61 @@ describe('OrderPage (#4249)', () => {
     expect(within(drawer).queryByLabelText(/Price per unit/)).toBeNull()
     expect(within(drawer).queryByTestId('print-item')).toBeNull()
     expect(within(drawer).queryByTestId('test-print-item')).toBeNull()
+  })
+
+  // #4673, #5832: a slice request is used once (`onSliceOpened`). Reopening the drawer, from
+  // the row or from the address (Back and Forward, a link), never opens the slice dialog
+  // again; a new Slice… does.
+  it('reopens the drawer without the slice dialog, and Slice… still opens it', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route
+          path="/orders/:id"
+          element={
+            <>
+              <OrderPage />
+              <Link to={`/orders/${ORDER_DRAFT}`}>Leave the item</Link>
+              <Link to={`/orders/${ORDER_DRAFT}?item=${ITEM_DRAFT}`}>Link to the item</Link>
+            </>
+          }
+        />
+      </Routes>,
+      { route: `/orders/${ORDER_DRAFT}` },
+    )
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    const row = () => screen.getByTestId(`order-item-${ITEM_DRAFT}`)
+    const sliceDialog = () => screen.queryByRole('dialog', { name: 'Quote from a slice', hidden: true })
+    const slice = async () => {
+      fireEvent.keyDown(within(row()).getByRole('button', { name: 'Row actions', hidden: true }), { key: 'Enter' })
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Slice…', hidden: true }))
+      return screen.findByRole('dialog', { name: 'Quote from a slice', hidden: true })
+    }
+    const cancel = async (dialog: HTMLElement) => {
+      // Beside the assistant the dialogs are not modal (#798): Cancel by its click.
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Cancel', hidden: true }))
+      await waitFor(() => expect(sliceDialog()).toBeNull())
+    }
+    const drawerShown = async () => {
+      const drawer = await screen.findByRole('dialog', { name: 'Name Keychain', hidden: true })
+      await within(drawer).findByTestId('quote-from-slice')
+    }
+
+    await cancel(await slice())
+    // Closed and reopened from the address: the page's request is not used again.
+    fireEvent.click(screen.getByRole('link', { name: 'Leave the item', hidden: true }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain', hidden: true })).toBeNull())
+    fireEvent.click(screen.getByRole('link', { name: 'Link to the item', hidden: true }))
+    await drawerShown()
+    expect(sliceDialog()).toBeNull()
+
+    // Closed and reopened from the row.
+    await user.click(within(screen.getByRole('dialog', { name: 'Name Keychain' })).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Name Keychain' })).toBeNull())
+    await user.click(within(row()).getByRole('button', { name: 'Name Keychain' }))
+    await drawerShown()
+    expect(sliceDialog()).toBeNull()
+
+    expect(await slice()).toBeInTheDocument()
   })
 
   it('prices an item from its drawer, accepts the order, and closes it from a shipment', async () => {

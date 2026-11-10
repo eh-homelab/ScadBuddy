@@ -89,6 +89,8 @@ export type AgentWorkerOptions = {
   deployment?: { name: string; buildId: string; queues?: () => readonly string[] }
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
+  /** The most workflows its sticky cache keeps; the SDK's default (sized by memory) when omitted. */
+  maxCachedWorkflows?: number
   /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
   activityHeartbeatMs?: number
   shutdownGraceMs?: number
@@ -146,6 +148,15 @@ export class AgentWorker {
    */
   current(): boolean {
     return this.#current
+  }
+
+  /**
+   * The connection the worker polls on, while it polls and once its build has been made current
+   * (`current`, which stays true when a later build is promoted); undefined otherwise. A client on it may start a workflow with `requestEagerStart`, which hands the first
+   * workflow task to this worker in the start's answer (activityProjection.ts `toolCallStarter`).
+   */
+  connection(): NativeConnection | undefined {
+    return this.#state === 'ok' && this.#current ? this.#connection : undefined
   }
 
   async stop(): Promise<void> {
@@ -235,6 +246,7 @@ export class AgentWorker {
           ...(options.maxConcurrentActivityTaskExecutions !== undefined
             ? { maxConcurrentActivityTaskExecutions: options.maxConcurrentActivityTaskExecutions }
             : {}),
+          ...(options.maxCachedWorkflows !== undefined ? { maxCachedWorkflows: options.maxCachedWorkflows } : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
           shutdownForceTime: options.shutdownForceMs ?? 15_000,
         })

@@ -1,6 +1,5 @@
 import { type Client, TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
-import { TASK_QUEUE } from '../temporal/names.js'
 import {
   BRIDGE_CALL_WORKFLOW,
   BRIDGE_TAB_ACTIVITY,
@@ -25,7 +24,7 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //   owner (holds the tab's socket)          caller
 //   hello: ai_tab_owners row ← its queue
 //                                           reads the tab's row: the owner's queue
-//                                           starts BridgeCall on `agent-tools`
+//                                           starts BridgeCall on its own queue
 //   activity `bridge.tab` on its queue ◀──  (temporal/bridgeCall.ts)
 //   runs it on the tab (hub.ts, as a local call)
 //   returns the answer                  ──▶ the workflow's result
@@ -33,7 +32,11 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 //
 // Each replica polls `agent-tools.<identity>` (main.ts HOST_QUEUE), so Temporal delivers
 // the call to the owner only, and once (one attempt). Nothing is sent to the replicas
-// that do not hold the tab.
+// that do not hold the tab. The workflow's own tasks run on the CALLER's queue, which its
+// host worker polls with BridgeCall (#5862): both queues are unversioned and polled by
+// one replica each, so no hop waits on the shared `agent-tools` queue. That queue is
+// versioned, and in prod a BridgeCall's first workflow task there waited 3.4 s for a
+// poller, past the status probe's budget (hub.ts STATUS_PROBE_MS).
 //
 // Sealed, always: the request and the answer (page snapshots, form contents, the
 // editor's text) are the workflow's payloads, and every BridgeCall workflow is a subject
@@ -69,10 +72,10 @@ export const ACK_TIMEOUT_MS = 3_000
  */
 export const MAX_BRIDGE_BYTES = 256 * 1024
 /**
- * Past the owner's own time: the workflow's whole run, for a workflow task that is slow to start.
- * Room for one failed first workflow task too: during a rolling deploy a replica still on the
- * build before #4780 polls the unversioned `agent-tools`, has no BridgeCall, and fails the task,
- * which Temporal then gives to another replica (docs/ai/operating.md, "Rolling deploys").
+ * Past the owner's own time: the workflow's whole run, for its workflow tasks on the caller's own
+ * host worker, which are CPU work there (start, unsealing, the result: up to 4.3 s on a loaded
+ * replica, #5428), and for that worker's reconnect if Temporal blips mid-call. Past it the call
+ * answers no_answer.
  */
 const WORKFLOW_SLACK_MS = 15_000
 
@@ -112,10 +115,12 @@ export interface TabRelay {
 
 export type TemporalTabRelayOptions = {
   owners: TabOwnerStore
-  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `hostActivities()` (then `startHosting`). */
+  /**
+   * This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with
+   * `hostActivities()` (then `startHosting`) and with the BridgeCall workflow: the calls this
+   * replica starts run their workflow tasks there (#5862).
+   */
   hostQueue: string
-  /** Where BridgeCall runs: `agent-tools`, which every replica's worker polls with the workflow bundle. */
-  workflowQueue?: string
   /** Set later with `useClient` when it is made after the hub (main.ts). */
   client?: SealingClient | undefined
   ackTimeoutMs?: number
@@ -154,7 +159,6 @@ const NO_ANSWER: RelayAnswer = {
 export class TemporalTabRelay implements TabRelay {
   readonly #owners: TabOwnerStore
   readonly hostQueue: string
-  readonly #workflowQueue: string
   readonly #ackTimeoutMs: number
   readonly #log: (message: string) => void
   readonly #ready: (() => Promise<boolean>) | undefined
@@ -172,7 +176,6 @@ export class TemporalTabRelay implements TabRelay {
   constructor(options: TemporalTabRelayOptions) {
     this.#owners = options.owners
     this.hostQueue = options.hostQueue
-    this.#workflowQueue = options.workflowQueue ?? TASK_QUEUE
     this.#client = options.client
     this.#ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS
     this.#log = options.log ?? ((m) => console.error(m))
@@ -298,7 +301,8 @@ export class TemporalTabRelay implements TabRelay {
     const input: BridgeCallInput = { queue, tabId, request, ackTimeoutMs: this.#ackTimeoutMs }
     const workflowId = bridgeWorkflowId()
     const handle = await client.workflow.start(BRIDGE_CALL_WORKFLOW, {
-      taskQueue: this.#workflowQueue,
+      // This replica's own queue: its own host worker runs the workflow tasks, at once (#5862).
+      taskQueue: this.hostQueue,
       workflowId,
       args: [input],
       workflowExecutionTimeout: this.#ackTimeoutMs + ownerRunMs(input) + WORKFLOW_SLACK_MS,
@@ -319,13 +323,14 @@ export class TemporalTabRelay implements TabRelay {
         },
         (err: unknown) => {
           signal.removeEventListener('abort', onAbort)
-          // The workflow failed or timed out (a rollout's old replica failing its tasks): the
-          // owner may have run the call, so it is never sent again.
+          // The workflow failed or timed out: the owner may have run the call, so it is never
+          // sent again.
           if (executionTimedOut(err)) {
-            // Named apart from an owner's failure (#4950): WORKFLOW_SLACK_MS covers about one
-            // failed workflow task, so a run of them during a rollout ends here.
+            // Named apart from an owner's failure (#4950): the workflow's own tasks, on this
+            // replica's host worker, did not finish within WORKFLOW_SLACK_MS (a worker that
+            // stopped polling, or failing tasks).
             this.#log(
-              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (rollout? its workflow tasks may have failed): ${errorMessage(err)}`,
+              `bridge relay: the call to tab ${tabId} on ${queue} timed out as a workflow (is this replica's host worker on ${this.hostQueue} polling? its workflow tasks may have failed): ${errorMessage(err)}`,
             )
           } else {
             this.#failed(err)

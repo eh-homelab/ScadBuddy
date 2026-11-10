@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router'
 import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
+import { JobPicture } from './JobPicture'
+import { queueItemPath, scadbuddyJobPath } from './prints'
+import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
-/** An outside link of the queue's (opens Bambuddy beside the frame, #2351). */
+/** A link of the queue's: an item's page, or Bambuddy's queue and stats beside the frame (#2351). */
 const LINK = 'font-medium text-primary underline-offset-4 hover:underline'
 
 /** How often the queue is read while the page is visible. */
@@ -26,7 +30,8 @@ function byPosition(a: QueueItem, b: QueueItem): number {
 /**
  * #2351 — Bambuddy's print queue on `/prints`: what is waiting to print, whoever
  * queued it, and why it is waiting; with the farm's totals under it. Read only: the
- * queue is managed in Bambuddy, which the links open.
+ * queue is managed in Bambuddy, which the "Bambuddy's queue" link opens. Each row opens
+ * its item's page (#3744).
  */
 export function PrintQueue() {
   const [items, setItems] = useState<QueueItem[] | null>(null)
@@ -111,6 +116,22 @@ export function PrintQueue() {
   )
 }
 
+/**
+ * #3743, #3744 — the item's name, as a link in ScadBuddy: ScadBuddy's own item to its
+ * ScadBuddy page ({@link scadbuddyJobPath}: its print once linked, else its queue item
+ * page); any other to its queue item page, which links on to Bambuddy's queue. Bambuddy
+ * has no route for one item (`frontend/src/App.tsx` and `QueuePage.tsx` at
+ * maziggy/bambuddy@2ce0d93).
+ */
+function ItemName({ item, name }: { item: QueueItem; name: string }) {
+  const to = item.scadbuddy ? scadbuddyJobPath(item.scadbuddy, item.id) : queueItemPath(item.id)
+  return (
+    <Link to={to} className={`min-w-0 truncate ${LINK}`}>
+      {name}
+    </Link>
+  )
+}
+
 function QueueRow({ item }: { item: QueueItem }) {
   const name = item.archive_name ?? item.library_file_name ?? `Queue item ${item.id}`
   const where = item.printer_name ?? (item.target_model ? `Any ${item.target_model}` : 'No printer yet')
@@ -119,17 +140,24 @@ function QueueRow({ item }: { item: QueueItem }) {
   if (item.manual_start) notes.push('Waits for a manual start')
   if (item.waiting_reason) notes.push(item.waiting_reason)
   return (
-    <li className="px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <span className="min-w-0 truncate font-medium">{name}</span>
-        <span className="sb-num shrink-0 text-xs text-muted-foreground">
-          {where}
-          {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}
-          {item.filament_used_grams ? ` · ${Math.round(item.filament_used_grams)} g` : ''}
-        </span>
+    <li className="flex items-start gap-3 px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
+      {/* #3742 — ScadBuddy's picture of its own item, else Bambuddy's thumbnail. */}
+      <JobPicture src={item.picture} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ItemName item={item} name={name} />
+            {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
+          </span>
+          <span className="sb-num shrink-0 text-xs text-muted-foreground">
+            {where}
+            {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}
+            {item.filament_used_grams ? ` · ${Math.round(item.filament_used_grams)} g` : ''}
+          </span>
+        </div>
+        {item.filament_short && <p className="mt-0.5 text-xs text-warn">Not enough filament loaded for this print.</p>}
+        {notes.length > 0 && <p className="mt-0.5 text-xs text-muted-foreground">{notes.join(' · ')}</p>}
       </div>
-      {item.filament_short && <p className="mt-0.5 text-xs text-warn">Not enough filament loaded for this print.</p>}
-      {notes.length > 0 && <p className="mt-0.5 text-xs text-muted-foreground">{notes.join(' · ')}</p>}
     </li>
   )
 }

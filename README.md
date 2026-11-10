@@ -675,9 +675,29 @@ the keys again. Without `SCADBUDDY_SECRET_KEY_FILE`,
 run reads the account's new posted deposits
 ([`/transactions/sync`](https://plaid.com/docs/api/products/transactions/#transactionssync))
 and suggests the orders each may pay: one whose number (`ORD-2026-12`) is in the deposit's
-text, or one whose balance equals the deposit. A suggestion records nothing. The bank's
+text, or one whose balance equals the deposit. A suggestion records nothing: the order
+page lists it under "Suggested bank deposits", where "Record this deposit as payment"
+records it once as a `bank_transfer` payment whose reference is Plaid's transaction id,
+and "Not this order" hides it for good, after an unlink and a new link too. If the bank
+later changes or removes a deposit already recorded, the order page warns until the shop
+records the difference as a `bank_transfer` payment with the transaction id as reference
+(payments are never edited). A cancelled order takes no payment and shows no such warning.
+With `SCADBUDDY_PUBLIC_URL` set, Link registers
+`https://<public host>/api/v1/payments/bank/webhook` for the account's webhooks
+([webhooks](https://plaid.com/docs/api/webhooks/)); an account linked before the public URL
+was set gets none until it is linked again. Each webhook is checked by its
+`Plaid-Verification` JWT
+([webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/)).
+`SYNC_UPDATES_AVAILABLE` reads the new deposits at once. When the bank needs the shop to
+sign in again (`ITEM_LOGIN_REQUIRED`), the card shows "Reconnect", which opens Link's
+update mode ([update mode](https://plaid.com/docs/link/update-mode/)). The bank's
 text is kept with every run of five or more digits masked, a run going on across single
-spaces or hyphens (so an IBAN printed in groups is masked); an order number is kept. The page's Content-Security-Policy allows Link's one
+spaces or hyphens (so an IBAN printed in groups is masked); an order number is masked
+too, and only the number of an order that exists is put back, written as ScadBuddy writes it
+(so an account number dressed as an order number never survives). The migration
+`20261109T1420Z_bank_deposits_remask.sql` masks the text stored before this rule, in
+`bank_deposits` and in the notes of a payment recorded from a deposit: every order number,
+and every run of four or more digits (a run going on across single spaces or hyphens). The page's Content-Security-Policy allows Link's one
 script, its frame on `cdn.plaid.com` and Plaid's two API hosts. ScadBuddy cannot set the
 bank Stripe pays out to: set it in the Stripe Dashboard.
 

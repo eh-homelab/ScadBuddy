@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
+import type { LockClient } from '../db.js'
 import { WorkspaceBlobError, type WorkspaceBlobStore } from './blobs.js'
 import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
@@ -22,8 +23,13 @@ import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing
 //
 // The bytes (#4789): with `blobs` (main.ts) a file's bytes are a blob of the
 // backend's content store, sealed under a file key of their own (sealing.ts) and
-// held in `blob_refs` while the row stands (a trigger, migration 20261027T0114Z);
-// the row keeps the metadata and the wrapped key. Only on a backend whose
+// held in `blob_refs` while the row stands; the row keeps the metadata and the
+// wrapped key. The holds go through the agent's CRUD routes (blobs.ts, #5299; no
+// trigger): a hold always comes before the row that names the blob, and a release
+// after the row is gone (`write`, `delete`, `copy`, `moveToBlobs`, `sweep`). A failed
+// release is only logged; `reconcile`, on the sweeper's tick, releases what a
+// session's cascade, forgetSubject, a crash or a failed release left, and holds a
+// row no hold names. Only on a backend whose
 // `store_backend` is `local` (it has no content store), or without `blobs` (tests),
 // do the bytes stay in `data`, as before. On any other backend a write that cannot
 // be sealed and stored (no KEK here, a backend that cannot mint the URLs or is too
@@ -47,6 +53,17 @@ export const WORKSPACE_MAX_FILES = 5_000
 export const WORKSPACE_TTL_MS = 24 * 60 * 60 * 1000
 /** How often principals' expired files are swept. */
 export const WORKSPACE_SWEEP_MS = 10 * 60 * 1000
+/**
+ * How old an orphan hold must be before `reconcile` releases it: longer than any write
+ * takes from its hold to its commit, so a write about to land keeps its hold.
+ */
+export const RECONCILE_GRACE_MS = 60 * 60 * 1000
+/** How often the sweeper's tick also runs `reconcile`. */
+export const RECONCILE_EVERY_MS = 60 * 60 * 1000
+/** The advisory lock that lets one replica at a time run `reconcile`. */
+export const RECONCILE_LOCK = 'scadbuddy:ai_session_files:reconcile'
+/** Why `reconcile` did nothing: another replica holds RECONCILE_LOCK, or no lock connection was free. */
+export type ReconcileSkipped = 'held' | 'no_connection'
 /** The slice `chunks` reads at a time. */
 export const STREAM_CHUNK_BYTES = 1024 * 1024
 
@@ -130,6 +147,11 @@ function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
   return ws.kind === 'session'
     ? { key: `session:${ws.sessionId}`, sessionId: ws.sessionId }
     : { key: `principal:${ws.principalKind}:${ws.principalId}`, sessionId: null }
+}
+
+/** The `blob_refs` holder of a workspace file's blob: `<workspace>/<path>`. */
+export function holderOf(workspace: string, path: string): string {
+  return `${workspace}/${path}`
 }
 
 /** The workspace a stored `workspace` key names. */
@@ -354,6 +376,10 @@ export class SessionFiles {
   private readonly settings: SettingsReader | undefined
   private readonly fixed: Partial<WorkspaceLimits>
   private readonly blobs: WorkspaceBlobs | undefined
+  private readonly onReleaseError: (message: string) => void
+  private readonly locks: LockClient | undefined
+  /** When `reconcile` last ran on the sweeper's tick (ms). */
+  #reconciledAt = 0
   /** The most files one workspace holds (WORKSPACE_MAX_FILES; tests set fewer). */
   readonly maxFiles: number
 
@@ -364,6 +390,10 @@ export class SessionFiles {
       limits?: Partial<WorkspaceLimits>
       blobs?: WorkspaceBlobs | undefined
       maxFiles?: number | undefined
+      /** A release that failed (its hold stays until `reconcile`); console.error by default. */
+      onReleaseError?: ((message: string) => void) | undefined
+      /** The connections `reconcile` holds its lock on (db.ts `Database.locks`); without them it takes none. */
+      locks?: LockClient | undefined
     } = {},
   ) {
     this.sql = sql
@@ -371,6 +401,36 @@ export class SessionFiles {
     this.fixed = options.limits ?? {}
     this.blobs = options.blobs
     this.maxFiles = options.maxFiles ?? WORKSPACE_MAX_FILES
+    this.onReleaseError = options.onReleaseError ?? ((message) => console.error(message))
+    this.locks = options.locks
+  }
+
+  /** Holds `blobKey` for `<workspace>/<path>`; `unavailable` when the backend refuses it. */
+  async #hold(store: WorkspaceBlobStore, workspace: string, path: string, blobKey: string): Promise<void> {
+    try {
+      await store.hold(blobKey, holderOf(workspace, path))
+    } catch (err) {
+      if (err instanceof WorkspaceBlobError) throw refused(err.message)
+      throw err
+    }
+  }
+
+  /**
+   * Releases `<workspace>/<path>`'s hold of `blobKey` once its row is gone or names another
+   * blob; a row that names it again since keeps it. Never throws: a failure is logged, and
+   * `reconcile` releases the hold later.
+   */
+  async #release(workspace: string, path: string, blobKey: string): Promise<void> {
+    const store = this.blobs?.store
+    if (!store) return
+    try {
+      const [named] = await this.sql`
+        SELECT 1 FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path} AND blob_key = ${blobKey}`
+      if (named) return
+      await store.release(blobKey, holderOf(workspace, path))
+    } catch (err) {
+      this.onReleaseError(`workspace files: could not release blob ${blobKey}; reconcile releases it later: ${(err as Error).message}`)
+    }
   }
 
   /** How many files the workspace holds now. */
@@ -451,8 +511,9 @@ export class SessionFiles {
   }
 
   /**
-   * Where `data` goes: sealed and uploaded as a blob, or inline only where #target says
-   * Postgres. A store that refuses is `unavailable`.
+   * Where `data` goes: sealed, uploaded as a blob and held for `<workspace>/<path>` (before
+   * the caller writes the row that names it), or inline only where #target says Postgres. A
+   * store that refuses the upload or the hold is `unavailable`.
    */
   async #place(ws: WorkspaceRef, path: string, data: Buffer, digest: string): Promise<Placed> {
     const target = await this.#target()
@@ -466,6 +527,7 @@ export class SessionFiles {
         if (err instanceof WorkspaceBlobError) throw refused(err.message)
         throw err
       }
+      await this.#hold(target.store, keyOf(ws).key, path, blobKey)
       const { sealed, kekId } = await target.sealing.wrap(ws, path, blobKey, fileKey)
       return { data: null, blobKey, keySealed: sealed, kekId }
     } finally {
@@ -629,12 +691,14 @@ export class SessionFiles {
     const source = options.source ?? null
     // Checked before any upload too, so a refused write sends nothing; the checks under the lock below are the ones that hold.
     if (this.blobs) await this.#precheck(key, name, data.byteLength, workspaceMaxBytes, options.expectedSha256)
+    // The blob is held here, before the transaction that writes the row naming it.
     const placed = await this.#place(ws, name, data, digest)
-    return this.sql.begin(async (tx) => {
+    let replaced: string | null = null
+    const written = await this.sql.begin(async (tx) => {
       if (options.alongside) await lockSession(tx, sessionId)
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${key}`}, 0))`
-      const [current] = await tx<{ sha256: string }[]>`
-        SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
+      const [current] = await tx<{ sha256: string; blob_key: string | null }[]>`
+        SELECT sha256, blob_key FROM ai_session_files WHERE workspace = ${key} AND path = ${name} FOR UPDATE`
       if (options.expectedSha256 !== undefined) {
         if (options.expectedSha256 === null && current) {
           throw new WorkspaceError('conflict', `${name} already exists (sha256 ${current.sha256}); nothing was written`)
@@ -684,8 +748,12 @@ export class SessionFiles {
         RETURNING path, media_type, size, sha256, source, created_at, updated_at`
       const file = infoOf(row!)
       await options.alongside?.(tx, file)
+      replaced = current?.blob_key ?? null
       return file
     })
+    // The old blob's hold goes once the row names the new one.
+    if (replaced !== null && replaced !== placed.blobKey) await this.#release(key, name, replaced)
+    return written
   }
 
   /**
@@ -699,24 +767,31 @@ export class SessionFiles {
   ): Promise<boolean> {
     const name = workspacePath(path)
     const { key, sessionId } = keyOf(ws)
-    return this.sql.begin(async (tx) => {
+    let released: string | null = null
+    const deleted = await this.sql.begin(async (tx) => {
       if (options.alongside) await lockSession(tx, sessionId)
       if (options.expectedSha256 === undefined) {
-        const rows = await tx`DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING path`
+        const rows = await tx<{ blob_key: string | null }[]>`
+          DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING blob_key`
         if (rows.length === 0) return false
+        released = rows[0]!.blob_key
       } else {
-        const [row] = await tx<{ sha256: string; deleted: boolean }[]>`
+        const [row] = await tx<{ sha256: string; deleted: boolean; blob_key: string | null }[]>`
           WITH target AS (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}),
-               gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING path)
-          SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted FROM target`
+               gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING blob_key)
+          SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted, (SELECT blob_key FROM gone) AS blob_key FROM target`
         if (!row) return false
         if (!row.deleted) {
           throw new WorkspaceError('conflict', `${name} changed since it was read: its sha256 is ${row.sha256}; nothing was deleted`)
         }
+        released = row.blob_key
       }
       await options.alongside?.(tx)
       return true
     })
+    // The blob's hold goes once the row is gone.
+    if (released !== null) await this.#release(key, name, released)
+    return deleted
   }
 
   /** The write's conflict and quota checks, without the lock, before its upload. */
@@ -779,6 +854,9 @@ export class SessionFiles {
           fileKey.fill(0)
         }
       }
+      // Each child row's hold comes before the insert that names the blob.
+      const { store } = this.#sealing()
+      for (const { row } of wrapped) await this.#hold(store, to, row.path, row.blob_key!)
     }
     await this.sql.begin(async (tx) => {
       await tx`
@@ -824,20 +902,105 @@ export class SessionFiles {
     }
   }
 
-  /** Deletes principals' files last written more than `ttlMs` ago; how many went. Sessions' files go with their session. */
+  /**
+   * Deletes principals' files last written more than `ttlMs` ago, then releases their blobs'
+   * holds; how many went. Sessions' files go with their session (`reconcile` releases those).
+   */
   async sweep(ttlMs = WORKSPACE_TTL_MS): Promise<number> {
-    const rows = await this.sql`
+    const rows = await this.sql<{ workspace: string; path: string; blob_key: string | null }[]>`
       DELETE FROM ai_session_files
-      WHERE session_id IS NULL AND updated_at < now() - (${ttlMs} * interval '1 millisecond') RETURNING path`
+      WHERE session_id IS NULL AND updated_at < now() - (${ttlMs} * interval '1 millisecond') RETURNING workspace, path, blob_key`
+    for (const row of rows) if (row.blob_key !== null) await this.#release(row.workspace, row.path, row.blob_key)
     return rows.length
   }
 
-  /** Sweeps every `everyMs` once `ready` says the database is; the returned function stops it. */
+  /**
+   * Makes the backend's holds match the rows: releases every hold older than `graceMs` whose
+   * row is gone or names another blob (what a session's cascade, forgetSubject, a crash or a
+   * failed release left), and holds every row no hold names. Reads every hold, then every
+   * row: a row written meanwhile is held again (a no-op), and a hold taken again meanwhile is
+   * kept, since the backend releases only a hold still older than the grace. Nothing without
+   * a blob store; WorkspaceBlobError when the backend cannot list or answer. With `locks`, one
+   * replica at a time: `skipped` is `held` while another replica holds RECONCILE_LOCK, and
+   * `no_connection` while no lock connection is free (the sweeper then tries again at its next
+   * tick, not an hour later).
+   */
+  async reconcile(graceMs = RECONCILE_GRACE_MS): Promise<{ released: number; held: number; skipped?: ReconcileSkipped }> {
+    const store = this.blobs?.store
+    if (!store) return { released: 0, held: 0 }
+    if (!this.locks) return this.#reconcile(store, graceMs)
+    // One replica at a time: the lock is held on a lock-client connection (db.ts
+    // `createLockClient`), never one of the stores'. With every lock connection out this one
+    // skips `no_connection`, and the sweeper tries again at its next tick; with the lock held
+    // by another replica it skips `held`, since that replica runs it this hour.
+    const lease = await this.locks.take()
+    if (!lease) return { released: 0, held: 0, skipped: 'no_connection' }
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
+    try {
+      const [lock] = await lease.sql<{ locked: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtextextended(${RECONCILE_LOCK}, 0)) AS locked`
+      if (!lock?.locked) {
+        healthy = true
+        return { released: 0, held: 0, skipped: 'held' }
+      }
+      try {
+        return await this.#reconcile(store, graceMs)
+      } finally {
+        await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${RECONCILE_LOCK}, 0))`
+        healthy = true
+      }
+    } finally {
+      lease.done(healthy)
+    }
+  }
+
+  async #reconcile(store: WorkspaceBlobStore, graceMs: number): Promise<{ released: number; held: number }> {
+    const holds = await store.listHolds(0)
+    const rows = await this.sql<{ workspace: string; path: string; blob_key: string }[]>`
+      SELECT workspace, path, blob_key FROM ai_session_files WHERE blob_key IS NOT NULL`
+    const named = new Set(rows.map((r) => `${r.blob_key} ${holderOf(r.workspace, r.path)}`))
+    const held = new Set(holds.map((h) => `${h.key} ${h.holderId}`))
+    const olderThanSeconds = Math.floor(graceMs / 1000)
+    let released = 0
+    for (const hold of holds) {
+      if (named.has(`${hold.key} ${hold.holderId}`)) continue
+      if (await store.release(hold.key, hold.holderId, { olderThanSeconds })) released += 1
+    }
+    let holding = 0
+    for (const row of rows) {
+      const holder = holderOf(row.workspace, row.path)
+      if (held.has(`${row.blob_key} ${holder}`)) continue
+      await store.hold(row.blob_key, holder)
+      holding += 1
+    }
+    return { released, held: holding }
+  }
+
+  /**
+   * Sweeps every `everyMs` once `ready` says the database is, and reconciles the holds on the
+   * first tick past RECONCILE_EVERY_MS since the last; a reconcile that skipped
+   * `no_connection` or failed is tried again at the next tick. The returned function stops it.
+   */
   startSweeper(everyMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
     const tick = () => {
       ready()
-        .then((ok) => (ok ? this.sweep() : 0))
+        .then(async (ok) => {
+          if (!ok) return
+          await this.sweep()
+          if (!this.blobs || Date.now() - this.#reconciledAt < RECONCILE_EVERY_MS) return
+          this.#reconciledAt = Date.now()
+          // No replica ran it this hour when no lock connection was free or it failed: try at the next tick.
+          let skipped: ReconcileSkipped | undefined
+          try {
+            skipped = (await this.reconcile()).skipped
+          } catch (err) {
+            this.#reconciledAt = 0
+            throw err
+          }
+          if (skipped === 'no_connection') this.#reconciledAt = 0
+        })
         .catch(options.onError ?? (() => {}))
     }
     const timer = setInterval(tick, everyMs)

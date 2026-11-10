@@ -7,8 +7,9 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
 `ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`, and `blob_refs` through a
-trigger; `backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). `src/db/grants.ts`
+`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
+`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
+holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -25,11 +26,14 @@ The agent's service credential (`src/api/serviceCredential.ts`, wired in `main.t
 `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (both is a `ConfigError`)
 `ExchangeCredential` exchanges that proof at the backend's `POST /api/v1/auth/service-token`
 for a 15-minute credential, renews it at half-life and after a 401, and falls back to the view
-on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
+on a 404 while it has a database. A failed exchange is tried again after 5 s doubling to 60 s,
+but a refused connection (the backend not up yet, `src/api/backendUp.ts` `backendNotUp`, #5868)
+is tried again at the next call and logged once as "waiting for the backend". Without a proof `ServiceCredential` reads the sealed one from
 `service_credentials_agent`, as before (#5494).
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
-assistant's spend on an order. A session's successful `order_item_revision_add` (or
+holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
+"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -129,10 +133,26 @@ opens every one and seals it again byte for byte).
   `RESTARTED_PROMPT` once its message is in the transcript (§5.5). Every tool call
   of a turn on Temporal is a `ToolCall` workflow of its own, `session-<id>-call-<tool_use_id>`
   (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
-  `tools_as_activities` switch is gone, Step 9.9); without Temporal the calls run in the turn's
+  `tools_as_activities` switch is gone, Step 9.9), started with `requestEagerStart` on the turn's
+  replica's own agent-tools worker connection while it polls, once its build has been made current (AgentWorker
+  `connection`, #5865; it stays so when a later build is promoted, and Temporal grants an eager start
+  to such a superseded build, whose worker then runs the call: measured on a dev server, Server
+  1.32.0, `toolCallLatency.temporal.test.ts` `SUPERSEDED`; the call's span attribute `scadbuddy.eager` says
+  `started`, `declined`, `failed` or `fallback`): the first workflow task comes back in the start's answer
+  without waiting on matching, and the activity is dispatched eagerly to the same worker when it is
+  on agent-tools and the worker has a free slot (a pinned server's call goes to `agent-tools.<hostname>`
+  through matching). Both need the server's `system.enableEagerWorkflowStart` and
+  `system.enableActivityEagerExecution`, on by default at Temporal v1.32.1
+  ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
+  and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
+  `test/toolCallLatency.temporal.test.ts`
+  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
+  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
-  below). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
-  `agent.turn.spawn` (`warm.outcome`), `agent.turn.release` and each ToolCall's
+  below); a turn whose transcript last ran in another directory (a fork's first) is told so in
+  its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
+  `agent.turn.spawn` (`warm.outcome`), `agent.turn.release`, the turn's span of each call with
+  `scadbuddy.eager` (above), and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
   charts.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
@@ -272,9 +292,12 @@ opens every one and seals it again byte for byte).
     the plaintext copies out), is a copy of it that each turn's placement fills and each park
     and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
-    `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
-    `blob_refs` holder with the row, which assumes one database and role for both services,
-    today's state, superseded by #5295;
+    `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; the `blob_refs` holder
+    `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
+    `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
+    the row that names a blob and releases after the row is gone, and `reconcile`, on the
+    sweeper's tick hourly, releases what cascades, `forgetSubject` and crashes left and holds
+    a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in `data`; on any other backend a write that cannot be sealed and stored is refused
@@ -316,6 +339,24 @@ opens every one and seals it again byte for byte).
     source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+  - Customer messages (#5660, spec `2026-11-08-order-notify-customer-design.md`):
+    `src/orders/messaging.ts` `pluginMessaging` opens the backend setting
+    `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,
+    both through the forwarder) and calls its tool; an `McpError` is `failed`, a timeout, a
+    closed connection or another error is `unknown`. `order_notify_customer` (`read`) composes
+    and answers `channel` and `send_ready`; `order_messages_list` (`read`) lists the order's
+    messages, whose ids `resend_of` takes; `order_notify_customer_send` (`outward`) parks the
+    exact message as `approved`, claims an `order_messages` row through the backend's
+    `POST /api/v1/orders/{id}/messages` (`Idempotency-Key`, the call's `idempotencyKey`),
+    sends, then posts the outcome. A replayed claim sends again only when the binding maps an
+    `idempotency_key` argument; otherwise a fresh `sending` row is answered as in flight (no
+    outcome posted) and one that reads `unknown` is recorded `unknown`, never resent by itself.
+    `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
+    message (a person's session only, kept in the audit log as `messaging.test_send`).
+    `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message
+    composed now and its digest, and the send takes only the template, `resend_of` and the
+    digest, composes again and refuses `message_changed` on a difference (a person's session
+    only; `tools/orders.ts` `previewPersonSend`, `personSend`).
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

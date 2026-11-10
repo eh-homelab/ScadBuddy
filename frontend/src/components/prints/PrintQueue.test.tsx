@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -6,9 +6,18 @@ import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import { PRINT_QUEUE, setPrintQueue } from '../../mocks/features/printQueue'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import type * as Embed from '../../lib/embed'
 import { PrintQueue, QUEUE_POLL_MS, QUEUE_SHOWN } from './PrintQueue'
 
+const frame = vi.hoisted(() => ({ embedded: false }))
+vi.mock('../../lib/embed', async (original) => ({
+  ...(await original<typeof Embed>()),
+  isEmbedded: () => frame.embedded,
+}))
+
 afterEach(() => {
+  frame.embedded = false
+  Object.defineProperty(document, 'referrer', { value: '', configurable: true })
   vi.restoreAllMocks()
   resetBambuddyLinks()
   vi.useRealTimers()
@@ -25,6 +34,7 @@ describe('PrintQueue (#2351)', () => {
     expect(within(list).getAllByRole('listitem').map((row) => row.dataset.testid)).toEqual([
       'queue-item-259',
       'queue-item-260',
+      'queue-item-263',
     ])
     const keychain = screen.getByTestId('queue-item-259')
     expect(keychain).toHaveTextContent('Luna keychain')
@@ -49,6 +59,77 @@ describe('PrintQueue (#2351)', () => {
     expect(within(totals).getByRole('link', { name: "Bambuddy's stats" })).toHaveAttribute(
       'href',
       'http://bambuddy.local/stats',
+    )
+  })
+
+  it('marks the items ScadBuddy queued, and no other (#3741)', async () => {
+    renderPage(<PrintQueue />)
+
+    const keychain = await screen.findByTestId('queue-item-259')
+    expect(within(keychain).getByText('Queued from ScadBuddy')).toBeInTheDocument()
+    expect(within(screen.getByTestId('queue-item-260')).queryByText('Queued from ScadBuddy')).toBeNull()
+  })
+
+  it("links ScadBuddy's items to ScadBuddy, and any other to its queue item page (#3743, #3744)", async () => {
+    setBambuddyLinks({ bambuddy_url: 'http://bambuddy.local', bambuddy_web_urls: null })
+    const ours = PRINT_QUEUE.find((item) => item.id === 259)!
+    setPrintQueue([
+      ...PRINT_QUEUE,
+      { ...ours, id: 261, position: 9, archive_name: 'Luna again', scadbuddy: { ...ours.scadbuddy!, archive_id: 35 } },
+    ])
+    renderPage(<PrintQueue />)
+
+    // Not archived yet: its queue item page (#3744).
+    const keychain = await screen.findByTestId('queue-item-259')
+    expect(within(keychain).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/prints/queue/259')
+    // Archived: its print.
+    expect(within(screen.getByTestId('queue-item-261')).getByRole('link', { name: 'Luna again' })).toHaveAttribute(
+      'href',
+      '/prints/35',
+    )
+    // Any other item: ScadBuddy's page of the item (#3744), in the frame, which links on
+    // to Bambuddy's queue. Bambuddy has no page per queue item.
+    const bracket = within(screen.getByTestId('queue-item-260')).getByRole('link', { name: 'Bracket.gcode.3mf' })
+    expect(bracket).toHaveAttribute('href', '/prints/queue/260')
+    expect(bracket).not.toHaveAttribute('target')
+  })
+
+  it('links an item ScadBuddy did not queue to its page without a Bambuddy address (#3744)', async () => {
+    renderPage(<PrintQueue />)
+
+    const bracket = within(await screen.findByTestId('queue-item-260')).getByRole('link', { name: 'Bracket.gcode.3mf' })
+    expect(bracket).toHaveAttribute('href', '/prints/queue/260')
+  })
+
+  it("shows each row's picture: ScadBuddy's, Bambuddy's, or a placeholder (#3742)", async () => {
+    renderPage(<PrintQueue />)
+
+    const ours = within(await screen.findByTestId('queue-item-259')).getByTestId('job-picture')
+    // The name is beside it, so the picture says nothing more to a screen reader.
+    expect(ours.querySelector('img')).toHaveAttribute('src', '/api/v1/outputs/luna-0002/thumbnail')
+    expect(ours.querySelector('img')).toHaveAttribute('alt', '')
+    const theirs = within(screen.getByTestId('queue-item-260')).getByTestId('job-picture')
+    expect(theirs.querySelector('img')).toHaveAttribute('src', '/api/v1/farm/library/1615/thumbnail')
+    const none = within(screen.getByTestId('queue-item-263')).getByTestId('job-picture')
+    expect(none.querySelector('img')).toBeNull()
+    expect(within(none).getByTestId('job-picture-placeholder')).toBeInTheDocument()
+
+    // A picture that fails to load is the placeholder, never a broken image.
+    fireEvent.error(theirs.querySelector('img')!)
+    expect(theirs.querySelector('img')).toBeNull()
+    expect(within(theirs).getByTestId('job-picture-placeholder')).toBeInTheDocument()
+  })
+
+  it('opens Bambuddy on the hostname framing ScadBuddy (#3743)', async () => {
+    setBambuddyLinks({ bambuddy_url: null, bambuddy_web_urls: 'http://bambuddy.local, http://bambuddy.lan:8000' })
+    frame.embedded = true
+    Object.defineProperty(document, 'referrer', { value: 'http://bambuddy.lan:8000/external/3', configurable: true })
+    renderPage(<PrintQueue />)
+
+    await screen.findByTestId('queue-item-260')
+    expect(screen.getByRole('link', { name: "Bambuddy's queue" })).toHaveAttribute(
+      'href',
+      'http://bambuddy.lan:8000/queue',
     )
   })
 

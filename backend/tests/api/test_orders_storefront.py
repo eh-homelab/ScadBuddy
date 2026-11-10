@@ -168,3 +168,23 @@ def test_the_reason_is_trimmed_before_its_length_is_checked(
     padded = {"what": "revision", "target_id": rev["id"], "reason": "  " + "r" * 500 + "  "}
     url = f"/api/v1/orders/{order.id}/items/{item['id']}/accept-for-customer"
     assert client.post(url, json=padded).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("time-entries", {"kind": "design", "minutes": 5}),
+        ("cost-entries", {"kind": "other", "amount_minor": 100}),
+    ],
+)
+def test_a_time_or_cost_entry_is_refused_on_a_cart(
+    client: TestClient, draft_with_item: str, path: str, body: dict[str, object]
+) -> None:
+    """Review of #5789: the sweep would drop it with the cart. The agent's
+    ``order_time_add`` and ``order_cost_add`` call these routes."""
+    refused = client.post(f"/api/v1/orders/{draft_with_item}/{path}", json=body)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/orders/order_not_submitted"
+    assert refused.json()["detail"] == f"cart {draft_with_item} is not yet submitted"
+    costs = client.get(f"/api/v1/orders/{draft_with_item}/costs").json()
+    assert (costs["time_entries"], costs["cost_entries"]) == ([], [])

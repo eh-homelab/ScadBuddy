@@ -12,9 +12,11 @@ import { OrderSummary } from '../components/orders/OrderSummary'
 import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
+import { DepositSuggestions } from '../components/orders/DepositSuggestions'
 import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
+import { OrderMessages } from '../components/orders/OrderMessages'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { itemAnchor } from '../components/orders/itemLink'
@@ -80,7 +82,18 @@ function decoded(text: string): string | null {
  */
 export function OrderPage() {
   const { id = '' } = useParams()
-  const view = useAsync(() => api.order(id), [id], [`order:${id}`])
+  // #5282 — the draft sweep tells a cart is deleted. The background read that follows
+  // is a 404, which `useAsync` keeps the stale order over, so the frame itself is read.
+  const [sweptId, setSwept] = useState<string | null>(null)
+  const view = useAsync(
+    () => api.order(id),
+    [id],
+    [`order:${id}`],
+    (signal) => {
+      if (signal !== 'resync' && signal.data.deleted === true) setSwept(id)
+      return true
+    },
+  )
   const events = useAsync(() => api.orderEvents(id), [id], [`order:${id}`])
   // #5326 — the money view, and the header's loss or thin-margin badge.
   const costs = useAsync(() => api.orderCosts(id), [id], [`order:${id}`])
@@ -173,6 +186,16 @@ export function OrderPage() {
     }
   }
 
+  if (sweptId === id) {
+    return (
+      <div className="mx-auto max-w-5xl px-4 py-6">
+        <h1 className="text-xl font-semibold tracking-tight">Order</h1>
+        <p role="alert" className="mt-2 text-[13px] text-warn">
+          This order was not found. It was deleted.
+        </p>
+      </div>
+    )
+  }
   if (view.error) {
     return (
       <div className="mx-auto max-w-5xl px-4 py-6">
@@ -421,6 +444,7 @@ export function OrderPage() {
               )}
               <DepositControls order={order} totals={totals} requests={requests} onChanged={reload} />
               <PaymentRequests order={order} requests={requests} balanceMinor={totals.balance_minor} onChanged={reload} />
+              <DepositSuggestions order={order} onChanged={reload} />
               {order.status !== 'cancelled' && (
                 <form
                   className="flex flex-wrap items-end gap-2"
@@ -523,6 +547,8 @@ export function OrderPage() {
           )
         )}
 
+        <OrderMessages orderId={order.id} />
+
         <OrderFlowRuns orderId={order.id} />
 
         <section className="flex flex-col gap-1" aria-label="Audit line">
@@ -561,6 +587,11 @@ export function OrderPage() {
           unfulfilAllowed={unfulfilAllowed}
           section={section?.item === current.id ? section.at : null}
           sliceAsked={section?.item === current.id && section.at === 'slice' ? section.n : 0}
+          // Once its dialog opened, a slice request is the quote's section only (#5797 review); only
+          // this item's (#5832). The item match is defensive: the drawer is keyed by its item and
+          // calls this from its own dialog, so no sequence in the UI today makes a call for
+          // another item's request.
+          onSliceOpened={() => setSection((was) => (was?.item === current.id && was.at === 'slice' ? { ...was, at: 'quote' } : was))}
           onClose={() => {
             setSection(null)
             setOpenItem(null)
@@ -580,6 +611,7 @@ function ItemDrawer({
   unfulfilAllowed,
   section = null,
   sliceAsked = 0,
+  onSliceOpened,
   onClose,
   onChanged,
 }: {
@@ -594,6 +626,7 @@ function ItemDrawer({
   section?: ItemSection | null
   /** #4673 — each row Slice… of this item, counted: a new count opens the slice dialog. */
   sliceAsked?: number
+  onSliceOpened?: () => void
   onClose: () => void
   onChanged: () => void
 }) {
@@ -828,7 +861,7 @@ function ItemDrawer({
         // left `quoted` (added after acceptance, or by the agent) is accepted here, unless the order is on hold (#5541).
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} acceptPending={editable && !settled && !order.on_hold} onChanged={onChanged} storefront={order.source === 'storefront'} />
       ) : (
-        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} storefront={order.source === 'storefront'} />
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={quotable && !settled} onChanged={onChanged} item={item} parts={(parts ?? []).map((p) => `${p.part_id}:${p.per_unit}`).join(',')} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} startSlicing={sliceAsked} onSliceOpened={onSliceOpened} storefront={order.source === 'storefront'} />
       )}
       </div>
       )}

@@ -3,8 +3,13 @@
 ScadBuddy is an overlay on Bambuddy, so ``/prints`` shows every active printer's live
 state from ``GET /printers/{id}/status``, not only the archives ScadBuddy linked: a job
 started from Bambuddy, or one paused on an HMS error, is as visible as one ScadBuddy
-queued. A job whose archive ScadBuddy linked points at its print; any other at
-Bambuddy's archives.
+queued. Each working job has a picture where one is known (#3742, `bambuddy/pictures.py`).
+A job whose archive ScadBuddy linked points at its print; any other at its
+archive in Bambuddy: that archive's page, ``/archives/{id}``, on a Bambuddy that has one,
+else the archives page (#3743, `with_archive_pages`). A job ScadBuddy queued or
+started carries ``scadbuddy`` (#3741, `with_scadbuddy_jobs`): the printing queue item
+ScadBuddy recorded, or a run's LAN start on that printer. A linked archive alone does not
+mark a job.
 
 Since the printer registry (#3823) a card is a registry printer's. A LAN-linked one
 with a fresh report (`is_fresh`) shows that report, whether or not it is also in
@@ -18,15 +23,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus
-from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus, QueueItem
+from scadbuddy.bambuddy.pictures import printer_cover, scadbuddy_picture
+from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
 from scadbuddy.bambuddy.progress import LanRunControl
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan_models import LanReport
@@ -37,10 +46,23 @@ from scadbuddy.printers.store import PrinterStore
 
 logger = logging.getLogger(__name__)
 
-#: Bambuddy's archives page, where a job ScadBuddy did not start is found. Bambuddy has
-#: no page per archive (``App.tsx`` at 14da007, as ``api/print_history.py`` records),
-#: so the card names the archive beside this link rather than in it.
+#: Bambuddy's archives page, where a job ScadBuddy did not link is found. A Bambuddy
+#: that has a page per archive gets the link to that page, ``/archives/{id}``
+#: (`with_archive_pages`, #3743); any other gets this one, with the archive's number
+#: beside it.
 ARCHIVES_PAGE = "/archives"
+#: The first Bambuddy version with ``archives/:id``. Measured on maziggy/bambuddy with
+#: `gh api` (2026-11-09), `APP_VERSION` in ``backend/app/core/config.py``, which
+#: ``GET /updates/version`` answers: f9080d1 (2026-10-02) set 1.2.6b1, ed72611
+#: (2026-10-21) 1.3.0b1, 2be2b26 (2026-10-28) 1.3.1b1; d43bf57 (2026-10-31) added
+#: the route (``frontend/src/App.tsx`` line 237 at 2ce0d93); 666f78f (2026-11-06), after
+#: it, set 1.3.0.
+FIRST_ARCHIVE_PAGE = Version("1.3.0")
+#: Versions reported both before and after the route came (1.3.1b1, from 2be2b26 until
+#: 666f78f): the archives page is the link that works on both.
+ARCHIVE_PAGE_UNKNOWN = frozenset({Version("1.3.1b1")})
+#: A daily build's tag (``v1.3.1b1-daily.20261108``) names the version it builds.
+_DAILY = re.compile(r"-daily\.\d+$")
 
 Activity = Literal["printing", "paused", "idle", "finished", "failed", "offline", "unknown"]
 
@@ -92,18 +114,147 @@ class PrinterNow(BaseModel):
     archive_id: int | None = None
     #: ScadBuddy linked ``archive_id``: its print is ``/prints/{archive_id}``.
     linked: bool = False
-    #: Where Bambuddy shows the archive, when ScadBuddy did not link it.
+    #: Where Bambuddy shows the archive, when ScadBuddy did not link it: its own page
+    #: (``/archives/{id}``) on a Bambuddy that has one (`has_archive_page`), else the
+    #: archives page.
     bambuddy_url: str | None = None
+    #: ``bambuddy_url`` is the archive's own page, not the archives page (#5840): the
+    #: card then names no archive number beside the link.
+    bambuddy_archive_page: bool = False
     #: The status read failed; the rest is unknown.
     error: str | None = None
     #: A native run on this printer with prints still to start (#4942), and its
     #: controls: stop the rest, and, while it waits for one (#4939), say the plate is
     #: clear. ``None`` when no run waits on it.
     lan_run: LanRunControl | None = None
+    #: The output or library file ScadBuddy queued or started this job for (#3741),
+    #: matched only while it prints or is paused (`with_scadbuddy_jobs`). On a
+    #: Bambuddy-linked card, when Bambuddy's queue has a printing item on this printer,
+    #: only ScadBuddy's record of the item the card takes matches; when the queue cannot
+    #: be read, nothing matches. Otherwise (the queue read names no item on this printer,
+    #: a printer not linked to Bambuddy, or Bambuddy not asked), the LAN start a run on
+    #: this printer recorded under ``job_name`` and has not seen end matches (a run's
+    #: last start never records an end). A linked ``archive_id`` alone is not a match:
+    #: Bambuddy's reprint of it prints the same archive. ``None`` for a job queued from
+    #: Bambuddy, and when ScadBuddy's records cannot be read. A job started on the
+    #: printer itself is ``None`` too, unless it has the name of such a LAN start: then
+    #: it matches that run.
+    scadbuddy: ScadBuddyJob | None = None
+    #: The working job's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's
+    #: for its own job (`scadbuddy`); else, on a card Bambuddy's status filled, its cover
+    #: of the job (the status's ``cover_url``) through the farm proxy
+    #: (`bambuddy/pictures.py`). ``None`` when there is none: a LAN card asks Bambuddy
+    #: nothing, so only ScadBuddy's own job there has one.
+    picture: str | None = None
 
 
 class PrintersNow(BaseModel):
     printers: list[PrinterNow] = Field(default_factory=list)
+
+
+def _working(printer: PrinterNow) -> bool:
+    return printer.activity in ("printing", "paused")
+
+
+@dataclass(frozen=True)
+class PrintingItems:
+    """What Bambuddy's printing queue says of the working cards (#3741), by registry id:
+    `printing_items`' answer."""
+
+    #: The one queue item each card prints: exactly one printing item names its printer
+    #: and, when both are known, the item's archive is the card's.
+    items: dict[str, int] = field(default_factory=dict)
+    #: The cards that a LAN start may not match: each Bambuddy-linked card that has a
+    #: printing item on its printer (one it takes or not), and every working
+    #: Bambuddy-linked card when the queue could not be read. A LAN start has no queue
+    #: item, so such a card's job may be Bambuddy's own (its reprint of that print, for
+    #: one). Its badge comes from its item's record or not at all.
+    queue_decides: frozenset[str] = frozenset()
+
+
+#: Bambuddy not asked (no Bambuddy, or every printer printed to natively, D4): every
+#: card may be matched by a LAN start.
+NOT_ASKED = PrintingItems()
+
+
+async def printing_items(client: BambuddyClient, now: PrintersNow) -> PrintingItems:
+    """What Bambuddy's ``printing`` items say of each working Bambuddy-linked card
+    (#3741), from one read. Bambuddy not asked when no such card works. Its queue
+    unreadable costs only the marks: no card takes an item, and no Bambuddy-linked card
+    is matched by a LAN start."""
+    working = [(p, p.printer_id) for p in now.printers if _working(p) and p.printer_id is not None]
+    if not working:
+        return NOT_ASKED
+    try:
+        items = await client.queue(status="printing")
+    except (ApiError, ValidationError, ValueError):
+        logger.info("Bambuddy's printing queue unreadable; the strip shows no queue marks")
+        return PrintingItems(queue_decides=frozenset(printer.id for printer, _ in working))
+    on: dict[int, list[QueueItem]] = {}
+    for item in items:
+        if item.printer_id is not None:
+            on.setdefault(item.printer_id, []).append(item)
+    found: dict[str, int] = {}
+    decides: set[str] = set()
+    for printer, bambuddy_id in working:
+        mine = on.get(bambuddy_id, [])
+        if not mine:
+            continue
+        decides.add(printer.id)
+        if len(mine) != 1:
+            continue
+        (item,) = mine
+        if (
+            None not in (item.archive_id, printer.archive_id)
+            and item.archive_id != printer.archive_id
+        ):
+            continue
+        found[printer.id] = item.id
+    return PrintingItems(items=found, queue_decides=frozenset(decides))
+
+
+def job_keys(now: PrintersNow, printing: PrintingItems) -> tuple[list[int], list[tuple[str, str]]]:
+    """What `PrintLinkStore.jobs` is asked for the working cards (#3741): the queue item
+    each one prints (`printing_items`), and, for a card whose job Bambuddy's queue does
+    not decide, its registry id with its job name (a LAN start's ``subtask_name``)."""
+    working = [printer for printer in now.printers if _working(printer)]
+    queue_items = [printing.items[p.id] for p in working if p.id in printing.items]
+    starts = [
+        (p.id, p.job_name)
+        for p in working
+        if p.id not in printing.queue_decides and p.job_name is not None
+    ]
+    return queue_items, starts
+
+
+def with_scadbuddy_jobs(
+    now: PrintersNow, matches: JobMatches, printing: PrintingItems
+) -> PrintersNow:
+    """``now`` with each working card's ScadBuddy job (#3741). A card whose job
+    Bambuddy's queue decides (`PrintingItems.queue_decides`) is matched by its item's
+    record alone, or not at all: a LAN start has no queue item, so Bambuddy's item is
+    another job (its reprint of that print, for one) even under the same name. Any other
+    card is matched by a run's LAN start of its job name on this printer."""
+
+    def card(printer: PrinterNow) -> PrinterNow:
+        if not _working(printer):
+            return printer
+        job: ScadBuddyJob | None = None
+        if printer.id in printing.queue_decides:
+            item = printing.items.get(printer.id)
+            if item is not None:
+                job = matches.queue_items.get(item)
+        elif printer.job_name is not None:
+            job = matches.lan_starts.get((printer.id, printer.job_name))
+        if job is None:
+            return printer
+        update: dict[str, Any] = {"scadbuddy": job}
+        # #3742: ScadBuddy's own picture of its job, over Bambuddy's cover.
+        if (picture := scadbuddy_picture(job)) is not None:
+            update["picture"] = picture
+        return printer.model_copy(update=update)
+
+    return PrintersNow(printers=[card(printer) for printer in now.printers])
 
 
 def with_lan_runs(now: PrintersNow, runs: Mapping[str, LanRunControl]) -> PrintersNow:
@@ -119,6 +270,41 @@ def with_lan_runs(now: PrintersNow, runs: Mapping[str, LanRunControl]) -> Printe
         if control.awaiting_clear:
             update["awaiting_plate_clear"] = True
         return printer.model_copy(update=update)
+
+    return PrintersNow(printers=[card(printer) for printer in now.printers])
+
+
+def has_archive_page(version: str | None) -> bool:
+    """Whether a Bambuddy reporting ``version`` has a page per archive,
+    ``archives/:id`` (#3743). A version that does not parse, or none, has not: the
+    archives page works on every Bambuddy."""
+    if not version:
+        return False
+    try:
+        parsed = Version(_DAILY.sub("", version.strip()))
+    except InvalidVersion:
+        return False
+    return parsed >= FIRST_ARCHIVE_PAGE and parsed not in ARCHIVE_PAGE_UNKNOWN
+
+
+def needs_archive_pages(now: PrintersNow) -> bool:
+    """Whether any card links an archive in Bambuddy: only then is its version asked."""
+    return any(printer.bambuddy_url and printer.archive_id for printer in now.printers)
+
+
+def with_archive_pages(
+    now: PrintersNow, client: BambuddyClient, version: str | None
+) -> PrintersNow:
+    """``now`` with each Bambuddy archive link moved to that archive's own page, when
+    the Bambuddy reporting ``version`` has one (`has_archive_page`); else unchanged."""
+    if not has_archive_page(version):
+        return now
+
+    def card(printer: PrinterNow) -> PrinterNow:
+        if printer.bambuddy_url is None or printer.archive_id is None:
+            return printer
+        page = client.config.web_url(f"{ARCHIVES_PAGE}/{printer.archive_id}")
+        return printer.model_copy(update={"bambuddy_url": page, "bambuddy_archive_page": True})
 
     return PrintersNow(printers=[card(printer) for printer in now.printers])
 
@@ -200,6 +386,11 @@ async def printer_now(
         update={
             "archive_id": archive_id,
             "linked": linked,
+            "picture": (
+                printer_cover(printer.id, archive_id, card.job_name)
+                if working and status.cover_url
+                else None
+            ),
             "bambuddy_url": (
                 client.config.web_url(ARCHIVES_PAGE)
                 if archive_id is not None and not linked

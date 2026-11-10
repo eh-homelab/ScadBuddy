@@ -15,6 +15,7 @@ import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
 import { pinnedOutward } from './pinnedOutward.js'
+import type { CustomerMessaging } from '../orders/messaging.js'
 import type { FetchGrantMinter } from './fetchGrant.js'
 
 // The tool registry, spec §5.1 and D3
@@ -133,6 +134,12 @@ export type ToolServices = {
   toolOverrides?: ToolOverrides | undefined
   /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
   fetchGrant?: FetchGrantMinter | undefined
+  /**
+   * The messaging plugin a customer notice is sent through (#5660, orders/messaging.ts):
+   * the bound remote MCP server through the loopback forwarder. order_notify_customer_send
+   * refuses without it.
+   */
+  messaging?: CustomerMessaging | undefined
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */

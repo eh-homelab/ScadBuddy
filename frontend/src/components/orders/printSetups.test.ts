@@ -48,6 +48,11 @@ describe('print setups', () => {
     ])
   })
 
+  it('keys each group by its revision id, one not listed included (#5797 review)', () => {
+    const groups = setupGroups([quote('a', 'gone1', '2026-11-01T00:00:00Z'), quote('b', 'gone2', '2026-11-02T00:00:00Z'), quote('c', null, '2026-11-03T00:00:00Z')], [], 'r9')
+    expect(groups.map((g) => g.key).sort()).toEqual(['gone1', 'gone2', null].sort())
+  })
+
   it("refuses Accept on an older revision's quote only", () => {
     expect(oldRevision(quote('a', 'r1', ''), 'r2')).toBe(true)
     expect(oldRevision(quote('a', 'r2', ''), 'r2')).toBe(false)

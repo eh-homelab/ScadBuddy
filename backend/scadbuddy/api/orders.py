@@ -1178,7 +1178,8 @@ async def get_order_costs(
     status_code=status.HTTP_201_CREATED,
     summary="Log time on an order or one of its items",
     description=(
-        "In any order status, ended and on hold included. The entry copies the labour rate "
+        "In any order status, ended and on hold included, except a storefront cart not yet "
+        "submitted (409 `order_not_submitted`). The entry copies the labour rate "
         "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
         "change never rewrites it; for an order in a currency other than the shop's, no "
         "rate can be copied and it is null. With a `source` (a timer's "
@@ -1229,7 +1230,8 @@ async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> 
     description=(
         "Money the job cost in the order's currency: the assistant's spend, a payment "
         "fee, materials, anything else. Shipping is a shipment's `cost_minor`, never an "
-        "entry. In any order status. With a `source`, a second write of the same order, "
+        "entry. In any order status, except a storefront cart not yet submitted (409 "
+        "`order_not_submitted`). With a `source`, a second write of the same order, "
         "kind and source returns the first entry as it was recorded, whatever this "
         "call's amount, note or item, and writes nothing (200). On the audit "
         "line as `cost.added`."
@@ -2812,9 +2814,9 @@ async def copy_archive_media(
     description=(
         "The attempt's quantity counts as made; the item is fulfilled once its accepted "
         "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
-        "`item_not_open`, and `fulfilment_stale` for an attempt made before the revision "
-        "the accepted quote prices (an item revised after acceptance, #5350): it printed "
-        "an earlier design."
+        "`item_not_open`, and `fulfilment_stale` for an attempt that printed a revision "
+        "earlier than the one the accepted quote prices (an item revised after acceptance, "
+        "#5350): it printed an earlier design."
     ),
 )
 async def accept_fulfilment(

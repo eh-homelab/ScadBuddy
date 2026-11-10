@@ -1149,7 +1149,8 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Task 11), and the credentials due. A failure is logged,
+    caller's role nothing (#5298 Task 11), a table dropped from a caller's list taken back
+    (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is logged,
     never fatal, as `grant_at_start`."""
     try:
         with state.settings_store.pool.connection() as conn:
@@ -1251,7 +1252,7 @@ async def _sync_bank_deposits_logged(state: AppState) -> None:
     """#4961: read the linked bank account's new deposits and suggest their orders."""
     payments = state.components.get(PAYMENTS)
     try:
-        suggested = await sync_deposits(payments.bank)
+        suggested = await sync_deposits(payments.bank, state.events)
     except Exception:
         logger.exception("could not sync the bank deposits")
         raise

@@ -5,7 +5,8 @@ import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 import { useSubscription } from '../../lib/realtime'
-import { CameraIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
+import { NEW_TAB } from '../../lib/embed'
+import { CameraIcon, ExternalLinkIcon, RefreshCwIcon, VideoIcon } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -19,9 +20,12 @@ import {
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { JobPicture } from './JobPicture'
 import { mergeCards, type NowCard } from './nowCards'
 import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
+import { printPath, scadbuddyJobPath } from './prints'
+import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
 /** How often the printers are read while the page is visible: the fallback when no
  * `printers` signal comes (realtime down, or a printer only Bambuddy knows). */
@@ -231,7 +235,14 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
       {printer.error && <p className="mt-1 text-xs text-muted-foreground">{printer.error}</p>}
       {working && (
         <>
-          {printer.job_name && <p className="mt-1 truncate">{printer.job_name}</p>}
+          {/* #3742 — ScadBuddy's picture of its own job, else Bambuddy's cover. */}
+          <div className="mt-1 flex items-center gap-2">
+            <JobPicture src={printer.picture} />
+            <div className="min-w-0 flex-1 [&>p]:mt-0">
+              <JobLink printer={printer} />
+            </div>
+          </div>
+          {printer.scadbuddy && <QueuedFromScadBuddy job={printer.scadbuddy} className="mt-1 self-start" />}
           {progress !== null && (
             <div
               role="progressbar"
@@ -272,28 +283,60 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
           ))}
         </ul>
       )}
-      {printer.archive_id != null &&
-        (printer.linked ? (
-          <Button asChild variant="link" size="xs" className="mt-1 h-auto self-start px-0">
-            <Link to={`/prints/${printer.archive_id}`}>View this print</Link>
-          </Button>
-        ) : printer.bambuddy_url ? (
-          // Bambuddy has no page per archive, so the link names the page it opens and the
-          // archive to look for there sits beside it (#2930).
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            <a
-              href={bambuddyLink(printer.bambuddy_url)}
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Bambuddy's archives
-            </a>{' '}
-            · archive {printer.archive_id}
-          </p>
-        ) : null)}
     </>
   )
+}
+
+const JOB_LINK = 'font-medium text-primary underline-offset-4 hover:underline'
+
+/**
+ * #3743 — the job's name, as a link to where the job is: ScadBuddy's print of an
+ * archive ScadBuddy linked; for ScadBuddy's own job (`scadbuddy`), its ScadBuddy page
+ * ({@link scadbuddyJobPath}); for any other, its archive in Bambuddy (`/archives/{id}`
+ * where Bambuddy has that page, else its archives page with the archive's number, on
+ * the hostname framing ScadBuddy, in a new tab, which escapes the frame's sandbox).
+ * A job with none of these is its name only.
+ */
+function JobLink({ printer }: { printer: PrinterNow }) {
+  const name = printer.job_name ?? (printer.archive_id != null ? `Archive ${printer.archive_id}` : null)
+  const inside =
+    printer.linked && printer.archive_id != null
+      ? printPath(printer.archive_id)
+      : printer.scadbuddy
+        ? scadbuddyJobPath(printer.scadbuddy)
+        : null
+  if (inside) {
+    return (
+      <p className="mt-1 truncate">
+        <Link to={inside} className={JOB_LINK}>
+          {name ?? 'This print'}
+        </Link>
+      </p>
+    )
+  }
+  if (printer.bambuddy_url) {
+    // A Bambuddy before 1.3.0 has no page per archive: the server then links its
+    // archives page, says so (`bambuddy_archive_page`, #5840), and the archive to look
+    // for there is named in the link (#2930).
+    const archivePage = printer.bambuddy_archive_page
+    const label = name ?? 'This print'
+    return (
+      <p className="mt-1 truncate">
+        <a
+          href={bambuddyLink(printer.bambuddy_url)}
+          {...NEW_TAB}
+          className={JOB_LINK}
+          aria-label={
+            archivePage ? `${label}, in Bambuddy` : `${label}, archive ${printer.archive_id} in Bambuddy's archives`
+          }
+        >
+          {archivePage ? label : `${label} · archive ${printer.archive_id}`}
+          <ExternalLinkIcon aria-hidden="true" className="ml-1 inline size-3 align-baseline" />
+        </a>
+      </p>
+    )
+  }
+  return name ? <p className="mt-1 truncate">{name}</p> : null
 }
 
 /**

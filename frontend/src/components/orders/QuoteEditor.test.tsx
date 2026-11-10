@@ -9,6 +9,7 @@ import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../.
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { CHECK_DEBOUNCE_MS, QuoteEditor } from './QuoteEditor'
+import { groupName } from './printSetups'
 import type { SliceQuoteRun } from './useSliceQuotes'
 
 /** Long enough for a debounced price check to be sent and its answer to land. */
@@ -650,7 +651,6 @@ describe('QuoteEditor · print setups (#4673)', () => {
   })
 })
 
-
 // #5283: on a storefront order the customer accepts a price; the shop accepts for them with a reason.
 describe('QuoteEditor · a storefront order (#5283)', () => {
   beforeEach(() => resetMockState())
@@ -669,5 +669,34 @@ describe('QuoteEditor · a storefront order (#5283)', () => {
     await user.click(screen.getByRole('button', { name: 'Record' }))
     await waitFor(() => expect(record).toHaveBeenCalledTimes(1))
     expect(accept).not.toHaveBeenCalled()
+  })
+})
+
+// #5828 review — the page's slice request is used once: the dialog that opened for it says
+// so, and the page then passes no request, so a remount leaves the dialog closed.
+describe('QuoteEditor · a slice request is used once (#4673)', () => {
+  beforeEach(() => resetMockState())
+
+  it('reports the dialog it opened, and a remount with no request opens none', async () => {
+    const draft = item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 1 })
+    const opened = vi.fn()
+    const editor = (asked: number) => (
+      <QuoteEditor orderId={ORDER_DRAFT} itemId={ITEM_DRAFT} currency="USD" exponent={2} quotes={[]} editable onChanged={vi.fn()} item={draft} slice={{ start: vi.fn(), dismiss: vi.fn() }} startSlicing={asked} onSliceOpened={opened} />
+    )
+    const first = renderPage(editor(1))
+    expect(await screen.findByRole('dialog', { name: 'Quote from a slice' })).toBeInTheDocument()
+    expect(opened).toHaveBeenCalledTimes(1)
+    first.unmount()
+    renderPage(editor(0))
+    await screen.findByTestId('quote-from-slice')
+    expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull()
+    expect(opened).toHaveBeenCalledTimes(1)
+  })
+
+  it('names a group of a revision the list lacks by its id, current or not', () => {
+    const quotes: Quote[] = []
+    expect(groupName({ key: 'abcdef123456', revision: null, current: true, quotes })).toBe('Revision abcdef12 (current)')
+    expect(groupName({ key: 'abcdef123456', revision: null, current: false, quotes })).toBe('Revision abcdef12')
+    expect(groupName({ key: null, revision: null, current: false, quotes })).toBe('No revision')
   })
 })

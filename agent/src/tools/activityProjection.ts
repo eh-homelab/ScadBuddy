@@ -1,7 +1,7 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { context as otelContext, trace } from '@opentelemetry/api'
+import { context as otelContext, type Span, trace } from '@opentelemetry/api'
 import type { CallApproval } from '../harness/seamLedger.js'
 import { TOOL_USE_META, toolContextFor } from '../telemetry/trace.js'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
@@ -26,8 +26,10 @@ import { errorResult } from './registry.js'
 // change; only its handler differs: it starts the call's ToolCall workflow
 // (`session-<uuid>-call-<tool_use_id>`, temporal/toolCall.ts), or attaches to it when it is
 // already there (a re-send after a lost answer), and answers with its result. The call then runs
-// on whichever agent-tools worker takes it, as `tool:<name>` (toolActivities.ts
-// `toolCallActivities`), so a pod that dies while the turn waits loses the turn, not the call:
+// as `tool:<name>` (toolActivities.ts `toolCallActivities`) on the turn's own replica's
+// agent-tools worker when an eager start is made and granted (#5865; the conditions are
+// `ToolCallStarterDeps`'s: the worker polls with its build made current, Temporal hands the task
+// back, and its activity has a free slot), else on whichever agent-tools worker takes it, so a pod that dies while the turn waits loses the turn, not the call:
 // the restarted turn is told which calls finished (`finishedToolCalls`) and reads what each
 // returned with `tool_call_result` (`toolCallResult`), so the result reaches the model as a tool
 // result, never in the user's message. Images come back as names in the session's blobs, never as
@@ -91,8 +93,27 @@ export async function callToolResult(sessionId: string, result: ToolCallResult, 
   return result.ok ? { content } : { isError: true, content }
 }
 
+/**
+ * What `toolCallStarter` starts calls with. `eager` is a client on the connection of this process's
+ * own worker on `queue`, while it polls and once its build has been made current (main.ts, AgentWorker
+ * `connection`): a call is then started with `requestEagerStart`, so Temporal hands the call's first
+ * workflow task back in the start's answer to that worker, with no wait on the task queue's matching,
+ * and the call is decoded where its session's payload key is already held (#5865). Its activity is
+ * dispatched eagerly to the same worker when it is on `queue` and the worker has a free slot; a
+ * pinned call (`activityQueue`) goes through matching to its replica's queue.
+ * Without it, or when its connection fails, the call is started on `client` as before. The call's
+ * span says which (`EAGER_ATTRIBUTE`).
+ */
+export type ToolCallStarterDeps = {
+  client: Client
+  blobs: Pick<SessionBlobs, 'get'>
+  timeoutMs?: number
+  queue?: string
+  eager?: () => Client | undefined
+}
+
 /** Starts (or finds) each call's ToolCall on `client` and answers with its result; on `queue` (agent-tools by default), the workflow and its activity. */
-export function toolCallStarter(deps: { client: Client; blobs: Pick<SessionBlobs, 'get'>; timeoutMs?: number; queue?: string }): ToolCallStarter {
+export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
   const queue = deps.queue ?? TASK_QUEUE
   return async (request) => {
     const workflowId = toolCallWorkflowId(request.sessionId, request.toolUseId)
@@ -112,16 +133,17 @@ export function toolCallStarter(deps: { client: Client; blobs: Pick<SessionBlobs
       // A replica's own queue: nobody takes the call once that pod is gone.
       ...(request.activityQueue ? { startTimeoutMs: PINNED_START_MS } : {}),
     }
+    const options = {
+      workflowId,
+      taskQueue: queue,
+      args: [input],
+      // A re-send of the same call finds its execution, open or closed, and its result.
+      workflowIdConflictPolicy: 'USE_EXISTING',
+      workflowIdReusePolicy: 'REJECT_DUPLICATE',
+    } as const
     let handle
     try {
-      handle = await deps.client.workflow.start(TOOL_CALL_WORKFLOW, {
-        workflowId,
-        taskQueue: queue,
-        args: [input],
-        // A re-send of the same call finds its execution, open or closed, and its result.
-        workflowIdConflictPolicy: 'USE_EXISTING',
-        workflowIdReusePolicy: 'REJECT_DUPLICATE',
-      })
+      handle = (await startEagerly(deps, options, trace.getSpan(otelContext.active()))) ?? (await deps.client.workflow.start(TOOL_CALL_WORKFLOW, options))
     } catch (err) {
       if (!(err instanceof WorkflowExecutionAlreadyStartedError)) throw err
       handle = deps.client.workflow.getHandle(workflowId)
@@ -139,6 +161,42 @@ export function toolCallStarter(deps: { client: Client; blobs: Pick<SessionBlobs
       request.signal.removeEventListener('abort', cancel)
     }
   }
+}
+
+/**
+ * The call's span attribute that says how its ToolCall was started (#5865): `started`, eagerly (the
+ * first workflow task came back in the start's answer); `declined`, on the worker's connection but
+ * Temporal gave no task back (the execution was already there, or the server dispatched it through
+ * matching); `failed`, the eager start failed and the call was started on the shared client;
+ * `fallback`, no worker to start on, so the shared client.
+ */
+export const EAGER_ATTRIBUTE = 'scadbuddy.eager'
+
+/**
+ * The call started on the worker's own connection with `requestEagerStart` (ToolCallStarterDeps
+ * `eager`), its handle on `client`: the result is long-polled on the client's own connection, which
+ * outlives a reconnect of the worker's. Undefined when there is no such connection or it failed
+ * (a start that reached Temporal before it failed is found by the start that follows, by its id).
+ */
+async function startEagerly(
+  deps: ToolCallStarterDeps,
+  options: Parameters<Client['workflow']['start']>[1] & { workflowId: string },
+  span: Span | undefined,
+): Promise<ReturnType<Client['workflow']['getHandle']> | undefined> {
+  const eager = deps.eager?.()
+  if (!eager) {
+    span?.setAttribute(EAGER_ATTRIBUTE, 'fallback')
+    return undefined
+  }
+  try {
+    const started = await eager.workflow.start(TOOL_CALL_WORKFLOW, { ...options, requestEagerStart: true })
+    span?.setAttribute(EAGER_ATTRIBUTE, started.eagerlyStarted ? 'started' : 'declined')
+  } catch (err) {
+    if (err instanceof WorkflowExecutionAlreadyStartedError) throw err
+    span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
+    return undefined
+  }
+  return deps.client.workflow.getHandle(options.workflowId)
 }
 
 /** The tool_use ids of a session's calls that have a `tool.call` and no `tool.result` in its events, since its seq `afterSeq`. */

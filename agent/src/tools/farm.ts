@@ -21,7 +21,12 @@ export const farmTools: Tool[] = [
       "Bambuddy's print queue, in its order: each item's status, printer (or the printer model it waits for), " +
       'file, times, estimated duration and filament, and why it is waiting or failed. Finished items stay in the ' +
       'queue, so pass `status` (pending or printing for what is to come). `printer_id` -1 is items not assigned ' +
-      'to a printer.' +
+      'to a printer. A pending or printing item ScadBuddy queued (a print run or a reprint) carries ' +
+      '`scadbuddy` (its output or library file, template `slug`, `run_id` and linked `archive_id`), matched ' +
+      "only by ScadBuddy's record of that item; a finished item has none, and so has an item queued from " +
+      'Bambuddy, its reprint of a ScadBuddy print too. Each item has `picture` (#3742), a URL on ScadBuddy of its ' +
+      "image: ScadBuddy's own for its item (the output's or library file's thumbnail), else Bambuddy's thumbnail " +
+      'through ScadBuddy; null when there is none.' +
       PAGED,
     input: z.object({
       printer_id: z.number().int().min(-1).optional(),
@@ -40,6 +45,30 @@ export const farmTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_print_queue_item',
+    label: 'Get a print queue item',
+    description:
+      "One item of Bambuddy's print queue by its id (#3744), whoever queued it and in any state: status, " +
+      'position, printer (or the printer model it waits for), file, plate, scheduled time, manual start, ' +
+      'estimated time and filament, `filament_short`, the AMS tray per filament slot (`ams_mapping`), and why ' +
+      'it waits or failed. A job ScadBuddy queued carries `scadbuddy` (its output or library file, template ' +
+      "`slug`, `run_id` and linked `archive_id`) even once it has finished; with `archive_id`, get_print reads " +
+      'its print. An item Bambuddy no longer has (deleted, or gone with its archive) is a not-found error.',
+    input: z.object({ item_id: z.number().int().min(1).describe('A queue item id, as list_print_queue lists them') }),
+    risk: 'read',
+    source: SOURCE,
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/farm/queue/{item_id}'],
+    handler: async ({ item_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/farm/queue/{item_id}', { params: { path: { item_id } } }),
+          `read queue item ${item_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'get_printers_now',
     label: 'See what each printer is doing',
     description:
@@ -50,7 +79,15 @@ export const farmTools: Tool[] = [
       'the Bambuddy printer id every print tool takes (as get_print_targets lists them), `id`, its registry id, ' +
       'which the registry tools and print_output (`printer`) take, and `path`, the link that answered (native ' +
       'over the LAN, bambuddy, or none). `printer_id` is null for a printer reached only over the LAN, which the ' +
-      'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`).',
+      'print tools address by `id` (print_output, get_print_choices and get_print_filaments take it as `printer`). ' +
+      'A printing or paused job ScadBuddy queued or started carries `scadbuddy` (its output or library file, ' +
+      'template `slug`, `run_id` and linked `archive_id`). On a printer linked to Bambuddy, when its queue has a ' +
+      "printing item on the printer, only ScadBuddy's record of that item matches, so a job queued from Bambuddy " +
+      '(its reprint of a ScadBuddy print too) has none; when its queue cannot be read, nothing matches. Otherwise ' +
+      "a run's LAN start on that printer under the job's name matches until the run records that start ended; a " +
+      'job started on the printer itself has none unless it has such a name. A working job has `picture` (#3742), a ' +
+      "URL on ScadBuddy of its image: ScadBuddy's own for its job, else Bambuddy's cover of the job through " +
+      'ScadBuddy on a card Bambuddy answered; null when there is none.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,

@@ -6,12 +6,15 @@ draft it is."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import os
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -19,11 +22,13 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.core.events import Event, EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.storefront import _multipart as edge_multipart
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders import lifecycle as lifecycle_module
@@ -90,8 +95,8 @@ class CrudCaller:
             sent["Idempotency-Key"] = key
         return sent
 
-    def get(self, path: str, *, token: str = TOKEN_A) -> Any:
-        return self.api.get(CRUD + path, headers=self._headers(token, None))
+    def get(self, path: str, *, token: str = TOKEN_A, key: str | None = None) -> Any:
+        return self.api.get(CRUD + path, headers=self._headers(token, key))
 
     def post(
         self,
@@ -776,6 +781,64 @@ def test_a_retried_request_makes_one_item_whatever_changed_since(
     assert len(asks.get("/draft").json()["items"]) == 1
 
 
+def test_a_committed_request_sent_again_after_requests_went_off_answers_its_reply(
+    asks: CrudCaller, s3_api: TestClient
+) -> None:
+    """Review of #5789: its answer was lost (the edge's 503 ``upload_unavailable`` says
+    "send it again"), then the shop turned requests off. The cart holds the request, so
+    the resend answers it, as any retry does "whatever changed since"."""
+    files = [("files", ("a.png", PNG, "image/png"))]
+    first = ask(asks, files, key="r18")
+    assert first.status_code == 200, first.text
+    off = s3_api.put("/api/v1/settings", json={"storefront_requests_enabled": False})
+    assert off.status_code == 200, off.text
+    # The edge's pre-check, with the key: on for this request alone.
+    assert asks.get("/requests-enabled", key="r18").json() == {"enabled": True}
+    assert asks.get("/requests-enabled").json() == {"enabled": False}
+    again = ask(asks, files, key="r18")
+    assert (again.status_code, _unsigned(again.json())) == (200, _unsigned(first.json()))
+    # A new key is still refused, before its body is read.
+    assert asks.get("/requests-enabled", key="r19").json() == {"enabled": False}
+    r = ask(asks, files, key="r19")
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert len(asks.get("/draft").json()["items"]) == 1
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+@pytest.mark.parametrize(
+    ("sent", "kept"),
+    [
+        # A name the edge's own parser read whole (a client that does not escape).
+        ('a"b.jpg', 'a"b.jpg'),
+        # What a browser sends for ``a"b.jpg`` (WHATWG HTML escapes ``"``, CR and LF).
+        ("a%22b.jpg", 'a"b.jpg'),
+        ("h\u00e9llo w\u00f6rld \u2713.jpg", "h\u00e9llo w\u00f6rld \u2713.jpg"),
+        ("a\\b.jpg", "b.jpg"),
+    ],
+)
+def test_a_files_name_survives_the_edges_multipart(asks: CrudCaller, sent: str, kept: str) -> None:
+    """Review of #5789: the edge percent-escapes ``"``, ``\\`` and control characters in
+    the name it forwards (`crud/storefront.py`), and the CRUD side decodes them. The
+    multipart parser ignores ``filename*`` (RFC 7578 §4.2), so the name goes as
+    ``filename``."""
+    upload = UploadFile(io.BytesIO(JPEG), filename=sent)
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [upload])])
+
+    headers = asks._headers(TOKEN_A, f"r-{sha256(sent.encode()).hexdigest()[:8]}")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    [attachment] = r.json()["items"][0]["attachments"]
+    assert attachment["filename"] == kept
+    got = httpx.get(attachment["url"])
+    assert got.status_code == 200 and got.content == JPEG
+
+
 def test_a_request_counts_against_the_draft_cap(
     asks: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -882,3 +945,33 @@ def test_a_view_with_no_listing_item_reads_no_listing(
     r = ask(asks, key="r-nolisting")
     assert r.status_code == 200, r.text
     assert r.json()["items"][0]["labels"] == {}
+
+
+def test_an_item_added_before_a_new_commit_shows_raw_parameter_names(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    """Captions come from the listing at the item's own (slug, commit). Once the listing
+    is republished at another commit, an older item falls back to the parameter's name
+    (the `DraftItem.labels` docstring); it never borrows the new commit's captions."""
+    r = crud.post("/draft/items", json=add_body(listing, {"width": 40}), key="old1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "Width (mm)"}
+    store = _orders(api).listings
+    current = store.get(listing.id)
+    assert current is not None
+    moved = store.update(
+        listing.id,
+        ListingInput(
+            slug="demo",
+            commit="e" * 40,
+            title="A demo box",
+            params={"width": {"kind": "number", "min": 20, "max": 80, "step": 1}},  # type: ignore[dict-item]
+        ),
+        expected_updated_at=current.updated_at,
+    )
+    store.mark_published(
+        moved.id, snapshot=_snapshot(), media=[], expected_updated_at=moved.updated_at
+    )
+    [item] = crud.get("/draft").json()["items"]
+    assert item["inputs"] == {"width": 40}
+    assert item["labels"] == {"width": "width"}
