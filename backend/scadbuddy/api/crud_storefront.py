@@ -31,9 +31,10 @@ order, or ``null`` when it has none; ``POST …/draft/items`` adds a listing at 
 values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (each with an
 ``Idempotency-Key``, 428 without). Another visitor's item is 404 ``item_not_found``. A body
 that is not an item is 422 ``draft_body_invalid``. ``POST …/draft/submit`` (``Idempotency-Key``
-required) submits the cart the body names as an order (`orders/storefront/submit.py`);
-another visitor's cart is 404 ``draft_not_found``, a body that is not a submit 422
-``submit_body_invalid``.
+required) submits the cart the body names as an order (`orders/storefront/submit.py`),
+for the session's account when signed in (`store_account`); another visitor's cart, or a
+cart whose visitor joined another account, is 404 ``draft_not_found``, a body that is not a
+submit 422 ``submit_body_invalid``.
 
 Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
 the edge refuses a request before it reads the body; with the request's
@@ -45,6 +46,17 @@ committed request (`request_sent`); then the body is read with
 its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
+
+Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
+token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
+reads into the request's account; submit takes the account from there, never from a
+body, and the order page is to (a later PR). ``POST …/account/verify`` signs in by a mailed code
+and sends the new session's token back in `SESSION_HEADER` (never in the body, so no
+logged or relayed JSON holds it), ending the session the browser held; one refusal, 400
+``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``. ``POST
+…/account/sign-out`` deletes the session's row. ``GET …/account`` is the account's email
+or ``null``, and ``GET …/account/orders`` its submitted orders (401 ``sign_in_required``
+with no live session).
 
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
 edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
@@ -73,6 +85,16 @@ from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront.accounts import (
+    Account,
+    AccountOrderRow,
+    SignedIn,
+    SignInLimitedError,
+    account_for_session,
+    account_orders,
+    end_session,
+    verify_code,
+)
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
@@ -101,11 +123,15 @@ from scadbuddy.orders.storefront.turnstile import (
     verify,
 )
 from scadbuddy.orders.storefront.wire import (
+    AccountOrder,
+    AccountOrders,
+    AccountView,
     AddListingItem,
     DraftView,
     PublicListing,
     PublicListings,
     RenderBody,
+    SignInBody,
     StoreRender,
     SubmitBody,
     SubmittedOrder,
@@ -114,6 +140,7 @@ from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    SESSION_HEADER,
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
     VISITOR_ID_PROBLEM,
@@ -155,6 +182,32 @@ def store_client(request: Request) -> str:
 
 Visitor = Annotated[str, Depends(visitor_id)]
 StoreClient = Annotated[str, Depends(store_client)]
+
+
+def store_session(request: Request) -> str | None:
+    """The session token the edge took from its verified ``sb_session`` cookie, if any. Only
+    the ``storefront`` credential reaches here (`crud_router`), so no other caller sends it.
+    A token that names no live session reads as none (`account_for_session`)."""
+    return request.headers.get(SESSION_HEADER) or None
+
+
+StoreSession = Annotated[str | None, Depends(store_session)]
+
+
+async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
+    """The account of the request's session, or None. Submit takes the account from here,
+    never from a body, and so is the order page to (a later PR)."""
+    if session is None:
+        return None
+
+    def read() -> Account | None:
+        with orders.store.transaction() as conn:
+            return account_for_session(conn, session)
+
+    return await asyncio.to_thread(read)
+
+
+StoreAccount = Annotated[Account | None, Depends(store_account)]
 
 
 def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
@@ -362,15 +415,16 @@ async def draft_submit(
     state: StateDep,
     visitor: Visitor,
     _client: StoreClient,
+    account: StoreAccount,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> SubmittedOrder:
     """The visitor's cart submitted as an order (`orders/storefront/submit.py`
-    `submit_draft`)."""
+    `submit_draft`), for the session's account when signed in."""
     key = required_key(idempotency_key)
     body = await _body(
         request, SubmitBody, "submit_body_invalid", "This request is not a submit of an order."
     )
-    return await submit_draft(state, visitor, key, body)
+    return await submit_draft(state, visitor, key, body, account)
 
 
 def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
@@ -493,7 +547,8 @@ def _turnstile_config(state: StateDep) -> TurnstileConfig:
     runtime = state.settings_store.snapshot().runtime
     public = state.settings.storefront_public_url
     return TurnstileConfig(
-        site_key=runtime.storefront_turnstile_site_key or None,
+        # A key of only spaces is no key: the check stays off rather than fail every form.
+        site_key=(runtime.storefront_turnstile_site_key or "").strip() or None,
         secret=runtime.storefront_turnstile_secret or None,
         hostname=urlsplit(public).hostname if public else None,
     )
@@ -514,3 +569,105 @@ async def turnstile_verify(
     config = await asyncio.to_thread(_turnstile_config, state)
     verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
     return TurnstileVerdict(verdict=verdict)
+
+
+@router.post(
+    "/account/verify",
+    name="crud_storefront_account_verify",
+    response_model=AccountView,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": SignInBody.model_json_schema()}},
+        }
+    },
+)
+async def account_verify(
+    request: Request,
+    response: Response,
+    orders: OrdersDep,
+    visitor: Visitor,
+    client: StoreClient,
+    session: StoreSession,
+) -> AccountView:
+    """A sign-in by the code mailed to the address (`accounts.py` `verify_code`). The new
+    session's token goes back in `SESSION_HEADER`, never in the body; the session the
+    browser held is ended. One refusal, 400 ``sign_in_failed``, for any code that reads
+    nothing; 429 ``sign_in_limited`` once the client guessed wrong too often."""
+    body = await _body(
+        request, SignInBody, "account_body_invalid", "This request is not a sign-in."
+    )
+
+    def run() -> SignedIn | None:
+        with orders.store.transaction() as conn:
+            return verify_code(
+                conn, body.email, body.code, client, visitor_id=visitor, previous_session=session
+            )
+
+    try:
+        signed = await asyncio.to_thread(run)
+    except SignInLimitedError as error:
+        raise problem(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "sign_in_limited",
+            f"Too many wrong codes. Try again in {error.retry_after} seconds.",
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
+    if signed is None:
+        raise problem(
+            status.HTTP_400_BAD_REQUEST,
+            "sign_in_failed",
+            "That code is wrong or has expired. Ask for a new one.",
+        )
+    response.headers[SESSION_HEADER] = signed.session_token
+    return AccountView(email=signed.account.email)
+
+
+@router.post(
+    "/account/sign-out",
+    name="crud_storefront_account_sign_out",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def account_sign_out(
+    orders: OrdersDep, _visitor: Visitor, _client: StoreClient, session: StoreSession
+) -> Response:
+    """Sign-out: the session's row is deleted (`end_session`). No session does nothing."""
+    if session is not None:
+
+        def run() -> None:
+            with orders.store.transaction() as conn:
+                end_session(conn, session)
+
+        await asyncio.to_thread(run)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/account", name="crud_storefront_account")
+async def account(
+    account: StoreAccount, _visitor: Visitor, _client: StoreClient
+) -> AccountView | None:
+    """The signed-in account; ``null`` when the request has no live session."""
+    return None if account is None else AccountView(email=account.email)
+
+
+@router.get("/account/orders", name="crud_storefront_account_orders")
+async def account_orders_route(
+    orders: OrdersDep, account: StoreAccount, _visitor: Visitor, _client: StoreClient
+) -> AccountOrders:
+    """What the account sees (`accounts.py` `account_orders`); 401 ``sign_in_required``
+    with no live session."""
+    if account is None:
+        raise problem(
+            status.HTTP_401_UNAUTHORIZED, "sign_in_required", "Sign in to see your orders."
+        )
+    found = account
+
+    def read() -> list[AccountOrderRow]:
+        with orders.store.transaction() as conn:
+            return account_orders(conn, found.id)
+
+    rows = await asyncio.to_thread(read)
+    return AccountOrders(
+        orders=[AccountOrder.model_validate(row, from_attributes=True) for row in rows]
+    )

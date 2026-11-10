@@ -25,11 +25,13 @@ function describe(error: unknown): string {
   return JSON.stringify(error)
 }
 
-/** The slug a problem's `type` ends in (`…/problems/orders/already_notified`), if any. */
+/** ScadBuddy's own problem types; any other `type` (`about:blank`, a relayed one) has no slug. */
+const PROBLEM_TYPE = /^https:\/\/scadbuddy\.dev\/problems\/(?:[a-z0-9_-]+\/)*([a-z0-9_-]+)$/
+
+/** The slug a ScadBuddy problem's `type` ends in (`…/problems/orders/already_notified`), if any. */
 function problemSlug(error: unknown): string | undefined {
   const type = typeof error === 'object' && error !== null ? (error as { type?: unknown }).type : undefined
-  const slug = typeof type === 'string' ? /([a-z_]+)$/.exec(type)?.[1] : undefined
-  return slug
+  return typeof type === 'string' ? PROBLEM_TYPE.exec(type)?.[1] : undefined
 }
 
 /** The response body, or a ToolError naming `what` failed, the status and the backend's reason. */

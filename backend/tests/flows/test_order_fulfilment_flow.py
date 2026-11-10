@@ -188,7 +188,10 @@ BUILTIN_RULES = [
 
 
 async def _approved_trigger(
-    triggers: TriggerStore, definition_id: str, event: bool = False
+    triggers: TriggerStore,
+    definition_id: str,
+    event: bool = False,
+    rules: list[GrantRule] | None = None,
 ) -> Trigger:
     """A trigger the shop made on ``definition_id`` (hourly, or with ``event`` on
     `order.changed`, as the built-in's docstring has it), its grant of `BUILTIN_RULES`
@@ -213,7 +216,10 @@ async def _approved_trigger(
             }
         )
     )
-    spec = GrantSpec(expires_at=datetime.now(UTC) + timedelta(days=6), rules=BUILTIN_RULES)
+    spec = GrantSpec(
+        expires_at=datetime.now(UTC) + timedelta(days=6),
+        rules=rules if rules is not None else BUILTIN_RULES,
+    )
     seen = await asyncio.to_thread(triggers.live_hash, trigger)
     assert await triggers.attach_grant(trigger.id, spec, "approved", browser, seen)
     return trigger
@@ -439,6 +445,43 @@ async def test_a_trigger_whose_grant_would_widen_is_not_moved(
 
 @pytest.mark.requires_postgres
 @pytest.mark.requires_git
+@pytest.mark.parametrize("admits_send", [False, True])
+async def test_the_send_moves_only_a_trigger_whose_grant_admits_it(
+    definitions: FlowDefinitions, triggers: TriggerStore, admits_send: bool
+) -> None:
+    """#5660 §6.2: the version that can send calls order_notify_customer_send, which the
+    version before it never did. A trigger moves to it only when its approved grant admits
+    that tool (the rule the shop adds); otherwise it stays, with the notice."""
+    await definitions.start()
+    before = SCRIPT.replace('tool("order_notify_customer_send"', 'tool("order_get"')
+    assert before != SCRIPT
+    made = await definitions.register_new(
+        NAME,
+        before,
+        builtin_flow.AUTHOR,
+        inputs_schema=INPUTS_SCHEMA,
+        message="Add it",
+        display_name=builtin_flow.DISPLAY_NAME,
+        description=builtin_flow.DESCRIPTION,
+    )
+    assert made is not None
+    [old] = definitions.history.versions(NAME)
+    send = GrantRule(fn="tool", tool="order_notify_customer_send", orders="any", max_calls=1)
+    rules = [*BUILTIN_RULES, send] if admits_send else None
+    trigger = await _approved_trigger(triggers, old.version_id, rules=rules)
+
+    assert await ensure_builtin_flow(definitions, triggers) is True
+    new = definitions.history.versions(NAME)[0]
+    left = await triggers.get(trigger.id)
+    assert left is not None
+    if admits_send:
+        assert (left.definition_id, left.notice) == (new.version_id, None)
+    else:
+        assert (left.definition_id, left.notice) == (old.version_id, NEWER_NOTICE)
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_git
 async def test_a_trigger_with_no_approved_grant_is_not_moved(
     definitions: FlowDefinitions, triggers: TriggerStore
 ) -> None:
@@ -452,6 +495,16 @@ async def test_a_trigger_with_no_approved_grant_is_not_moved(
     assert left is not None
     assert left.definition_id == old.version_id
     assert left.notice == NEWER_NOTICE
+
+
+class _NoMail:
+    """The storefront mail sender, faked: `_run` binds it and stops it (#5283)."""
+
+    def bind(self, loop: object) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
 
 
 @pytest.mark.parametrize(
@@ -483,6 +536,7 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_NoMail(),
     )
     async with component._run(cast(component.OrdersComponent, orders)):
         await asyncio.sleep(0)
@@ -523,6 +577,7 @@ async def test_a_slow_registration_never_holds_up_the_start(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_NoMail(),
     )
     async with asyncio.timeout(5):
         async with component._run(cast(component.OrdersComponent, orders)):
@@ -544,6 +599,11 @@ class _Host:
         *,
         later: list[tuple[list[dict[str, Any]], str]] | None = None,
         notify: bool = False,
+        send: bool = False,
+        send_ready: bool = True,
+        told: set[str] | None = None,
+        send_error: str | None = None,
+        send_answer: dict[str, Any] | None = None,
         settle_hours: int = 48,
         choices: dict[str, Any] | None = None,
     ) -> None:
@@ -551,7 +611,16 @@ class _Host:
         self.prints = prints
         self.answers = answers
         self.later = later or [(items, "in_production")]
-        self.settings = {"notify": notify, "settle_hours": settle_hours}
+        self.settings = {"notify": notify, "send": send, "settle_hours": settle_hours}
+        self.send_ready = send_ready
+        # The orders already told "ready" since their last status change, shared across runs
+        # as the backend's episode rule is (#5660 §7.1): a second run's send is refused.
+        self.told = told if told is not None else set()
+        # How a failed send reaches the script: `Exception("<type>: <text>")`, as the
+        # harness's `_script_outcome` hands it over; and the send's answer when it is not sent.
+        self.send_error = send_error
+        self.send_answer = send_answer
+        self.sends: list[dict[str, Any]] = []
         self.choices = choices or {"default_nozzles": [], "bed_type": "pei"}
         self.requests: list[dict[str, Any]] = []
         self.reads = 0
@@ -586,7 +655,27 @@ class _Host:
                 raise RuntimeError("no such output")
             return json.dumps(self.choices)
         if name == "order_notify_customer":
-            return json.dumps({"text": "Order ORD-1 is ready.", "sent": False})
+            return json.dumps(
+                {"text": "Order ORD-1 is ready.", "sent": False, "send_ready": self.send_ready}
+            )
+        if name == "order_notify_customer_send":
+            self.sends.append(args)
+            if self.send_error is not None:
+                raise Exception(self.send_error)
+            if args["order_id"] in self.told:
+                # What a later run sees: the tool's `prepareApproval` pre-check
+                # (agent `tools/orders.ts` `refuseIfTold`) refuses before anything parks or
+                # is claimed, and the agent's activity says it "was not run"
+                # (`toolActivities.ts` `refuseOrRetry`), wrapped by the harness.
+                raise Exception(
+                    "ToolFailedError: order_notify_customer_send was not run: already_notified: "
+                    'the customer was already sent "ready" (message m1, sent) since the order '
+                    "last changed status; name it in resend_of to send it again"
+                )
+            if self.send_answer is not None:
+                return json.dumps(self.send_answer)
+            self.told.add(args["order_id"])
+            return json.dumps({"sent": True, "message": {"id": "m1", "status": "sent"}})
         raise AssertionError(f"unexpected tool {name}")
 
     async def queue_print(self, source: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -714,7 +803,7 @@ def test_the_check_waits_for_the_prints_to_end() -> None:
     assert host.calls.count("sleep") == 2
     assert host.calls.index("agent") > max(i for i, c in enumerate(host.calls) if c == "sleep")
     assert host.calls[-1] == "order_notify_customer"
-    assert result["message"] == {"text": "Order ORD-1 is ready.", "sent": False}
+    assert result["message"] == {"text": "Order ORD-1 is ready.", "sent": False, "send_ready": True}
 
 
 def test_prints_still_running_at_the_deadline_end_the_run_without_a_check() -> None:
@@ -745,6 +834,139 @@ def test_no_ready_message_for_an_order_that_is_not_ready() -> None:
     result = host.run()
     assert "agent" in host.calls and "order_notify_customer" not in host.calls
     assert result["message"] is None
+    assert result["send"] == {"status": "skipped", "reason": "the order is not ready"}
+
+
+def _ready_host(**kwargs: Any) -> _Host:
+    """An order the checks made ready: its second read says so."""
+    return _Host([_item("a")], [_OK], [], later=[([_item("a")], "ready")], notify=True, **kwargs)
+
+
+def test_the_ready_message_is_sent_only_with_send_on() -> None:
+    """#5660 §6.2: `notify` alone composes the message for a person; `send` sends it."""
+    composed = _ready_host()
+    result = composed.run()
+    assert composed.sends == []
+    assert result["message"]["text"] == "Order ORD-1 is ready."
+    assert result["send"]["status"] == "skipped"
+    assert "send is off" in result["send"]["reason"]
+
+    sending = _ready_host(send=True)
+    result = sending.run()
+    assert sending.sends == [{"order_id": "o1", "template": "ready"}]
+    assert result["send"] == {"status": "sent", "message_id": "m1"}
+
+
+def test_no_send_without_a_bound_plugin_or_a_contact() -> None:
+    host = _ready_host(send=True, send_ready=False)
+    result = host.run()
+    assert host.sends == []
+    assert result["send"]["status"] == "skipped"
+    assert "no messaging plugin" in result["send"]["reason"]
+
+
+def test_a_second_run_on_the_same_ready_order_never_sends_twice() -> None:
+    """A re-run (or another run) on an order already told reports the refusal; the run
+    still ends with its report. A retry of one run's call reuses its key (the call's
+    request id), so the backend answers its first claim."""
+    told: set[str] = set()
+    first = _ready_host(send=True, told=told).run()
+    assert first["send"]["status"] == "sent"
+    again = _ready_host(send=True, told=told)
+    result = again.run()
+    assert len(again.sends) == 1
+    assert result["send"]["status"] == "refused"
+    assert result["send"]["reason"].startswith(
+        "order_notify_customer_send was not run: already_notified:"
+    )
+    assert result["report"] == {"summary": "ok"}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "reason"),
+    [
+        (
+            "ToolFailedError: messaging_plugin_unavailable: remote:mail is not connected; "
+            "nothing was sent",
+            "refused",
+            "messaging_plugin_unavailable: remote:mail is not connected; nothing was sent",
+        ),
+        (
+            "ToolApprovalDenied: timed out",
+            "refused",
+            "the send was not approved: timed out",
+        ),
+        (
+            "ToolFailedError: order_notify_customer_send may have run: the agent replica that "
+            "took it sent no heartbeat for 30s",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+        (
+            "ToolFailedError: record the message to order o1's customer failed (HTTP 503)",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+        (
+            "TimeoutError: no answer",
+            "unknown",
+            "the outcome is unknown; check the order's messages",
+        ),
+    ],
+)
+def test_a_failed_send_is_refused_only_on_the_agents_refusal(
+    error: str, status: str, reason: str
+) -> None:
+    """Review of #5919: only the agent's refusal is `refused`; a failure that may have sent
+    the message (a timeout, a lost answer, a 5xx) is `unknown`, and nothing is sent again."""
+    host = _ready_host(send=True, send_error=error)
+    result = host.run()
+    assert len(host.sends) == 1
+    assert result["send"] == {"status": status, "reason": reason}
+    assert result["report"] == {"summary": "ok"}
+
+
+#: The claim's 409 as a flow script sees it: the backend's `already_notified` detail
+#: (`orders/messages.py` `claim`, problem title "Conflict"), as agent `call.ts` `ok` words
+#: the failure and `registry.ts` `failedWith` wraps the backend's text, then the harness's
+#: `ToolFailedError`.
+CLAIM_RACE_409 = (
+    "ToolFailedError: record the message to order o1's customer failed (HTTP 409): "
+    + json.dumps(
+        {
+            "untrusted_data": {
+                "tool": "order_notify_customer_send",
+                "source": "the backend's error detail, which can relay Bambuddy's or another "
+                "upstream's own message",
+                "content": "Conflict: ORD-1's customer was already sent 'ready' (message m1, "
+                "sent) since its last status change; name it in resend_of to send it again",
+            }
+        },
+        indent=2,
+    )
+)
+
+
+def test_a_run_that_loses_the_claim_race_is_refused() -> None:
+    """Review of #5932: two runs both pass the `already_notified` pre-check, and a concurrent
+    run claims first after this run's check passed; this run's claim is then the backend's
+    409. It is refused, and nothing is sent again."""
+    host = _ready_host(send=True, send_error=CLAIM_RACE_409)
+    result = host.run()
+    assert len(host.sends) == 1
+    assert result["send"]["status"] == "refused"
+    assert "failed (HTTP 409)" in result["send"]["reason"]
+    assert "name it in resend_of to send it again" in result["send"]["reason"]
+    assert result["report"] == {"summary": "ok"}
+
+
+def test_a_send_the_plugin_did_not_take_is_not_sent() -> None:
+    """Review of #5919: the call answered, but the plugin refused the message."""
+    host = _ready_host(
+        send=True, send_answer={"sent": False, "message": {"id": "m2", "status": "failed"}}
+    )
+    result = host.run()
+    assert result["send"] == {"status": "not_sent", "reason": "failed", "message_id": "m2"}
 
 
 def test_print_choices_that_cannot_be_read_ask_a_person_and_the_next_item_prints() -> None:

@@ -73,11 +73,25 @@ export const ACK_TIMEOUT_MS = 3_000
 export const MAX_BRIDGE_BYTES = 256 * 1024
 /**
  * Past the owner's own time: the workflow's whole run, for its workflow tasks on the caller's own
- * host worker, which are CPU work there (start, unsealing, the result: up to 4.3 s on a loaded
- * replica, #5428), and for that worker's reconnect if Temporal blips mid-call. Past it the call
+ * host worker, which are CPU work there (start, unsealing, the result: up to 4.3 s in all, over a
+ * call's start and its tasks together, on a loaded test runner, #5428; each task has
+ * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS), and for that worker's reconnect if Temporal blips mid-call. Past it the call
  * answers no_answer.
  */
 const WORKFLOW_SLACK_MS = 15_000
+
+/**
+ * Each BridgeCall workflow task's start-to-close, in place of Temporal's 10 s (#5939). Prod's
+ * Temporal sometimes records a task as started and never delivers it: history's AddWorkflowTask
+ * to the throttled matching times out after the start is recorded, its retry is refused "Workflow
+ * task already started", and the task waits out its timeout (eh-homelab/clusters#3418). That cost
+ * a call 10 s, past the status probe's 6 s (hub.ts STATUS_PROBE_MS); at 3 s the retry, on the same
+ * worker, has time to run. Every BridgeCall task that completed in prod took at most 2.24 s from
+ * start to completion (57 tasks, 2026-11-09/10), and 2.18 s on a dev server beside a busy main
+ * worker (#5939). A task that runs past 3 s is retried; one that never fits ends the call at its
+ * execution timeout, as a stalled worker's did before.
+ */
+export const BRIDGE_WORKFLOW_TASK_TIMEOUT_MS = 3_000
 
 /**
  * How often a replica refreshes its tabs' rows (`TabOwnerStore.refresh`): a claim lost while
@@ -306,6 +320,7 @@ export class TemporalTabRelay implements TabRelay {
       workflowId,
       args: [input],
       workflowExecutionTimeout: this.#ackTimeoutMs + ownerRunMs(input) + WORKFLOW_SLACK_MS,
+      workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS,
     })
     const answer = await new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
       const onAbort = () => {

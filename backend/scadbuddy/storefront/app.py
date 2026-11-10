@@ -156,12 +156,17 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     if frontend is not None:
 
         async def turnstile_on() -> bool:
-            return await app.state.turnstile_site_key.get(client) is not None
+            # Until a read succeeds the edge cannot know the check is off, so the page's
+            # CSP allows Cloudflare: a later read that finds a key is then not blocked.
+            site_key = app.state.turnstile_site_key
+            return await site_key.get(client) is not None or not site_key.ever_read
 
         app.mount("/", StorefrontStatic(frontend, turnstile=turnstile_on), name="storefront-page")
     else:
         logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()
+    # The session cookie's key too (`accounts.py`), under its own version tag.
+    app.state.cookie_key = key
     # The last added runs first.
     app.add_middleware(VisitorCookie, key=key, prefix=STOREFRONT_PREFIX)
     app.add_middleware(

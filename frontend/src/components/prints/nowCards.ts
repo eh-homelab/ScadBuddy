@@ -9,6 +9,15 @@ export interface NowCard {
   stale: string | null
 }
 
+/**
+ * #3632 — why a card is not current, and when it was: "Last seen at 14:05 · <why>".
+ * #5940 — a working job's row says the same, from the same card.
+ */
+export function lastSeen(card: NowCard): string {
+  const at = new Date(card.seenAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return `Last seen at ${at} · ${card.stale}`
+}
+
 const UNLISTED = 'Bambuddy did not list this printer in the last read.'
 
 /**

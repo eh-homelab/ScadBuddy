@@ -130,8 +130,8 @@ class ArchiveCache:
 
     async def version(self, client: BambuddyClient) -> str | None:
         """Bambuddy's version (`BambuddyClient.version`), which says whether it has a page
-        per archive (#3743). Kept `VERSION_TTL`, so the polled Now printing strip asks
-        once in that time. A failed read is kept as None for the same time: the strip
+        per archive (#3743). Kept `VERSION_TTL`, so the polled printers read on /prints asks
+        once in that time. A failed read is kept as None for the same time: a job's row
         then links the archives page, which every Bambuddy has."""
 
         async def load() -> str | None:

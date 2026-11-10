@@ -323,7 +323,8 @@ opens every one and seals it again byte for byte).
     The one way past it is a plugin package approved with `allow_refused` (store.ts,
     column `allow_refused`, bound to that pin's approval): it loads as it is through
     `allowedPluginPaths`, unchecked, with the built-ins it names (`builtinTools`, each
-    call `outward`) and skill shell injection on (with `Bash` offered, Claude Code
+    call `outward`; the session's own, `SESSION_BUILTINS`, are never among them and keep
+    their item's tier) and skill shell injection on (with `Bash` offered, Claude Code
     2.1.287 runs an injection without asking the seam). A name that is not a safe path segment
     (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
     the hash and the egress check stay fatal (`vet.ts` `fatal`).
@@ -380,7 +381,15 @@ opens every one and seals it again byte for byte).
     session's own `tool-results` directory in the Claude Code config dir, where Claude Code
     saves an oversized tool result (#5542, `projectDirName`). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
-    2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
+    2026-11-01). Where the deployment sets `SCADBUDDY_SANDBOX_*` (all five or none, `config.ts`
+    `sandbox`), every turn gets the session's own `Bash` and `PowerShell` instead
+    (`mcp__builtin__Bash`, `builtins/sandboxShell.ts`, `outward` by default under the same two
+    items), each command run in the session's sandbox pod (#5864, `src/sandbox/`: `pods.ts` makes
+    one pod per session through the Kubernetes API and sweeps the ended ones, `client.ts` syncs
+    the session directory in and out around each command, `server.ts` is the pod's exec server
+    and `egressProxy.ts` the pods' CONNECT proxy, both the Dockerfile's `sandbox` target, which
+    carries only Node's built-ins; `docs/ai/security.md`, "Bash and PowerShell in a sandbox
+    pod"). Tests run the exec server in-process (`test/support/sandbox.ts`). An allowed package's `builtinTools`
     only switch on one that is `off` by default, at its package tier (`outward` by default),
     never one a person switched off (the source, or the item's row); they no longer decide
     what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured
@@ -391,17 +400,28 @@ opens every one and seals it again byte for byte).
     Code's own `Read`, `Write` and the rest, with paths in the session directory (its cwd).
     The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
     background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
-    `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
+    `builtin` server, `mcp__builtin__<Name>`), in every turn, not only one whose package names
+    them (#2726 R2): each is an item of `builtin:claude-code` too (`nativeBuiltins.ts`
+    `SESSION_BUILTINS`, `turnBuiltins`), `WebFetch` and `WebSearch` at `outward`, `CronList` at
+    `read`, the rest at `write`; a session a flow run started or forked, a Workflow agent's chat,
+    a session one of those started or forked through `sessions_*`, and a fork of any of them
+    (`ai_sessions.background_tools` false, `ClaimedSession.backgroundTools`) get no background one;
+    nor does a turn a flow run, or such a session, sent (`ai_sessions.turn_flow`), nor any turn
+    on an agent with no `deps.background`. A
+    `Monitor`'s `ws` source is `outward`, and its `command` source runs a shell where Bash runs,
+    so a turn gives it a command queue only while `Bash` is on, at Bash's tier if stricter
+    (`monitorAccess`, `sessionTierOf`). `CronCreate`, `CronDelete`,
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own
     (`src/background/`: `ai_background_tasks`; a recurring cron is a Temporal Schedule
     `bgtask-<session>-<id>` whose `BackgroundFire` sends the prompt when the session is idle
     (`background/temporal.ts`, plan Step 9.8, its older jobs converted at start by
     `convertCronTasks`), and a wakeup or a one-shot cron one `BackgroundTask` workflow on
-    `agent-tools`; a Monitor's source
-    runs where the session's Bash runs, the replica's own queue, its events in
+    `agent-tools`; a Monitor's command
+    runs on the replica that ran the turn, its own queue, and never where a sandbox is set up
+    (#5864: its description there offers `ws` only), its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
-    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; every turn
+    (`workflowAgents.ts`, a chat with no background built-in of its own), its results journalled in `ai_workflow_calls`; every turn that has them
     gets them as the in-process `builtin` server in place of Claude Code's, which would end
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API

@@ -20,12 +20,19 @@ from scadbuddy.main import create_app
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import AddressInput, ContactInput, Customer
 from scadbuddy.orders.money import DepositRule, OrderRules, ShippingOption
+from scadbuddy.orders.storefront.accounts import (
+    Account,
+    orders_of_account,
+    request_code,
+    verify_code,
+)
 from scadbuddy.orders.storefront.submit import _refusal
 from scadbuddy.orders.storefront.wire import Listing, ListingInput
 from scadbuddy.payments import store as payments
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.orders.storefront.test_drafts import (
     COMMIT,
+    TOKEN_A,
     TOKEN_B,
     CrudCaller,
     _orders,
@@ -408,3 +415,93 @@ def test_the_submit_is_the_customers_on_the_audit_line(
 def test_a_422_refusal_keeps_its_own_slug(slug: str) -> None:
     error = _refusal(LifecycleError(slug, f"{slug}: no", unprocessable=True))
     assert (error.status, error.type) == (422, f"{STOREFRONT_PROBLEMS}{slug}")
+
+
+# -- a signed-in submit (#5283: the account from the CRUD side's session) ------------------
+
+
+def signed_in(api: TestClient, email: str, visitor: str | None) -> tuple[str, Account]:
+    """A session for ``email``'s account; ``visitor`` joins it when given."""
+    with _state(api).projection.pool.connection() as conn:
+        code = request_code(conn, email, "192.0.2.1")
+        assert code is not None
+        signed = verify_code(
+            conn, email, code, "192.0.2.1", visitor_id=visitor, previous_session=None
+        )
+    assert signed is not None
+    return signed.session_token, signed.account
+
+
+def account_orders(api: TestClient, account_id: str) -> list[str]:
+    with _state(api).projection.pool.connection() as conn:
+        return orders_of_account(conn, account_id)
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_a_signed_in_submit_takes_the_accounts_customer_and_lists_the_order(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing, joined: bool
+) -> None:
+    """Spec §5.2/§5.5: a verified account's customer, no new one; the order is in the
+    account's orders whether or not the cart's visitor joined the account."""
+    owner_lifecycle.rules = rules(options=(POST,))
+    draft = draft_of(crud, listing)
+    session, account = signed_in(api, "grace@example.com", TOKEN_A if joined else None)
+    customers = rows(api, "SELECT id FROM customers ORDER BY id")
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
+        key="s1",
+        session=session,
+    )
+    assert r.status_code == 200, r.text
+    assert rows(api, "SELECT id FROM customers ORDER BY id") == customers
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.submitted_at is not None
+    assert order.customer_id == account.customer_id
+    assert account_orders(api, account.id) == [order.id]
+    # The address joins the account's customer, as an address of this order, never its
+    # default; the customer's name and contacts stay as they were.
+    customer = _orders(api).store.customer(account.customer_id)
+    assert customer is not None and customer.display_name == "grace@example.com"
+    assert [(c.kind, c.value) for c in customer.contacts] == [("email", "grace@example.com")]
+    assert [(a.recipient, a.default_shipping) for a in customer.addresses] == [
+        ("Ada Lovelace", False)
+    ]
+    assert order.shipping_address_id == customer.addresses[0].id
+    [submitted] = [e for e in _orders(api).store.events(order.id) if e.kind == "order.submitted"]
+    assert submitted.by.principal == f"customer:{account.customer_id}"
+
+
+def test_an_anonymous_submit_joins_no_account(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    draft = draft_of(crud, listing)
+    _session, account = signed_in(api, "grace@example.com", None)
+    customers = rows(api, "SELECT id FROM customers")
+    r = crud.post("/draft/submit", json=submit_body(draft), key="s1")
+    assert r.status_code == 200, r.text
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.customer_id not in [c["id"] for c in customers]
+    assert len(rows(api, "SELECT id FROM customers")) == len(customers) + 1
+    assert rows(api, "SELECT * FROM storefront_account_orders") == []
+    assert account_orders(api, account.id) == []
+
+
+def test_another_accounts_session_cannot_submit_this_visitors_cart(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """The cart's visitor joined account A; a session of account B is refused as if the
+    cart did not exist, and nothing of it is kept."""
+    draft = draft_of(crud, listing)
+    _a_session, a = signed_in(api, "ada@example.com", TOKEN_A)
+    b_session, b = signed_in(api, "grace@example.com", None)
+    customers = rows(api, "SELECT id FROM customers ORDER BY id")
+    r = crud.post("/draft/submit", json=submit_body(draft), key="s1", session=b_session)
+    assert r.status_code == 404, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}draft_not_found"
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.unsubmitted and order.customer_id is None
+    assert rows(api, "SELECT id FROM customers ORDER BY id") == customers
+    assert rows(api, "SELECT * FROM storefront_mail") == []
+    assert account_orders(api, b.id) == []
+    assert account_orders(api, a.id) == [order.id]

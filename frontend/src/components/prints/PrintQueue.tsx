@@ -1,65 +1,71 @@
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router'
+import { useEffect, useRef, useState } from 'react'
+import { newStart, startedOn, type StartedJob } from './liveJobs'
 import { api, ApiError, BAMBUDDY_NOT_CONFIGURED } from '../../api/client'
 import type { ArchiveStats, QueueItem } from '../../api/types'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
-import { formatDuration } from '../../lib/format'
 import { Card } from '@/components/ui/card'
-import { JobPicture } from './JobPicture'
-import { queueItemPath, scadbuddyJobPath } from './prints'
-import { QueuedFromScadBuddy } from './QueuedFromScadBuddy'
 
-/** A link of the queue's: an item's page, or Bambuddy's queue and stats beside the frame (#2351). */
+/** A link to Bambuddy's queue or stats beside the frame (#2351). */
 const LINK = 'font-medium text-primary underline-offset-4 hover:underline'
 
 /** How often the queue is read while the page is visible. */
 export const QUEUE_POLL_MS = 30_000
-/** Items listed before the rest are left to Bambuddy's queue page. */
-export const QUEUE_SHOWN = 8
 
-/** Bambuddy's not-configured refusal, which NowPrinting above already shows. */
-
-/** Bambuddy's queue order, items with no position last, then by id so two such keep a
- * stable order: subtracting two missing positions was Infinity - Infinity, NaN (#2919). */
-function byPosition(a: QueueItem, b: QueueItem): number {
-  const [pa, pb] = [a.position ?? Infinity, b.position ?? Infinity]
-  if (pa !== pb) return pa < pb ? -1 : 1
-  return a.id - b.id
+/** What {@link usePrintQueue} gives. */
+export interface PrintQueueState {
+  /** Bambuddy's pending items, as read; `null` until the first read answers. */
+  items: QueueItem[] | null
+  stats: ArchiveStats | null
+  error: string | null
+  /** Bambuddy is not configured: said once on the page, by the printer strip (#2919). */
+  unconfigured: boolean
 }
 
 /**
- * #2351 — Bambuddy's print queue on `/prints`: what is waiting to print, whoever
- * queued it, and why it is waiting; with the farm's totals under it. Read only: the
- * queue is managed in Bambuddy, which the "Bambuddy's queue" link opens. Each row opens
- * its item's page (#3744).
+ * #2351 — Bambuddy's print queue for `/prints`: what is waiting to print, whoever
+ * queued it, read every {@link QUEUE_POLL_MS} while the page is visible, and the farm's
+ * totals, once per visit. Read only: the queue is managed in Bambuddy. Nothing is read
+ * until `enabled` (#4629: on the hot path's backends, once the person asks).
+ *
+ * #3745 — the items are rows of the one Prints list. `started` names the working jobs,
+ * each by its printer and key (`liveJobs.ts` `startedOn`). When one starts
+ * (`newStart`), the queue is read again at once, so the item that job came from leaves
+ * the list with the printers' read, not up to a poll later. That is a read per job
+ * start, not per poll. A job ScadBuddy links meanwhile (`printer:<id>` to
+ * `archive:<id>`) is not a start (#5940).
  */
-export function PrintQueue() {
+export function usePrintQueue(enabled: boolean, started: readonly StartedJob[] | null): PrintQueueState {
   const [items, setItems] = useState<QueueItem[] | null>(null)
   const [stats, setStats] = useState<ArchiveStats | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [unconfigured, setUnconfigured] = useState(false)
+  const readNow = useRef<() => void>(() => undefined)
 
   useEffect(() => {
+    if (!enabled) return
     let live = true
+    let sent = 0
     const read = () => {
       if (document.hidden) return
+      const mine = ++sent
       api
         .getPrintQueue('pending')
         .then((pending) => {
-          if (!live) return
-          setItems([...pending].sort(byPosition))
+          if (!live || mine !== sent) return
+          setItems(pending)
           setError(null)
           setUnconfigured(false)
         })
         .catch((cause: unknown) => {
-          if (!live) return
+          if (!live || mine !== sent) return
           setUnconfigured(cause instanceof ApiError && cause.problem.type === BAMBUDDY_NOT_CONFIGURED)
           setError(cause instanceof ApiError ? cause.detail : "Bambuddy's queue could not be read.")
         })
     }
+    readNow.current = read
     read()
     // The totals change once a print ends, so once per visit is enough. A failed read
-    // only leaves them out: the queue above them still shows (#2922).
+    // only leaves them out: the queue still shows (#2922).
     api.getFarmStats().then(
       (totals) => live && setStats(totals),
       () => {},
@@ -68,97 +74,59 @@ export function PrintQueue() {
     document.addEventListener('visibilitychange', read)
     return () => {
       live = false
+      readNow.current = () => undefined
       clearInterval(timer)
       document.removeEventListener('visibilitychange', read)
     }
-  }, [])
+  }, [enabled])
 
-  if (items === null && error === null) return null
-  // Bambuddy not configured is said once on the page, by NowPrinting (#2919).
-  if (unconfigured) return null
-  const base = bambuddyBase()
-  const shown = items?.slice(0, QUEUE_SHOWN) ?? []
-  const more = (items?.length ?? 0) - shown.length
-  return (
-    <section aria-labelledby="print-queue-heading" className="mb-6" data-testid="print-queue">
-      <div className="mb-2 flex items-baseline justify-between gap-2">
-        <h2 id="print-queue-heading" className="text-sm font-medium">
-          Up next
-        </h2>
-        {base && (
-          <a href={`${base}/queue`} target="_blank" rel="noreferrer" className={`text-xs ${LINK}`}>
-            Bambuddy's queue
-          </a>
-        )}
-      </div>
-      {error && (
-        <p className="text-xs text-muted-foreground" data-testid="print-queue-error">
-          {error}
-        </p>
-      )}
-      {items !== null && items.length === 0 && <p className="text-xs text-muted-foreground">Nothing is waiting to print.</p>}
-      {shown.length > 0 && (
-        <Card className="gap-0 py-0">
-          <ol className="divide-y" aria-label="Waiting to print">
-            {shown.map((item) => (
-              <QueueRow key={item.id} item={item} />
-            ))}
-          </ol>
-        </Card>
-      )}
-      {more > 0 && (
-        <p className="mt-1.5 text-xs text-muted-foreground" data-testid="print-queue-more">
-          {more} more waiting in Bambuddy's queue.
-        </p>
-      )}
-      {stats && <FarmTotals stats={stats} statsUrl={base ? `${base}/stats` : null} />}
-    </section>
-  )
+  const seen = useRef<readonly StartedJob[] | null>(null)
+  // The jobs as a value an effect can compare: JSON keeps each pair whole (#5946). A
+  // change of order alone runs the effect, which finds no start in it.
+  const startedKey = started === null ? null : JSON.stringify(started.map(({ printerId, key }) => [printerId, key]))
+  useEffect(() => {
+    // Before the printers' first read nothing has started: that read is no news.
+    if (startedKey === null) return
+    const now = (JSON.parse(startedKey) as [string, string][]).map(([printerId, key]) => startedOn(printerId, key))
+    const before = seen.current
+    seen.current = now
+    if (before !== null && newStart(now, before)) readNow.current()
+  }, [startedKey])
+
+  return { items, stats, error, unconfigured }
 }
 
 /**
- * #3743, #3744 — the item's name, as a link in ScadBuddy: ScadBuddy's own item to its
- * ScadBuddy page ({@link scadbuddyJobPath}: its print once linked, else its queue item
- * page); any other to its queue item page, which links on to Bambuddy's queue. Bambuddy
- * has no route for one item (`frontend/src/App.tsx` and `QueuePage.tsx` at
- * maziggy/bambuddy@2ce0d93).
+ * #3745 — what the Prints list says about Bambuddy's queue beside its rows: a link to
+ * the queue, a failed read, an empty queue, how many items are left to Bambuddy's page
+ * (`tail`), and the farm's totals.
+ *
+ * #5940 — a `filtered` list shows no queued row (`printRows`), so it says nothing of the
+ * queue. The farm's totals stay: they describe the farm, not the list, and no filter of
+ * the list narrows them.
  */
-function ItemName({ item, name }: { item: QueueItem; name: string }) {
-  const to = item.scadbuddy ? scadbuddyJobPath(item.scadbuddy, item.id) : queueItemPath(item.id)
+export function QueueNotes({ queue, tail, filtered = false }: { queue: PrintQueueState; tail: number; filtered?: boolean }) {
+  const { items, stats, error, unconfigured } = queue
+  if ((items === null && error === null) || unconfigured) return null
+  // #5946 — filtered, only the totals would show: with none, nothing does.
+  if (filtered && !stats) return null
+  const base = bambuddyBase()
   return (
-    <Link to={to} className={`min-w-0 truncate ${LINK}`}>
-      {name}
-    </Link>
-  )
-}
-
-function QueueRow({ item }: { item: QueueItem }) {
-  const name = item.archive_name ?? item.library_file_name ?? `Queue item ${item.id}`
-  const where = item.printer_name ?? (item.target_model ? `Any ${item.target_model}` : 'No printer yet')
-  const notes: string[] = []
-  if (item.scheduled_time) notes.push(`Scheduled ${new Date(item.scheduled_time).toLocaleString()}`)
-  if (item.manual_start) notes.push('Waits for a manual start')
-  if (item.waiting_reason) notes.push(item.waiting_reason)
-  return (
-    <li className="flex items-start gap-3 px-3 py-2 text-[12.5px]" data-testid={`queue-item-${item.id}`}>
-      {/* #3742 — ScadBuddy's picture of its own item, else Bambuddy's thumbnail. */}
-      <JobPicture src={item.picture} />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <ItemName item={item} name={name} />
-            {item.scadbuddy && <QueuedFromScadBuddy job={item.scadbuddy} />}
-          </span>
-          <span className="sb-num shrink-0 text-xs text-muted-foreground">
-            {where}
-            {item.print_time_seconds ? ` · ${formatDuration(item.print_time_seconds)}` : ''}
-            {item.filament_used_grams ? ` · ${Math.round(item.filament_used_grams)} g` : ''}
-          </span>
-        </div>
-        {item.filament_short && <p className="mt-0.5 text-xs text-warn">Not enough filament loaded for this print.</p>}
-        {notes.length > 0 && <p className="mt-0.5 text-xs text-muted-foreground">{notes.join(' · ')}</p>}
-      </div>
-    </li>
+    <div className="mb-3 flex flex-col gap-1.5 text-xs" data-testid="print-queue">
+      {!filtered && (
+        <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-muted-foreground">
+          {error && <span data-testid="print-queue-error">{error}</span>}
+          {items !== null && items.length === 0 && <span>Nothing is waiting to print.</span>}
+          {tail > 0 && <span data-testid="print-queue-more">{tail} more waiting in Bambuddy's queue.</span>}
+          {base && (
+            <a href={`${base}/queue`} target="_blank" rel="noreferrer" className={`ml-auto ${LINK}`}>
+              Bambuddy's queue
+            </a>
+          )}
+        </p>
+      )}
+      {stats && <FarmTotals stats={stats} statsUrl={base ? `${base}/stats` : null} />}
+    </div>
   )
 }
 
@@ -168,7 +136,7 @@ function FarmTotals({ stats, statsUrl }: { stats: ArchiveStats; statsUrl: string
   return (
     <Card
       size="sm"
-      className="sb-num mt-3 flex-row flex-wrap gap-x-4 gap-y-1 px-3 text-xs text-muted-foreground"
+      className="sb-num flex-row flex-wrap gap-x-4 gap-y-1 px-3 text-xs text-muted-foreground"
       data-testid="farm-totals"
     >
       <span>{stats.total_prints} prints</span>

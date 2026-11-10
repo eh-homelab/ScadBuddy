@@ -383,8 +383,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
   records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
   person's (no subject). The Customize page, the dialog's
-  first read and its analysis, and the Prints page's queue and history panels ask
-  Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  first read and its analysis, and the Prints page ask Bambuddy nothing on these
+  backends (#4601, #4629); the Prints page reads Bambuddy's queue and history only after
+  its "Show Bambuddy's queue and print history" button (#3745).
   A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
   row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
   `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
@@ -533,16 +534,18 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   address, IPv6 /64) with `FAILED_CHECKS` (10) failed checks in 10 minutes, or any client
   of a prefix (IPv4 /24, IPv6 /48) with 100, is refused with no Siteverify call
   (`FailedChecks`; it never evicts a block, and when full of blocks it checks new clients
-  without tracking them, never refusing them). A
+  without tracking them, never refusing them). A send with no token is refused but not
+  counted: it costs no Siteverify call. A
   design request checks its upload allowance first, and only a passed check spends it.
   The edge asks for the verdict once, never retried, with 15 s to answer; no answer is
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Design requests (`request`) and submit (`submit`) take it;
-  the actions `sign_up` and `sign_in` are kept for the code request and sign-in routes
-  still to come. The edge's page CSP (`storefront/static.py`) names
-  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
+  before it reads its body. Design requests (`request`), submit (`submit`) and sign-ins
+  (`sign_in`) take it; the action `sign_up` is kept for the code request route still to
+  come. The edge's page CSP (`storefront/static.py`) names
+  `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
+  and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `backend/scadbuddy/core/tracing.py` — OpenTelemetry (#988): the provider from the
@@ -637,7 +640,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, inputs `notify` and `settle_hours`), registered by
+  script, inputs `notify`, `send` and `settle_hours`), registered by
   `ensure_builtin_flow` at the component's start when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
   is still an unedited built-in one with another script (#4673, `_upgraded`:
@@ -662,8 +665,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   input `settle_hours` (default 48; past it the run ends with a summary and no check);
   an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
-  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing),
+  and with `send` too (#5660) and the answer's `send_ready`, `order_notify_customer_send` (`outward`,
+  so the trigger's grant must name it); the result's `send` says `sent`, `skipped`, `refused` (the agent's refusal only),
+  `unknown` (a failure that may have sent it) or `not_sent`, and none ends the run. `ensure_builtin_flow` runs as a task beside the
   component's start; it reads the versions first (a name with any registers nothing,
   unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
@@ -1112,6 +1117,51 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+- Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
+  passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
+  - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's
+    base32 less `0` and `1`), shown `XXXX-XXXX-XXXX-XXXX`; `verify_code` reads it with
+    case, spaces and hyphens ignored. It does the same for every address, whether or not
+    an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
+    when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
+    live code signs in from any client. No address can be locked: requests are limited
+    per address and client (3 an hour) and per client (10), wrong guesses per client and
+    address (20 an hour) and per client (200), never per address, and a client is
+    `core/proxies.py` `client_key` (IPv4 address, IPv6 /64), so one guesser on a shared
+    network does not stop sign-in at other addresses. The mail cap is 20 live codes per
+    address: past it `request_code` returns None, raises nothing, and the caller answers
+    as usual and sends no mail; the refused request still counts toward the client's
+    limits (a used, expired row). A full cap
+    means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
+    it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
+    the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
+    `request_code` and `verify_code` each hold transaction locks on the client, then the
+    address, so call them in a transaction. The verify route takes Turnstile
+    (`sign_in`) whenever a site key is set; the code route, a later PR, is to take it
+    (`sign_up`).
+  - `verify_code` makes the account at the first sign-in. It links the one unarchived
+    customer with that email contact, else makes a new customer. It joins a visitor of no
+    account, rotates the session (the old row is deleted), and stores only the 256-bit
+    token's sha256.
+  - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
+    The order page attaches an order whose link was opened while signed in, in its own
+    transaction.
+  - Old code and failure rows are pruned as new rows are written, and every expired
+    session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
+    joined an account.
+  - The routes: the edge's `storefront/accounts.py` keeps the session in the
+    `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
+    Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
+    CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
+    session, never from a body. Submit takes the account from it (the edge sends the
+    cookie's session on): the order takes the account's customer, makes none, and is
+    attached to the account (`attach_order`); a cart whose visitor joined another account
+    is 404 `draft_not_found`. The order page is to take it too (a later PR).
+    `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
+    answers the new token in that header only, never in a body. `POST …/account/sign-out`
+    deletes the session, and the edge also gives the browser a new visitor. `GET
+    …/account` answers the account's email or null, and `…/account/orders` lists
+    submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by

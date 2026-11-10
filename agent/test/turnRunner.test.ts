@@ -89,7 +89,9 @@ describe('TurnRunner', () => {
     const turn = await runner.assemble(session, principal)
     const { run } = turn
     // What the assembly computed before #5869 (`pluginTiers`): proxied, it is `run.tierOf` itself;
-    // handed over, the same call over the run's own plugins and paths.
+    // handed over, the same call over the run's own plugins and paths. Proxied, `harnessTierOf(run)`
+    // (`gate`, below) also reads `run.tierOf`, since `remotePlugins` is unset, so the `old` and
+    // `gate` comparisons are nearly one check there: the hard-coded `expected` tiers carry that case.
     const old = turnTools
       ? run.tierOf!
       : harnessTierOf({

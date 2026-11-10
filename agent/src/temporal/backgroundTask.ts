@@ -134,7 +134,8 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
 
 /**
  * A monitor: its source runs as one heartbeating activity on the queue the plan names
- * (where the session's Bash runs, or any agent for a WebSocket), recording each event
+ * (a command on the replica that ran the turn, never where a sandbox is set up; any agent
+ * for a WebSocket), recording each event
  * and signalling this workflow; each signal sends what is undelivered as the session's
  * next message once it is idle. Its end is the last event, sent the same way.
  */
