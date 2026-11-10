@@ -126,6 +126,26 @@ describe("the session's own built-ins in every turn", () => {
     expect(turn.eventTierOf('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('write')
     // A WebSocket still asks first.
     expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', ws: { url: 'wss://example.com' } })).toBe('outward')
+    expect(turn.run.systemPromptAppend).toContain('A Monitor with a `ws` source asks the user first.')
+  })
+
+  it('tells the model a Monitor command asks first when Bash is on at outward', async () => {
+    const turn = await assemble({ access: [row('Bash', 'outward')] })
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('outward')
+    expect(turn.run.systemPromptAppend).toContain('A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).')
+  })
+
+  it("puts an admin's outward on CronCreate and Workflow in front of every call (docs/ai/security.md)", async () => {
+    const turn = await assemble({ access: [row('CronCreate', 'outward'), row('Workflow', 'outward')] })
+    const cron = { cron: '1 * * * *', prompt: 'p' }
+    const workflow = { script: 'export default async () => 1' }
+    expect(await turn.run.live!.access('mcp__builtin__CronCreate', cron)).toBe('outward')
+    expect(turn.eventTierOf('mcp__builtin__CronCreate', cron)).toBe('outward')
+    expect(await turn.run.live!.access('mcp__builtin__Workflow', workflow)).toBe('outward')
+    expect(turn.eventTierOf('mcp__builtin__Workflow', workflow)).toBe('outward')
+    expect(turn.run.systemPromptAppend).toMatch(/A call of [^.]*CronCreate[^.]*Workflow[^.]* asks the user first\./)
+    // The others keep their item's tier.
+    expect(await turn.run.live!.access('mcp__builtin__ScheduleWakeup', { delaySeconds: 60 })).toBe('write')
   })
 
   it("answers off for one of the session's own the turn does not serve, even when a package names it", async () => {

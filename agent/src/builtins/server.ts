@@ -211,9 +211,9 @@ export function classicBuiltinServer(
 
 /**
  * What a classic turn's model is told about the built-ins it gets that way: `served` with
- * their tiers, and `shell`, whether a Monitor may run a command (Bash is on).
+ * their tiers, and `shell`, Bash's tier when it is on (a Monitor may run a command, at the stricter of the two), else undefined.
  */
-export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: boolean): string {
+export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined): string {
   const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)
@@ -223,8 +223,10 @@ export function classicBuiltinNote(served: readonly { name: string; tier: string
       'session as a new message when it is due and the session is idle.'
     : ''
   const monitor = names.includes('Monitor')
-    ? shell
-      ? ' A Monitor with a `ws` source asks the user first.'
+    ? shell !== undefined
+      ? shell === 'outward'
+        ? ' A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).'
+        : ' A Monitor with a `ws` source asks the user first.'
       : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'
     : ''
   return (
