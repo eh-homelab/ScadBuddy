@@ -65,11 +65,11 @@ export class WorkspaceBlobError extends Error {
    * not up yet, #5868; `ENOTFOUND`, ...): worth asking again. Undefined for any other refusal,
    * and for a presigned URL elsewhere (S3), which is not the backend.
    */
-  readonly unreachable: string | undefined
+  readonly unreachableKind: string | undefined
 
-  constructor(message: string, options: { unreachable?: string | undefined } = {}) {
+  constructor(message: string, options: { unreachableKind?: string | undefined } = {}) {
     super(message)
-    this.unreachable = options.unreachable
+    this.unreachableKind = options.unreachableKind
   }
 }
 
@@ -98,7 +98,7 @@ export class BackendWorkspaceBlobs implements WorkspaceBlobStore {
       // A presigned S3 URL is not the backend: it is never "not up yet", and has no kind.
       const kind = url.startsWith(`${this.#base}/`) ? transportKind(error) : undefined
       const why = kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'
-      throw new WorkspaceBlobError(`${why} (${step})`, { unreachable: kind })
+      throw new WorkspaceBlobError(`${why} (${step})`, { unreachableKind: kind })
     }
   }
 

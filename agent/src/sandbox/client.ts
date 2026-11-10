@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { Agent, type Dispatcher, fetch } from 'undici'
 import { dirBytes, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
 import { type ExecResult, type KeptRecord, keptValue, type Manifest, SHA_HEADER, type Shell, syncPath, UNSYNCED_MAX } from './protocol.js'
 
@@ -54,6 +55,67 @@ async function checkedManifest(client: SandboxClient): Promise<{ files: Manifest
 }
 
 const REQUEST_MS = 60_000
+/**
+ * The most JSON a manifest, an exec result or the kept record may be: a command controls what
+ * the pod sends. An exec result holds two streams of at most STREAM_MAX_BYTES each, which JSON
+ * escaping can make six times larger; a manifest at most MANIFEST_MAX_ENTRIES short entries.
+ */
+export const JSON_MAX_BYTES = 16 * 1024 * 1024
+/** How long past its own deadline an exec request may wait for its answer (the server's sweep and reply). */
+const EXEC_SLACK_MS = 30_000
+
+type SandboxResponse = Awaited<ReturnType<typeof fetch>>
+
+/** A JSON body read under a cap: past it, a SandboxError, whatever the pod claims. */
+async function cappedJson(res: SandboxResponse, max: number, what: string): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let size = 0
+  const reader = res.body?.getReader()
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > max) {
+        await reader.cancel().catch(() => {})
+        throw new SandboxError(`the sandbox's ${what} is past ${max} bytes`)
+      }
+      chunks.push(Buffer.from(value))
+    }
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+  } catch {
+    throw new SandboxError(`the sandbox's ${what} is not JSON`)
+  }
+}
+
+const isCount = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+
+/** An exec result as the pod sent it, checked field by field: a command controls what the pod says. */
+export function checkedExecResult(raw: unknown): ExecResult {
+  const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  const ok =
+    (r.exit_code === null || (typeof r.exit_code === 'number' && Number.isInteger(r.exit_code))) &&
+    (r.signal === null || typeof r.signal === 'string') &&
+    typeof r.timed_out === 'boolean' &&
+    typeof r.stdout === 'string' &&
+    typeof r.stderr === 'string' &&
+    isCount(r.stdout_bytes) &&
+    isCount(r.stderr_bytes) &&
+    isCount(r.duration_ms)
+  if (!ok) throw new SandboxError('the sandbox sent an exec result that is not one')
+  return {
+    exit_code: r.exit_code as number | null,
+    signal: r.signal as string | null,
+    timed_out: r.timed_out as boolean,
+    stdout: r.stdout as string,
+    stderr: r.stderr as string,
+    stdout_bytes: r.stdout_bytes as number,
+    stderr_bytes: r.stderr_bytes as number,
+    duration_ms: r.duration_ms as number,
+  }
+}
 
 export class SandboxClient {
   readonly endpoint: SandboxEndpoint
@@ -64,13 +126,18 @@ export class SandboxClient {
     this.signal = signal
   }
 
-  async #call(method: string, path: string, init: { body?: Buffer | string; headers?: Record<string, string>; timeoutMs?: number } = {}): Promise<Response> {
-    let res: Response
+  async #call(
+    method: string,
+    path: string,
+    init: { body?: Buffer | string; headers?: Record<string, string>; timeoutMs?: number; dispatcher?: Dispatcher } = {},
+  ): Promise<SandboxResponse> {
+    let res: SandboxResponse
     try {
       res = await fetch(`${this.endpoint.url}${path}`, {
         method,
         headers: { authorization: `Bearer ${this.endpoint.token}`, ...init.headers },
         ...(init.body !== undefined ? { body: init.body } : {}),
+        ...(init.dispatcher ? { dispatcher: init.dispatcher } : {}),
         signal: AbortSignal.any([this.signal, AbortSignal.timeout(init.timeoutMs ?? REQUEST_MS)]),
       })
     } catch (err) {
@@ -83,8 +150,11 @@ export class SandboxClient {
     return res
   }
 
+  /** The pod's manifest, read under JSON_MAX_BYTES; its entries are checked by the sync (checkedManifest). */
   async manifest(): Promise<Manifest> {
-    return (await (await this.#call('GET', '/v1/manifest')).json()) as Manifest
+    const raw = await cappedJson(await this.#call('GET', '/v1/manifest'), JSON_MAX_BYTES, 'manifest')
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new SandboxError("the sandbox's manifest is not an object")
+    return raw as Manifest
   }
 
   async put(rel: string, bytes: Buffer): Promise<void> {
@@ -124,7 +194,7 @@ export class SandboxClient {
 
   /** The pod's Kept (protocol.ts KeptRecord), its entries checked: a command controls what the pod says. */
   async kept(): Promise<Kept> {
-    const raw = (await (await this.#call('GET', '/v1/kept')).json()) as unknown
+    const raw = await cappedJson(await this.#call('GET', '/v1/kept'), JSON_MAX_BYTES, 'kept record')
     const out: Kept = new Map()
     if (typeof raw !== 'object' || raw === null) return out
     for (const [rel, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -142,13 +212,25 @@ export class SandboxClient {
     await this.#call('DELETE', `/v1/files/${encodeURI(rel)}`)
   }
 
-  async exec(shell: Shell, command: string, timeoutMs: number): Promise<ExecResult> {
-    const res = await this.#call('POST', '/v1/exec', {
-      body: JSON.stringify({ shell, command, timeout_ms: timeoutMs }),
-      headers: { 'content-type': 'application/json' },
-      timeoutMs: timeoutMs + 30_000,
-    })
-    return (await res.json()) as ExecResult
+  /**
+   * Runs a command. The server answers only once it ends (up to MAX_TIMEOUT_MS), past undici's
+   * default 300 s headers and body timeouts, so the request has a dispatcher of its own whose
+   * timeouts outlast `timeoutMs` (`slackMs` is for tests), closed once the answer is read.
+   */
+  async exec(shell: Shell, command: string, timeoutMs: number, slackMs = EXEC_SLACK_MS): Promise<ExecResult> {
+    const waitMs = timeoutMs + slackMs
+    const dispatcher = new Agent({ headersTimeout: waitMs + slackMs, bodyTimeout: waitMs + slackMs })
+    try {
+      const res = await this.#call('POST', '/v1/exec', {
+        body: JSON.stringify({ shell, command, timeout_ms: timeoutMs }),
+        headers: { 'content-type': 'application/json' },
+        timeoutMs: waitMs,
+        dispatcher,
+      })
+      return checkedExecResult(await cappedJson(res, JSON_MAX_BYTES, 'exec result'))
+    } finally {
+      await dispatcher.close().catch(() => {})
+    }
   }
 }
 

@@ -710,7 +710,7 @@ export class TurnRunner {
           : {}),
         // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
         // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
-        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier !== undefined, this.deps.sandbox !== undefined)] : []), turnSettings.system_prompt_append.trim()]
+        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(servedTools, shellTier, this.deps.sandbox !== undefined)] : []), turnSettings.system_prompt_append.trim()]
           .filter((part) => part !== '')
           .join('\n\n'),
         systemPromptBase: turnSettings.system_prompt_base,

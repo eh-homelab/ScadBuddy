@@ -294,6 +294,28 @@ sends nothing until a person sets `send` true. Without the rule, a run with `sen
 parks the send for a `workflow_run_decisions` approval. No send starts without a
 person's yes.
 
+As built (PR 4): the run's result carries `send`, which says what became of the message.
+The run page shows it with the rest of the result:
+
+- `{"status": "sent", "message_id": …}`: the plugin took it.
+- `{"status": "skipped", "reason": …}`: `notify` is off, the order is not ready, `send` is
+  off (the message was composed for a person to send), or no plugin is bound or the
+  customer has no contact of its kind.
+- `{"status": "refused", "reason": …}`: the agent refused it (`already_notified`, a denied
+  approval, `messaging_plugin_unavailable`, `message_changed`, a backend 4xx, a call that was
+  not run). The run goes on to its end.
+- `{"status": "unknown", "reason": "the outcome is unknown; check the order's messages"}`: the
+  call failed in a way that may have sent it (a timeout, a lost answer, a 5xx). The script sees
+  a failed call only as `Exception("<type>: <text>")` (the harness's `_script_outcome`), so
+  `send_refusal` tells a refusal by the agent's own texts; nothing is sent again.
+- `{"status": "not_sent", "reason": …, "message_id": …}`: it was claimed, but the plugin
+  refused it or did not answer (`failed`, `unknown`, in flight).
+
+A run never sends one message twice. A retried call keeps its request id, which is its
+claim key, so the backend answers the first claim. Another run on the same ready order
+finds the template told since the order's last status change (`episode`), so it is
+refused `already_notified`.
+
 ## 7. The audit record, failure and retry
 
 ### 7.1 The record (CRUD service)
@@ -383,9 +405,10 @@ answers it with its digest; nothing is sent or recorded. The send names the temp
 409 `message_changed` when its digest differs, and else claims and sends it as the tool does,
 under the open preview's `Idempotency-Key`. The browser makes one key per preview and keeps it
 for every click on its Send until a send is answered, so a retry after a lost answer is served
-from the first claim. A refusal from the backend keeps its status and slug: a claim that lost a
-race after the preview is 409 `already_notified`. The person's click on the shown message is
-the approval.
+from the first claim. A backend 404, 409 or 422 keeps its status and slug: a claim that lost a
+race after the preview is 409 `already_notified`. Any other backend status is logged and answered
+502 `upstream_error`: a 401 or 403 there is the agent's service credential, not the person. The
+person's click on the shown message is the approval.
 
 Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only `read`
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a

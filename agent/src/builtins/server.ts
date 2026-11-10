@@ -240,10 +240,11 @@ export function classicBuiltinServer(
 
 /**
  * What a classic turn's model is told about the built-ins it gets that way: `served` with
- * their tiers, `shell`, whether a Monitor may run a command (Claude Code's own Bash is on), and
- * `sandboxed`, whether the session's Bash runs in a sandbox pod (#5864).
+ * their tiers, `shell`, Bash's tier when Claude Code's own Bash is on (a Monitor may run a
+ * command, at the stricter of the two), else undefined, and `sandboxed`, whether the session's
+ * Bash runs in a sandbox pod (#5864), where a Monitor runs no command.
  */
-export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: boolean, sandboxed = false): string {
+export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined, sandboxed = false): string {
   const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)
@@ -253,8 +254,10 @@ export function classicBuiltinNote(served: readonly { name: string; tier: string
       'session as a new message when it is due and the session is idle.'
     : ''
   const monitor = names.includes('Monitor')
-    ? shell
-      ? ' A Monitor with a `ws` source asks the user first.'
+    ? shell !== undefined
+      ? shell === 'outward'
+        ? ' A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).'
+        : ' A Monitor with a `ws` source asks the user first.'
       : sandboxed
         ? " Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source would not run in this session's sandbox."
         : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'

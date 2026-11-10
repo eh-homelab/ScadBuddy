@@ -1076,8 +1076,10 @@ What this relies on, and what the design adds for it:
   As built (#4252): `order_notify_customer` is `read` and only composes: it reads the
   order and the customer and answers the template's text addressed to the customer's
   primary contacts, `sent: false`, for a person to send. Sending through a plugin is
-  #5660. The built-in flow is `orders/builtin_flow.py` (`order-fulfilment`, inputs
-  `notify` and `settle_hours`), registered at start when its name never had a version
+  #5660 (`order_notify_customer_send`). The built-in flow is `orders/builtin_flow.py`
+  (`order-fulfilment`, inputs `notify`, `send` and `settle_hours`; `send` sends the
+  `ready` message through the bound plugin, spec 2026-11-08 §6.2), registered at start
+  when its name never had a version
   (`FlowDefinitions.register_new`), and as a new version when the newest is still an
   unedited built-in one with another script (#4673), so a person's edit or delete stands.
   A trigger pins its version: each trigger of an older built-in version moves to the new

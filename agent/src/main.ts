@@ -472,7 +472,7 @@ if (role.http && database && workspace && workspaceBytesStatus) {
     .then(async (ready) => {
       if (!ready) return
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
-        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachable : undefined),
+        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachableKind : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
         error: (message) => console.error(`workspace files: ${message}`),
       })

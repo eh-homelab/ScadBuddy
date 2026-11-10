@@ -8,7 +8,7 @@ import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@tempor
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { SessionBlobs } from '../sessions/blobs.js'
-import { traceparentOf } from '../telemetry/trace.js'
+import { failureClass, traceparentOf } from '../telemetry/trace.js'
 import { TASK_QUEUE, TURN_TOOL_PREFIX } from '../temporal/names.js'
 import {
   TOOL_CALL_WORKFLOW,
@@ -198,7 +198,8 @@ async function startEagerly(
     }
     span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
     // Why, as an exception event: the exporter scrubs its message (telemetry/scrub.ts), and keeps its type.
-    span?.recordException(err instanceof Error ? err : { name: 'NonError', message: String(err) })
+    // As recordFailure does: a non-Error's value is never recorded, only its class.
+    span?.recordException(err instanceof Error ? err : { name: failureClass(err) })
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)

@@ -4,8 +4,9 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Agent, fetch as undiciFetch, getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SandboxClient, syncBack, syncIn } from '../src/sandbox/client.js'
+import { JSON_MAX_BYTES, SandboxClient, SandboxError, syncBack, syncIn } from '../src/sandbox/client.js'
 import { reapStrays } from '../src/sandbox/server.js'
 import { writeDirFile } from '../src/workspace/directory.js'
 
@@ -134,6 +135,60 @@ describe('a sandbox that lies', () => {
     const back = await syncBack(client(box.url), dir, none(), limits)
     expect(back.written).toEqual([])
     expect(back.left[0]).toMatchObject({ path: 'new.txt', reason: expect.stringContaining('cap') })
+  })
+})
+
+describe('an exec answer', () => {
+  const servers: Server[] = []
+  afterEach(async () => {
+    for (const server of servers.splice(0)) await new Promise((r) => server.close(() => r(undefined)))
+  })
+  /** A server that answers /v1/exec with `body` after `delayMs`. */
+  const answering = async (body: () => string, delayMs = 0) => {
+    const server = createServer((req, res) => {
+      req.resume()
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(body())
+      }, delayMs)
+    })
+    servers.push(server)
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    return new SandboxClient({ url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token: 't' }, AbortSignal.timeout(10_000))
+  }
+  const good = { exit_code: 0, signal: null, timed_out: false, stdout: 'hi\n', stderr: '', stdout_bytes: 3, stderr_bytes: 0, duration_ms: 1 }
+
+  it("outlasts the default headers timeout: a long command's answer still arrives", async () => {
+    // A small default stands in for undici's 300 s; the command (2 s here) runs longer than it.
+    const before = getGlobalDispatcher()
+    const small = new Agent({ headersTimeout: 300, bodyTimeout: 300 })
+    setGlobalDispatcher(small)
+    try {
+      const client = await answering(() => JSON.stringify(good), 2_000)
+      await expect(undiciFetch(`${client.endpoint.url}/v1/exec`, { method: 'POST', body: '{}' })).rejects.toThrow()
+      expect(await client.exec('bash', 'sleep', 2_500, 1_000)).toEqual(good)
+    } finally {
+      setGlobalDispatcher(before)
+      await small.close()
+    }
+  })
+
+  it('refuses a result whose fields are not what they say, before anything reads them', async () => {
+    const hostile = await answering(() => JSON.stringify({ ...good, stdout: { toString: 'x' } }))
+    await expect(hostile.exec('bash', 'x', 5_000)).rejects.toThrow(SandboxError)
+    const counts = await answering(() => JSON.stringify({ ...good, stdout_bytes: -1 }))
+    await expect(counts.exec('bash', 'x', 5_000)).rejects.toThrow(/not one/)
+    const notJson = await answering(() => 'nope')
+    await expect(notJson.exec('bash', 'x', 5_000)).rejects.toThrow(/not JSON/)
+  })
+
+  it('stops reading an exec result or a manifest past its cap', async () => {
+    const huge = await answering(() => JSON.stringify({ ...good, stdout: 'a'.repeat(JSON_MAX_BYTES) }))
+    await expect(huge.exec('bash', 'x', 5_000)).rejects.toThrow(/past/)
+    const manifest = await answering(() => JSON.stringify({ files: [], truncated: false, pad: 'a'.repeat(JSON_MAX_BYTES) }))
+    await expect(manifest.manifest()).rejects.toThrow(/past/)
+    const list = await answering(() => '[]')
+    await expect(list.manifest()).rejects.toThrow(/not an object/)
   })
 })
 

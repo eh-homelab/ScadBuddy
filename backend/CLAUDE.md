@@ -637,7 +637,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, inputs `notify` and `settle_hours`), registered by
+  script, inputs `notify`, `send` and `settle_hours`), registered by
   `ensure_builtin_flow` at the component's start when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
   is still an unedited built-in one with another script (#4673, `_upgraded`:
@@ -662,8 +662,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   input `settle_hours` (default 48; past it the run ends with a summary and no check);
   an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
-  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing),
+  and with `send` too (#5660) and the answer's `send_ready`, `order_notify_customer_send` (`outward`,
+  so the trigger's grant must name it); the result's `send` says `sent`, `skipped`, `refused` (the agent's refusal only),
+  `unknown` (a failure that may have sent it) or `not_sent`, and none ends the run. `ensure_builtin_flow` runs as a task beside the
   component's start; it reads the versions first (a name with any registers nothing,
   unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the
@@ -1067,6 +1069,33 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+- Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
+  passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
+  - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's
+    base32 less `0` and `1`), shown `XXXX-XXXX-XXXX-XXXX`; `verify_code` reads it with
+    case, spaces and hyphens ignored. It does the same for every address, whether or not
+    an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
+    when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
+    live code signs in from any client. No address can be locked: requests are limited
+    per address and client (3 an hour) and per client (10), wrong guesses per client (20),
+    never per address, and a client is `core/proxies.py` `client_key` (IPv4 address,
+    IPv6 /64). The mail cap is 20 live codes per address: past it `request_code` returns
+    None, raises nothing, and the caller answers as usual and sends no mail. A full cap
+    means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
+    it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
+    the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
+    `request_code` and `verify_code` each hold transaction locks on the client, then the
+    address, so call them in a transaction. The code route, a later PR, is to take
+    Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a site key is set.
+  - `verify_code` makes the account at the first sign-in. It links the one unarchived
+    customer with that email contact, else makes a new customer. It joins a visitor of no
+    account, rotates the session (the old row is deleted), and stores only the 256-bit
+    token's sha256.
+  - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
+    The order page attaches an order whose link was opened while signed in, in its own
+    transaction.
+  - Old code and failure rows are pruned as new rows are written, and every expired
+    session at each sign-in. There is no sweep.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by

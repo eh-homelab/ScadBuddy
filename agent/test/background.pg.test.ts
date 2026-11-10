@@ -559,6 +559,35 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     classic.abortAll()
   })
 
+  it("revalidates an idle process against the session's own shape, not a flow turn's, so the person's process is kept and reused (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const spawned = (id: string) => scripted.runs.filter((r) => (r.sessionId ?? r.resume) === id).length
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await (await classic.send(session.id, browser, 'mine')).done
+    expect(spawned(session.id)).toBe(1)
+    // A flow's turn has another tool set, so it runs on a process of its own shape.
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000003', call_id: 'toolu_ask' }
+    await (await classic.send(session.id, browser, 'from the flow', { flow: flowRun })).done
+    expect(spawned(session.id)).toBe(2)
+    // The resync checks the idle process against the session's next own turn: the flow-shaped one goes.
+    await classic.revalidateWarm()
+    expect(classic.warm.size()).toBe(0)
+    await (await classic.send(session.id, browser, 'mine again')).done
+    expect(spawned(session.id)).toBe(3)
+    // And the person's process stays through the resync, and the next turn reuses it.
+    await classic.revalidateWarm()
+    expect(classic.warm.size()).toBe(1)
+    await (await classic.send(session.id, browser, 'and again')).done
+    expect(spawned(session.id)).toBe(3)
+    classic.abortAll()
+  })
+
   it("gives a turn a flow run sends to an ordinary session no background built-in, and the person's next turn them all (#5870)", async () => {
     const scripted = scriptedRunner(() => ({ reply: 'ok' }))
     const classic = manager({
