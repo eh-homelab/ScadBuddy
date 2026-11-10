@@ -130,6 +130,18 @@ class StorefrontCrud:
         )
         return response.json()
 
+    async def account_code(self, body: bytes, *, visitor_id: str, client: str) -> None:
+        """``POST …/storefront/account/code``: the visitor's JSON body as it came. Sent
+        once, never retried (``budget=0``): a replay would make and mail a second code and
+        count against the client's limits."""
+        await self._crud.request(
+            "POST",
+            f"{BASE}/account/code",
+            content=body,
+            budget=0.0,
+            headers=_headers(visitor_id, client),
+        )
+
     async def account_verify(
         self, body: bytes, *, visitor_id: str, client: str, session: str | None
     ) -> tuple[Any, str | None]:

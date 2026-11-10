@@ -16,6 +16,7 @@ from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import AGENT, create_order
 from tests.api.test_settings_runtime import _state
+from tests.api.test_storefront_mail import CONNECTION
 from tests.conftest import PgPool
 
 BINDING: dict[str, Any] = {
@@ -152,14 +153,14 @@ def test_one_template_is_told_once_per_status_change(client: TestClient, order_i
     cancelled = client.post(f"/api/v1/orders/{order_id}/cancel")
     assert cancelled.status_code == 200, cancelled.text
     after = client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "ready"})
-    assert after.json() == {"already_notified": None}
+    assert after.json() == {"already_notified": None, "storefront_mail": False}
     assert claim(client, order_id, "k5").status_code == 201
 
 
 def test_the_check_writes_nothing(client: TestClient, order_id: str) -> None:
     check = client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "ready"})
     assert check.status_code == 200
-    assert check.json() == {"already_notified": None}
+    assert check.json() == {"already_notified": None, "storefront_mail": False}
     assert client.get(f"/api/v1/orders/{order_id}/messages").json() == []
     assert events(client, order_id) == []
 
@@ -331,3 +332,95 @@ def test_a_word_that_holds_a_secret_word_is_no_secret(client: TestClient, key: s
     binding = {**BINDING, "fixed_args": {key: "x"}}
     saved = client.put("/api/v1/settings", json={"orders_customer_messaging": binding})
     assert saved.status_code == 200, saved.text
+
+
+# -- the storefront overlap (spec §8, PR 5) ------------------------------------------------
+
+
+class _Covers:
+    """`storefront_mail_covers` faked: whether the storefront mails the order, and each ask."""
+
+    def __init__(self, covers: bool) -> None:
+        self.covers = covers
+        self.asked: list[tuple[str, str, str | None]] = []
+
+    def __call__(self, conn: Any, order_id: str, event: str, *, host: str | None) -> bool:
+        self.asked.append((order_id, event, host))
+        return self.covers
+
+
+def _covers(monkeypatch: pytest.MonkeyPatch, covers: bool) -> _Covers:
+    fake = _Covers(covers)
+    monkeypatch.setattr("scadbuddy.orders.messages.storefront_mail_covers", fake)
+    return fake
+
+
+@pytest.mark.parametrize("covers", [True, False])
+@pytest.mark.parametrize(
+    ("template", "event"),
+    [("quoted", "price_ready"), ("accepted", None), ("ready", None), ("shipped", "shipped")],
+)
+def test_a_template_the_storefront_mails_is_skipped(
+    client: TestClient,
+    order_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    template: str,
+    event: str | None,
+    covers: bool,
+) -> None:
+    """Only `quoted` and `shipped` have storefront mail; each is skipped only when the
+    storefront mails this order. A skip is a `skipped` row with its audit row."""
+    fake = _covers(monkeypatch, covers)
+    check = client.get(
+        f"/api/v1/orders/{order_id}/messages/check", params={"template": template}
+    ).json()
+    claimed = claim(client, order_id, "k1", claim_body(template))
+    assert claimed.status_code == 201, claimed.text
+    skipped = covers and event is not None
+    assert check["storefront_mail"] is skipped
+    message = claimed.json()
+    if skipped:
+        assert (message["status"], message["reason"]) == ("skipped", "storefront_mail")
+        assert message["finished_at"] is not None
+        assert events(client, order_id) == ["message.skipped"]
+    else:
+        assert (message["status"], message["reason"]) == ("sending", None)
+        assert events(client, order_id) == ["message.sending"]
+    # A template with no storefront event never asks the seam.
+    assert [asked[1] for asked in fake.asked] == ([event, event] if event else [])
+
+
+def test_a_skip_does_not_count_as_told(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _covers(monkeypatch, True)
+    assert claim(client, order_id, "k1", claim_body("shipped")).json()["status"] == "skipped"
+    # The same key answers the skipped row; nothing new is written.
+    again = claim(client, order_id, "k1", claim_body("shipped"))
+    assert (again.status_code, again.json()["status"]) == (200, "skipped")
+    fake.covers = False
+    sent = claim(client, order_id, "k2", claim_body("shipped"))
+    assert (sent.status_code, sent.json()["status"]) == (201, "sending")
+
+
+def test_also_when_storefront_mails_sends_anyway(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _covers(monkeypatch, True)
+    body = claim_body("quoted", also_when_storefront_mails=True)
+    claimed = claim(client, order_id, "k1", body)
+    assert (claimed.status_code, claimed.json()["status"]) == (201, "sending")
+    assert events(client, order_id) == ["message.sending"]
+
+
+def test_the_skip_asks_with_the_running_mail_host(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _covers(monkeypatch, False)
+    claim(client, order_id, "k1", claim_body("quoted"))
+    assert client.put("/api/v1/settings", json=CONNECTION).status_code == 200
+    client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "shipped"})
+    assert [(asked[0], asked[2]) for asked in fake.asked] == [
+        (order_id, None),
+        (order_id, "smtp.example.com"),
+    ]

@@ -9,11 +9,17 @@ change of the order (``episode``, the order's newest ``order_status_changes`` ro
 second claim is ``already_notified`` unless it names the message it sends again
 (``resend_of``). A ``sending`` row older than ``STALE_SENDING_MINUTES`` reads as
 ``unknown`` and is never sent again by itself; it stays ``sending`` in storage until its
-outcome or a person's "Mark sent" is written."""
+outcome or a person's "Mark sent" is written.
+
+The storefront overlap (spec §8): a template the storefront mails itself for this order
+(`STOREFRONT_EVENT`, asked of ``storefront_mail_covers`` with the running mail host) is
+not sent through the plugin too. Its claim writes a ``skipped`` row, reason
+``storefront_mail``, unless the body says ``also_when_storefront_mails``."""
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Final
 
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
@@ -28,6 +34,18 @@ from scadbuddy.orders.message_models import (
 )
 from scadbuddy.orders.models import Actor, Order
 from scadbuddy.orders.store import Conn, OrderNotFoundError, OrderStore
+from scadbuddy.orders.storefront.mail import storefront_mail_covers
+from scadbuddy.orders.storefront.mail_templates import MailEvent
+
+#: The storefront mail event that tells the customer what each template tells (#5283's
+#: events: `revision_ready`, `price_ready`, `payment_requested`, `shipped`). A template
+#: with none (`accepted`, `ready`) is never skipped.
+STOREFRONT_EVENT: Final[dict[NotifyTemplate, MailEvent]] = {
+    "quoted": "price_ready",
+    "shipped": "shipped",
+}
+#: A skipped row's reason.
+STOREFRONT_MAIL: Final = "storefront_mail"
 
 #: Statuses that mean the customer was, or may have been, told.
 _TOLD = ("sent", "sending", "unknown")
@@ -40,10 +58,14 @@ _COLUMNS = (
 
 
 class OrderMessages:
-    """The record over the orders store's pool."""
+    """The record over the orders store's pool. ``mail_host`` is the running
+    ``storefront_mail_host`` (the lifecycle's), read at each skip check."""
 
-    def __init__(self, store: OrderStore) -> None:
+    def __init__(
+        self, store: OrderStore, mail_host: Callable[[], str | None] = lambda: None
+    ) -> None:
         self.store = store
+        self.mail_host = mail_host
 
     # -- reads -------------------------------------------------------------------------
 
@@ -66,6 +88,14 @@ class OrderMessages:
             order = self._order(conn, order_id, lock=False)
             check_submitted(order)
             return self._told(conn, order_id, template, self._episode(conn, order_id))
+
+    def storefront_mails(self, order_id: str, template: NotifyTemplate) -> bool:
+        """Whether the storefront mails ``template``'s news to this order's customer itself,
+        so a send through the plugin would be skipped. Writes nothing."""
+        with self.store.transaction() as conn:
+            order = self._order(conn, order_id, lock=False)
+            check_submitted(order)
+            return self._skipped_for_storefront(conn, order.id, template)
 
     # -- writes ------------------------------------------------------------------------
 
@@ -94,15 +124,19 @@ class OrderMessages:
                         f"(message {told.id}, {told.status}) since its last status change; "
                         "name it in resend_of to send it again",
                     )
+            skip = not body.also_when_storefront_mails and self._skipped_for_storefront(
+                conn, order.id, body.template
+            )
             try:
                 # A savepoint: another order's claim may commit the same key between the
                 # read above and this insert (this order's lock does not cover it).
                 with conn.transaction():
                     row = conn.execute(
                         "INSERT INTO order_messages (order_id, template, source, tool,"
-                        " recipients, subject, text, status, idempotency_key, episode,"
-                        " resend_of, by)"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, 'sending', %s, %s, %s, %s)"
+                        " recipients, subject, text, status, reason, finished_at,"
+                        " idempotency_key, episode, resend_of, by)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                        " CASE WHEN %s THEN clock_timestamp() END, %s, %s, %s, %s)"
                         f" RETURNING {_COLUMNS}",
                         (
                             order.id,
@@ -112,6 +146,9 @@ class OrderMessages:
                             Jsonb([r.model_dump() for r in body.recipients]),
                             body.subject,
                             body.text,
+                            "skipped" if skip else "sending",
+                            STOREFRONT_MAIL if skip else None,
+                            skip,
                             key,
                             episode,
                             body.resend_of,
@@ -126,7 +163,16 @@ class OrderMessages:
                 return self._same_order(OrderMessage.model_validate(taken), order), False
             assert row is not None
             message = OrderMessage.model_validate(row)
-            self._event(conn, order, by, "message.sending", message, resend_of=body.resend_of)
+            kind = "message.skipped" if skip else "message.sending"
+            self._event(
+                conn,
+                order,
+                by,
+                kind,
+                message,
+                resend_of=body.resend_of,
+                reason=STOREFRONT_MAIL if skip else None,
+            )
         return message, True
 
     def outcome(
@@ -190,6 +236,15 @@ class OrderMessages:
             (order_id,),
         ).fetchone()
         return None if row is None else row["id"]
+
+    def _skipped_for_storefront(self, conn: Conn, order_id: str, template: NotifyTemplate) -> bool:
+        """§8: the storefront mails this template's news for the order itself (a mail host
+        is set and the order has a live order link). A template with no storefront event
+        never asks."""
+        event = STOREFRONT_EVENT.get(template)
+        return event is not None and storefront_mail_covers(
+            conn, order_id, event, host=self.mail_host()
+        )
 
     @staticmethod
     def _told(conn: Conn, order_id: str, template: str, episode: int | None) -> OrderMessage | None:

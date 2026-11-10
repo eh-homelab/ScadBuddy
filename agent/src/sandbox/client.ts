@@ -267,7 +267,8 @@ export type SyncBack = { written: string[]; removed: string[]; left: { path: str
 
 /**
  * The files a sync back left in the pod past a cap, by path: what the session directory held
- * at that path then (its sha256, past the per-file cap too, or undefined for none). Until
+ * at that path then (its sha256, past the per-file cap too; `large` when it could not be hashed;
+ * or undefined for none). Until
  * the session directory's copy changes, a sync in neither sends nor deletes such a path, so
  * the file stays in the pod for as long as the pod lasts. The pod itself keeps the record
  * (GET and PUT /v1/kept), so a sync in on any worker sees it; a new pod starts with none.
@@ -280,22 +281,28 @@ export type Kept = Map<string, string | undefined>
  */
 export type SyncedIn = { files: Map<string, string>; unsynced: Set<string>; notSent: string[] }
 
-/** What Kept records for a session file it could not hash (it went away while read). */
+/**
+ * What Kept records for a session file it could not hash (it went away, or could not be opened),
+ * and what the manifest holds for a file past the cap that is not kept.
+ */
 const LARGE = 'large'
 
 type LocalFile = { sha256: string; bytes: Buffer } | { sha256: string; tooLarge: true }
 
 /**
  * Each worker file's sha256, by path: the session directory's files that sync. A file past the
- * per-file cap is hashed as a stream, never held, so Kept sees when it changes.
+ * per-file cap is hashed as a stream, never held, and only when it is in `kept`, the one place
+ * its sha256 is compared (so Kept sees when it changes); any other is recorded as `large`, and
+ * a large file costs no read on every command.
  */
-async function localManifest(dir: string, limits: SyncLimits): Promise<Map<string, LocalFile>> {
+async function localManifest(dir: string, limits: SyncLimits, kept: Kept): Promise<Map<string, LocalFile>> {
   const out = new Map<string, LocalFile>()
   for (const rel of (await dirFiles(dir)).keys()) {
     if (!syncPath(rel)) continue
     const bytes = await readDirFile(dir, rel, limits.fileMaxBytes)
     if (!bytes) {
-      out.set(rel, { sha256: (await dirFileSha256(dir, rel)) ?? LARGE, tooLarge: true })
+      const sha256 = kept.has(rel) ? ((await dirFileSha256(dir, rel)) ?? LARGE) : LARGE
+      out.set(rel, { sha256, tooLarge: true })
       continue
     }
     out.set(rel, { sha256: createHash('sha256').update(bytes).digest('hex'), bytes })
@@ -312,7 +319,7 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
  * as it is then.
  */
 export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncedIn> {
-  const local = await localManifest(dir, limits)
+  const local = await localManifest(dir, limits, kept)
   const remote = await checkedManifest(client)
   const there = new Map(remote.files.map((f) => [f.path, f.sha256]))
   const stays = new Set<string>()

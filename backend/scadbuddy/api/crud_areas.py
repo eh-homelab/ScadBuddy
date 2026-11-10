@@ -25,7 +25,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``/release`` (#5299), the holds of its workspace files' blobs. The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
-#: ``…/print/destination-touches`` (#5298 Task 26).
+#: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
+#: ``…/print/copy-leases/{key}``, the copy lease (#5298 Task 27).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -38,6 +39,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "reprints",
         "uploads",
         "previews",
+        "copy-leases",
     ],
     "storefront": ["listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"],
     "agent": ["order-costs", "workspace-blob-refs"],

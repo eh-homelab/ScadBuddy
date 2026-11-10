@@ -161,7 +161,7 @@ async def ensure_native_copy(
     scheduled (`left_unrecorded`'s ``since``); without it no earlier upload is taken."""
     target_key = _hinted(target.key, len(printable.colours))
     lock = (f"{NATIVE_LOCK}{printable.key}", folder_id)
-    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}"):
+    async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{folder_id}") as lease:
         for copy in await uploads.for_output(printable.key, native=True):
             if copy.folder_id != folder_id or copy.target_key != target_key:
                 continue
@@ -196,7 +196,9 @@ async def ensure_native_copy(
             ).id
         )
         await uploads.record(
-            printable.key, LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key)
+            printable.key,
+            LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key),
+            lease,
         )
     return uploaded
 
