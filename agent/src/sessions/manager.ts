@@ -736,9 +736,9 @@ export type SessionManagerDeps = {
    */
   workspace?: SessionFiles
   /**
-   * A session's background tasks (src/background/): a classic turn whose allowed packages
-   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
-   * end with the turn. Without it those are Claude Code's.
+   * A session's background tasks (src/background/): every turn gets the session's CronCreate
+   * and the rest (each not off under `builtin:claude-code`) in place of Claude Code's own,
+   * which end with the turn. Without it (a flow) the turn has none of them.
    */
   background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner

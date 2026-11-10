@@ -299,7 +299,8 @@ opens every one and seals it again byte for byte).
     The one way past it is a plugin package approved with `allow_refused` (store.ts,
     column `allow_refused`, bound to that pin's approval): it loads as it is through
     `allowedPluginPaths`, unchecked, with the built-ins it names (`builtinTools`, each
-    call `outward`) and skill shell injection on (with `Bash` offered, Claude Code
+    call `outward`; the session's own, `SESSION_BUILTINS`, are never among them and keep
+    their item's tier) and skill shell injection on (with `Bash` offered, Claude Code
     2.1.287 runs an injection without asking the seam). A name that is not a safe path segment
     (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
     the hash and the egress check stay fatal (`vet.ts` `fatal`).

@@ -103,4 +103,13 @@ describe("the session's own built-ins in every turn", () => {
     expect(shell.eventTierOf('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toBe('outward')
     expect(shell.run.systemPromptAppend).not.toContain('which is off here')
   })
+
+  it('refuses a Monitor command, never asking, when Bash is switched on after the turn was assembled', async () => {
+    const rig = await turnRunnerForTest({ packages: NONE, background: true })
+    const turn = await rig.runner.assemble(rig.session, rig.principal)
+    turn.release()
+    // Its server has no command queue: an approval would only run a call certain to fail.
+    await rig.access.setItem(CC, 'Bash', 'write', { actor: { kind: 'browser', id: 'b' } } as never)
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'd', command: 'ls' })).toEqual({ off: MONITOR_SHELL_OFF })
+  })
 })

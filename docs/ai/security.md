@@ -711,18 +711,20 @@ A turn that loads an allowed pin also gets two more things:
   name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
   or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
   `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
-  `outward`, and in a session it parks for a human. Claude Code's own `WebFetch` is never
-  offered (#2684): it fetches inside Claude Code, outside the agent's egress checks, and
-  resolves the name again as it connects. A package that names it gets the agent's
-  (`builtins/web.ts`, the `builtin` server's `WebFetch`, `builtins/server.ts`
-  `classicBuiltinServer`), which connects only to the addresses its check passed, on every
-  hop, and refuses the pod's loopback (the agent's own services). The `PreToolUse` hook
-  `harness/webFetchEgress.ts` stays as a second line: a Claude Code `WebFetch` call, should
-  one ever be offered, is checked the same way first and denied, approved or not. WebSearch
-  stays Claude Code's: the API searches, not this pod. A durable session gets the same built-ins
-  as the agent's `builtin` turn tools (#2393, [operating.md](operating.md)), on the
-  session workspace instead of the pod's disk, each parked the same way; its `WebFetch`
-  connects only to the addresses it checked, on every hop.
+  `outward`, and in a session it parks for a human. The session's own built-ins
+  (`WebFetch`, `WebSearch` and the background ones, `access/nativeBuiltins.ts`
+  `SESSION_BUILTINS`) are never among them: every session turn gets those from the agent's
+  `builtin` server (`builtins/server.ts` `classicBuiltinServer`, `mcp__builtin__<Name>`),
+  whether or not a package names them, each at its `builtin:claude-code` item's access
+  unless that item is `off` (#5870, [operating.md](operating.md) §9). Claude Code's own
+  `WebFetch` is never offered (#2684): it fetches inside Claude Code, outside the agent's
+  egress checks, and resolves the name again as it connects. The agent's (`builtins/web.ts`)
+  connects only to the addresses its check passed, on every hop, and refuses the pod's
+  loopback (the agent's own services). The `PreToolUse` hook `harness/webFetchEgress.ts`
+  stays as a second line: a Claude Code `WebFetch` call, should one ever be offered, is
+  checked the same way first and denied, approved or not. `WebSearch` is the session's too
+  (decision Q2): `builtins/web.ts` `webSearch` runs Claude Code's WebSearch in a one-shot
+  query that may make only the search asked for; Claude Code's own is never offered.
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):

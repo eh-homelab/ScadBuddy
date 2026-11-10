@@ -35,6 +35,8 @@ export type LiveTurn = {
   native?: boolean
   /** The session's own built-ins the turn serves (nativeBuiltins.ts `SESSION_BUILTINS`): each call reads `builtin:claude-code` too. */
   served?: readonly string[]
+  /** Whether the turn gave Monitor a command queue (Bash was on when it was assembled): without one a command call is refused. */
+  shell?: boolean
 }
 
 /** Why a Monitor `command` call is refused while Bash is off. */
@@ -58,6 +60,7 @@ export function liveAccess(
   turn: LiveTurn,
 ): LiveAccess {
   const native = new Map(turn.native ? NATIVE_BUILTINS.map((b) => [b.name, b.access]) : [])
+  const bashDeclared = NATIVE_BUILTINS.find((b) => b.name === 'Bash')!.access
   const served = new Map(SESSION_BUILTINS.filter((b) => turn.served?.includes(b.name)).map((b) => [`${SERVED_PREFIX}${b.name}`, b]))
   const registry = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
   const sources: { prefix: string; source: string }[] = [
@@ -82,7 +85,9 @@ export function liveAccess(
       const access = await resolver.native(own.name, own.access, builtins.get(own.name) ?? [])
       if (own.name !== 'Monitor' || access === 'off') return access
       const command = typeof input === 'object' && input !== null && (input as Record<string, unknown>).command !== undefined
-      const shell = command ? await resolver.native('Bash', 'off', builtins.get('Bash') ?? []) : undefined
+      // Bash off now, or off when the turn was assembled (its server has no command queue): refused, never asked.
+      if (command && !turn.shell) return { off: MONITOR_SHELL_OFF }
+      const shell = command ? await resolver.native('Bash', bashDeclared, builtins.get('Bash') ?? []) : undefined
       if (shell === 'off') return { off: MONITOR_SHELL_OFF }
       return monitorAccess(access, input, shell)
     }

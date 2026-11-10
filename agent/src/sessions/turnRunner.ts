@@ -479,6 +479,7 @@ export class TurnRunner {
               builtins: callBuiltins,
               native: true,
               served,
+              shell: shellTier !== undefined,
             }),
             ledger,
           }
