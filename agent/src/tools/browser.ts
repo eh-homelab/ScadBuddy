@@ -161,6 +161,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // retry below finds out, and a write says to snapshot and call again. Read as gone, it
           // would end the turn's tab waits.
           isBack: async (signal) => {
+            // The manager asks again after a `reconnected` verdict (sessions/manager.ts): a slow
+            // owner already seen is not probed a second time (#5981 review).
+            if (sawSlow) return true
             const status = await tabs(ctx).status(target(ctx), { signal })
             if (!status.attached && status.slow === true) sawSlow = true
             return status.attached || status.slow === true

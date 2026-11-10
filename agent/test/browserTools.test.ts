@@ -556,9 +556,12 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     let back: boolean | undefined
     const result = await runTool(tool('browser_snapshot'), {}, {
       ...ctx(hub.forSession('s1'), browser),
+      // As sessions/manager.ts does: isBack in onParked, then again after a `reconnected` verdict.
       waitForTab: async ({ isBack }) => {
         back = await isBack(new AbortController().signal)
-        return back ? { back: true, why: 'reconnected' as const } : { back: false, message: 'x' }
+        if (!back) return { back: false, message: 'x' }
+        expect(await isBack(new AbortController().signal)).toBe(true)
+        return { back: true, why: 'reconnected' as const }
       },
     })
     expect(back).toBe(true)
@@ -577,8 +580,12 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
       ...ctx(hub.forSession('s1'), browser),
       gate: 'harness',
-      waitForTab: async ({ isBack }) =>
-        (await isBack(new AbortController().signal)) ? { back: true, why: 'reconnected' as const } : { back: false, message: 'x' },
+      // As sessions/manager.ts does: isBack in onParked, then again after a `reconnected` verdict.
+      waitForTab: async ({ isBack }) => {
+        if (!(await isBack(new AbortController().signal))) return { back: false, message: 'x' }
+        await isBack(new AbortController().signal)
+        return { back: true, why: 'reconnected' as const }
+      },
     })
     expect(result.isError).toBe(true)
     expect(text(result)).toMatch(/The session.s tab may be connected.*take a snapshot to see the page, then call again\.$/s)
