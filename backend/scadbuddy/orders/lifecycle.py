@@ -942,7 +942,9 @@ class Lifecycle:
             address = to if to is not None else self._customer_email(conn, order)
             if address is None:
                 raise LifecycleError(
-                    "no_email", "to: the customer has no email contact that is one address", unprocessable=True
+                    "no_email",
+                    "to: the customer has no email contact that is one address",
+                    unprocessable=True,
                 )
             if to is not None:
                 address = check_address(address)
