@@ -217,9 +217,10 @@ async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
  * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
  * template's news to the order's customer itself) unless `also_when_storefront_mails`. With
  * `key`, a key that already claimed a message refuses nothing: its claim answers that row (a
- * retry after a lost answer is served from the first claim, never refused).
+ * retry after a lost answer is served from the first claim, never refused). Answers the row the
+ * key claimed, else null.
  */
-async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<void> {
+async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<OrderMessage | null> {
   const { order_id, template } = args
   const header = key === undefined ? {} : { header: { 'Idempotency-Key': key } }
   const check = await ok(
@@ -228,7 +229,7 @@ async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Pro
     }),
     `check order ${order_id}'s messages`,
   )
-  if (check.claimed) return
+  if (check.claimed) return check.claimed
   const told = check.already_notified
   if (told && args.resend_of === undefined) {
     throw new ToolError(
@@ -243,6 +244,7 @@ async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Pro
         'here too',
     )
   }
+  return null
 }
 
 /** The approval's line: who gets it, through what, and the text. */
@@ -264,7 +266,7 @@ export type SendAnswer = { sent: boolean; message: OrderMessage; warning?: strin
  * back as an earlier one (the same call retried) never sends again, unless the binding
  * gives the plugin a dedupe key: then the plugin drops the copy.
  */
-async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Promise<SendAnswer> {
+async function sendMessage(ctx: SendContext, args: SendArgs, plan: Pick<SendPlan, 'binding' | 'approved'>): Promise<SendAnswer> {
   const { backend } = ctx
   const order_id = args.order_id
   if (!ctx.messaging) {
@@ -302,7 +304,10 @@ async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Pr
     if (!fresh && (message.status === 'sent' || message.status === 'failed')) {
       return { sent: message.status === 'sent', message }
     }
-    const keyed = plan.binding.args.idempotency_key != null
+    // A replayed claim goes again only through the plugin and tool it was recorded for, which
+    // is what drops the copy by its dedupe key.
+    const keyed =
+      plan.binding.args.idempotency_key != null && message.source === plan.binding.source && message.tool === plan.binding.tool
     // A replayed claim still `sending` and fresh is another call's send in flight: without a dedupe
     // key it is neither sent again nor given an outcome here (#5858 review). Past the stale limit
     // the backend reads it `unknown`, and that is recorded below.
@@ -317,9 +322,11 @@ async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Pr
       }
     }
     const resendable = fresh || keyed
+    // The claimed row is the record (#5980 review): what goes is its own recipients and text,
+    // never a message composed since, which a replay's claim body does not change.
     const outcome = resendable
       ? await connection.send(
-          messageArguments(plan.binding, { to: plan.approved.to, subject: plan.approved.subject, text: plan.approved.text, key: message.id }),
+          messageArguments(plan.binding, { to: message.recipients, subject: message.subject ?? null, text: message.text, key: message.id }),
         )
       : ({ status: 'unknown', reason: 'no_answer' } as const)
     const recorded = await backend.POST('/api/v1/orders/{order_id}/messages/{message_id}/outcome', {
@@ -380,6 +387,12 @@ export async function previewPersonSend(
  * the browser names what it saw and never supplies the text.
  */
 export async function personSend(ctx: SendContext, args: PersonSend, digest: string): Promise<SendAnswer> {
+  // The key's claim first (#5978): a retry of a send already claimed is answered from that claim,
+  // never refused and never composed again (it may have reached the customer). Without one, the
+  // preview's refusals stand at the send too (the storefront may have begun to mail it since),
+  // and so do the composition's and the digest.
+  const claimed = await refuseIfTold(ctx, args, idempotencyKey(ctx))
+  if (claimed) return replayClaim(ctx, args, claimed)
   const planned = await sendPlan(ctx, args)
   if (messageDigest(planned.approved) !== digest) {
     throw new ToolError(
@@ -387,10 +400,36 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
         'was sent; preview it again',
     )
   }
-  // The preview's refusals stand at the send too: the storefront may have begun to mail it since.
-  // Under the claim's own key: a retry of a send already claimed is answered from that claim.
-  await refuseIfTold(ctx, args, idempotencyKey(ctx))
   return sendMessage(ctx, args, planned)
+}
+
+/**
+ * A send whose key already claimed `claimed`. An ended row is answered as it is, with no plugin.
+ * One with no outcome (`sending`, `unknown`) goes through `sendMessage` with its own recipients
+ * and text: the plugin is called again only when the binding gives it a dedupe key (§7.2 step 4),
+ * else nothing is sent and a person checks. It needs no contact (the row carries its
+ * recipients), but it needs the binding: none is `no_messaging_plugin`.
+ */
+async function replayClaim(ctx: SendContext, args: PersonSend, claimed: OrderMessage): Promise<SendAnswer> {
+  if (claimed.status !== 'sending' && claimed.status !== 'unknown') {
+    return { sent: claimed.status === 'sent', message: claimed }
+  }
+  const settings = await ok(ctx.backend.GET('/api/v1/settings', {}), 'read the settings')
+  const binding = settings.orders_customer_messaging ?? null
+  if (!binding) {
+    throw new ToolError(
+      `no_messaging_plugin: message ${claimed.id} was claimed and has no outcome, and the shop no longer binds a ` +
+        'messaging plugin (Settings → Orders), so nothing was sent again; check the inbox, then "Mark sent" on the order page',
+    )
+  }
+  const approved = {
+    source: claimed.source,
+    tool: claimed.tool,
+    to: claimed.recipients,
+    subject: claimed.subject ?? null,
+    text: claimed.text,
+  }
+  return sendMessage(ctx, args, { binding, approved })
 }
 
 const itemId = ID.describe('A line item id, as order_get lists them')
