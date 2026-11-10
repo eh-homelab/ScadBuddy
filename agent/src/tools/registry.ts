@@ -67,6 +67,12 @@ export type WaitForTab = (request: {
   toolUseId: string | undefined
   signal: AbortSignal
   isBack: (signal: AbortSignal) => Promise<boolean>
+  /**
+   * Asked once before a new wait opens, after the turn's latch and its wait limit (#5981 review):
+   * a message when the tab's replica is only slow to answer, so no wait is opened (it would show
+   * no card and still use up the turn's and the user's waits); undefined to wait as usual.
+   */
+  slow?: (signal: AbortSignal) => Promise<string | undefined>
 }) => Promise<TabWait>
 
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
