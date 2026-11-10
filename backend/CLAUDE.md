@@ -1171,7 +1171,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
     CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
     session, never from a body. Submit takes the account from it (the edge sends the
-    cookie's session on): the order takes the account's customer, makes none, and is
+    cookie's session on): the order takes the account's customer, makes none (unless the shop archived that
+    customer: then it makes a new one and the account links to it), and is
     attached to the account (`attach_order`); a cart whose visitor joined another account
     is 404 `draft_not_found`. The order page is to take it too (a later PR).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
