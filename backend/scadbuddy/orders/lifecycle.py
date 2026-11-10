@@ -410,6 +410,17 @@ class _Change:
     ended: bool = False
 
 
+@dataclass
+class InTransaction:
+    """A transition run in the caller's transaction on ``conn`` (as a savepoint): what it
+    changed waits in ``changes`` until the caller's `Lifecycle.tell`, once that
+    transaction commits. The storefront's customer writes run so, in one transaction with
+    their ``Idempotency-Key``'s ledger row (`crud/idempotency.py` `idempotent_write`)."""
+
+    conn: Conn
+    changes: list[_Change] = field(default_factory=list)
+
+
 def _covered(items: Iterable[OrderItem], shipments: Iterable[Shipment]) -> list[str]:
     """The fulfilled items no shipment covers in full (§6.3)."""
     shipped: dict[str, int] = {}
@@ -652,6 +663,21 @@ class Lifecycle:
                     cart=cart,
                 ),
             )
+
+    def _tell(self, change: _Change, within: InTransaction | None) -> None:
+        """``change`` told now, or kept for the caller's `tell` when ``within`` its
+        transaction."""
+        if within is None:
+            self._told(change)
+        else:
+            within.changes.append(change)
+
+    def tell(self, within: InTransaction) -> None:
+        """Tell the bus what the transitions run ``within`` the caller's transaction
+        changed, once that has committed."""
+        for change in within.changes:
+            self._told(change)
+        within.changes.clear()
 
     def told(self, order: Order, items: Sequence[OrderItem] = ()) -> None:
         """Tell the bus of a transition that ran in the caller's transaction (``conn``),
@@ -2399,17 +2425,32 @@ class Lifecycle:
                 f"order {order.label} has a payment in flight; wait until it settles",
             )
 
-    def cancel_order(self, order_id: str, by: Actor, reason: str | None = None) -> Order:
+    def cancel_order(
+        self,
+        order_id: str,
+        by: Actor,
+        reason: str | None = None,
+        *,
+        within: InTransaction | None = None,
+    ) -> Order:
         """§3.5: from any state before `shipped`; cancels the open items and the open
         and failed payment requests, and keeps every fulfilled one's attempts. Allowed on
         hold (Ruling 14). A pending request is money on its way, so it refuses the cancel
-        (`payment_in_flight`, #4959) until its provider settles it."""
-        with self.store.transaction() as conn:
+        (`payment_in_flight`, #4959) until its provider settles it. The customer cancels
+        only while nothing is approved (storefront spec §5.5, `order_approved`), and only
+        their own order (`order_not_found`)."""
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
+            if by.kind == "customer":
+                self._accepts(order, by, None, accepting=False)
             if order.status in ("shipped", *ENDED):
                 raise LifecycleError(
                     "order_not_cancellable", f"order {order.label} is {order.status}"
+                )
+            if by.kind == "customer" and self.approved_anything(conn, order):
+                raise LifecycleError(
+                    "order_approved", f"order {order.label} has something approved"
                 )
             self._no_payment_in_flight(conn, order)
             change = _Change(order)
@@ -2442,8 +2483,21 @@ class Lifecycle:
                 reason=reason,
             )
             change.order = cancelled
-        self._told(change)
+        self._tell(change, within)
         return cancelled
+
+    def approved_anything(self, conn: Conn, order: Order) -> bool:
+        """Whether anything of ``order`` is approved: the order is past `quoted`, an item
+        is past `quoted`, or a design was accepted. The customer cancels only before
+        (storefront spec §5.5)."""
+        if order.status not in OPEN_FOR_EDITS:
+            return True
+        for item in self.store.items(order.id, conn=conn):
+            if item.status not in ("draft", "quoted", "cancelled"):
+                return True
+            if any(r.answer == "accepted" for r in self.store.revisions(item.id, conn=conn)):
+                return True
+        return False
 
     def close_order(self, order_id: str, by: Actor) -> Order:
         """§3.5's close rule: refused, naming every item not fulfilled or cancelled and
@@ -3912,25 +3966,43 @@ class Lifecycle:
             self.store.drop_holds(conn, QUOTE_HOLDER, quote_id)
         return True
 
-    def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
+    def accept_quote(
+        self,
+        order_id: str,
+        item_id: str,
+        quote_id: str,
+        by: Actor,
+        *,
+        within: InTransaction | None = None,
+    ) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
         item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
         `design_first` item the quote's revision must be accepted first
         (`revision_not_accepted`); a custom item has neither. Never on a cart (#5282,
         ``order_not_submitted``). On a storefront order only the customer accepts
         (`customer_accepts`, storefront spec §6.1), and the accept that leaves every open
-        item `approved` accepts the order (§6.2)."""
-        return self._accept_quote_of(order_id, item_id, quote_id, by, for_customer=None)
+        item `approved` accepts the order (§6.2). ``within`` runs it in the caller's
+        transaction."""
+        return self._accept_quote_of(
+            order_id, item_id, quote_id, by, for_customer=None, within=within
+        )
 
     def _accept_quote_of(
-        self, order_id: str, item_id: str, quote_id: str, by: Actor, *, for_customer: str | None
+        self,
+        order_id: str,
+        item_id: str,
+        quote_id: str,
+        by: Actor,
+        *,
+        for_customer: str | None,
+        within: InTransaction | None = None,
     ) -> OrderItem:
         """`accept_quote`, or with ``for_customer`` (a reason) the shop's accept of it for
         a storefront customer (`accept_for_customer`)."""
         self._not_a_cart(order_id)
         self._customers_accept(order_id, by, for_customer)
         self.ensure_revision(order_id, item_id, by)
-        with self.store.transaction() as conn:
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
             self._accepts(order, by, for_customer)
@@ -3946,7 +4018,7 @@ class Lifecycle:
             order, item, released = self._accept_quote(conn, order, item, quote, by)
             self._for_customer(conn, order, by, item, "quote", quote.id, for_customer)
             order = self._accepted_by_the_last(conn, order, by)
-        self._told(_Change(order, [(item, None)], released))
+        self._tell(_Change(order, [(item, None)], released), within)
         return item
 
     # -- the storefront's accepts (storefront spec §6.1, §6.2) ----------------------------
@@ -4173,14 +4245,17 @@ class Lifecycle:
         revision_id: str,
         body: RevisionAnswerInput,
         by: Actor,
+        *,
+        within: InTransaction | None = None,
     ) -> Revision:
         """The customer's answer to the newest sent revision. On a `together` item an
         `accepted` also accepts the newest quote that names it, in the same transaction.
         On a storefront order only the customer accepts (`customer_accepts`, storefront
         spec §6.1; the shop may record their `changes_requested`), and the accept that
-        leaves every open item `approved` accepts the order (§6.2)."""
+        leaves every open item `approved` accepts the order (§6.2). ``within`` runs it in
+        the caller's transaction."""
         revision, _ = self._answer_revision(
-            order_id, item_id, revision_id, body, by, for_customer=None
+            order_id, item_id, revision_id, body, by, for_customer=None, within=within
         )
         return revision
 
@@ -4193,6 +4268,7 @@ class Lifecycle:
         by: Actor,
         *,
         for_customer: str | None,
+        within: InTransaction | None = None,
     ) -> tuple[Revision, OrderItem]:
         """`answer_revision`, or with ``for_customer`` (a reason) the shop's accept of it
         for a storefront customer (`accept_for_customer`)."""
@@ -4202,7 +4278,7 @@ class Lifecycle:
         self._customers_accept(order_id, by, for_customer, accepting=accepting)
         self.ensure_revision(order_id, item_id, by)
         released: list[str] = []
-        with self.store.transaction() as conn:
+        with self.store.transaction(within.conn if within else None) as conn:
             order = self._lock(conn, order_id)
             self._accepts(order, by, for_customer, accepting=accepting)
             self._not_ended(order)
@@ -4251,7 +4327,7 @@ class Lifecycle:
             self._for_customer(conn, order, by, item, "revision", revision.id, for_customer)
             if quote is not None:
                 order = self._accepted_by_the_last(conn, order, by)
-        self._told(_Change(order, [(item, None)], released))
+        self._tell(_Change(order, [(item, None)], released), within)
         return revision, item
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------

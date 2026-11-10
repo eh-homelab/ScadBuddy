@@ -41,9 +41,10 @@ from scadbuddy.storefront.wire import (
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
 #: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
-#: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`).
+#: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
+#: customer's order page (#5283).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
-    {"listings", "renders", "drafts", "requests", "pay", "turnstile"}
+    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "order"}
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
@@ -205,6 +206,18 @@ class StorefrontCrud:
                 f"multipart/form-data; boundary={boundary}",
                 _multipart(boundary, text, files),
             ),
+        )
+        return response.json()
+
+    async def order(self, path: str, body: bytes, *, key: str | None = None) -> Any:
+        """``POST …/storefront/order/<path>`` (the customer's order page): the page's JSON
+        body as it came, unread, since it holds the order link's token, which never
+        leaves a body; a write's ``Idempotency-Key``. No visitor or client header: the
+        token is the secret. ``path`` is the edge's own (`storefront/routes.py` checks
+        each id in it), so it cannot leave ``order/``. A token that reads nothing raises
+        `CrudRefusedError` 404 with no problem."""
+        response = await self._crud.request(
+            "POST", f"{BASE}/order/{path}", content=body, idempotency_key=key
         )
         return response.json()
 

@@ -862,6 +862,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
   `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
+  The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
+  area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
+  `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.
+  The token travels in the body only; `resolve` (a `Reader`, today `ByLink`) finds the live
+  link by the token's sha256 (`links.link_by_token`), and any token that reads nothing is
+  a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
+  view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
+  `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
+  `test_order_page.py` pins. A revision's pictures are copied once from the packed blob to
+  `customer-file-<sha256>` on S3, held with the attachment, and presigned (left out on any
+  other store). Writes take an `Idempotency-Key` and run as `customer_actor` (session
+  `link:<link id>`) inside the ledger's transaction (`Lifecycle` `InTransaction`, told by
+  `Lifecycle.tell` after commit); the customer's cancel is refused `order_approved` once
+  anything is approved (`Lifecycle.approved_anything`).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

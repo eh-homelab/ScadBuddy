@@ -51,6 +51,15 @@ edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one r
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
 The token travels in the body, never the path, so no access log holds it. The token is
 the secret here, so it takes no visitor or client header.
+
+Area ``order`` (`orders/storefront/order_page.py`, #5283 Task 5): the customer's order
+page. ``POST …/order/view`` answers the `CustomerOrderView` the body's ``token`` (the
+order link's) opens; ``POST …/order/revisions/{id}/answer``, ``…/order/quotes/{id}/accept``
+and ``…/order/cancel`` (each with an ``Idempotency-Key``, 428 without) are the customer's
+writes, each answering the view after it. Any token that reads nothing (unknown, revoked,
+or not a token) is a 404 with no body, as ``pay/checkout``'s, and the token travels in the
+body only. They take no visitor or client header: the token is the secret, and the
+customer actor's session is the link's.
 """
 
 from __future__ import annotations
@@ -73,6 +82,7 @@ from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront import order_page
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
@@ -102,10 +112,13 @@ from scadbuddy.orders.storefront.turnstile import (
 )
 from scadbuddy.orders.storefront.wire import (
     AddListingItem,
+    CancelBody,
+    CustomerOrderView,
     DraftView,
     PublicListing,
     PublicListings,
     RenderBody,
+    RevisionAnswerBody,
     StoreRender,
     SubmitBody,
     SubmittedOrder,
@@ -514,3 +527,101 @@ async def turnstile_verify(
     config = await asyncio.to_thread(_turnstile_config, state)
     verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
     return TurnstileVerdict(verdict=verdict)
+
+
+#: The body of every order route: the order link's token, and the write's own fields.
+_ORDER_TOKEN: dict[str, Any] = {
+    "type": "object",
+    "required": ["token"],
+    "properties": {"token": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS}},
+}
+_UNREAD: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {"description": "The token reads nothing (an empty body)"}
+}
+
+
+def _order_body(model: type[BaseModel] | None = None) -> dict[str, Any]:
+    schema = dict(_ORDER_TOKEN)
+    if model is not None:
+        own = _inlined(model)
+        schema = {
+            **schema,
+            "properties": {**own.get("properties", {}), **schema["properties"]},
+            "required": [*own.get("required", []), "token"],
+        }
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+def _answered(found: CustomerOrderView | None) -> CustomerOrderView | Response:
+    """The view, or a 404 with no body for a token that reads nothing."""
+    return Response(status_code=status.HTTP_404_NOT_FOUND) if found is None else found
+
+
+@router.post(
+    "/order/view",
+    name="crud_storefront_order_view",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(),
+)
+async def order_view(request: Request, state: StateDep) -> CustomerOrderView | Response:
+    """The order the body's token opens, as its customer reads it; the first view stamps
+    the link's ``opened_at``."""
+    reader, _ = order_page.read_body(await request.body())
+    return _answered(await order_page.view(state, reader))
+
+
+@router.post(
+    "/order/revisions/{revision_id}/answer",
+    name="crud_storefront_order_answer",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(RevisionAnswerBody),
+)
+async def order_answer(
+    revision_id: str,
+    request: Request,
+    state: StateDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer's answer to a design (`order_page.answer`)."""
+    key = required_key(idempotency_key)
+    reader, body = order_page.read_body(await request.body())
+    return _answered(await order_page.answer(state, reader, key, revision_id, body))
+
+
+@router.post(
+    "/order/quotes/{quote_id}/accept",
+    name="crud_storefront_order_accept",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(),
+)
+async def order_accept(
+    quote_id: str,
+    request: Request,
+    state: StateDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer accepts a price (`order_page.accept`)."""
+    key = required_key(idempotency_key)
+    reader, _ = order_page.read_body(await request.body())
+    return _answered(await order_page.accept(state, reader, key, quote_id))
+
+
+@router.post(
+    "/order/cancel",
+    name="crud_storefront_order_cancel",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(CancelBody),
+)
+async def order_cancel(
+    request: Request,
+    state: StateDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer cancels the order while nothing is approved (`order_page.cancel`)."""
+    key = required_key(idempotency_key)
+    reader, body = order_page.read_body(await request.body())
+    return _answered(await order_page.cancel(state, reader, key, body))

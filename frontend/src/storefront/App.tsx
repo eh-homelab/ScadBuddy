@@ -6,6 +6,7 @@ import { DraftChanged } from './draftCount'
 import { CustomizePage } from './pages/CustomizePage'
 import { DraftPage } from './pages/DraftPage'
 import { ListingsPage } from './pages/ListingsPage'
+import { OrderPage } from './pages/OrderPage'
 
 function CustomizeRoute() {
   const { id = '' } = useParams()
@@ -68,6 +69,7 @@ export function App() {
             <Route path="/l/:id" element={<CustomizeRoute />} />
             <Route path="/draft" element={<DraftPage />} />
             <Route path="/request" element={<RequestRoute />} />
+            <Route path="/o" element={<OrderPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

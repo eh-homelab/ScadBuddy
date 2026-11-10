@@ -84,6 +84,33 @@ def live_link(conn: Conn, order_id: str) -> LiveLink | None:
     return None if row is None else LiveLink(id=str(row["id"]), sent_to=str(row["sent_to"]))
 
 
+@dataclass(frozen=True)
+class OpenedLink:
+    id: str
+    order_id: str
+
+
+def link_by_token(conn: Conn, token: str) -> OpenedLink | None:
+    """The live link ``token`` opens, found by its sha256; None for any token that reads
+    nothing (unknown, revoked, or not a token at all). Every token costs the same one
+    lookup by an index: none is refused by its shape first."""
+    row = conn.execute(
+        "SELECT id, order_id FROM storefront_order_links"
+        " WHERE token_sha256 = %s AND revoked_at IS NULL",
+        (token_sha256(token),),
+    ).fetchone()
+    return None if row is None else OpenedLink(id=str(row["id"]), order_id=str(row["order_id"]))
+
+
+def mark_opened(conn: Conn, link_id: str) -> None:
+    """Stamp the link's first view (``opened_at``); a later view keeps the first."""
+    conn.execute(
+        "UPDATE storefront_order_links SET opened_at = clock_timestamp()"
+        " WHERE id = %s AND opened_at IS NULL",
+        (link_id,),
+    )
+
+
 class LinkState(BaseModel):
     """What the back office sees of the order's newest link (`link_state`): whether it is
     live, when it was made, where its mail went, when the customer first opened it and when
