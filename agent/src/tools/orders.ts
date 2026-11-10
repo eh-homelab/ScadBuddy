@@ -217,9 +217,10 @@ async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
  * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
  * template's news to the order's customer itself) unless `also_when_storefront_mails`. With
  * `key`, a key that already claimed a message refuses nothing: its claim answers that row (a
- * retry after a lost answer is served from the first claim, never refused).
+ * retry after a lost answer is served from the first claim, never refused). Answers whether the
+ * key had claimed.
  */
-async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<void> {
+async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<boolean> {
   const { order_id, template } = args
   const header = key === undefined ? {} : { header: { 'Idempotency-Key': key } }
   const check = await ok(
@@ -228,7 +229,7 @@ async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Pro
     }),
     `check order ${order_id}'s messages`,
   )
-  if (check.claimed) return
+  if (check.claimed) return true
   const told = check.already_notified
   if (told && args.resend_of === undefined) {
     throw new ToolError(
@@ -243,6 +244,7 @@ async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Pro
         'here too',
     )
   }
+  return false
 }
 
 /** The approval's line: who gets it, through what, and the text. */
@@ -381,15 +383,17 @@ export async function previewPersonSend(
  */
 export async function personSend(ctx: SendContext, args: PersonSend, digest: string): Promise<SendAnswer> {
   const planned = await sendPlan(ctx, args)
-  if (messageDigest(planned.approved) !== digest) {
+  // The key's claim first (#5978): a retry of a send already claimed is answered from that claim,
+  // never refused, even when the message composed now differs (it may have reached the customer).
+  // Without one, the preview's refusals stand at the send too (the storefront may have begun to
+  // mail it since), and so does the digest.
+  const claimed = await refuseIfTold(ctx, args, idempotencyKey(ctx))
+  if (!claimed && messageDigest(planned.approved) !== digest) {
     throw new ToolError(
       'message_changed: the order, the customer or the messaging binding changed since the preview, so nothing ' +
         'was sent; preview it again',
     )
   }
-  // The preview's refusals stand at the send too: the storefront may have begun to mail it since.
-  // Under the claim's own key: a retry of a send already claimed is answered from that claim.
-  await refuseIfTold(ctx, args, idempotencyKey(ctx))
   return sendMessage(ctx, args, planned)
 }
 

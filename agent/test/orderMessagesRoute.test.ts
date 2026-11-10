@@ -216,6 +216,25 @@ describe('the order page’s Send again (#5660)', () => {
     expect(claims.map((c) => c.key)).toEqual([claims[0]!.key, claims[0]!.key])
   })
 
+  it('serves a replay under the same key from its first claim after the order changed (#5978)', async () => {
+    const { hono, customer, sends } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0030' }
+    expect((await post(hono, 'send', { ...AGAIN, digest }, headers)).status).toBe(200)
+    expect(sends).toHaveLength(1)
+    // The answer was lost; the customer changes before the person clicks Send again.
+    customer.name = 'Ada Lovelace'
+    const replay = await post(hono, 'send', { ...AGAIN, digest }, headers)
+    expect(replay.status).toBe(200)
+    expect(await replay.json()).toMatchObject({ sent: true, message: { id: 'm2', status: 'sent' } })
+    expect(sends).toHaveLength(1)
+    // A new key still meets the digest check.
+    const fresh = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0031' })
+    expect(fresh.status).toBe(409)
+    expect(await fresh.json()).toMatchObject({ type: 'message_changed' })
+    expect(sends).toHaveLength(1)
+  })
+
   it('forwards the backend’s 404 as it is', async () => {
     const { hono, race, sends } = app(signedIn())
     const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }

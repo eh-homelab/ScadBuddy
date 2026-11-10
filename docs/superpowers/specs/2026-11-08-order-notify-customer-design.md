@@ -407,7 +407,9 @@ answers it with its digest; nothing is sent or recorded. The send names the temp
 409 `message_changed` when its digest differs, and else claims and sends it as the tool does,
 under the open preview's `Idempotency-Key`. The browser makes one key per preview and keeps it
 for every click on its Send until a send is answered, so a retry after a lost answer is served
-from the first claim. A backend 404, 409 or 422 keeps its status and slug: a claim that lost a
+from the first claim. The agent looks the key's claim up first (the check under that key) and
+compares the digest only when there is none, so such a retry is served even when the order
+changed since (#5978). A backend 404, 409 or 422 keeps its status and slug: a claim that lost a
 race after the preview is 409 `already_notified`. A template the storefront already emails
 (§8) is refused 409 `storefront_mail` by the preview and the send; the page asks "The
 storefront already emails this update to the customer. Send it here too?" and on yes previews
