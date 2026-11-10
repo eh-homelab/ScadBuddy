@@ -23,7 +23,7 @@ from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, stale
+from scadbuddy.printers.reports import FUTURE_TOLERANCE, PrintEnd, PrinterReportStore, stale
 from scadbuddy.printers.watch import (
     OWED_RESENDS,
     WATCH_OWED_GIVEN_UP,
@@ -302,7 +302,18 @@ def test_a_report_older_than_the_row_is_stale() -> None:
     """Re-review D2, the store's guard without a database: only an older ``seen_at`` is
     stale; one as old as the row is written again."""
     now = datetime.now(UTC)
-    assert stale(now, now - timedelta(microseconds=1))
-    assert not stale(now, now)
-    assert not stale(now, now + timedelta(seconds=1))
-    assert not stale(None, now)
+    assert stale(now, now - timedelta(microseconds=1), now)
+    assert not stale(now, now, now)
+    assert not stale(now, now + timedelta(seconds=1), now)
+    assert not stale(None, now, now)
+
+
+def test_a_row_stamped_by_a_clock_ahead_guards_nothing() -> None:
+    """Re-review 3 N1: a row whose ``seen_at`` came from a clock that ran ahead (past the
+    database's ``now`` by more than `FUTURE_TOLERANCE`) never skips a later report; one
+    within the tolerance still does."""
+    now = datetime.now(UTC)
+    ahead = now + FUTURE_TOLERANCE + timedelta(seconds=1)
+    assert not stale(ahead, now, now)
+    near = now + FUTURE_TOLERANCE
+    assert stale(near, now, now)

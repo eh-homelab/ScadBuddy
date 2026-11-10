@@ -21,7 +21,7 @@ gives one start, also across a reconnect's ``pushall`` and a new attempt of the 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from psycopg import Connection
@@ -45,10 +45,19 @@ class PrintEnd:
     timed: bool
 
 
-def stale(stored: datetime | None, seen_at: datetime) -> bool:
+#: How far ahead of the database's clock a stored ``seen_at`` may be and still guard the
+#: row (`stale`). Report times come from the clock of the host that runs the watch, which
+#: may move between hosts; a row stamped by a host whose clock ran ahead must not freeze
+#: every later report until real time catches up.
+FUTURE_TOLERANCE = timedelta(seconds=30)
+
+
+def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:
     """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
-    is not written (`PrinterReportStore.put_in`)."""
-    return stored is not None and seen_at < stored
+    is not written (`PrinterReportStore.put_in`). A ``stored`` time more than
+    `FUTURE_TOLERANCE` past ``now`` (the database's clock) guards nothing: it came from a
+    clock that ran ahead, and the next report repairs the row, as before the guard."""
+    return stored is not None and seen_at < stored and stored <= now + FUTURE_TOLERANCE
 
 
 def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None, PrintEnd | None]:
@@ -152,14 +161,18 @@ class PrinterReportStore:
         a write that lands after a newer one (a print worker's request still running on
         the API after the worker gave its answer up) never moves the row, or the print it
         shows running, back. One as old as the row's writes as before, so a resend is the
-        same write."""
+        same write. A skipped write answers no end and no start, as a written one that
+        ended and started nothing does, so the watch counts it written and announces
+        `printer.report` once more: the card refetches the row unchanged, which costs one
+        read."""
         if printer_uuid(printer_id) is None:
             return Advance()
         old = conn.execute(
-            "SELECT running_subtask, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+            "SELECT running_subtask, seen_at, now() AS now FROM printer_reports"
+            " WHERE printer_id = %s FOR UPDATE",
             (printer_id,),
         ).fetchone()
-        if stale(None if old is None else old["seen_at"], seen_at):
+        if old is not None and stale(old["seen_at"], seen_at, old["now"]):
             return Advance()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
