@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Principal, tiersUpTo } from '../src/auth/principal.js'
-import { TabHub, type TabConnection } from '../src/bridge/hub.js'
+import { STATUS_PROBE_MS, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
 import { ACK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
@@ -147,6 +147,16 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       started = []
     })
     afterEach(async () => {
+      // Each call's workflow runs on its caller's worker, which stops below: one still open (a
+      // cancelled call's, or one whose caller's worker was killed) would leave its caller's
+      // `result()` polling the dev server after teardown. End it first.
+      await Promise.all(
+        started.map(async (id) => {
+          const handle = client.workflow.getHandle(id)
+          if ((await handle.describe()).status.name === 'RUNNING') await handle.terminate('the test ended').catch(() => {})
+          await handle.result().catch(() => {})
+        }),
+      )
       for (const r of replicas) {
         r.hub.close()
         if (r.worker.getState() === 'RUNNING') r.worker.shutdown()
@@ -192,8 +202,11 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       expect(await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })).toEqual({ ok: true, result: 'from b' })
       const call = performance.now() - before
       console.log(`bridge across replicas: status ${status.toFixed(0)} ms, call ${call.toFixed(0)} ms`)
-      expect(status).toBeLessThan(1_000)
-      expect(call).toBeLessThan(1_000)
+      // 281-298 ms and 107-133 ms on an idle machine; the wall clock also counts this process's CPU
+      // work (the owner row's read, sealing), so on a loaded runner it gets half the probe's 6 s,
+      // which the regression crossed. The routing itself is bounded from the history below.
+      expect(status).toBeLessThan(STATUS_PROBE_MS / 2)
+      expect(call).toBeLessThan(STATUS_PROBE_MS / 2)
       expect(onB.calls).toHaveLength(1)
       // Each workflow ran on the caller's own queue, its one activity on the owner's.
       expect(started).toHaveLength(2)
@@ -201,6 +214,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         const { events } = JSON.parse(historyToJSON(await client.workflow.getHandle(id).fetchHistory())) as {
           events: {
             eventType: string
+            eventTime?: string
             workflowExecutionStartedEventAttributes?: { taskQueue?: { name?: string } }
             activityTaskScheduledEventAttributes?: { taskQueue?: { name?: string } }
           }[]
@@ -208,6 +222,10 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         expect(events[0]?.workflowExecutionStartedEventAttributes?.taskQueue?.name).toBe(a.queue)
         const scheduled = events.filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED')
         expect(scheduled.map((e) => e.activityTaskScheduledEventAttributes?.taskQueue?.name)).toEqual([b.queue])
+        // The hop that took 3.4 s in prod: the first workflow task, scheduled to started.
+        const at = (type: string) => Date.parse(events.find((e) => e.eventType === type)?.eventTime ?? '')
+        const firstTaskMs = at('EVENT_TYPE_WORKFLOW_TASK_STARTED') - at('EVENT_TYPE_WORKFLOW_TASK_SCHEDULED')
+        expect(firstTaskMs).toBeLessThan(1_000)
       }
     })
 

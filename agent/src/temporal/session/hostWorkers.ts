@@ -27,6 +27,13 @@ import { sessionHostQueue } from './names.js'
 
 type Activities = NonNullable<WorkerOptions['activities']>
 
+/**
+ * The pinned worker's sticky cache when it runs BridgeCall (#5862 review): each lasts seconds, and a
+ * replica has a few in flight at once, so the SDK's memory-sized default (thousands) is never needed
+ * on an `api` pod. One evicted early is replayed from its short history.
+ */
+export const BRIDGE_CACHED_WORKFLOWS = 50
+
 export type HostWorkersOptions = {
   address: string
   namespace: string
@@ -60,7 +67,7 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
     ...common,
     taskQueue: `${TASK_QUEUE}.${options.identity}`,
     activities: options.pinned,
-    ...(options.pinnedWorkflows ? { workflows: options.pinnedWorkflows } : {}),
+    ...(options.pinnedWorkflows ? { workflows: options.pinnedWorkflows, maxCachedWorkflows: BRIDGE_CACHED_WORKFLOWS } : {}),
   })
   const sessions = options.sessions
     ? AgentWorker.start({

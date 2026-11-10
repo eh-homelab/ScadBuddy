@@ -1307,18 +1307,24 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
-  // with it, the session host worker with the turns' 17 s as its grace. AgentSession turns get
+  // and at 15 s it stops regardless: inside the turns' 17 s budget. The session host worker stops
+  // with it, with the turns' 17 s as its grace; the pinned host worker only once they end (below).
+  // AgentSession turns get
   // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
   // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
   const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
   await Promise.all([
     temporalWorker?.stop(),
-    hostWorkers?.stop(),
+    hostWorkers?.sessions?.stop(),
     sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
+  // The pinned host worker only now (#5862 review): it runs this replica's own BridgeCalls, whose
+  // workflow tasks a draining turn's browser_* call needs until the turn ends, and its pinned calls.
+  // Not awaited: it runs beside shutdown() below, which closes the tabs first, so its bridge.tab
+  // calls end at once ("gone"); process.exit ends whatever is left, within the pod's grace.
+  void hostWorkers?.pinned.stop()
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()
   stopSessionWake?.()
