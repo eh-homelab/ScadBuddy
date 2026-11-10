@@ -153,8 +153,11 @@ from scadbuddy.orders.store import (
     decode_cursor,
     encode_cursor,
 )
+from scadbuddy.orders.storefront.addresses import EmailInvalidError
+from scadbuddy.orders.storefront.links import LinkState
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
+from scadbuddy.payments.credentials import KekMissingError
 from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
@@ -497,6 +500,13 @@ class CancelBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, max_length=500)
+
+
+class CustomerLinkSend(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: One address; the customer's email contact when left out.
+    to: str | None = Field(default=None, max_length=320)
 
 
 # -- views -------------------------------------------------------------------------------------
@@ -1367,6 +1377,89 @@ async def reopen_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -
     check_path(order_id)
     by = current_actor()
     return await _run_linked(lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service)
+
+
+# -- the customer link (#5283, storefront spec §5.2) ---------------------------------------
+
+
+def _to_problem(slug: str, detail: str) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail,
+        type_=PROBLEMS + slug,
+        errors=[{"loc": ["body", "to"], "msg": detail}],
+    )
+
+
+@router.get(
+    "/{order_id}/customer-link",
+    response_model=LinkState,
+    summary="The state of an order's customer link",
+    description=(
+        "Whether the order's newest customer link is live, when it was made, the address "
+        "its mail went to, when the customer first opened it and when it was revoked; all "
+        "null with `live: false` when the order never had one. Never the link's token."
+    ),
+)
+async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
+    check_path(order_id)
+    return await _run(lambda: orders.lifecycle.customer_link(order_id))
+
+
+@router.post(
+    "/{order_id}/customer-link",
+    response_model=LinkState,
+    summary="Send the customer a new order link",
+    description=(
+        "Mails the customer a link that opens this order on the storefront without an "
+        "account. Every live link of the order is revoked first, so an old one stops "
+        "working. The mail goes to `to` (one address), or else to the customer's email "
+        "contact, the primary one first. A back-office order gets one too. Answers the "
+        "link's state, never its token. Audit row `order.customer_link_sent`. 422 "
+        "`email_invalid` for anything but one address, 422 `no_email` with no `to` and no "
+        "email contact, 409 `order_not_submitted` for a cart, 409 `kek_missing` with no "
+        "key to seal the link with."
+    ),
+)
+async def send_customer_link(
+    order_id: str, orders: OrdersDep, body: CustomerLinkSend | None = None
+) -> LinkState:
+    check_path(order_id)
+    by = current_actor()
+    to = body.to if body else None
+    try:
+        return await asyncio.to_thread(orders.lifecycle.send_customer_link, order_id, by, to)
+    except LifecycleError as error:
+        if error.slug == "no_email":
+            raise _to_problem(
+                "no_email",
+                "The customer has no email address. Give the address to send the link to.",
+            ) from None
+        raise refused(error) from None
+    except EmailInvalidError:
+        raise _to_problem(
+            "email_invalid", "Give one email address, such as ada@example.com."
+        ) from None
+    except KekMissingError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, str(error), type_=PROBLEMS + "kek_missing"
+        ) from None
+
+
+@router.delete(
+    "/{order_id}/customer-link",
+    response_model=LinkState,
+    summary="Revoke an order's customer link",
+    description=(
+        "Revokes every live customer link of the order: each stops opening the order at "
+        "once. Answers the newest link's state. Audit row `order.customer_link_revoked`, "
+        "only when a link was live."
+    ),
+)
+async def revoke_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
+    check_path(order_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.revoke_customer_links(order_id, by))
 
 
 @router.post(

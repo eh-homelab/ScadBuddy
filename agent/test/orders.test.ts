@@ -75,6 +75,8 @@ describe('order tools (#4249)', () => {
       'order_deposit_waive',
       'order_balance_waive',
       'order_shipping_option_set',
+      'order_customer_link_send',
+      'order_customer_link_revoke',
       'order_notify_customer',
       'order_notify_customer_send',
       'order_messages_list',
@@ -111,6 +113,8 @@ describe('order tools (#4249)', () => {
       order_deposit_waive: 'write',
       order_balance_waive: 'outward',
       order_shipping_option_set: 'write',
+      order_customer_link_send: 'outward',
+      order_customer_link_revoke: 'write',
       order_notify_customer: 'read',
       order_notify_customer_send: 'outward',
       order_messages_list: 'read',
@@ -386,6 +390,30 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
     await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
     expect(sent).toEqual({ provider: null })
+  })
+
+  it("sends a customer link as an outward step and revokes it as a write (#5283)", async () => {
+    const STATE = { live: true, created_at: '2026-11-10T00:00:00Z', sent_to: 'ada@example.com', opened_at: null, revoked_at: null }
+    const calls: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/customer-link`, async ({ request }) => {
+        calls.push(`SEND ${await request.text()}`)
+        return HttpResponse.json(STATE)
+      }),
+      http.delete(`${BACKEND}/api/v1/orders/${ORDER}/customer-link`, () => {
+        calls.push('REVOKE')
+        return HttpResponse.json({ ...STATE, live: false, revoked_at: '2026-11-10T01:00:00Z' })
+      }),
+    )
+    expect(tool('order_customer_link_send').risk).toBe('outward')
+    expect(tool('order_customer_link_revoke').risk).toBe('write')
+    expect(firstText(await tool('order_customer_link_send').execute({ order_id: ORDER }, ctx()))).toEqual(STATE)
+    await tool('order_customer_link_send').execute({ order_id: ORDER, to: 'grace@example.org' }, ctx())
+    const revoked = firstText(await tool('order_customer_link_revoke').execute({ order_id: ORDER }, ctx()))
+    expect(revoked).toMatchObject({ live: false })
+    expect(calls).toEqual(['SEND {}', 'SEND {"to":"grace@example.org"}', 'REVOKE'])
+    expect(tool('order_customer_link_send').summarize({ order_id: ORDER, to: 'grace@example.org' })).toContain('grace@example.org')
+    expect(() => tool('order_customer_link_send').execute({ order_id: ORDER, to: '' }, ctx())).toThrow('to')
   })
 
   it('sets a deposit or applies the policy as an outward step, waives with a reason (#5281)', async () => {

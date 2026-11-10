@@ -109,8 +109,13 @@ from scadbuddy.orders.store import (
 )
 from scadbuddy.orders.storefront.addresses import check_address
 from scadbuddy.orders.storefront.customers import customer_actor
-from scadbuddy.orders.storefront.links import create_order_link, live_link
-from scadbuddy.orders.storefront.mail import MailEvent, queue_mail
+from scadbuddy.orders.storefront.links import (
+    LinkState,
+    link_state,
+    live_link,
+    revoke_order_links,
+)
+from scadbuddy.orders.storefront.mail import MailEvent, issue_link, queue_mail
 from scadbuddy.orders.totals import balance_due, has_standing_balance, totals_of
 from scadbuddy.payments import store as payments
 from scadbuddy.payments.models import (
@@ -861,8 +866,8 @@ class Lifecycle:
            applies only in another currency sets none, and `deposit.policy_skipped` tells
            the shop;
         6. stamps ``submitted_at``;
-        7. makes the order link (`create_order_link`);
-        8. queues the `order_link` mail to ``body.email``.
+        7. makes the order link and queues its `order_link` mail to ``body.email``
+           (`issue_link`, the back office's `send_customer_link` path too).
 
         Everything after step 1 is recorded as the customer (`customer_actor`, with the
         cart's visitor row as the session). The order and the link's token, which is
@@ -909,14 +914,61 @@ class Lifecycle:
                 self._event(tx, order, customer, "deposit.policy_skipped", reason=str(error))
             order = self.store.stamp_submitted(tx, order.id)
             self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
-            link_id, token = create_order_link(tx, self.kek, order.id, email)
-            queue_mail(
-                tx, "order_link", email, {"order": order.label, "link_id": link_id}, order.id
-            )
+            token = issue_link(tx, self.kek, order.id, order.label, email)
             order = self.store.order(order.id, conn=tx) or order
         if conn is None:
             self._told(_Change(order))
         return order, token
+
+    def customer_link(self, order_id: str) -> LinkState:
+        """The state of the order's newest customer link (spec §5.2), never its token."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            return link_state(conn, order.id)
+
+    def send_customer_link(self, order_id: str, by: Actor, to: str | None) -> LinkState:
+        """The shop sends the order a new customer link (spec §5.2 "Order link"), under the
+        order's lock: every live link is revoked and a new one mailed (`issue_link`) to
+        ``to``, or else to the customer's email contact (the primary one first). A
+        `back_office` order gets one too. Audit row `order.customer_link_sent`. Refusals:
+        `order_not_found`; `order_not_submitted` on a cart; 422 `no_email` with no ``to``
+        and no email contact; `EmailInvalidError`; `KekMissingError`."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            address = to if to is not None else self._customer_email(conn, order)
+            if address is None:
+                raise LifecycleError(
+                    "no_email", "to: the customer has no email address", unprocessable=True
+                )
+            address = check_address(address)
+            issue_link(conn, self.kek, order.id, order.label, address)
+            self._event(conn, order, by, "order.customer_link_sent", to=address)
+            state = link_state(conn, order.id)
+        self._told(_Change(order))
+        return state
+
+    def revoke_customer_links(self, order_id: str, by: Actor) -> LinkState:
+        """The shop revokes the order's live customer links, under the order's lock. Audit
+        row `order.customer_link_revoked` with how many, when there were any."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            count = revoke_order_links(conn, order.id)
+            if count:
+                self._event(conn, order, by, "order.customer_link_revoked", count=count)
+            state = link_state(conn, order.id)
+        if count:
+            self._told(_Change(order))
+        return state
+
+    def _customer_email(self, conn: Conn, order: Order) -> str | None:
+        """The order's customer's email contact, the primary one first."""
+        if order.customer_id is None:
+            return None
+        customer = self.store.customer(order.customer_id, conn=conn)
+        emails = [c for c in (customer.contacts if customer else []) if c.kind == "email"]
+        emails.sort(key=lambda c: not c.primary)
+        return emails[0].value if emails else None
 
     def _new_customer(self, conn: Conn, body: SubmitInput, email: str) -> tuple[str, str | None]:
         """`submit_order`'s step 1 for an anonymous submit: a new customer with the name,

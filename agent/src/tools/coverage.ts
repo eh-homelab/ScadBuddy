@@ -236,6 +236,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "Only a person says a message whose outcome is unknown reached the customer (#5660), on the order page.",
   },
   {
+    operation: 'GET /api/v1/orders/{order_id}/customer-link',
+    reason:
+      "The order page's Customer link card (#5283); order_customer_link_send and order_customer_link_revoke each " +
+      'answer the same state.',
+  },
+  {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +
