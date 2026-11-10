@@ -516,16 +516,25 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
   it('counts a slow owner as back after a tab wait, so the read call runs again', async () => {
     const { rows, store } = sharedRows()
     rows.set('s1', OTHER_TAB)
-    const hub = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 50, log: () => {} })
+    const relay = hungRelay()
+    const calls: string[] = []
+    const forward = relay.forward
+    relay.forward = (tab, request, options) => {
+      if (request.op === 'call') calls.push(request.tool)
+      return forward(tab, request, options)
+    }
+    const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
     let back: boolean | undefined
     await runTool(tool('browser_snapshot'), {}, {
       ...ctx(hub.forSession('s1'), browser),
       waitForTab: async ({ isBack }) => {
         back = await isBack(new AbortController().signal)
-        return { back: false, message: 'x' }
+        return back ? { back: true, why: 'reconnected' as const } : { back: false, message: 'x' }
       },
     })
     expect(back).toBe(true)
+    // The read ran once more after the wait.
+    expect(calls).toEqual(['snapshot', 'snapshot'])
   })
 
   it('a write call whose wait ended reconnected, on a slow owner, says to snapshot and call again', async () => {

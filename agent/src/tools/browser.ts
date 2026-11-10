@@ -148,8 +148,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           tool: `browser_${spec.tool}`,
           toolUseId: ctx.toolUseId,
           signal: ctx.signal,
-          // A slow owner counts as back (#5962 review): the tab may still be connected, and the
-          // call below finds out; read as gone, it would end the turn's tab waits.
+          // A slow owner counts as back (#5962 review): the tab may still be connected; a read's
+          // retry below finds out, and a write says to snapshot and call again. Read as gone, it
+          // would end the turn's tab waits.
           isBack: async (signal) => {
             const status = await tabs(ctx).status(target(ctx), { signal })
             return status.attached || status.slow === true
@@ -214,11 +215,11 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
   )
 }
 
-/** Why a read retried after a tab wait can still find no tab here. */
 /** After a reconnect, when the tab's replica only answered slowly: the tab may well be there (#5962). */
 const WHY_SLOW =
   "The session's tab reconnected, and the call was not run: take a snapshot to see the page, then call again."
 
+/** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
   // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #4780), so it dropped again,
   // or the replica holding it did not answer.

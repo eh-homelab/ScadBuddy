@@ -55,8 +55,9 @@ export type TabWait =
   | { back: false; message: string }
 /**
  * `signal`: the call's own (it stops waiting, the others sharing the wait do not).
- * `isBack`: whether the call's tab is connected now, checked once the wait is
- * recorded, so a tab that came back in between is not waited for; `signal`
+ * `isBack`: whether the call's tab is connected now, or may be (its replica was too slow
+ * to answer a status read, #5962), checked once the wait is recorded, so a tab that came
+ * back in between is not waited for; `signal`
  * aborts once the wait no longer needs the answer, and the check stops then.
  */
 export type WaitForTab = (request: {
