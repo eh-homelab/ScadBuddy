@@ -33,8 +33,9 @@ function inFlight(itemId: string, extra: Partial<Fulfilment> = {}): Fulfilment {
     failure_reason: null,
     started_at: '2026-11-04T10:00:00Z',
     finished_at: null,
-    // After the item's revision, as a real attempt is: an older one is `stale` (#5592).
     created_at: '2026-11-04T10:00:00Z',
+    // The item's current revision, as a real attempt names: an earlier one is `stale` (#5592, #5704).
+    revision_id: state.items.find((i) => i.id === itemId)!.current_revision_id ?? null,
     notes: 'first go',
     accepted_at: null,
     print_request_id: 'req-open',

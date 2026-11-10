@@ -23,8 +23,9 @@ describe('FulfilmentForm stale attempts (#5592)', () => {
 
   it('marks an old design attempt and offers no Accept for it', async () => {
     const old = await api.recordFulfilment(ORDER_ACCEPTED, ITEM_APPROVED, { quantity: 1, outcome: 'succeeded' })
-    // Pinned before the revision, as the backend's test does.
-    state.fulfilments.find((f) => f.id === old.id)!.created_at = '2026-01-01T00:00:00Z'
+    // It names revision 1. Its time is moved past the revision that follows, as the backend's
+    // test does: the revision's number orders them, not the clock (#5704).
+    state.fulfilments.find((f) => f.id === old.id)!.created_at = '2099-01-01T00:00:00Z'
     await api.addOrderItemRevisionAfterAcceptance(ORDER_ACCEPTED, ITEM_APPROVED, { note: 'loop' })
     const quote = await api.quoteOrderItem(ORDER_ACCEPTED, ITEM_APPROVED, { unit_price_minor: 1300 })
     await api.acceptOrderQuote(ORDER_ACCEPTED, ITEM_APPROVED, quote.id)
