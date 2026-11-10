@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.storefront.accounts import CODE_TTL
 
 MailEvent = Literal[
     "sign_in_code", "order_link", "revision_ready", "price_ready", "payment_requested", "shipped"
@@ -60,6 +62,14 @@ def _amount(context: Mapping[str, Any]) -> str:
     return f"{Decimal(minor).scaleb(-exponent):.{exponent}f} {currency}"
 
 
+def _lifetime(ttl: timedelta) -> str:
+    """``ttl`` in words: "one hour", "2 hours" or "10 minutes"."""
+    minutes = int(ttl.total_seconds()) // 60
+    if minutes % 60:
+        return f"{minutes} minutes"
+    return "one hour" if minutes == 60 else f"{minutes // 60} hours"
+
+
 def render(event: MailEvent, context: Mapping[str, Any], link: str | None) -> Rendered:
     """The mail for ``event`` with ``context``. ``link`` is the order link, which every
     order mail needs (ValueError without one); a sign-in code takes none: its context
@@ -72,7 +82,8 @@ def render(event: MailEvent, context: Mapping[str, Any], link: str | None) -> Re
         return Rendered(
             "Your sign-in code",
             f"Sign in here:\n{sign_in}\n\nOr type this code: {code}\n\n"
-            "It works for 10 minutes. If you did not ask for it, you can ignore this mail.\n",
+            f"It works for {_lifetime(CODE_TTL)}. If you did not ask for it, you can ignore"
+            " this mail.\n",
         )
     if not link:
         raise ValueError(f"the {event} mail needs the order link")
