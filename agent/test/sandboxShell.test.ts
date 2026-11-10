@@ -135,6 +135,12 @@ describe('Bash in the session sandbox', () => {
     expect(next.stdout).toBe('50\n')
     expect(next.files_not_in_sandbox).toBeUndefined()
     expect(await readFile(path.join(dir, 'big.txt'), 'utf8')).toBe('x'.repeat(100))
+    // The session's copy changes while still past the cap (Claude Code's own Write): the kept copy no longer stands in for it.
+    await writeFile(path.join(dir, 'big.txt'), 'y'.repeat(200))
+    const changed = content((await runShell(ctx, 'bash', { command: 'cat big.txt' })).text)
+    expect(changed.stderr).toContain('No such file')
+    expect(changed.files_not_in_sandbox).toEqual([{ path: 'big.txt', reason: expect.stringContaining('per-file cap') }])
+    expect(await readFile(path.join(dir, 'big.txt'), 'utf8')).toBe('y'.repeat(200))
   })
 
   it('names the paths a command made that never come back', async () => {
