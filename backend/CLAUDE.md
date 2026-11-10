@@ -1116,7 +1116,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   older than `STALE_SENDING_MINUTES` reads `unknown`, is never sent again by itself and has
   no sweep; only a person marks it sent (`…/mark-sent`, `PERSON_ENDPOINTS`). The plugin
   binding is the stored setting `orders_customer_messaging` (`MessagingBinding`; no secret,
-  a secret-looking `fixed_args` key is refused; an unreadable one loads as none).
+  a secret-looking `fixed_args` key is refused; an unreadable one loads as none). The
+  storefront overlap (spec §8): a `quoted` or `shipped` claim is recorded `skipped`, reason
+  `storefront_mail`, audit row `message.skipped`, when `storefront_mail_covers` says the
+  storefront mails that news to the order itself (`STOREFRONT_EVENT`, asked with the
+  lifecycle's `mail_host`), unless the body sets `also_when_storefront_mails`; the check
+  answers it as `storefront_mail`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
