@@ -13,6 +13,8 @@ const DRAFT: Draft = {
   id: 'd1',
   currency: 'USD',
   minor_exponent: 2,
+  shipping_currency: 'USD',
+  shipping_minor_exponent: 2,
   shipping_options: [
     { id: 'post', label: 'Post', amount_minor: 700, ships: true },
     { id: 'pickup', label: 'Pick up at the workshop', amount_minor: 0, ships: false },
@@ -119,6 +121,17 @@ describe('Submitting the order', () => {
     expect(screen.getByRole('radio', { name: /Pick up at the workshop.*\$0\.00/ })).toBeInTheDocument()
   })
 
+  it('prices the shipping options in the shop currency, not the cart currency', async () => {
+    server.use(
+      http.get('/api/store/v1/draft', () =>
+        HttpResponse.json({ ...DRAFT, shipping_currency: 'JPY', shipping_minor_exponent: 0 }),
+      ),
+    )
+    renderPage(<DraftPage />)
+    expect(await screen.findByRole('radio', { name: /Post.*¥700/ })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Pick up at the workshop.*¥0/ })).toBeInTheDocument()
+  })
+
   it('asks for an address only when the option ships', async () => {
     server.use(http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)))
     const { user } = renderPage(<DraftPage />)
@@ -193,6 +206,31 @@ describe('Submitting the order', () => {
     await user.click(screen.getByRole('button', { name: 'Send my order' }))
     expect(await screen.findByText('Give one email address, such as ada@example.com.')).toBeInTheDocument()
     expect(screen.getByLabelText('Your name')).toHaveValue('Ada')
+  })
+
+  it('loads the cart again when it was sent from another tab', async () => {
+    let loads = 0
+    server.use(
+      http.get('/api/store/v1/draft', () => {
+        loads += 1
+        return loads === 1 ? HttpResponse.json(DRAFT) : HttpResponse.json(null)
+      }),
+      http.post('/api/store/v1/draft/submit', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/order_submitted', status: 409, detail: 'This order is sent already.' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('radio', { name: /Pick up/ }))
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText('Your order is empty.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('This order is sent already.')
+    expect(screen.queryByLabelText('Your name')).toBeNull()
+    expect(loads).toBe(2)
   })
 
   it('sends the bot check token in X-Turnstile-Token', async () => {
