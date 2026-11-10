@@ -2,7 +2,10 @@
 -- it was recorded (`OrderStore.insert_fulfilment`), so `stale_attempt` orders an attempt
 -- and the accepted quote's revision by revision number, not by two wall-clock times from
 -- two transactions. An attempt made before this names the item's newest revision written
--- no later than the attempt; one made before the item had a revision names none.
+-- no later than the attempt; one made before the item had a revision names none. This
+-- backfill still reads `created_at`, so an attempt written before this file across a
+-- clock step-back names the earlier revision and stays stale, as it was before (history
+-- only; every attempt made since names its revision when it is written).
 UPDATE order_item_fulfilments AS f
    SET revision_id = (
      SELECT r.id FROM order_item_revisions AS r
