@@ -16,6 +16,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.bambuddy.copy_leases import CopyLease
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
@@ -110,11 +111,16 @@ def died_after_the_upload(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     real = BambuddyUploadStore.record
     asked: list[int] = []
 
-    async def record(self: BambuddyUploadStore, output_id: str, copy: LibraryCopy) -> None:
+    async def record(
+        self: BambuddyUploadStore,
+        output_id: str,
+        copy: LibraryCopy,
+        lease: CopyLease | None = None,
+    ) -> None:
         asked.append(copy.id)
         if len(asked) == 1:
             raise RuntimeError("the attempt died after the upload")
-        await real(self, output_id, copy)
+        await real(self, output_id, copy, lease)
 
     monkeypatch.setattr(BambuddyUploadStore, "record", record)
     return asked

@@ -17,6 +17,13 @@ describe('OrderMessages (#5660)', () => {
     await waitFor(() => expect(screen.queryByRole('list', { name: 'Customer messages' })).not.toBeInTheDocument())
   })
 
+  it('says why a message was skipped: the storefront mails it itself (#5660 §8)', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'skipped', reason: 'storefront_mail' })
+    renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    expect(within(list).getByText(/Skipped \(the storefront mails it itself\)/)).toBeInTheDocument()
+  })
+
   it('marks an unknown message sent only on a person’s word', async () => {
     mockOrderMessage(ORDER_ACCEPTED, { status: 'unknown', reason: 'no_answer', finished_at: null })
     const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)

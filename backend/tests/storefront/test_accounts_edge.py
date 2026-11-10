@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -51,6 +52,7 @@ def edge(edge_env: None, crud_mock: respx.Router) -> Iterator[TestClient]:  # no
         200, json={"email": "ada@example.com"}, headers={**CRUD, SESSION_HEADER: TOKEN}
     )
     crud_mock.post(f"{CRUD_ACCOUNT}/sign-out", name="sign_out").respond(204, headers=CRUD)
+    crud_mock.post(f"{CRUD_ACCOUNT}/code", name="code").respond(204, headers=CRUD)
     crud_mock.get(CRUD_ACCOUNT, name="account").respond(
         200, json={"email": "ada@example.com"}, headers=CRUD
     )
@@ -139,7 +141,7 @@ def test_a_failed_bot_check_stops_a_sign_in_before_the_crud_side(
     assert not crud_mock["verify"].called
 
 
-@pytest.mark.parametrize("path", ["verify", "sign-out"])
+@pytest.mark.parametrize("path", ["code", "verify", "sign-out"])
 def test_verify_and_sign_out_refuse_another_sites_page(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
@@ -148,10 +150,11 @@ def test_verify_and_sign_out_refuse_another_sites_page(
     r = edge.post(f"{STORE}/{path}", json=SIGN_IN, headers={"Origin": "https://evil.example"})
     assert r.status_code == 403
     assert not crud_mock["verify"].called and not crud_mock["sign_out"].called
+    assert not crud_mock["code"].called
     assert not [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
 
 
-@pytest.mark.parametrize("path", ["verify", "sign-out"])
+@pytest.mark.parametrize("path", ["code", "verify", "sign-out"])
 def test_verify_and_sign_out_are_post_only(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
@@ -161,6 +164,7 @@ def test_verify_and_sign_out_are_post_only(
     # No route answers it: 405, or 404 from the page's mount when a bundle is built.
     assert r.status_code in (404, 405)
     assert not crud_mock["verify"].called and not crud_mock["sign_out"].called
+    assert not crud_mock["code"].called
 
 
 def test_sign_out_ends_the_session_clears_the_cookie_and_starts_a_new_visitor(
@@ -401,3 +405,68 @@ def test_a_forged_session_cookie_is_not_sent_on_with_the_order_page(
         headers={"Origin": PUBLIC_URL},
     )
     assert SESSION_HEADER not in route.calls.last.request.headers
+
+
+def ask_code(edge: TestClient) -> Any:
+    return edge.post(
+        f"{STORE}/code",
+        json={"email": "ada@example.com"},
+        headers={"Origin": PUBLIC_URL, TURNSTILE_HEADER: "tok"},
+    )
+
+
+def test_a_code_request_takes_the_sign_up_check_and_answers_as_the_crud_side_did(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    r = ask_code(edge)
+    assert r.status_code == 204, r.text
+    assert r.content == b""
+    sent = crud_mock["code"].calls.last.request
+    assert json.loads(sent.content) == {"email": "ada@example.com"}
+    assert json.loads(crud_mock["turnstile"].calls.last.request.content)["action"] == "sign_up"
+    assert not [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
+
+
+def test_a_failed_bot_check_stops_a_code_request_before_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["turnstile"].respond(200, json={"verdict": "fail"}, headers=CRUD)
+    r = ask_code(edge)
+    assert r.status_code == 403
+    assert r.json()["type"] == BOT_CHECK_FAILED
+    assert not crud_mock["code"].called
+
+
+def test_a_code_request_is_sent_once(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Never retried: a second try would make a second code and mail, and count against
+    the visitor's limits."""
+    crud_mock["code"].side_effect = refused
+    r = ask_code(edge)
+    assert r.status_code == 503
+    assert crud_mock["code"].call_count == 1
+
+
+def test_a_code_request_passes_on_the_crud_sides_limit(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["code"].respond(
+        429,
+        json={
+            "type": "https://scadbuddy.dev/problems/storefront/sign_in_limited",
+            "title": "Too Many Requests",
+            "status": 429,
+            "detail": "Too many codes asked for.",
+            "retry_after": 60,
+        },
+        headers={**CRUD, "Retry-After": "60", "Content-Type": "application/problem+json"},
+    )
+    r = ask_code(edge)
+    assert r.status_code == 429
+    assert r.json()["type"].endswith("/sign_in_limited")
+    assert r.headers["Retry-After"] == "60"

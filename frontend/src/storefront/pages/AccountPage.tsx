@@ -25,9 +25,9 @@ const STATUS_LABELS: Record<AccountOrder['status'], string> = {
   cancelled: 'Cancelled',
 }
 
-function statusLabel(status: string): string {
+function statusLabel(status: AccountOrder['status']): string {
   // The type names every status, but an edge newer than this page may send one more.
-  return Object.hasOwn(STATUS_LABELS, status) ? STATUS_LABELS[status as AccountOrder['status']] : 'In progress'
+  return Object.hasOwn(STATUS_LABELS, status) ? STATUS_LABELS[status] : 'In progress'
 }
 
 function OrderRow({ order }: { order: AccountOrder }) {

@@ -14,12 +14,14 @@ from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.core.urls import https_origin
 
 #: The edge refuses to start when any of these is set: it must never hold a database
-#: secret or the KEK's file.
+#: secret, the KEK's file or a Temporal address (#5295, #5284); it reaches only the CRUD
+#: service.
 FORBIDDEN_ENV: Final = (
     "SCADBUDDY_DATABASE_URL",
     "PGPASSWORD",
     "PGPASSFILE",
     "SCADBUDDY_SECRET_KEY_FILE",
+    "SCADBUDDY_TEMPORAL_ADDRESS",
 )
 STOREFRONT_PORT: Final = 8083
 STOREFRONT_PREFIX: Final = "/api/store/v1"
@@ -39,7 +41,7 @@ class EdgeRefusal(Exception):  # noqa: N818  (a refusal to start, not an error)
 
 def check_environment(environ: Mapping[str, str]) -> None:
     reasons = [
-        f"{name} is set; the storefront holds no database secret or key"
+        f"{name} is set; the storefront holds no database secret, key or Temporal address"
         for name in FORBIDDEN_ENV
         if name in environ
     ]

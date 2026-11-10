@@ -57,6 +57,8 @@ function fakeBackend(
     binding?: MessagingBinding | null
     claim?: { status: number; message: Message }
     told?: Message | null
+    /** The check's `storefront_mail`: the storefront mails this template's news itself. */
+    storefrontMail?: boolean
     contacts?: { kind: string; value: string; primary: boolean }[]
     outcomeStatus?: number
   } = {},
@@ -87,7 +89,7 @@ function fakeBackend(
       return Response.json({ orders_customer_messaging: opts.binding === undefined ? BINDING : opts.binding })
     }
     if (request.method === 'GET' && path === `/api/v1/orders/${ORDER}/messages/check`) {
-      return Response.json({ already_notified: opts.told ?? null })
+      return Response.json({ already_notified: opts.told ?? null, storefront_mail: opts.storefrontMail ?? false })
     }
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
       writes.push({ path, body: await request.json(), key: request.headers.get('idempotency-key') })
@@ -335,6 +337,56 @@ describe('order_notify_customer_send (#5660)', () => {
     const told = fakeBackend({ told: { id: 'm0', status: 'sent' } })
     const again = await runToolWithOutcome(send, ARGS, { ...ctx({ backend: told.backend }), pending })
     expect(JSON.stringify(again.result)).toContain('already_notified')
+  })
+})
+
+// The storefront overlap (spec §8, PR 5): a template the storefront mails itself for this
+// order is not sent through the plugin too, unless `also_when_storefront_mails` says so.
+describe('order_notify_customer_send and storefront mail (#5660)', () => {
+  const SHIPPED = { order_id: ORDER, template: 'shipped' as const }
+
+  it('refuses before anything parks when the storefront mails it', async () => {
+    const { backend, writes } = fakeBackend({ storefrontMail: true })
+    const pending = new PendingActionStore()
+    const run = await runToolWithOutcome(send, SHIPPED, { ...ctx({ backend, messaging: fakeMessaging().messaging }), pending })
+    const said = JSON.stringify(run.result)
+    expect(said).toContain('storefront_mail')
+    expect(said).toContain('also_when_storefront_mails')
+    expect(said).not.toContain('pending_approval')
+    expect(writes).toEqual([])
+  })
+
+  it('parks it with the note when also_when_storefront_mails is set, and claims with it', async () => {
+    const { backend } = fakeBackend({ storefrontMail: true })
+    const pending = new PendingActionStore()
+    const args = { ...SHIPPED, also_when_storefront_mails: true }
+    const run = await runToolWithOutcome(send, args, { ...ctx({ backend, messaging: fakeMessaging().messaging }), pending })
+    const said = JSON.stringify(run.result)
+    expect(said).toContain('pending_approval')
+    expect(said).toContain('the storefront mail also sends this')
+
+    const claimed = fakeBackend({ storefrontMail: true })
+    const { messaging, sends } = fakeMessaging()
+    await send.execute(args, ctx({ backend: claimed.backend, messaging }))
+    expect(claimed.writes[0]!.body).toMatchObject({ template: 'shipped', also_when_storefront_mails: true })
+    expect(sends).toHaveLength(1)
+  })
+
+  it('sends nothing when the claim comes back skipped (the storefront started mailing since)', async () => {
+    const { backend, writes } = fakeBackend({ claim: { status: 201, message: { id: 'm1', status: 'skipped', reason: 'storefront_mail' } } })
+    const { messaging, sends } = fakeMessaging()
+    const answer = firstText(await send.execute(SHIPPED, ctx({ backend, messaging }))) as { sent: boolean; message: Message; warning?: string }
+    expect(answer.sent).toBe(false)
+    expect(answer.message.status).toBe('skipped')
+    expect(answer.warning).toMatch(/storefront mails this/)
+    expect(sends).toEqual([])
+    expect(writes.map((w) => w.path)).toEqual([`/api/v1/orders/${ORDER}/messages`])
+  })
+
+  it('claims with the flag off by default', async () => {
+    const { backend, writes } = fakeBackend()
+    await send.execute(SHIPPED, ctx({ backend, messaging: fakeMessaging().messaging }))
+    expect(writes[0]!.body).toMatchObject({ also_when_storefront_mails: false })
   })
 })
 

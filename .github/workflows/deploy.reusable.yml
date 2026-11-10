@@ -12,8 +12,9 @@ name: Deploy (reusable)
 #   2. Rewrite applications/scadbuddy/scadbuddy.yaml (the API) and, once it
 #      exists in clusters, applications/scadbuddy/scadbuddy-render.yaml (the
 #      render worker, same image; #547), scadbuddy-print.yaml (the print
-#      worker, same image; #1060) and scadbuddy-projects.yaml (the flow runs'
-#      worker, same image; #1057): in each, the image line to
+#      worker, same image; #1060), scadbuddy-projects.yaml (the flow runs'
+#      worker, same image; #1057) and scadbuddy-storefront.yaml (the
+#      storefront, same image; #5284): in each, the image line to
 #      `ghcr.io/eh-homelab/scadbuddy:<version>@sha256:<digest>` and the three
 #      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
 #      The agent sidecar's line in the API manifest (#738) is pinned to
@@ -113,6 +114,9 @@ env:
   MANIFEST_PRINT: applications/scadbuddy/scadbuddy-print.yaml
   # The flow runs' worker's Deployment (#1057, `--queue projects`): same image, same pin.
   MANIFEST_PROJECTS: applications/scadbuddy/scadbuddy-projects.yaml
+  # The storefront's Deployment (#5284, `python -m scadbuddy.storefront`): same
+  # image, same pin. Optional until that file lands in clusters.
+  MANIFEST_STOREFRONT: applications/scadbuddy/scadbuddy-storefront.yaml
   # The slicer worker (#3821, #3822), same run, same tags, its own Deployment.
   # Optional until that file lands in clusters (clusters#2549), and the only
   # image whose absence for a build is not an error: see the pin step.
@@ -791,6 +795,13 @@ jobs:
             manifests+=("$MANIFEST_PROJECTS")
           else
             echo "::notice::${MANIFEST_PROJECTS} is not in clusters yet; not pinning it"
+          fi
+          # Conditional until clusters adds the storefront's file (#5284).
+          if [ -f "$MANIFEST_STOREFRONT" ]; then
+            pin "$MANIFEST_STOREFRONT" scadbuddy-storefront
+            manifests+=("$MANIFEST_STOREFRONT")
+          else
+            echo "::notice::${MANIFEST_STOREFRONT} is not in clusters yet; not pinning it"
           fi
 
           # Nothing left behind (#5037): every ScadBuddy image any scanned file
