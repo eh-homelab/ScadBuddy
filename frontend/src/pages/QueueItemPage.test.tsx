@@ -130,8 +130,9 @@ describe('QueueItemPage (#3744)', () => {
 
     const region = await screen.findByRole('region', { name: 'Filament slots' })
     expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
-    // Read, and maybe again once the registry's topic is subscribed (#5914).
+    // Read, and maybe again once the registry's topic is subscribed (#5914); never in a loop.
     expect(read).toBeGreaterThanOrEqual(1)
+    expect(read).toBeLessThanOrEqual(2)
   })
 
   it("reads the printer's model again when the registry changes while the page is open (#5914)", async () => {
@@ -154,6 +155,39 @@ describe('QueueItemPage (#3744)', () => {
       emitRealtime('printer.changed', ['printers', 'printer:p-7'], {})
       expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
     })
+  })
+
+  it('keeps the AMS Lite when a later read of the registry fails (#5914)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let failing = false
+    let failed = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        if (!failing) {
+          return HttpResponse.json([{ id: 'p-7', serial: 'S7', name: 'Seven', model: 'A2L', bambuddy_printer_id: 7 }])
+        }
+        failed += 1
+        return HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'The registry did not answer' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
+
+    // The registry changes, and the read that follows fails: what is shown stays.
+    failing = true
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', 'printer:p-7'], {})
+      expect(failed).toBeGreaterThan(0)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
+    expect(within(region).queryByText('AMS-A · slot 3')).toBeNull()
   })
 
   it('takes no A2L from a registry that cannot be read (#5914)', async () => {

@@ -162,12 +162,14 @@ function ItemView({ item }: { item: QueueItem }) {
   )
   const output = outputRead.data
   // The registry, only for trays on an assigned printer when the item names no model
-  // (#5908); a failed read leaves the trays as the first AMS's. While it is needed, it is
-  // read again on a registry write or a resync (#5914), as Settings → Printers is; a
-  // LAN printer's reports on the same topic read nothing.
+  // (#5908). While it is needed, it is read again on a registry write or a resync
+  // (#5914), as Settings → Printers is; a LAN printer's reports on the same topic read
+  // nothing. A failed read is not caught here: `useAsync` keeps the data on screen after
+  // a failed background read, and a failed first read leaves no data, so the trays read
+  // as the first AMS's. Only `data` is used, so the page never shows that error.
   const needsPrinter = Boolean(item.ams_mapping?.length) && !itemModel(item) && item.printer_id != null
   const printers = useAsync(
-    async () => (needsPrinter ? await api.listPrinters().catch(() => null) : null),
+    async () => (needsPrinter ? await api.listPrinters() : null),
     [needsPrinter],
     needsPrinter ? PRINTER_TOPICS : NO_TOPICS,
     registryNews,
