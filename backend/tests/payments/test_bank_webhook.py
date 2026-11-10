@@ -590,4 +590,9 @@ def test_a_refused_source_keeps_its_place_among_the_buckets(clock: Clock) -> Non
     assert lookups.take("192.0.2.1") == 0
     assert lookups.take("192.0.2.2") == 0
     assert lookups.take("192.0.2.1") > 0  # refused: its own bucket is spent
-    assert list(lookups._sources) == ["192.0.2.1", "192.0.2.2"]
+    for n in range(bank_module.MAX_LOOKUP_SOURCES - 1):
+        assert lookups.take(f"198.51.100.{n}") == 0
+    # The second source was admitted after the first's refusals: it is kept, spent.
+    assert lookups.take("192.0.2.2") > 0
+    # The first was forgotten, so it starts again with a full bucket.
+    assert lookups.take("192.0.2.1") == 0
