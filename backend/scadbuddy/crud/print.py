@@ -38,6 +38,16 @@ took it. So the store holds no pool: nothing it does reaches SQL from the worker
 methods only the API's sweeps and routes call are refused here (`API_ONLY`), and so is
 ``pool``.
 
+`RemotePrintLinks` is `bambuddy/print_links.py` `PrintLinkStore` (Q20) for the methods
+the print worker calls: the links its progress reads, operations and settle hook make
+and read, the sends a run records, and a library file's links and gone items, over the
+routes with the same answers. `RemoteOutputPrints` is `library/output_prints.py`
+`OutputPrintStore` (Q21): an output's last print, as a run records it and a LAN print's
+follow moves it. Every write of both is natural (plan D5). Neither holds a pool, and
+each refuses the methods only the API calls (`LINKS_API_ONLY`, `OUTPUT_PRINTS_API_ONLY`).
+``pending_library`` is among them: only the prints list's library linking pass
+(`linking.link_library_prints`, on the API) claims those rows.
+
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a
 task on the event loop posts each to the API, which logs and NOTIFYs it once by its id.
@@ -53,7 +63,7 @@ import logging
 import threading
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Collection, Iterable
+from collections.abc import AsyncIterator, Callable, Collection, Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any, NoReturn
 from urllib.parse import quote, urlencode
@@ -63,10 +73,17 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
-from scadbuddy.bambuddy.print_links import PrintReprint
+from scadbuddy.bambuddy.print_links import (
+    LinkedPrint,
+    PrintLink,
+    PrintLinkStore,
+    PrintReprint,
+    PrintSend,
+)
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
+from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
@@ -83,6 +100,8 @@ from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import PrinterRow
@@ -346,7 +365,7 @@ class RemoteReprints:
 
 
 class ApiOnlyError(RuntimeError):
-    """A `BambuddyUploadStore` method only the API calls, called on the print worker."""
+    """A store method only the API calls, called on the print worker."""
 
 
 #: The `BambuddyUploadStore` methods only the API's sweeps and routes call: the print
@@ -643,16 +662,156 @@ class RemoteUploadStore(BambuddyUploadStore):
         await self._send("/destination-touches", {"kind": kind, "target_id": target_id})
 
 
-def _api_only(name: str) -> Callable[..., NoReturn]:
-    def refused(self: RemoteUploadStore, *args: Any, **kwargs: Any) -> NoReturn:
-        raise ApiOnlyError(f"BambuddyUploadStore.{name} is the API's; the worker has no route")
+def _api_only(store: str, name: str) -> Callable[..., NoReturn]:
+    def refused(self: Any, *args: Any, **kwargs: Any) -> NoReturn:
+        raise ApiOnlyError(f"{store}.{name} is the API's; the worker has no route")
 
     refused.__name__ = name
     return refused
 
 
-for _name in API_ONLY:
-    setattr(RemoteUploadStore, _name, _api_only(_name))
+def _refuse(cls: type, store: str, names: Iterable[str]) -> None:
+    for name in names:
+        setattr(cls, name, _api_only(store, name))
+
+
+_refuse(RemoteUploadStore, "BambuddyUploadStore", API_ONLY)
+
+
+#: The `PrintLinkStore` methods only the API calls: the prints list and detail
+#: (`api/print_history.py`, its library linking pass `linking.link_library_prints`
+#: among them), the jobs' badges (`api/printing.py`, `api/farm.py`) and an output's
+#: delete. The print worker has no route for them (#5298 Task 28).
+LINKS_API_ONLY = (
+    "page",
+    "delete_outputs",
+    "send",
+    "lan_start",
+    "record_lan_start",
+    "jobs",
+    "pending_library",
+)
+#: The `PrintLinkStore` methods that only call others of its own, each of which the
+#: worker sends over a route: ``output_for`` (``linked``), ``linked_queue_items``
+#: (``for_subject``) and ``last_run`` (``sends_for``).
+LINKS_COMPOSED = ("output_for", "linked_queue_items", "last_run")
+
+
+class RemotePrintLinks(PrintLinkStore):
+    """No pool: every method the worker calls is a route under ``…/print/links`` or
+    ``…/print/sends`` (area ``links``); the reprint's record is `RemoteReprints`'
+    route (area ``reprints``)."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+        self._reprints = RemoteReprints(client)
+
+    async def _read(self, path: str, query: Any = None) -> Any:
+        url = f"{BASE}{path}?{urlencode(query, doseq=True)}" if query else f"{BASE}{path}"
+        return (await self._client.request("GET", url)).json()
+
+    async def _post(self, path: str, body: Any = None) -> None:
+        await self._client.request("POST", f"{BASE}{path}", json=body)
+
+    async def record(self, subject: PrintSubject, link: PrintLink) -> None:
+        await self._post("/links", {"subject": subject.key, "link": link.model_dump(mode="json")})
+
+    async def for_subject(self, subject: PrintSubject) -> list[PrintLink]:
+        body = await self._read("/links", {"subject": subject.key})
+        return [PrintLink.model_validate(row) for row in body]
+
+    async def linked(self, archive_id: int) -> LinkedPrint | None:
+        body = await self._read(f"/links/{archive_id}")
+        return None if body is None else LinkedPrint.model_validate(body)
+
+    async def record_sends(self, subject: PrintSubject, sends: Sequence[PrintSend]) -> None:
+        if not sends:
+            return
+        await self._post(
+            "/sends",
+            {"subject": subject.key, "sends": [send.model_dump(mode="json") for send in sends]},
+        )
+
+    async def record_reprint(self, subject: PrintSubject, reprint: PrintReprint) -> None:
+        await self._reprints.record_reprint(subject, reprint)
+
+    async def sends_for(self, subject: PrintSubject) -> list[PrintSend]:
+        body = await self._read("/sends", {"subject": subject.key})
+        return [PrintSend.model_validate(row) for row in body]
+
+    async def run_sends(self, subject: PrintSubject, run_id: str) -> list[PrintSend]:
+        body = await self._read("/sends", {"subject": subject.key, "run_id": run_id})
+        return [PrintSend.model_validate(row) for row in body]
+
+    async def link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
+        await self._post(
+            f"/sends/{queue_item_id}/library-link", {"archive_id": archive_id, "name": name}
+        )
+
+    async def library_gone(self, queue_item_id: int) -> None:
+        await self._post(f"/sends/{queue_item_id}/library-gone")
+
+
+_refuse(RemotePrintLinks, "PrintLinkStore", LINKS_API_ONLY)
+
+
+#: The `OutputPrintStore` methods only the API calls: `OutputStore`'s overlay of the
+#: rows and an output's delete (#5298 Task 28).
+OUTPUT_PRINTS_API_ONLY = ("for_outputs", "delete")
+
+
+def _last_print(output_id: str) -> str:
+    return f"{BASE}/last-prints/{quote(output_id, safe='')}"
+
+
+class RemoteOutputPrints(OutputPrintStore):
+    """No pool: each write is a ``PUT`` under ``…/print/last-prints/{output_id}`` (area
+    ``links``), set by the output's key. Blocking, as the SQL store is: callers on the
+    loop use a thread."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    def record(
+        self,
+        output_id: str,
+        *,
+        queue_item_id: int | None,
+        slice_job_id: int | None,
+        project_id: int | None,
+        plates: list[PlateSend],
+    ) -> None:
+        body = {
+            "queue_item_id": queue_item_id,
+            "slice_job_id": slice_job_id,
+            "project_id": project_id,
+            "plates": [plate.model_dump(mode="json") for plate in plates],
+        }
+        self._client.request("PUT", _last_print(output_id), json=body)
+
+    def record_lan(
+        self,
+        output_id: str,
+        *,
+        run_id: str,
+        printer: str | None,
+        plates: list[LanPlateSend],
+    ) -> None:
+        body = {
+            "run_id": run_id,
+            "printer": printer,
+            "plates": [plate.model_dump(mode="json") for plate in plates],
+        }
+        self._client.request("PUT", f"{_last_print(output_id)}/lan", json=body)
+
+    def record_lan_progress(
+        self, output_id: str, run_id: str, *, stage: Stage, settled: bool
+    ) -> None:
+        body = {"run_id": run_id, "stage": stage, "settled": settled}
+        self._client.request("PUT", f"{_last_print(output_id)}/lan-progress", json=body)
+
+
+_refuse(RemoteOutputPrints, "OutputPrintStore", OUTPUT_PRINTS_API_ONLY)
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

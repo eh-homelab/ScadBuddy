@@ -466,7 +466,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the projects' printers, folderless projects and destination touches
   (`RemoteUploadStore`, a `BambuddyUploadStore` with no pool, whose copy lock is the API's
   copy lease, `bambuddy/copy_leases.py`, #5298 Task 27; a method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
-  its claim take an `Idempotency-Key`), and it
+  its claim take an `Idempotency-Key`), and its print links, sends and outputs' last
+  prints (`RemotePrintLinks`, a `PrintLinkStore` with no pool, and `RemoteOutputPrints`,
+  an `OutputPrintStore` with no pool, area `links`, #5298 Task 28; each refuses the
+  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning

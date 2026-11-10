@@ -43,7 +43,6 @@ from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
 from scadbuddy.bambuddy.output_reader import REMOTE_TIMEOUT, RemoteBlobs, RemoteOutputs
-from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     PrintProgress,
     ProgressObserver,
@@ -67,7 +66,9 @@ from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteEvents,
     RemoteOutcomes,
+    RemoteOutputPrints,
     RemotePrinterStore,
+    RemotePrintLinks,
     RemotePrintRunStore,
     RemoteReprints,
     RemoteSettingsStore,
@@ -96,7 +97,6 @@ from scadbuddy.library.libraries import (
     LibraryStore,
 )
 from scadbuddy.library.library_seed import seed_libraries
-from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import (
     RenderStoreSettings,
@@ -1248,8 +1248,9 @@ async def _given(library: RemoteLibrary) -> RemoteLibrary | None:
 def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> PrintWorkerDeps:
     """The print worker's stores, over the API's database and its internal routes. The
     Bambuddy settings, key included, are read through the API's CRUD route on every use,
-    and the runs, outcomes, operations, events, uploads, slices, background slices and
-    project records go through its CRUD routes (#5298).
+    and the runs, outcomes, operations, events, uploads, slices, background slices,
+    project records, print links, sends and outputs' last prints go through its CRUD
+    routes (#5298).
     ``crud``, the client of those routes, defaults to one with the worker's credential."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
@@ -1262,7 +1263,6 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # #5210: on a role of its own, wait for the API's migrations and grants.
     open_for_caller(database, "print")
     pool = database.pool
-    links = PrintLinkStore(pool)
     # #4975 phase 4: the print worker's service credential on the internal routes:
     # exchanged for its proof when one is configured (#5494), else read from its own view
     # and unsealed with the KEK (none without one).
@@ -1270,8 +1270,13 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         token_source("print", settings, settings_kek(settings.secret_key_file))
     )
     crud = crud or CrudClient(settings.api_internal_url, "print", credential, metrics=metrics)
-    # Called from threads (`asyncio.to_thread`), so blocking.
-    settings_store = RemoteSettingsStore(crud.blocking())
+    # Called from threads (`asyncio.to_thread`), so blocking. The settings store closes it.
+    blocking = crud.blocking()
+    settings_store = RemoteSettingsStore(blocking)
+    # Its print links and sends (Q20) and its outputs' last prints (Q21) through the API
+    # (#5298 Task 28): neither store has a pool.
+    links = RemotePrintLinks(crud)
+    prints = RemoteOutputPrints(blocking)
     # #5298: no LISTEN and no event log of its own. Its events go to the API (Q5), and
     # its runs, outcomes and operations are written there with theirs (D7).
     events = RemoteEvents(crud, metrics=metrics)
@@ -1352,7 +1357,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         on_settled=[settle_hook(rack, links, settings_store.load)],
         # A LAN print's last print and rack picks follow its reads (#4644, #4543).
         on_read=[
-            lan_last_print(OutputPrintStore(pool)),
+            lan_last_print(prints),
             lan_settle_hook(rack),
             native_use_hook(spools),
         ],
@@ -1388,7 +1393,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         PrintDeps(
             settings_store=settings_store,
             outputs=outputs,
-            prints=OutputPrintStore(pool),
+            prints=prints,
             uploads=uploads,
             store=print_runs,
             observer=observer,
@@ -1459,6 +1464,7 @@ PRINT_CRUD_AREAS = frozenset(
         "uploads",
         "previews",
         "copy-leases",
+        "links",
     }
 )
 
