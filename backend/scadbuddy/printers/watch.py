@@ -18,7 +18,8 @@ its graceful timeout per printer. A report the store could not write, or a touch
 not make, is logged and counted (`WATCH_WRITE_FAILED`) and the watch goes on; the report
 is written at the next quiet tick or report, and announced only once written. A report
 whose answer was lost (it may have landed) is sent again under its Idempotency-Key before
-any newer one, so the API answers the print end that write showed. On the print worker
+any newer one, so the API answers the print end that write showed, at most
+`OWED_RESENDS` times. The API writes no report older than the row's. On the print worker
 each write is a CRUD call bounded well inside the heartbeat timeout (`crud/print.py`
 `WATCH_CALL_BUDGET`).
 
@@ -44,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -78,6 +80,14 @@ WriteOutcome = Literal["written", "owed", "unwritten"]
 WRITTEN: WriteOutcome = "written"
 OWED: WriteOutcome = "owed"
 UNWRITTEN: WriteOutcome = "unwritten"
+#: How many times an owed report is sent again under its key before it is given up: its
+#: print end is then left to ``lan_wait``, the run's follow or the pick's age, and the
+#: report itself, or a newer one, is written under a new key. Bounded, so an API whose
+#: answers keep being lost never freezes the card or stops the touch.
+OWED_RESENDS = 3
+#: Logged, and counted on `Metrics.printer_watch_write_failed`, when an owed report is
+#: given up (``given_up`` true).
+WATCH_OWED_GIVEN_UP = "a printer watch gave up a report whose answer was lost"
 #: How far back an open connection proves the printer was there: paho closes a link
 #: with no inbound traffic within two keepalives, so a touch stamps ``now`` less this
 #: (never before the connect), and the card goes offline `STALE_AFTER` after the last
@@ -100,6 +110,15 @@ Nudge = Callable[[str, JobStart], Awaitable[object]]
 #: The bound of one nudge (its settings and row reads and its start): past it the nudge's
 #: task is cancelled, so a slow API or Temporal never piles up nudges.
 NUDGE_TIMEOUT = 10.0
+
+
+def raised_at(error: BaseException) -> str | None:
+    """The file and line of the frame that raised ``error`` (its traceback's last), never
+    its message, which can quote what it was given."""
+    frames = traceback.extract_tb(error.__traceback__)
+    if not frames:
+        return None
+    return f"{frames[-1].filename}:{frames[-1].lineno}"
 
 
 def shown(report: dict[str, Any]) -> tuple[Any, ...]:
@@ -206,25 +225,30 @@ class WatchActivities:
         #: attempt ends, so none outlives its activity.
         nudges: set[asyncio.Task[None]] = set()
         #: A report sent whose answer was lost (it may have landed), with its
-        #: Idempotency-Key. It is sent again under that key before any newer report, so
-        #: the API answers the print end that write showed; a newer one waits in
-        #: ``pending``. One write per turn of the loop, so each fits between heartbeats.
-        owed: tuple[LanReport, str] | None = None
+        #: Idempotency-Key and how many times it was sent again. It is sent again under
+        #: that key before any newer report, so the API answers the print end that write
+        #: showed; a newer one waits in ``pending``. One write per turn of the loop, so
+        #: each fits between heartbeats. After `OWED_RESENDS` it is given up.
+        owed: tuple[LanReport, str, int] | None = None
 
         async def flush(report: LanReport | None) -> None:
             """One write: the owed report first, else ``report`` (or the pending one)."""
             nonlocal pending, owed, last_write, announced
             last_write = self.clock()
             if owed is not None:
-                sent, key = owed
+                sent, key, resends = owed
                 outcome = await self._write(printer_id, sent, key, nudges)
-                if outcome != OWED:
-                    owed = None
+                owed = None
+                if outcome == OWED:
+                    if resends + 1 < OWED_RESENDS:
+                        owed = (sent, key, resends + 1)
+                    else:
+                        self._gave_up(printer_id)
                 if outcome == WRITTEN:
                     announced = self._announce(printer_id, sent, announced)
                 if report is not None:
                     pending = report
-                elif outcome == UNWRITTEN and pending is None:
+                elif owed is None and outcome != WRITTEN and pending is None:
                     pending = sent
                 return
             target = report if report is not None else pending
@@ -234,7 +258,7 @@ class WatchActivities:
             outcome = await self._write(printer_id, target, key, nudges)
             pending = target if outcome == UNWRITTEN else None
             if outcome == OWED:
-                owed = (target, key)
+                owed = (target, key, 0)
             elif outcome == WRITTEN:
                 announced = self._announce(printer_id, target, announced)
 
@@ -293,10 +317,19 @@ class WatchActivities:
             emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
         return now
 
+    def _gave_up(self, printer_id: str) -> None:
+        if self.write_failed is not None:
+            self.write_failed.inc()
+        logger.warning(
+            WATCH_OWED_GIVEN_UP,
+            extra={"printer_id": printer_id, "write": "put", "given_up": True},
+        )
+
     def _failed(self, what: str, printer_id: str, error: Exception) -> None:
-        """Counted, and logged with what can be searched for, never the report: a
-        refusal's status and problem type, a CRUD outage's failure word, else the
-        traceback, so a repeating bug shows where it is."""
+        """Counted, and logged with what can be searched for, never the report nor an
+        error's text, traceback or message (spec §7: a database error's DETAIL can quote
+        the report, hotend serials in it): a refusal's status and problem type, a CRUD
+        outage's failure word, else the file and line that raised it."""
         if self.write_failed is not None:
             self.write_failed.inc()
         extra: dict[str, Any] = {
@@ -310,12 +343,11 @@ class WatchActivities:
                 "problem_type": error.problem.get("type"),
                 "reason": error.problem.get("reason"),
             }
-            logger.warning(WATCH_WRITE_FAILED, extra=extra)
         elif isinstance(error, CrudUnavailableError):
             extra["failure"] = error.failure
-            logger.warning(WATCH_WRITE_FAILED, extra=extra)
         else:
-            logger.warning(WATCH_WRITE_FAILED, extra=extra, exc_info=error)
+            extra["raised_at"] = raised_at(error)
+        logger.warning(WATCH_WRITE_FAILED, extra=extra)
 
     async def _touch(self, printer_id: str, proven: datetime) -> None:
         """The row's ``seen_at``; a failure is logged and counted, and the row ages."""
@@ -350,7 +382,9 @@ class WatchActivities:
             )
         except Exception as error:
             self._failed("put", printer_id, error)
-            landed = isinstance(error, CrudUnavailableError) and not error.passes
+            # Only a lost answer may have landed: a route's 5xx means the write raised
+            # and its ledger recorded nothing, and a passing failure never ran it.
+            landed = isinstance(error, CrudUnavailableError) and error.failure == "transport"
             return OWED if landed else UNWRITTEN
         if advance.started is not None and self.nudge is not None:
             # A task of its own (#6034), held in ``nudges`` until it ends: the loop's next

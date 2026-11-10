@@ -391,9 +391,13 @@ def test_a_report_put_sent_again_with_its_key_answers_the_same_end(
     assert reports.get(pid) == seen
     # Without the key's ledger the same write ends nothing: the print ended already.
     assert remote.put(pid, _report("FINISH"), start + timedelta(seconds=5)) is None
+    later = start + timedelta(seconds=10)
     # The write that shows a print start answers it, for the print watcher's nudge.
-    assert remote.advance(pid, _report("RUNNING", "plate_2"), start) == Advance(started="plate_2")
-    assert remote.put(pid, _report("FAILED", "plate_2"), start) == PrintEnd("plate_2", True)
+    assert remote.advance(pid, _report("RUNNING", "plate_2"), later) == Advance(started="plate_2")
+    assert remote.put(pid, _report("FAILED", "plate_2"), later) == PrintEnd("plate_2", True)
+    # A write that lands late, older than the row, moves nothing back (#5298 Task 30).
+    assert remote.put(pid, _report("RUNNING", "plate_2"), start) is None
+    assert reports.get(pid) == (_report("FAILED", "plate_2"), later)
     with pytest.raises(CrudRefusedError) as refused:
         crud.request("PUT", url, json=body)
     assert refused.value.status == 428

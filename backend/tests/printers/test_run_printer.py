@@ -160,6 +160,16 @@ def lan_linked(printers: PrinterStore, reports: PrinterReportStore, **patch: Any
     return row.id
 
 
+def reported_ago(reports: PrinterReportStore, printer_id: str, ago: timedelta) -> None:
+    """The printer last heard from ``ago``: its row aged in place, since a write of an
+    older report is skipped (`PrinterReportStore.put_in`, #5298 Task 30)."""
+    with reports.pool.connection() as conn:
+        conn.execute(
+            "UPDATE printer_reports SET seen_at = %s WHERE printer_id = %s",
+            (datetime.now(UTC) - ago, printer_id),
+        )
+
+
 @respx.mock
 async def test_run_refuses_disagreeing_printer_fields(
     printers: PrinterStore, reports: PrinterReportStore
@@ -419,7 +429,7 @@ async def test_auto_path_is_bambuddy_once_the_report_is_stale(
 ) -> None:
     status = bambuddy_routes()
     pid = lan_linked(printers_with_kek, reports)
-    reports.put(pid, REPORT["print"], datetime.now(UTC) - timedelta(minutes=5))
+    reported_ago(reports, pid, timedelta(minutes=5))
 
     prepared = await prepare(printers_with_kek, reports, run_request(printer=pid))
 
@@ -493,7 +503,7 @@ async def test_a_native_printer_whose_report_is_stale_is_refused(
     """#4442 I3: past the window `/printers/now` calls it offline; its trays are not known."""
     status = bambuddy_routes()
     pid = lan_linked(printers_with_kek, reports, preferred_path="native")
-    reports.put(pid, REPORT["print"], datetime.now(UTC) - timedelta(minutes=5))
+    reported_ago(reports, pid, timedelta(minutes=5))
 
     with pytest.raises(ApiError) as refused:
         await prepare(printers_with_kek, reports, run_request(printer=pid))
@@ -603,7 +613,7 @@ def refusal(scenario: str, printers: PrinterStore, reports: PrinterReportStore) 
     if scenario == "lan-only":
         printers.unlink_bambuddy(pid)
     elif scenario == "stale":
-        reports.put(pid, REPORT["print"], datetime.now(UTC) - timedelta(minutes=5))
+        reported_ago(reports, pid, timedelta(minutes=5))
     else:
         assert scenario == "no-key"
         printers.kek = None
@@ -684,7 +694,7 @@ async def test_asked_bambuddy_takes_bambuddys_path_on_a_lan_printer(
 
     native = await run_route(settings, printers_with_kek, reports, printer=pid, printer_id=None)
     assert native.native
-    reports.put(pid, REPORT["print"], datetime.now(UTC) - timedelta(minutes=5))
+    reported_ago(reports, pid, timedelta(minutes=5))
     route = await run_route(
         settings, printers_with_kek, reports, printer=pid, printer_id=None, asked="bambuddy"
     )

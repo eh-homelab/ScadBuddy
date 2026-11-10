@@ -11,10 +11,11 @@ import asyncio
 import logging
 import threading
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
+from prometheus_client import CollectorRegistry, Counter
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.events import Event
@@ -22,8 +23,13 @@ from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore
-from scadbuddy.printers.watch import WATCH_WRITE_FAILED, WatchActivities
+from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, stale
+from scadbuddy.printers.watch import (
+    OWED_RESENDS,
+    WATCH_OWED_GIVEN_UP,
+    WATCH_WRITE_FAILED,
+    WatchActivities,
+)
 from scadbuddy.rack.usage import LanUsage
 
 PRINTER = "00000000-0000-4000-8000-000000000001"
@@ -91,13 +97,16 @@ class Lan:
         await asyncio.Event().wait()
 
 
-def _watch(log: list[Any], script: list[Any]) -> tuple[WatchActivities, Store]:
+def _watch(
+    log: list[Any], script: list[Any], failed: Counter | None = None
+) -> tuple[WatchActivities, Store]:
     store = Store(log, script)
     watches = WatchActivities(
         None,  # type: ignore[arg-type]
         cast(PrinterReportStore, store),
         cast(Any, Bus(log)),
         rack=cast(LanUsage, Rack(log)),
+        write_failed=failed,
     )
     return watches, store
 
@@ -203,13 +212,97 @@ async def test_a_failure_is_logged_to_be_found_never_with_the_report(
     refused = CrudRefusedError(
         422, {"type": "https://x/problem", "reason": "bad", "detail": "TEST-HOTEND-17"}
     )
-    watches, _ = _watch(log, [refused, TypeError("a bug")])
+    # A database error's DETAIL can quote the report it was given (re-review D3).
+    bug = TypeError('invalid input syntax for type json DETAIL: {"serial": "TEST-HOTEND-18"}')
+    watches, _ = _watch(log, [refused, bug])
     report = LanReport(serial="s", received_at=datetime.now(UTC), print={"secret": "S3CR3T"})
     with caplog.at_level(logging.WARNING):
         assert await watches._write(PRINTER, report, "k1") == "unwritten"
         assert await watches._write(PRINTER, report, "k2") == "unwritten"
     first, second = [r for r in caplog.records if r.getMessage() == WATCH_WRITE_FAILED]
     assert (first.status, first.problem_type, first.reason) == (422, "https://x/problem", "bad")  # type: ignore[attr-defined]
-    assert first.exc_info is None
-    assert second.exc_info is not None and second.exc_info[0] is TypeError
-    assert "S3CR3T" not in caplog.text and "TEST-HOTEND-17" not in caplog.text
+    assert first.exc_info is None and second.exc_info is None
+    # The raising frame's file and line, never the message or a traceback.
+    assert second.error == "TypeError"  # type: ignore[attr-defined]
+    assert second.raised_at.startswith(__file__.removesuffix("c"))  # type: ignore[attr-defined]
+    for secret in ("S3CR3T", "TEST-HOTEND-17", "TEST-HOTEND-18", "invalid input"):
+        assert secret not in caplog.text
+        assert all(secret not in repr(vars(record)) for record in caplog.records)
+
+
+async def test_an_owed_report_answered_with_a_5xx_goes_pending() -> None:
+    """Re-review D1(a): a route's 5xx means the write raised and the ledger recorded
+    nothing, so the resend's 5xx stops owing it: the newer report is written under a key
+    of its own, and the quiet tick touches again."""
+    log: list[Any] = []
+    lost = CrudUnavailableError("no answer", "transport")
+    server = CrudUnavailableError("500", "unavailable")
+    newer = {"gcode_state": "IDLE"}
+    watches, store = _watch(log, [lost, server, None])
+    await _follow_until(watches, Lan([FINISH, newer]), lambda: ("touch", None) in log)
+    (r1, k1), (r2, k2), (r3, k3) = store.puts[:3]
+    assert (r1, r2, r3) == (FINISH, FINISH, newer)
+    assert k1 == k2 != k3
+    assert len(store.puts) == 3
+
+
+async def test_a_first_5xx_is_never_owed() -> None:
+    log: list[Any] = []
+    server = CrudUnavailableError("500", "unavailable")
+    watches, store = _watch(log, [server, None])
+    await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    assert [report for report, _ in store.puts] == [FINISH, FINISH]
+    assert store.puts[0][1] != store.puts[1][1]
+
+
+async def test_an_owed_report_is_given_up_after_its_resends(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Re-review D1(b): after `OWED_RESENDS` lost answers the report is given up, logged
+    and counted, then written under a new key, and the touch runs again."""
+    log: list[Any] = []
+    failed = Counter("given_up", "given_up", registry=CollectorRegistry())
+    lost = [CrudUnavailableError("no answer", "transport") for _ in range(OWED_RESENDS + 1)]
+    watches, store = _watch(log, [*lost, None], failed=failed)
+    with caplog.at_level(logging.WARNING):
+        await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    keys = [key for _, key in store.puts]
+    assert len(keys) == OWED_RESENDS + 2
+    assert len(set(keys[: OWED_RESENDS + 1])) == 1
+    assert keys[-1] != keys[0]
+    (given_up,) = [r for r in caplog.records if r.getMessage() == WATCH_OWED_GIVEN_UP]
+    assert given_up.given_up is True  # type: ignore[attr-defined]
+    # Each lost answer, and the giving up.
+    assert failed._value.get() == OWED_RESENDS + 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        CrudRefusedError(429, {"type": "x", "reason": "busy"}),
+        CrudUnavailableError("no connection", "unreached"),
+        CrudUnavailableError("not served here", "route_missing"),
+    ],
+    ids=["4xx", "unreached", "route-missing"],
+)
+async def test_an_owed_report_refused_or_never_run_on_its_resend_is_dropped(
+    answer: Exception,
+) -> None:
+    """A resend refused (a 4xx) or never run (a passing failure) stops owing the report:
+    it is written again under a new key."""
+    log: list[Any] = []
+    lost = CrudUnavailableError("no answer", "transport")
+    watches, store = _watch(log, [lost, answer, None])
+    await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    keys = [key for _, key in store.puts]
+    assert len(keys) == 3 and keys[0] == keys[1] != keys[2]
+
+
+def test_a_report_older_than_the_row_is_stale() -> None:
+    """Re-review D2, the store's guard without a database: only an older ``seen_at`` is
+    stale; one as old as the row is written again."""
+    now = datetime.now(UTC)
+    assert stale(now, now - timedelta(microseconds=1))
+    assert not stale(now, now)
+    assert not stale(now, now + timedelta(seconds=1))
+    assert not stale(None, now)

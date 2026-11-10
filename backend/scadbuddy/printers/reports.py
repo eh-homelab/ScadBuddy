@@ -45,6 +45,12 @@ class PrintEnd:
     timed: bool
 
 
+def stale(stored: datetime | None, seen_at: datetime) -> bool:
+    """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
+    is not written (`PrinterReportStore.put_in`)."""
+    return stored is not None and seen_at < stored
+
+
 def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None, PrintEnd | None]:
     """The print running after the report ``new``, given the one ``running`` before it,
     and the print ``new`` shows ended: ``running``'s own ``FINISH``, ``FAILED`` or
@@ -141,13 +147,20 @@ class PrinterReportStore:
     def advance_in(
         conn: Connection[DictRow], printer_id: str, report: dict[str, Any], seen_at: datetime
     ) -> Advance:
-        """`advance` on ``conn``, in the caller's transaction."""
+        """`advance` on ``conn``, in the caller's transaction. A report older than the row's
+        ``seen_at`` writes nothing, touches nothing, and ends and starts nothing (`stale`):
+        a write that lands after a newer one (a print worker's request still running on
+        the API after the worker gave its answer up) never moves the row, or the print it
+        shows running, back. One as old as the row's writes as before, so a resend is the
+        same write."""
         if printer_uuid(printer_id) is None:
             return Advance()
         old = conn.execute(
-            "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+            "SELECT running_subtask, seen_at FROM printer_reports WHERE printer_id = %s FOR UPDATE",
             (printer_id,),
         ).fetchone()
+        if stale(None if old is None else old["seen_at"], seen_at):
+            return Advance()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
         written = conn.execute(
