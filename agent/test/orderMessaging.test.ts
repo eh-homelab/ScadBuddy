@@ -23,7 +23,7 @@ import { connectInProcess } from '../src/temporal/turnTools.js'
 import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { runToolWithOutcome, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { runToolWithOutcome, type Tool, type ToolContext, ToolError } from '../src/tools/registry.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
@@ -203,8 +203,8 @@ describe('order_notify_customer_send (#5660)', () => {
     }
   })
 
-  it('never sends again for a claim already made: an unknown one is recorded unknown', async () => {
-    const { backend, writes } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'sending' } } })
+  it('never sends again for a claim already made: one read unknown (stale) is recorded unknown', async () => {
+    const { backend, writes } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'unknown' } } })
     const { messaging, sends } = fakeMessaging()
     const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean; warning?: string }
     expect(answer.sent).toBe(false)
@@ -213,8 +213,38 @@ describe('order_notify_customer_send (#5660)', () => {
     expect(writes[1]!.body).toEqual({ status: 'unknown', reason: 'no_answer' })
   })
 
+  it('answers a replayed claim still sending, with no dedupe key, as in flight: no send, no outcome', async () => {
+    const { backend, writes } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'sending' } } })
+    const { messaging, sends } = fakeMessaging()
+    const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean; message: Message; warning?: string }
+    expect(answer.sent).toBe(false)
+    expect(answer.message.status).toBe('sending')
+    expect(answer.warning).toMatch(/may still be in flight; nothing was sent again\. It reads unknown after 15 minutes/)
+    expect(sends).toEqual([])
+    expect(writes.map((w) => w.path)).toEqual([`/api/v1/orders/${ORDER}/messages`])
+  })
+
+  it('lists the order’s messages as the order page does, for resend_of (#5660)', async () => {
+    const list = tool('order_messages_list')
+    expect(list.risk).toBe('read')
+    const listed = [{ id: 'm1', status: 'unknown', template: 'ready' }]
+    const backend = createBackendClient(BACKEND, async (input) => {
+      const path = new URL((input as Request).url).pathname
+      return path === `/api/v1/orders/${ORDER}/messages` ? Response.json(listed) : Response.json({ detail: path }, { status: 500 })
+    })
+    expect(firstText(await list.execute({ order_id: ORDER }, ctx({ backend })))).toEqual(listed)
+  })
+
+  it('names the list in its refusal for an unknown order', async () => {
+    const list = tool('order_messages_list')
+    const backend = createBackendClient(BACKEND, async () => Response.json({ title: 'Not Found', detail: 'no such order' }, { status: 404 }))
+    const refused = list.execute({ order_id: ORDER }, ctx({ backend }))
+    await expect(refused).rejects.toBeInstanceOf(ToolError)
+    await expect(refused).rejects.toThrow(`list order ${ORDER}'s messages failed (HTTP 404)`)
+  })
+
   it('says a replayed claim was not sent again when its outcome cannot be recorded either', async () => {
-    const { backend } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'sending' } }, outcomeStatus: 503 })
+    const { backend } = fakeBackend({ claim: { status: 200, message: { id: 'm1', status: 'unknown' } }, outcomeStatus: 503 })
     const { messaging, sends } = fakeMessaging()
     const answer = firstText(await send.execute(ARGS, ctx({ backend, messaging }))) as { sent: boolean; warning?: string }
     expect(answer.sent).toBe(false)

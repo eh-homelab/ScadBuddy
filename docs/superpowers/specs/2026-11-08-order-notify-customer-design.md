@@ -363,12 +363,30 @@ The handler's order of work:
    answer, between the call and the outcome.
    - With `args.idempotency_key` bound: call the plugin again with the same key (the
      plugin drops the copy), then post the outcome.
-   - Without it: post `unknown` (`no_answer`) and send nothing. The answer tells the
-     person to check the inbox, then "Mark sent" or send again.
+   - Without it, a row that reads `unknown` (stale, or recorded so): post `unknown`
+     (`no_answer`) and send nothing. The answer tells the person to check the inbox, then
+     "Mark sent" or send again.
+   - Without it, a row still `sending` and fresh: another call is sending it now. Send
+     nothing and post no outcome; the answer says it is in flight. Once stale, it reads
+     `unknown` (above).
 5. The plugin's key is the message row's `id`, so each send attempt of one row has one key.
 
 "Send again" is a new call with `resend_of: <message id>`: a new key, a new approval, a
-new row. It is the only way past `already_notified` and `unknown`.
+new row. It is the only way past `already_notified` and `unknown`. The ids are the read tool
+`order_messages_list`'s (`GET …/messages`), as the order page lists them.
+
+On the order page (PR 3), "Send again" goes to the agent's person-only routes
+`POST /api/v1/ai/orders/{id}/messages/preview` and `…/send` (`routes/orderMessages.ts`, the
+UI's origin and a signed-in person, as the test send). The preview composes the message and
+answers it with its digest; nothing is sent or recorded. The send names the template,
+`resend_of` and that digest, never the text: the agent composes the message again, refuses
+409 `message_changed` when its digest differs, and else claims and sends it as the tool does,
+under the open preview's `Idempotency-Key`. The browser makes one key per preview and keeps it
+for every click on its Send until a send is answered, so a retry after a lost answer is served
+from the first claim. A backend 404, 409 or 422 keeps its status and slug: a claim that lost a
+race after the preview is 409 `already_notified`. Any other backend status is logged and answered
+502 `upstream_error`: a 401 or 403 there is the agent's service credential, not the person. The
+person's click on the shown message is the approval.
 
 Outward calls are not retried by Temporal on a lost answer (`turnTools.ts`: only `read`
 calls are), and an approval runs once (`confirm_action`). The key and the claim make a

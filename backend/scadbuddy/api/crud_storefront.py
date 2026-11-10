@@ -6,7 +6,8 @@ The edge sends the visitor id it verified in the cookie (`VISITOR_HEADER`) and t
 browser's address (`CLIENT_HEADER`). This side cannot check the cookie's mac: it takes
 the id only as a 256-bit secret to look a visitor up by, and the address only to key the
 per-client render limit (plan "Trust model"). `visitor_id` and `store_client` are the
-dependencies that read them, and every route takes both but ``pay/checkout``: only a
+dependencies that read them, and every route takes both but ``pay/checkout`` and
+``GET …/turnstile``: only a
 ``storefront`` credential reaches these routes (`crud_router`), so no other caller can
 send either header here.
 
@@ -32,9 +33,12 @@ values to it, and ``DELETE …/draft/items/{item_id}`` removes an item of it (ea
 that is not an item is 422 ``draft_body_invalid``.
 
 Area ``requests``: ``GET …/requests-enabled`` says whether "Ask for a design" is on, so
-the edge refuses a request before it reads the body. ``POST …/draft/requests`` (multipart
+the edge refuses a request before it reads the body; with the request's
+``Idempotency-Key``, it is also on for a key that holds a committed request, whose retry
+answers its stored reply whatever changed since. ``POST …/draft/requests`` (multipart
 ``text`` and ``files``, ``Idempotency-Key`` required) adds a design request with its files.
-It refuses 404 ``requests_disabled`` before it reads the body; then the body is read with
+It refuses 404 ``requests_disabled`` before it reads the body, unless its key holds a
+committed request (`request_sent`); then the body is read with
 its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
@@ -53,6 +57,7 @@ import ipaddress
 import json
 import re
 from typing import Annotated, Any, Final
+from urllib.parse import urlsplit
 
 from fastapi import Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -70,6 +75,7 @@ from scadbuddy.orders.storefront.drafts import (
     add_request,
     get_draft,
     remove_item,
+    request_sent,
     requests_disabled,
 )
 from scadbuddy.orders.storefront.listings import (
@@ -83,6 +89,12 @@ from scadbuddy.orders.storefront.renders import (
     render_estimate,
     start_render,
     store_render,
+)
+from scadbuddy.orders.storefront.turnstile import (
+    MAX_TOKEN_CHARS,
+    TurnstileConfig,
+    Verdict,
+    verify,
 )
 from scadbuddy.orders.storefront.wire import (
     AddListingItem,
@@ -99,6 +111,7 @@ from scadbuddy.storefront.wire import (
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
     VISITOR_ID_PROBLEM,
+    TurnstileAction,
 )
 
 router = crud_router("storefront")
@@ -307,8 +320,12 @@ async def draft_remove(
     return await remove_item(state, visitor, key, item_id)
 
 
-def _requests_enabled(state: StateDep) -> bool:
-    return state.settings_store.snapshot().runtime.storefront_requests_enabled
+def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
+    """Whether "Ask for a design" is on, or ``key`` holds a committed request (a retry,
+    answered whatever changed since)."""
+    if state.settings_store.snapshot().runtime.storefront_requests_enabled:
+        return True
+    return key is not None and request_sent(state, key)
 
 
 class RequestsEnabled(BaseModel):
@@ -317,10 +334,16 @@ class RequestsEnabled(BaseModel):
 
 @router.get("/requests-enabled", name="crud_storefront_requests_enabled")
 async def requests_enabled(
-    state: StateDep, _visitor: Visitor, _client: StoreClient
+    state: StateDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
 ) -> RequestsEnabled:
-    """Whether "Ask for a design" is on (``storefront_requests_enabled``)."""
-    return RequestsEnabled(enabled=await asyncio.to_thread(_requests_enabled, state))
+    """Whether "Ask for a design" is on (``storefront_requests_enabled``); with a
+    request's ``Idempotency-Key``, also on when that key holds a committed request."""
+    return RequestsEnabled(
+        enabled=await asyncio.to_thread(_requests_enabled, state, idempotency_key)
+    )
 
 
 @router.post(
@@ -357,7 +380,7 @@ async def draft_request(
     """A design request added to the visitor's draft
     (`orders/storefront/drafts.py` `add_request`)."""
     key = required_key(idempotency_key)
-    if not await asyncio.to_thread(_requests_enabled, state):
+    if not await asyncio.to_thread(_requests_enabled, state, key):
         raise requests_disabled()
     upload = await read_request(request)
     try:
@@ -392,3 +415,49 @@ async def pay_checkout(body: PayCheckoutRead, orders: OrdersDep) -> VenmoCheckou
     if found is None:
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     return found
+
+
+class TurnstileSiteKey(BaseModel):
+    """The bot check's public site key; ``null`` while the check is off."""
+
+    site_key: str | None
+
+
+class TurnstileCheck(BaseModel):
+    """The browser's token, as the edge read it, and the form it was made for."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str | None = Field(default=None, max_length=MAX_TOKEN_CHARS)
+    action: TurnstileAction
+
+
+class TurnstileVerdict(BaseModel):
+    verdict: Verdict
+
+
+def _turnstile_config(state: StateDep) -> TurnstileConfig:
+    runtime = state.settings_store.snapshot().runtime
+    public = state.settings.storefront_public_url
+    return TurnstileConfig(
+        site_key=runtime.storefront_turnstile_site_key or None,
+        secret=runtime.storefront_turnstile_secret or None,
+        hostname=urlsplit(public).hostname if public else None,
+    )
+
+
+@router.get("/turnstile", name="crud_storefront_turnstile")
+async def turnstile(state: StateDep) -> TurnstileSiteKey:
+    """The bot check's site key (``storefront_turnstile_site_key``), or ``null``."""
+    config = await asyncio.to_thread(_turnstile_config, state)
+    return TurnstileSiteKey(site_key=config.site_key)
+
+
+@router.post("/turnstile/verify", name="crud_storefront_turnstile_verify")
+async def turnstile_verify(
+    body: TurnstileCheck, state: StateDep, _visitor: Visitor, client: StoreClient
+) -> TurnstileVerdict:
+    """The verdict on the browser's token (`orders/storefront/turnstile.py` `verify`)."""
+    config = await asyncio.to_thread(_turnstile_config, state)
+    verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
+    return TurnstileVerdict(verdict=verdict)

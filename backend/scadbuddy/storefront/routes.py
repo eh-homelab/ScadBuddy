@@ -30,6 +30,7 @@ from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
 
@@ -70,6 +71,14 @@ def _client(request: Request) -> str:
 Crud = Annotated[StorefrontCrud, Depends(_crud)]
 Visitor = Annotated[str, Depends(_visitor)]
 Client = Annotated[str, Depends(_client)]
+
+
+@visitor_router.get("/turnstile")
+async def turnstile(request: Request, crud: Crud) -> Any:
+    """The bot check's public site key for the page's widget, or null while the check is
+    off (`turnstile.py`): the CRUD side's ``GET …/turnstile``, as last read."""
+    site_key: SiteKey = request.app.state.turnstile_site_key
+    return {"site_key": await site_key.get(crud)}
 
 
 @visitor_router.get("/listings")
@@ -164,13 +173,36 @@ UPLOAD_LOST: Final = (
 )
 
 
+#: How long a refused (visitor, key) is remembered, and how many are kept.
+REFUSED_TTL: Final = 30.0
+REFUSED_MAX: Final = 10_000
+
+
 class RequestsEnabled:
     """The CRUD side's ``storefront_requests_enabled``, read at most once per
-    `ENABLED_TTL` per replica."""
+    `ENABLED_TTL` per replica. Also a short negative cache of the keys it said hold no
+    committed request while requests are off (`REFUSED_TTL`, `REFUSED_MAX`, the oldest
+    evicted): safe, since a refused request never commits."""
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._read: tuple[float, bool] | None = None
+        self._refused: dict[tuple[str, str], float] = {}
+
+    def is_refused(self, visitor_id: str, key: str) -> bool:
+        at = self._refused.get((visitor_id, key))
+        if at is None:
+            return False
+        if self._clock() - at >= REFUSED_TTL:
+            del self._refused[(visitor_id, key)]
+            return False
+        return True
+
+    def refuse(self, visitor_id: str, key: str) -> None:
+        self._refused.pop((visitor_id, key), None)
+        self._refused[(visitor_id, key)] = self._clock()
+        while len(self._refused) > REFUSED_MAX:
+            del self._refused[next(iter(self._refused))]
 
     async def get(self, crud: StorefrontCrud, *, visitor_id: str, client: str) -> bool:
         now = self._clock()
@@ -203,11 +235,38 @@ def _request_key(request: Request, visitor_id: str) -> str:
     return hashlib.sha256(f"{visitor_id}\x1f{browser}".encode()).hexdigest()
 
 
+async def _refuse_unless_sent(
+    request: Request, crud: StorefrontCrud, visitor_id: str, client: str
+) -> None:
+    """404 ``requests_disabled`` unless the request's key holds a request the CRUD side
+    committed (asked while requests are off; a refusal is remembered for `REFUSED_TTL`).
+    A request with no key, or a bad one, is refused as off."""
+    try:
+        key = _request_key(request, visitor_id)
+    except ApiError:
+        key = None
+    cache: RequestsEnabled = request.app.state.requests_enabled
+    if key is None or cache.is_refused(visitor_id, key):
+        refused = True
+    else:
+        refused = not await crud.requests_enabled(visitor_id=visitor_id, client=client, key=key)
+        if refused:
+            cache.refuse(visitor_id, key)
+    if refused:
+        raise ApiError(
+            404,
+            "This shop does not take design requests.",
+            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+        )
+
+
 @visitor_router.post("/draft/requests")
 async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A design request. Refused before its body is read: 404 ``requests_disabled``,
     428 ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`: the
-    client's allowance is spent, or its one upload is running), 503 ``uploads_busy``
+    client's allowance is spent, or its one upload is running), then 403
+    ``bot_check_failed`` or 503 ``bot_check_unavailable`` (`turnstile.py`; neither spends
+    the allowance), 503 ``uploads_busy``
     (`uploads.py` `UploadGate`). The body is then read whole with every cap
     (`read_request`) and spooled before the CRUD call: a deliberate step from the spec's
     "streams each upload" (spec §5.4), so that each cap is refused here before the CRUD
@@ -215,14 +274,12 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
     read, before the forward, which the CRUD side's own gate bounds. A CRUD side that is
     busy is 503 ``uploads_busy`` (it read no byte); any other failed or timed-out call is
     503 ``upload_unavailable``: it may have committed, and the same browser key sent
-    again is the same request."""
+    again is the same request. So while requests are off, the CRUD side is asked about
+    the request's own key: a key that holds a committed request is forwarded, and the
+    CRUD side answers its stored reply."""
     state = request.app.state
     if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
-        raise ApiError(
-            404,
-            "This shop does not take design requests.",
-            type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
-        )
+        await _refuse_unless_sent(request, crud, visitor_id, client)
     key = _request_key(request, visitor_id)
     allowance: UploadAllowance = state.upload_allowance
     held = allowance.start(client)
@@ -235,6 +292,10 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
             retry_after=held,
         )
     try:
+        # After the allowance, which spends nothing until the check passes: a client out
+        # of allowance costs no Siteverify call, and a failed check spends no allowance
+        # (failed checks have their own limit, `turnstile.py` `FailedChecks`).
+        await require_turnstile(request, "request")
         upload = await _read_spent(request, allowance, held)
     finally:
         allowance.finish(held)

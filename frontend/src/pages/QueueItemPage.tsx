@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { ChevronRightIcon, ExternalLinkIcon, SlidersHorizontalIcon, TriangleAlertIcon } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { Output, QueueItem, ScadBuddyJob } from '../api/types'
+import type { Output, PrinterRow, QueueItem, ScadBuddyJob } from '../api/types'
 import { JobPicture } from '../components/prints/JobPicture'
 import { ParamsTable } from '../components/prints/PrintFiles'
 import { PrintStatus } from '../components/prints/PrintStatus'
@@ -19,7 +19,11 @@ import { editPath, modelPath } from '../lib/deeplink'
 import { NEW_TAB, openExternal } from '../lib/embed'
 import { amsUnitLabel } from '../lib/filaments'
 import { formatDuration } from '../lib/format'
+import { PRINTER_TOPICS, registryNews } from '../lib/printerRegistry'
 import { useAsync } from '../lib/useAsync'
+
+/** No realtime topic: the registry is not read, so nothing to follow. */
+const NO_TOPICS: readonly string[] = []
 
 /** A queue item id: what Bambuddy's ids look like, so nothing else is asked for. */
 const ITEM_ID = /^[1-9]\d{0,14}$/
@@ -42,14 +46,32 @@ function when(iso: string | null | undefined): string | null {
  */
 const AMS_LITE_UNIT = 6
 
+/** Whether a model name is the A2L's: "A2L" (the printer code N9,
+ * `backend/scadbuddy/bambuddy/filaments3mf.py`), or a full name such as "Bambu Lab A2L". */
+function isA2lModel(model: string | null | undefined): boolean {
+  return /(^|\s)A2L$/i.test(model?.trim() ?? '')
+}
+
 /**
- * Whether the item prints on an A2L, the one printer with an AMS-Lite: by the model the
- * file was sliced for, else the model the item waits for. Bambuddy names it "A2L" (the
- * printer code N9, `backend/scadbuddy/bambuddy/filaments3mf.py`); a full name such as
- * "Bambu Lab A2L" ends with it.
+ * The model the item names for itself: the model its file was sliced for, else the
+ * model it waits for. `null` when it names neither.
  */
-function onA2l(item: QueueItem): boolean {
-  return [item.sliced_for_model, item.target_model].some((model) => /(^|\s)A2L$/i.test(model?.trim() ?? ''))
+function itemModel(item: QueueItem): string | null {
+  return item.sliced_for_model || item.target_model || null
+}
+
+/**
+ * Whether the item prints on an A2L, the one printer with an AMS-Lite: by the model it
+ * names (`itemModel`), else, for an item assigned to a printer, by that printer's model
+ * in ScadBuddy's printer registry (`GET /printers`, read only then: no Bambuddy call).
+ * With no model known at all, it is not taken for an A2L, and its trays read as the
+ * first AMS's.
+ */
+function onA2l(item: QueueItem, printers: readonly PrinterRow[] | null): boolean {
+  const named = itemModel(item)
+  if (named) return isA2lModel(named)
+  const printer = printers?.find((row) => row.bambuddy_printer_id === item.printer_id)
+  return isA2lModel(printer?.model)
 }
 
 /**
@@ -139,6 +161,19 @@ function ItemView({ item }: { item: QueueItem }) {
     [job?.output_id],
   )
   const output = outputRead.data
+  // The registry, only for trays on an assigned printer when the item names no model
+  // (#5908). While it is needed, it is read again on a registry write or a resync
+  // (#5914), as Settings → Printers is; a LAN printer's reports on the same topic read
+  // nothing. A failed read is not caught here: `useAsync` keeps the data on screen after
+  // a failed background read, and a failed first read leaves no data, so the trays read
+  // as the first AMS's. Only `data` is used, so the page never shows that error.
+  const needsPrinter = Boolean(item.ams_mapping?.length) && !itemModel(item) && item.printer_id != null
+  const printers = useAsync(
+    async () => (needsPrinter ? await api.listPrinters() : null),
+    [needsPrinter],
+    needsPrinter ? PRINTER_TOPICS : NO_TOPICS,
+    registryNews,
+  ).data
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-4 py-6">
@@ -177,7 +212,7 @@ function ItemView({ item }: { item: QueueItem }) {
             />
           )}
           {item.ams_mapping && item.ams_mapping.length > 0 && (
-            <SlotsSection item={item} colours={output?.colors ?? []} a2l={onA2l(item)} />
+            <SlotsSection item={item} colours={output?.colors ?? []} a2l={onA2l(item, printers ?? null)} />
           )}
         </div>
       </div>
@@ -257,7 +292,8 @@ function QueueSection({ item }: { item: QueueItem }) {
         <Fact label="Waiting because" value={item.waiting_reason} />
         <Fact label="Error" value={item.error_message} />
         <Fact label="Scheduled" value={when(item.scheduled_time)} />
-        <Fact label="Start" value={item.manual_start ? 'Waits for a manual start' : null} />
+        {/* Only while it waits: a finished item keeps the flag (#5908). */}
+        <Fact label="Start" value={item.manual_start && item.status === 'pending' ? 'Waits for a manual start' : null} />
         <Fact label="Estimated time" value={item.print_time_seconds ? formatDuration(item.print_time_seconds) : null} />
         <Fact
           label="Estimated filament"

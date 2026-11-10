@@ -146,8 +146,8 @@ opens every one and seals it again byte for byte).
   ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
   and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
   `test/toolCallLatency.temporal.test.ts`
-  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
-  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
+  times each phase around the activity when asked (`TOOL_CALL_BENCH_REPORT=1` prints them,
+  `TOOL_CALL_BENCH_ASSERT=1` fails a median overhead over 1 s) and always checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
   below); a turn whose transcript last ran in another directory (a fork's first) is told so in
   its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
@@ -296,7 +296,8 @@ opens every one and seals it again byte for byte).
     `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
     `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
     the row that names a blob and releases after the row is gone, and `reconcile`, on the
-    sweeper's tick hourly, releases what cascades, `forgetSubject` and crashes left and holds
+    sweeper's tick hourly (a failed or `no_connection` run is tried again at the next tick),
+    on one replica at a time (`RECONCILE_LOCK` on a `database.locks` connection), releases what cascades, `forgetSubject` and crashes left and holds
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
@@ -322,7 +323,8 @@ opens every one and seals it again byte for byte).
     The one way past it is a plugin package approved with `allow_refused` (store.ts,
     column `allow_refused`, bound to that pin's approval): it loads as it is through
     `allowedPluginPaths`, unchecked, with the built-ins it names (`builtinTools`, each
-    call `outward`) and skill shell injection on (with `Bash` offered, Claude Code
+    call `outward`; the session's own, `SESSION_BUILTINS`, are never among them and keep
+    their item's tier) and skill shell injection on (with `Bash` offered, Claude Code
     2.1.287 runs an injection without asking the seam). A name that is not a safe path segment
     (`SAFE_NAME_RE`; a reserved name is allowable), paths outside the package, symlinks,
     the hash and the egress check stay fatal (`vet.ts` `fatal`).
@@ -344,13 +346,19 @@ opens every one and seals it again byte for byte).
     `orders_customer_messaging`'s source (a remote plugin, or a package's http MCP server,
     both through the forwarder) and calls its tool; an `McpError` is `failed`, a timeout, a
     closed connection or another error is `unknown`. `order_notify_customer` (`read`) composes
-    and answers `channel` and `send_ready`; `order_notify_customer_send` (`outward`) parks the
+    and answers `channel` and `send_ready`; `order_messages_list` (`read`) lists the order's
+    messages, whose ids `resend_of` takes; `order_notify_customer_send` (`outward`) parks the
     exact message as `approved`, claims an `order_messages` row through the backend's
     `POST /api/v1/orders/{id}/messages` (`Idempotency-Key`, the call's `idempotencyKey`),
     sends, then posts the outcome. A replayed claim sends again only when the binding maps an
-    `idempotency_key` argument; otherwise it is `unknown`, never resent by itself.
+    `idempotency_key` argument; otherwise a fresh `sending` row is answered as in flight (no
+    outcome posted) and one that reads `unknown` is recorded `unknown`, never resent by itself.
     `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
     message (a person's session only, kept in the audit log as `messaging.test_send`).
+    `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message
+    composed now and its digest, and the send takes only the template, `resend_of` and the
+    digest, composes again and refuses `message_changed` on a difference (a person's session
+    only; `tools/orders.ts` `previewPersonSend`, `personSend`).
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);
@@ -384,7 +392,17 @@ opens every one and seals it again byte for byte).
     Code's own `Read`, `Write` and the rest, with paths in the session directory (its cwd).
     The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
     background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
-    `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
+    `builtin` server, `mcp__builtin__<Name>`), in every turn, not only one whose package names
+    them (#2726 R2): each is an item of `builtin:claude-code` too (`nativeBuiltins.ts`
+    `SESSION_BUILTINS`, `turnBuiltins`), `WebFetch` and `WebSearch` at `outward`, `CronList` at
+    `read`, the rest at `write`; a session a flow run started or forked, a Workflow agent's chat,
+    a session one of those started or forked through `sessions_*`, and a fork of any of them
+    (`ai_sessions.background_tools` false, `ClaimedSession.backgroundTools`) get no background one;
+    nor does a turn a flow run, or such a session, sent (`ai_sessions.turn_flow`), nor any turn
+    on an agent with no `deps.background`. A
+    `Monitor`'s `ws` source is `outward`, and its `command` source runs a shell where Bash runs,
+    so a turn gives it a command queue only while `Bash` is on, at Bash's tier if stricter
+    (`monitorAccess`, `sessionTierOf`). `CronCreate`, `CronDelete`,
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own
     (`src/background/`: `ai_background_tasks`; a recurring cron is a Temporal Schedule
     `bgtask-<session>-<id>` whose `BackgroundFire` sends the prompt when the session is idle
@@ -394,7 +412,7 @@ opens every one and seals it again byte for byte).
     runs where the session's Bash runs, the replica's own queue, its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
-    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; every turn
+    (`workflowAgents.ts`, a chat with no background built-in of its own), its results journalled in `ai_workflow_calls`; every turn that has them
     gets them as the in-process `builtin` server in place of Claude Code's, which would end
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API

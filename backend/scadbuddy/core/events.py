@@ -243,6 +243,8 @@ class OrderChanged(BaseEvent):
     status: str
     #: A storefront visitor's cart, not yet submitted (#5282): it starts no flow.
     cart: bool = False
+    #: The draft sweep deleted this cart (#5282): ``GET /orders/{order_id}`` is 404.
+    deleted: bool = False
 
 
 class OrderBankDepositsChanged(BaseEvent):

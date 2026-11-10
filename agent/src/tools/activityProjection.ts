@@ -8,7 +8,7 @@ import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@tempor
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { SessionBlobs } from '../sessions/blobs.js'
-import { traceparentOf } from '../telemetry/trace.js'
+import { failureClass, traceparentOf } from '../telemetry/trace.js'
 import { TASK_QUEUE, TURN_TOOL_PREFIX } from '../temporal/names.js'
 import {
   TOOL_CALL_WORKFLOW,
@@ -166,8 +166,8 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
 /**
  * The call's span attribute that says how its ToolCall was started (#5865): `started`, eagerly (the
  * first workflow task came back in the start's answer); `declined`, on the worker's connection but
- * Temporal gave no task back (the execution was already there, or the server dispatched it through
- * matching); `failed`, the eager start failed and the call was started on the shared client;
+ * Temporal gave no task back (the execution was already there, open or closed, or the server
+ * dispatched it through matching); `failed`, the eager start failed (the span's exception event names the error's type) and the call was started on the shared client;
  * `fallback`, no worker to start on, so the shared client.
  */
 export const EAGER_ATTRIBUTE = 'scadbuddy.eager'
@@ -192,8 +192,14 @@ async function startEagerly(
     const started = await eager.workflow.start(TOOL_CALL_WORKFLOW, { ...options, requestEagerStart: true })
     span?.setAttribute(EAGER_ATTRIBUTE, started.eagerlyStarted ? 'started' : 'declined')
   } catch (err) {
-    if (err instanceof WorkflowExecutionAlreadyStartedError) throw err
+    if (err instanceof WorkflowExecutionAlreadyStartedError) {
+      span?.setAttribute(EAGER_ATTRIBUTE, 'declined')
+      throw err
+    }
     span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
+    // Why, as an exception event: the exporter scrubs its message (telemetry/scrub.ts), and keeps its type.
+    // As recordFailure does: a non-Error's value is never recorded, only its class.
+    span?.recordException(err instanceof Error ? err : { name: failureClass(err) })
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)

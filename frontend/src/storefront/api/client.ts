@@ -23,6 +23,7 @@ export type StoreRender = Schemas['StoreRender']
 export type StoreEstimate = Schemas['StoreEstimate']
 export type Draft = Schemas['DraftView']
 export type DraftItem = Schemas['DraftItem']
+export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
 export type ParamValue = boolean | number | string
 
 export const BASE = '/api/store/v1'
@@ -79,11 +80,14 @@ interface CallOptions {
   json?: unknown
   form?: FormData
   key?: string
+  /** The bot check's token (`components/Turnstile.tsx`), for a form that takes one. */
+  turnstile?: string | null
 }
 
-async function call<T>(path: string, { method = 'GET', json, form, key }: CallOptions = {}): Promise<T> {
+async function call<T>(path: string, { method = 'GET', json, form, key, turnstile }: CallOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (key) headers['Idempotency-Key'] = key
+  if (turnstile) headers['X-Turnstile-Token'] = turnstile
   let body: BodyInit | undefined
   if (json !== undefined) {
     headers['Content-Type'] = 'application/json'
@@ -121,12 +125,13 @@ export const store = {
     call<Draft>('/draft/items', { method: 'POST', json: input, key }),
   removeItem: (itemId: string, key: string) =>
     call<Draft>(`/draft/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', key }),
-  addRequest: (text: string, files: readonly File[], key: string) => {
+  addRequest: (text: string, files: readonly File[], key: string, turnstile: string | null = null) => {
     const form = new FormData()
     form.append('text', text)
     for (const file of files) form.append('files', file, file.name)
-    return call<Draft>('/draft/requests', { method: 'POST', form, key })
+    return call<Draft>('/draft/requests', { method: 'POST', form, key, turnstile })
   },
+  turnstile: () => call<TurnstileSiteKey>('/turnstile'),
 }
 
 /**

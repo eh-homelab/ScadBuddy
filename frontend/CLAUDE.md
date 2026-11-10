@@ -70,6 +70,18 @@ same way, `vite.config.ts`).
   `vite dev` and
   `vite preview` serve the page under `/store` (`storefrontPreview`); its mocks are
   `src/mocks/features/storefrontPublic.ts`, its e2e `e2e/storefront.spec.ts` (390 px wide).
+  The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
+  and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
+  takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
+  after each send, because a token passes one check only. The mocks keep the check off.
+
+- Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
+  (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
+  ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the
+  backend (`api/client.ts` `orderMessages`, `markOrderMessageSent`); the binding's check and
+  test send, and the preview and send, go through the agent's routes (`api/orderMessages.ts`).
+  An open preview keeps one `Idempotency-Key` for all its sends, so a retry after a lost
+  answer is served from the first claim. Mocks `src/mocks/features/orders/messages.ts`.
 
 ## See also
 

@@ -471,7 +471,7 @@ if (role.http && database && workspace && workspaceBytesStatus) {
     .then(async (ready) => {
       if (!ready) return
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
-        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachable : undefined),
+        kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachableKind : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
         error: (message) => console.error(`workspace files: ${message}`),
       })
@@ -1252,6 +1252,7 @@ const app = !role.http
   workspaceSecrets: agentSecrets.fresh,
   // Settings → Orders' messaging binding check and test send (#5660, routes/messagingBinding.ts).
   orderMessaging: toolServices.messaging,
+  orderSends: { backend: toolServices.backend, messaging: toolServices.messaging },
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),

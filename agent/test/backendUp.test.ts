@@ -58,6 +58,18 @@ describe('backendNotUp', () => {
     })
     expect(backendNotUp(mixed)).toBe(true)
     expect(transportKind(mixed)).toBe(NOT_UP)
+    // No refusal in the list: the AggregateError's own code wins, else its first error's.
+    const timedOut = new AggregateError([
+      Object.assign(new Error('a'), { code: 'ETIMEDOUT' }),
+      Object.assign(new Error('b'), { code: 'ETIMEDOUT' }),
+    ])
+    expect(transportKind(new TypeError('fetch failed', { cause: timedOut }))).toBe('ETIMEDOUT')
+    const ownCode = Object.assign(
+      new AggregateError([Object.assign(new Error('a'), { code: 'ENETUNREACH' }), Object.assign(new Error('b'), { code: 'ETIMEDOUT' })]),
+      { code: 'ETIMEDOUT' },
+    )
+    expect(transportKind(new TypeError('fetch failed', { cause: ownCode }))).toBe('ETIMEDOUT')
+    expect(backendNotUp(new TypeError('fetch failed', { cause: ownCode }))).toBe(false)
     expect(backendNotUp(new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }) }))).toBe(false)
     expect(backendNotUp(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }))).toBe(false)
     expect(backendNotUp(new DOMException('timed out', 'TimeoutError'))).toBe(false)
@@ -72,11 +84,11 @@ describe('untilBackendAnswers', () => {
     const answer = await untilBackendAnswers(
       async () => {
         tries += 1
-        if (tries < 8) throw new WorkspaceBlobError('the backend is not up yet (/healthz)', { unreachable: NOT_UP })
+        if (tries < 8) throw new WorkspaceBlobError('the backend is not up yet (/healthz)', { unreachableKind: NOT_UP })
         return 's3'
       },
       {
-        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachableKind : undefined),
         log: (message) => logs.push(message),
         error: () => expect.unreachable(),
         sleep: async (ms) => {
@@ -99,10 +111,10 @@ describe('untilBackendAnswers', () => {
         const kind = kinds[tries++]
         if (kind === undefined) return 's3'
         const why = kind === NOT_UP ? 'the backend is not up yet' : 'the backend could not be reached'
-        throw new WorkspaceBlobError(`${why} (/healthz)`, { unreachable: kind })
+        throw new WorkspaceBlobError(`${why} (/healthz)`, { unreachableKind: kind })
       },
       {
-        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachableKind : undefined),
         log: (message) => logs.push(message),
         error: (message) => errors.push(message),
         sleep: async () => undefined,
@@ -121,7 +133,7 @@ describe('untilBackendAnswers', () => {
     const refusal = new WorkspaceBlobError("the backend's /healthz names no store backend (HTTP 500)")
     await expect(
       untilBackendAnswers(() => Promise.reject(refusal), {
-        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
+        kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachableKind : undefined),
         log: () => expect.unreachable(),
         error: () => expect.unreachable(),
         sleep: async () => expect.unreachable(),
@@ -135,7 +147,7 @@ describe('untilBackendAnswers', () => {
     const logs: string[] = []
     let slept = 0
     const answer = await untilBackendAnswers(() => store.backend(), {
-      kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachable : undefined),
+      kind: (error) => (error instanceof WorkspaceBlobError ? error.unreachableKind : undefined),
       log: (message) => logs.push(message),
       error: () => expect.unreachable(),
       sleep: async () => {
@@ -156,7 +168,7 @@ describe('the workspace before the backend is up', () => {
     const error = await store.backend().catch((err: unknown) => err)
     expect(error).toBeInstanceOf(WorkspaceBlobError)
     expect((error as WorkspaceBlobError).message).toBe('the backend is not up yet (/healthz)')
-    expect((error as WorkspaceBlobError).unreachable).toBe(NOT_UP)
+    expect((error as WorkspaceBlobError).unreachableKind).toBe(NOT_UP)
 
     // The count of blob rows: none.
     const sql = (() => Promise.resolve([{ n: 0 }])) as unknown as Sql
@@ -174,7 +186,7 @@ describe('the workspace before the backend is up', () => {
     }) as typeof fetch
     const error = await new BackendWorkspaceBlobs('http://backendd:8080', { fetch: lookupFailed }).backend().catch((err: unknown) => err)
     expect((error as WorkspaceBlobError).message).toBe('the backend could not be reached (/healthz)')
-    expect((error as WorkspaceBlobError).unreachable).toBe('ENOTFOUND')
+    expect((error as WorkspaceBlobError).unreachableKind).toBe('ENOTFOUND')
     expect(transportKind(new DOMException('timed out', 'TimeoutError'))).toBe('TimeoutError')
   })
 
@@ -186,6 +198,6 @@ describe('the workspace before the backend is up', () => {
     expect(error).toBeInstanceOf(WorkspaceBlobError)
     expect((error as WorkspaceBlobError).message).toBe('the backend could not be reached (PUT)')
     // Not the backend: nothing that waits for the backend reads it (#5889).
-    expect((error as WorkspaceBlobError).unreachable).toBeUndefined()
+    expect((error as WorkspaceBlobError).unreachableKind).toBeUndefined()
   })
 })

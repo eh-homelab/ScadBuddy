@@ -479,6 +479,10 @@ export type BankLinkCreate = Schemas['BankLinkCreate']
 export type BankUnlinked = Schemas['BankUnlinked']
 /** A deposit of the linked account suggested for an order; it records nothing by itself. */
 export type DepositSuggestion = Schemas['DepositSuggestion']
+/** #5660 — a message to an order's customer, sent (or tried) through the bound messaging plugin. */
+export type OrderMessage = Schemas['OrderMessage']
+/** #5660 — the messaging plugin tool bound to customer messages (`orders_customer_messaging`). */
+export type MessagingBinding = Schemas['MessagingBinding']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }
 export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'method' | 'reference' | 'received_at'>
 /** #5281 — the shop's money rules (Settings → Orders): a rule of the deposit policy, and a

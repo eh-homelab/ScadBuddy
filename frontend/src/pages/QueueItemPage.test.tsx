@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useParams } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,7 @@ import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
 import type { QueueItem } from '../api/types'
 import { outputs } from '../mocks/fixtures'
 import { QUEUE_ITEM_ONLY } from '../mocks/features/printQueue'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { QueueItemPage } from './QueueItemPage'
@@ -110,6 +111,129 @@ describe('QueueItemPage (#3744)', () => {
 
     const slots = within(await screen.findByRole('region', { name: 'Filament slots' })).getAllByRole('listitem')
     expect(slots.map((slot) => slot.textContent)).toEqual([expect.stringContaining('AMS Lite · slot 3')])
+  })
+
+  it("names an A2L's trays by its AMS Lite from the assigned printer's model when the item names none (#5908)", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json([
+          { id: 'p-h2c', serial: 'S1', name: 'H2C', model: 'H2C', bambuddy_printer_id: 1 },
+          { id: 'p-a2l', serial: 'S7', name: 'Lite', model: 'A2L', bambuddy_printer_id: 7 },
+        ])
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
+    // Read, and maybe again once the registry's topic is subscribed (#5914); never in a loop.
+    expect(read).toBeGreaterThanOrEqual(1)
+    expect(read).toBeLessThanOrEqual(2)
+  })
+
+  it("reads the printer's model again when the registry changes while the page is open (#5914)", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let model = 'H2C'
+    server.use(
+      http.get('/api/v1/printers', () =>
+        HttpResponse.json([{ id: 'p-7', serial: 'S7', name: 'Seven', model, bambuddy_printer_id: 7 }]),
+      ),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS-A · slot 3')).toBeInTheDocument()
+
+    // Someone sets the printer's model to A2L in another tab: the registry's own event.
+    model = 'A2L'
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', 'printer:p-7'], {})
+      expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
+    })
+  })
+
+  it('keeps the AMS Lite when a later read of the registry fails (#5914)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let failing = false
+    let failed = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        if (!failing) {
+          return HttpResponse.json([{ id: 'p-7', serial: 'S7', name: 'Seven', model: 'A2L', bambuddy_printer_id: 7 }])
+        }
+        failed += 1
+        return HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'The registry did not answer' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
+
+    // The registry changes, and the read that follows fails: what is shown stays.
+    failing = true
+    await waitFor(() => {
+      emitRealtime('printer.changed', ['printers', 'printer:p-7'], {})
+      expect(failed).toBeGreaterThan(0)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
+    expect(within(region).queryByText('AMS-A · slot 3')).toBeNull()
+  })
+
+  it('takes no A2L from a registry that cannot be read (#5914)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'The registry did not answer' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    await waitFor(() => expect(read).toBeGreaterThanOrEqual(1))
+    expect(await within(region).findByText('AMS-A · slot 3')).toBeInTheDocument()
+    expect(within(region).queryByText(/AMS Lite/)).toBeNull()
+  })
+
+  it('reads no printers when the item names its model', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, sliced_for_model: 'H2C', ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json([])
+      }),
+    )
+    render(265)
+
+    await screen.findByRole('region', { name: 'Filament slots' })
+    expect(read).toBe(0)
+  })
+
+  it('says a finished item waited for no manual start any more (#5908)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, status: 'completed', manual_start: true })
+    render(265)
+
+    const queue = await screen.findByRole('region', { name: "In Bambuddy's queue" })
+    expect(queue).not.toHaveTextContent('Waits for a manual start')
   })
 
   it('names the same id on any other printer by its AMS', async () => {

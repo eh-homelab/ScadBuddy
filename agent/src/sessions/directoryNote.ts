@@ -21,5 +21,9 @@ export function directoryNote(from: string, to: string): string {
   return `${DIRECTORY_NOTE_MARK} ${to}. ${from}, the directory earlier messages name, is not this session's directory, and calls to it are refused: this session was forked from another one or moved. Use the same relative paths under ${to}.`
 }
 
-/** The note's paragraph (it holds no line break), as memory/hindsight.ts strips it. */
-export const DIRECTORY_NOTE_RE = new RegExp(`${DIRECTORY_NOTE_MARK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*`, 'g')
+/**
+ * The note's paragraph (it holds no line break), as memory/hindsight.ts strips it from each text
+ * block or string on its own. Anchored to the very start, the only place `withNote` puts it, so a
+ * user's line or paragraph that quotes its words after other text is kept.
+ */
+export const DIRECTORY_NOTE_RE = new RegExp(`^${DIRECTORY_NOTE_MARK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*`)

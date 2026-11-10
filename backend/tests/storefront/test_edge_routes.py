@@ -892,8 +892,79 @@ def test_requests_off_are_refused_before_the_body_is_read(
         r = _ask(edge, [("files", ("a.png", PNG, "image/png"))])
         assert r.status_code == 404
         assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
-    # Read once, then from the replica's cache.
-    assert (crud_mock["requests_enabled"].call_count, posted.call_count) == (1, 0)
+    # Read once, then from the replica's cache; each request's own key is asked about
+    # (review of #5789: a retry of a committed request is answered).
+    asked = [c.request.headers.get("idempotency-key") for c in crud_mock["requests_enabled"].calls]
+    assert asked[0] is None and len(asked) == 3
+    assert all(len(key or "") == 64 for key in asked[1:])
+    assert posted.call_count == 0
+    # A request with no key is refused as off, without asking.
+    r = _ask(edge, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert crud_mock["requests_enabled"].call_count == 3
+
+
+def test_a_refused_key_is_not_asked_about_again_within_30_seconds(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5829: a key the CRUD side said holds no committed request is refused
+    on a repeat without a second CRUD call (a refused request never commits)."""
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    sent = {"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())}
+    for _ in range(3):
+        assert _ask(edge, headers=sent).status_code == 404
+    keyed = [
+        c for c in crud_mock["requests_enabled"].calls if "idempotency-key" in c.request.headers
+    ]
+    assert len(keyed) == 1
+
+
+def test_a_committed_request_is_sent_again_after_requests_went_off(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5789: its answer was lost (503 ``upload_unavailable``: "send it
+    again"), then the shop turned requests off. The CRUD side says the key holds a
+    committed request, so the edge forwards it and the CRUD side answers its reply."""
+
+    def enabled(request: httpx.Request) -> httpx.Response:
+        keyed = "idempotency-key" in request.headers
+        return httpx.Response(200, json={"enabled": keyed}, headers=CRUD)
+
+    crud_mock["requests_enabled"].side_effect = enabled
+    posted = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    key = str(uuid.uuid4())
+    r = _ask(edge, headers={"Origin": PUBLIC_URL, "Idempotency-Key": key})
+    assert r.status_code == 200 and r.json() == VIEW
+    [asked] = [
+        c.request.headers["idempotency-key"]
+        for c in crud_mock["requests_enabled"].calls
+        if "idempotency-key" in c.request.headers
+    ]
+    assert asked == posted.calls.last.request.headers["idempotency-key"]
+
+
+def test_a_crud_side_that_does_not_answer_the_keyed_check_is_503(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #5829: requests are off and the CRUD side does not answer the uncached
+    check of the request's own key. The visitor gets the edge's 503 problem, never a 500,
+    and the body is never sent."""
+
+    def enabled(request: httpx.Request) -> httpx.Response:
+        if "idempotency-key" in request.headers:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"enabled": False}, headers=CRUD)
+
+    crud_mock["requests_enabled"].side_effect = enabled
+    posted = crud_mock.post(REQUESTS)
+    r = _ask(edge, headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())})
+    assert r.status_code == 503
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert posted.call_count == 0
 
 
 def test_a_client_may_start_six_requests_an_hour(

@@ -20,6 +20,7 @@ from psycopg.rows import DictRow, dict_row
 from scadbuddy.core.events import OrderChanged, OrderItemChanged
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.lifecycle import (
+    LabourRate,
     Lifecycle,
     LifecycleError,
     ManualQuoteInput,
@@ -28,7 +29,7 @@ from scadbuddy.orders.lifecycle import (
     NewRequestItem,
     UsdRate,
 )
-from scadbuddy.orders.models import Order, OrderFilter
+from scadbuddy.orders.models import CostEntryInput, Order, OrderFilter, TimeEntryInput
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import SliceQuoteRequest, quote_check
@@ -290,6 +291,16 @@ ACTS: dict[str, Callable[[Shop, Order], object]] = {
         usd_rate=UsdRate(Decimal("1"), "USD"),
         by=BY,
     ),
+    # The sweep would drop them with the cart (review of #5789).
+    "time_entry": lambda shop, order: shop.lifecycle.add_time_entry(
+        order.id,
+        TimeEntryInput(kind="design", minutes=5),
+        BY,
+        labour_rate=LabourRate(Decimal("30"), "USD"),
+    ),
+    "cost_entry": lambda shop, order: shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(kind="other", amount_minor=100), BY
+    ),
 }
 
 
@@ -307,6 +318,8 @@ def test_the_shop_cannot_act_on_an_unsubmitted_draft(
     items = shop.rows.items(draft_with_item.id)
     assert all(shop.rows.quotes(i.id) == [] for i in items)
     assert shop.rows.payments(draft_with_item.id) == []
+    assert shop.rows.time_entries(draft_with_item.id) == []
+    assert shop.rows.cost_entries(draft_with_item.id) == []
     with shop.rows.transaction() as conn:
         requests = conn.execute(
             "SELECT count(*) AS n FROM payment_requests WHERE order_id = %s", (draft_with_item.id,)
@@ -508,6 +521,57 @@ def test_the_sweep_deletes_an_idle_draft_its_attachments_and_their_holds(
     assert holders(pool, f"request-file-{idle_draft_with_request.id}") == []
     assert lifecycle.store.attachments(idle_draft_with_request.id) == []
     assert lifecycle.store.items(idle_draft_with_request.id) == []
+
+
+def test_the_sweep_tells_the_bus_the_cart_is_gone(
+    rows: OrderStore, refs: BlobRefs, visitors: VisitorStore, owner_conn: Connection[DictRow]
+) -> None:
+    # Review of #5789: an open orders list and an ``order:<id>`` page drop it.
+    shop = Shop(rows, refs)
+    visitor = visitors.ensure("t" * 43)
+    order = _draft(shop.lifecycle, visitor)
+    _idle(owner_conn, order, visitor)
+    shop.events.clear()
+    assert shop.lifecycle.sweep_drafts(NOW - timedelta(days=30)) == [order.id]
+    told = [(type(e), e.model_dump(include={"order_id", "cart", "deleted"})) for e in shop.events]
+    assert told == [(OrderChanged, {"order_id": order.id, "cart": True, "deleted": True})]
+
+
+def test_a_cart_kept_by_the_sweep_tells_nothing(
+    rows: OrderStore, refs: BlobRefs, visitors: VisitorStore
+) -> None:
+    shop = Shop(rows, refs)
+    _draft(shop.lifecycle, visitors.ensure("u" * 43))
+    shop.events.clear()
+    assert shop.lifecycle.sweep_drafts(NOW - timedelta(days=30)) == []
+    assert shop.events == []
+
+
+@pytest.mark.parametrize("table", ["order_time_entries", "order_cost_entries"])
+def test_the_sweep_keeps_a_cart_with_a_time_or_cost_entry(
+    lifecycle: Lifecycle,
+    idle_draft_with_request: Order,
+    owner_conn: Connection[DictRow],
+    pool: PgPool,
+    table: str,
+) -> None:
+    # Review of #5789: the lifecycle refuses them on a cart; one written past it (an
+    # older row, a hand-made one) is never dropped with the cart.
+    if table == "order_time_entries":
+        owner_conn.execute(
+            "INSERT INTO order_time_entries (id, order_id, kind, minutes, created_by)"
+            " VALUES ('te1', %s, 'design', 5, '{}'::jsonb)",
+            (idle_draft_with_request.id,),
+        )
+    else:
+        owner_conn.execute(
+            "INSERT INTO order_cost_entries (id, order_id, kind, amount_minor, created_by)"
+            " VALUES ('ce1', %s, 'other', 100, '{}'::jsonb)",
+            (idle_draft_with_request.id,),
+        )
+    _idle(owner_conn, idle_draft_with_request, None)
+    assert lifecycle.sweep_drafts(NOW - timedelta(days=30)) == []
+    _intact(lifecycle, idle_draft_with_request, pool)
 
 
 def test_the_sweep_keeps_a_recent_draft_and_every_back_office_order(

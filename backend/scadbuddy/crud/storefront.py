@@ -10,7 +10,8 @@ sends the visitor id the edge verified (`VISITOR_HEADER`) and the browser's addr
 render's body, and a draft item's, goes as the visitor sent it, unread; a render's preview
 comes back as a stream (`CrudStream`), which the edge relays without holding it whole. A
 design request goes as multipart made from the files the edge spooled, read a chunk at a
-time in a thread, in one call that is never retried (its body cannot be sent twice).
+time in a thread, in one call that is never retried (its body cannot be sent twice); each
+file's name is escaped (`escape_filename`), and the CRUD side decodes it.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -30,26 +31,28 @@ from starlette.datastructures import UploadFile
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
-from scadbuddy.storefront.wire import CLIENT_HEADER, VISITOR_HEADER
+from scadbuddy.storefront.wire import (
+    CLIENT_HEADER,
+    TURNSTILE_VERIFY_SECONDS,
+    VISITOR_HEADER,
+    escape_filename,
+)
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
 #: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
-EDGE_AREAS: Final[frozenset[str]] = frozenset({"listings", "renders", "drafts", "requests", "pay"})
+#: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`).
+EDGE_AREAS: Final[frozenset[str]] = frozenset(
+    {"listings", "renders", "drafts", "requests", "pay", "turnstile"}
+)
+#: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
+#: keeps its last value (`storefront/turnstile.py` `SiteKey`).
+SITE_KEY_BUDGET: Final = 2.0
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 #: A design request's one call: the CRUD side answers only once every file is checked
 #: and stored.
 UPLOAD_TIMEOUT: Final = httpx.Timeout(connect=5.0, read=300.0, write=300.0, pool=5.0)
 _CHUNK: Final = 1 << 20
-
-
-def _field(value: str) -> str:
-    """A multipart header parameter's value with ``"``, ``\\`` and control characters
-    percent-escaped. Browsers escape ``"``, CR and LF the same way (WHATWG HTML,
-    "multipart/form-data encoding algorithm")."""
-    return "".join(
-        f"%{ord(c):02X}" if c in '"\\' or ord(c) < 32 or ord(c) == 127 else c for c in value
-    )
 
 
 async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> AsyncIterator[bytes]:
@@ -58,7 +61,7 @@ async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> A
     yield dash + b'Content-Disposition: form-data; name="text"\r\n\r\n'
     yield text.encode() + b"\r\n"
     for upload in files:
-        name = _field(upload.filename or "file")
+        name = escape_filename(upload.filename or "file")
         yield (
             dash
             + (
@@ -161,9 +164,14 @@ class StorefrontCrud:
             "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
 
-    async def requests_enabled(self, *, visitor_id: str, client: str) -> bool:
-        """``GET …/storefront/requests-enabled``: whether "Ask for a design" is on."""
-        answer = await self._call("GET", "/requests-enabled", visitor_id=visitor_id, client=client)
+    async def requests_enabled(
+        self, *, visitor_id: str, client: str, key: str | None = None
+    ) -> bool:
+        """``GET …/storefront/requests-enabled``: whether "Ask for a design" is on; with a
+        request's ``key``, also whether that key holds a committed request."""
+        answer = await self._call(
+            "GET", "/requests-enabled", visitor_id=visitor_id, client=client, key=key
+        )
         return bool(answer.get("enabled")) if isinstance(answer, dict) else False
 
     async def add_request(
@@ -192,6 +200,36 @@ class StorefrontCrud:
             ),
         )
         return response.json()
+
+    async def turnstile_site_key(self) -> str | None:
+        """``GET …/storefront/turnstile``: the bot check's site key, or None while it is
+        off. Read outside any visitor, so it sends no visitor or client header."""
+        response = await self._crud.request(
+            "GET", f"{BASE}/turnstile", budget=SITE_KEY_BUDGET, timeout=SITE_KEY_BUDGET
+        )
+        answer = response.json()
+        key = answer.get("site_key") if isinstance(answer, dict) else None
+        return key if isinstance(key, str) and key else None
+
+    async def turnstile_verify(
+        self, token: str | None, action: str, *, visitor_id: str, client: str
+    ) -> str:
+        """``POST …/storefront/turnstile/verify``: the CRUD side's verdict on the
+        browser's token for ``action`` (``off``, ``pass``, ``fail``, ``unavailable``).
+        Sent once, never retried: a token passes one Siteverify call only, so a retry
+        after a lost answer would fail a good token. A transport failure or a timeout
+        (`TURNSTILE_VERIFY_SECONDS`) raises `CrudUnavailableError`."""
+        response = await self._crud.request(
+            "POST",
+            f"{BASE}/turnstile/verify",
+            json={"token": token, "action": action},
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+            timeout=TURNSTILE_VERIFY_SECONDS,
+            budget=0.0,
+        )
+        answer = response.json()
+        verdict = answer.get("verdict") if isinstance(answer, dict) else None
+        return verdict if isinstance(verdict, str) else "unavailable"
 
     async def render_preview(
         self, job_id: str, *, plate: int | None, visitor_id: str, client: str

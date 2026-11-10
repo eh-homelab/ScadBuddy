@@ -15,6 +15,7 @@ import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.j
 import { TurnRunner, type TurnRunnerDeps } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
 import type { SessionFiles } from '../../src/workspace/store.js'
+import type { BackgroundTasks } from '../../src/background/service.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
 import { fixedCredentials } from './fixedCredentials.js'
 import { memoryAccess } from './memoryAccess.js'
@@ -54,6 +55,10 @@ export type TurnRunnerTestOptions = {
   reader?: (base: AccessReader) => AccessReader
   /** Settings → Tools & plugins' stored loadings (#838), by bare name; none when undefined. */
   toolLoadings?: Record<string, ToolLoading>
+  /** Whether the agent keeps background tasks (`deps.background`: Temporal and a database); none when undefined. */
+  background?: boolean
+  /** The session's `backgroundTools` (false: flow-started, or a Workflow agent's chat); true when undefined. */
+  backgroundTools?: boolean
   /** The registry's tiers; every tool `read` when undefined. */
   tierOf?: TurnRunnerDeps['tierOf']
   /** The turn's calls as activities, with these tools listed as its turn tools (`<server>__<tool>`): its plugins are then proxied. */
@@ -99,6 +104,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     agentModel: null,
     agentEffort: null,
     agentType: null,
+    backgroundTools: options.backgroundTools ?? true,
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}
@@ -177,6 +183,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         release: () => {},
       }),
     httpRequest: {},
+    // Never called: the tests only assemble.
+    ...(options.background ? { background: { tasks: {} as BackgroundTasks, tz: 'UTC', commandQueue: 'agent-sessions.test' } } : {}),
     ...(options.turnTools
       ? {
           toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),

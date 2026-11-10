@@ -689,4 +689,53 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       expect(clean.done.at(-1)).toBe(true)
     })
   })
+  describe('review of 90edb1e90', () => {
+    it('tries a failed reconcile again at the next tick, not an hour later', async () => {
+      backend.holds.set(`workspace-${'6'.repeat(64)} session:${sessionId}/gone.txt`, 0)
+      const store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      const list = store.listHolds.bind(store)
+      let failures = 1
+      store.listHolds = async (olderThanSeconds) => {
+        if (failures > 0) {
+          failures -= 1
+          throw new Error('the backend could not be reached (list)')
+        }
+        return list(olderThanSeconds)
+      }
+      const errors: unknown[] = []
+      const swept = new SessionFiles(db.sql, { locks: db.locks, blobs: { store, sealing } })
+      const stop = swept.startSweeper(50, { onError: (err) => errors.push(err) })
+      try {
+        await expect.poll(() => backend.holds.size, { timeout: 10_000 }).toBe(0)
+      } finally {
+        stop()
+      }
+      expect(errors).toHaveLength(1)
+    })
+  })
+  describe('review of 48a2176c6', () => {
+    it('tries again at the next tick when taking a lock connection throws', async () => {
+      backend.holds.set(`workspace-${'7'.repeat(64)} session:${sessionId}/gone.txt`, 0)
+      let failures = 1
+      const locks: LockClient = {
+        take() {
+          if (failures > 0) {
+            failures -= 1
+            return Promise.reject(new Error('connection refused'))
+          }
+          return db.locks.take()
+        },
+        end: () => Promise.resolve(),
+      }
+      const errors: unknown[] = []
+      const swept = new SessionFiles(db.sql, { locks, blobs: { store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }), sealing } })
+      const stop = swept.startSweeper(50, { onError: (err) => errors.push(err) })
+      try {
+        await expect.poll(() => backend.holds.size, { timeout: 10_000 }).toBe(0)
+      } finally {
+        stop()
+      }
+      expect(errors).toEqual([expect.objectContaining({ message: 'connection refused' })])
+    })
+  })
 })
