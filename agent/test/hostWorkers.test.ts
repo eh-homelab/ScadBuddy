@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stopAfter } from '../src/temporal/session/hostWorkers.js'
+import { PINNED_SHUTDOWN_FORCE_MS, PINNED_SHUTDOWN_GRACE_MS, stopAfter } from '../src/temporal/session/hostWorkers.js'
 
 // #5862 review: the pinned host worker runs this replica's own BridgeCalls, so a draining turn's
 // browser_* call needs it until the turn ends. It must stop only once the drain settles.
@@ -32,5 +32,14 @@ describe('stopAfter', () => {
     endStop()
     await stopped
     expect(done).toBe(true)
+  })
+
+  it('never rejects when the worker fails to stop, so an early shutdown failure leaves no unhandled rejection', async () => {
+    await expect(stopAfter({ stop: () => Promise.reject(new Error('stuck')) }, Promise.resolve())).resolves.toBeUndefined()
+  })
+
+  it("ends inside shutdown()'s 10 s deadline with a margin (#5881 review)", () => {
+    expect(PINNED_SHUTDOWN_GRACE_MS).toBeLessThan(PINNED_SHUTDOWN_FORCE_MS)
+    expect(PINNED_SHUTDOWN_FORCE_MS).toBeLessThanOrEqual(8_000)
   })
 })

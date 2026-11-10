@@ -1323,8 +1323,10 @@ async function stop(): Promise<void> {
   // The pinned host worker only once those end (#5862 review, stopAfter): it runs this replica's own
   // BridgeCalls, whose workflow tasks a draining turn's browser_* call needs until the turn ends, and
   // its pinned calls. It runs beside shutdown() below, which closes the tabs first, so its bridge.tab
-  // calls end at once ("gone"); closeSessions awaits it before closeDatabase, so a pinned call in its
-  // grace (a classic Monitor's appendEvent) never meets a closed pool.
+  // calls end at once ("gone"). Its stop ends within PINNED_SHUTDOWN_FORCE_MS (8 s) of the drain, and
+  // shutdown()'s 10 s deadline starts later, so closeDatabase, which awaits it, never closes the pool
+  // under a pinned call still in its grace (a classic Monitor's appendEvent). The server's own close
+  // does not wait for it.
   const pinnedStopped = hostWorkers ? stopAfter(hostWorkers.pinned, drained) : undefined
   await drained
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
@@ -1349,8 +1351,6 @@ async function stop(): Promise<void> {
       // down append their final session.status/session.done, and publish them,
       // before closeDatabase runs; within the same deadline (#802).
       await sessions?.settled()
-      // The pinned host worker's running activities, within its own 10 s grace, before the pool closes.
-      await pinnedStopped
       await app?.close()
       resources.close()
       await events?.close()
@@ -1367,6 +1367,8 @@ async function stop(): Promise<void> {
     // never wake (#715 review; busEvents.ts).
     closeDatabase: database
       ? async () => {
+          // The pinned host worker's running activities, bounded by its 8 s force time, before the pool closes.
+          await pinnedStopped
           sessionEvents?.close()
           await database.close()
         }
