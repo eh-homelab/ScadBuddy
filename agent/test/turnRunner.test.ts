@@ -6,6 +6,8 @@ import { createTurnSlot, slotHooks, slotHttpContext, type TurnContext } from '..
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 import { TurnTrace } from '../src/telemetry/turn.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
+import { harnessTierOf } from '../src/harness/run.js'
+import { TOOL_SEARCH } from '../src/harness/toolSearch.js'
 import { turnRunnerForTest, type TurnRunnerTestOptions, unusedSql } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
@@ -45,6 +47,21 @@ describe('TurnRunner', () => {
     slot.clear()
     expect(await decide(request('t2'))).toMatchObject({ approved: false, message: 'no turn is running' })
     expect(gateCalls.seen).toHaveLength(1)
+  })
+
+  it("records each native tool's step at the tier the gate applies (#5869)", async () => {
+    // A registry that knows only its own tools, as in production: ToolSearch fell back to outward.
+    const { runner, session, principal } = await turnRunnerForTest({ tierOf: (name) => (name.startsWith('mcp__scadbuddy__') ? 'read' : undefined) })
+    const turn = await runner.assemble(session, principal)
+    expect(turn.run.toolSearch).toBe('auto')
+    expect(turn.eventTierOf(TOOL_SEARCH, {})).toBe('read')
+    expect(turn.shownTierOf(TOOL_SEARCH, {})).toBe('read')
+    expect(turn.shownTierOf('Write', { file_path: 'a.txt', content: '' })).toBe('write')
+    // Every native tool's event tier is the gate's own (run.ts buildHarness reads harnessTierOf(run)).
+    const gate = harnessTierOf(turn.run)
+    const names = [TOOL_SEARCH, 'Skill', 'Agent', ...(turn.run.nativeTools ?? []).map((t) => t.name)]
+    expect(names).toEqual(expect.arrayContaining(['Read', 'Glob', 'Grep', 'Write', 'Edit', 'NotebookEdit', 'TaskCreate', 'TaskUpdate']))
+    for (const name of names) expect([name, turn.eventTierOf(name, {})]).toEqual([name, gate(name, {})])
   })
 
   it("runs a Workflow agent's chat on its own model, effort and subagent, and fingerprints them", async () => {

@@ -330,8 +330,8 @@ export class TurnRunner {
     // http_request's access in ai_access is a tier (#2171), read with its switch below.
     let httpTier: TierResolver = httpTierOf
     const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? registryTierOf(name, input)
-    // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies.
+    // Replaced by the gate's own resolver once the run is built below, so the
+    // panel shows every tool at the tier the permission seam applies.
     // Settings → Tools & plugins' raised tiers (#1953), once read below, over every tier shown.
     let builtIn: BuiltInPolicy | undefined
     const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
@@ -501,7 +501,6 @@ export class TurnRunner {
         allowedPluginPaths: packages?.allowedPaths ?? [],
         nativeTools,
       })
-      eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
       // A plugin left out of this turn is said so in the session, not only in the log.
       const unavailable = (message: string) =>
         this.deps.events.append(id, [
@@ -817,6 +816,10 @@ export class TurnRunner {
         onSpend: (usd) => slot.meter(usd),
       }
       inProcessServers = Object.keys(run.mcpServers ?? {})
+      // The gate's own resolver over the run it is given (run.ts buildHarness), so each step shows
+      // the tier the gate applied: ToolSearch, Skill, Agent and the native tools too (#5869).
+      const gateTiers = harnessTierOf(run)
+      eventTierOf = (name, input) => raised(name, gateTiers(name, input))
       const first = candidates[0]
       const fingerprintParts: FingerprintParts = {
         credentialId: first?.id ?? '',
