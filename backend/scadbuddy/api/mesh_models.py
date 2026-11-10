@@ -92,12 +92,14 @@ async def create_mesh_model(
     description: str,
     source: dict[str, Any],
     claim: Callable[[ClaimStore], Awaitable[Held]] | None = None,
-    changed: str | None = None,
+    changed: Callable[[bool], str] | None = None,
 ) -> ModelRecord | JSONResponse:
     """The ``mesh_model_create`` operation. ``claim`` holds an upload's bytes by claim,
     called only when no record answers the request: a repeat holds nothing. With
-    ``changed``, a key on record for another body of this model is a 409 that says
-    ``changed`` (#5979: the source's bytes moved between a request and its retry)."""
+    ``changed``, a key on record for another body of this model is a 409 whose text is
+    ``changed(made)``, ``made`` whether the model exists now (#5979: the source's bytes
+    moved between a request and its retry; that request's operation may have failed or
+    still be running, and then no model exists to name)."""
     slug = _slug_from_name(name)
     request = {"slug": slug, "name": name, "description": description, "source": source}
     kind = ops.kinds["mesh_model_create"]
@@ -114,7 +116,7 @@ async def create_mesh_model(
             and idempotency_key is not None
             and await ops.store.keyed(kind.name, slug, idempotency_key)
         ):
-            raise ApiError(status.HTTP_409_CONFLICT, changed)
+            raise ApiError(status.HTTP_409_CONFLICT, changed(catalogue.exists(slug)))
         _require_new(catalogue, slug)
         if claim is not None:
             held.append(await claim(claims))

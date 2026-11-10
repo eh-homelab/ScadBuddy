@@ -427,6 +427,22 @@ async def _forget_copy(client: BambuddyClient, file_id: int) -> None:
         )
 
 
+def _source_changed(name: str, slug: str, made: bool) -> str:
+    """The 409 of a new-model retry whose source changed since its first send (#5979)."""
+    if made:
+        return (
+            f"{name} changed since this request was first sent, so it is no longer the file"
+            f" the model {slug!r} was made from: that model stays; import the print onto it"
+            " with `slug`, or choose another source"
+        )
+    return (
+        f"{name} changed since this request was first sent, and that request made no model"
+        f" {slug!r} (its operation failed, or is still running: follow it). Send the request"
+        " with a new Idempotency-Key to make the model from the file as it is now, or choose"
+        " another source"
+    )
+
+
 async def _new_model(
     ops: OperationsDep,
     response: Response,
@@ -450,13 +466,9 @@ async def _new_model(
         description=new_model.description,
         source={"kind": "upload", "claim": read.sha256, "name": read.name},
         claim=claim,
-        # A retry reads its source again, and a printer overwrites its files: the model
-        # the first read made is no longer this file's, so it is named, never linked.
-        changed=(
-            f"{read.name} changed since this request was first sent, so it is no longer the"
-            f" file the model {_slug_from_name(new_model.name)!r} was made from: that model"
-            " stays; import the print onto it with `slug`, or choose another source"
-        ),
+        # A retry reads its source again, and a printer overwrites its files: a model the
+        # first read made is no longer this file's, so it is named, never linked.
+        changed=lambda made: _source_changed(read.name, _slug_from_name(new_model.name), made),
     )
     if isinstance(made, JSONResponse):
         return made

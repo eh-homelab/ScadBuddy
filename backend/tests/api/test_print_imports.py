@@ -676,24 +676,43 @@ def test_an_import_waiting_on_another_is_refused_in_time(
 
 @respx.mock
 def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
-    client: TestClient, model: str
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#5979: the key made a model from other bytes, as a printer file overwritten
-    between a 202 and its retry would; the retry is a 409 naming that model."""
-    from tests.api.test_mesh_models import painted_3mf, upload
+    """#5979: a first request makes the model but records no import; its retry with the
+    same key reads the source again, now other bytes, as a printer file overwritten in
+    between would be. The retry links nothing, and names the model only while it exists."""
+    from scadbuddy.api import print_imports as route
+    from tests.api.test_mesh_models import painted_3mf
 
     configure(client)
     bambuddy(source_3mf_path="archive/x/source/demo_elan.3mf")
+    content = {"bytes": painted_3mf()}
     respx.get(f"{API}/archives/{ARCHIVE}/source").mock(
-        return_value=httpx.Response(200, content=painted_3mf())
+        side_effect=lambda request: httpx.Response(200, content=content["bytes"])
     )
+    record = route._record
+
+    async def lost(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the answer never arrived")
+
+    body = {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}
     key = press()
-    assert upload(client, name="Trophy", key=key).status_code == 201
+    monkeypatch.setattr(route, "_record", lost)
+    with pytest.raises(RuntimeError):
+        import_print(client, body, **key)
+    monkeypatch.setattr(route, "_record", record)
+    assert client.get("/api/v1/models/trophy/scene").status_code == 200
+    content["bytes"] = a_3mf()
 
-    response = import_print(
-        client, {"source": {"kind": "archive_source"}, "new_model": {"name": "Trophy"}}, **key
-    )
+    made = import_print(client, body, **key)
 
-    assert response.status_code == 409, response.text
-    assert "the model 'trophy' was made from" in response.json()["detail"]
+    assert made.status_code == 409, made.text
+    assert "the model 'trophy' was made from" in made.json()["detail"]
+    assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+    assert client.delete("/api/v1/models/trophy", headers=press()).status_code == 204
+    gone = import_print(client, body, **key)
+
+    assert gone.status_code == 409, gone.text
+    assert "that request made no model 'trophy'" in gone.json()["detail"]
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None

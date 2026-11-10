@@ -25,13 +25,19 @@ def test_a_dot_segment_or_another_file_is_refused(path: str) -> None:
 
 def test_library_candidates_are_newest_first_and_undated_last() -> None:
     """#5979: a row with no date never takes a dated row's place under the cut."""
-    from datetime import UTC, datetime
-    from types import SimpleNamespace
+    from datetime import datetime
 
+    from scadbuddy.bambuddy.models import LibraryListRow
     from scadbuddy.bambuddy.print_import import _newest_first
 
-    old = SimpleNamespace(id=1, created_at=datetime(2026, 1, 1, tzinfo=UTC))
-    new = SimpleNamespace(id=2, created_at=datetime(2026, 6, 1, tzinfo=UTC))
-    undated = SimpleNamespace(id=3, created_at=None)
-    rows = sorted([undated, old, new], key=_newest_first, reverse=True)  # type: ignore[arg-type]
-    assert [row.id for row in rows] == [2, 1, 3]
+    def row(file_id: int, created_at: datetime | None) -> LibraryListRow:
+        return LibraryListRow(
+            id=file_id, filename=f"{file_id}.3mf", file_type="3mf", created_at=created_at
+        )
+
+    rows = sorted(
+        [row(3, None), row(1, datetime(2026, 1, 1)), row(2, datetime(2026, 6, 1))],
+        key=_newest_first,
+        reverse=True,
+    )
+    assert [r.id for r in rows] == [2, 1, 3]
