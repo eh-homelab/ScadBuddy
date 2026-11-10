@@ -14,6 +14,8 @@ import { When } from './When'
  * email contact; with a live link the button reads "Send a new link" and asks first, since the
  * old link stops working. "Revoke" ends the live link. The card shows the link's state only:
  * the link itself goes to the customer by mail and never to this page. Everything shown is text.
+ * Until the state is read, "Send link" is disabled: a send with a live link unseen would end it
+ * with no confirm. A failed read says so and offers "Try again".
  */
 export function CustomerLink({ orderId, onChanged }: { orderId: string; onChanged?: () => void }) {
   const link = useAsync(() => api.customerLink(orderId), [orderId], [`order:${orderId}`])
@@ -44,6 +46,17 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
   return (
     <section className="flex flex-col gap-2" aria-label="Customer link">
       <h2 className="text-sm font-medium">Customer link</h2>
+      {!state && link.error && (
+        <div className="flex flex-col gap-1 text-[13px]">
+          <p role="alert" className="text-destructive">
+            The link's state could not be read: {link.error.message}
+          </p>
+          <p className="text-muted-foreground">Sending waits until the state is read: a new link would end a live one without asking.</p>
+          <Button size="sm" variant="outline" className="self-start" onClick={() => link.refresh()}>
+            Try again
+          </Button>
+        </div>
+      )}
       {state && (
         <div className="flex flex-col gap-0.5 text-[13px]">
           {state.sent_to === null ? (

@@ -49,8 +49,8 @@ export const handlers = [
       const asked = text ? (JSON.parse(text) as { to?: string | null }).to : undefined
       const customer = state.customers.find((c) => c.id === order.customer_id)
       const emails = (customer?.contacts ?? []).filter((c) => c.kind === 'email').sort((a, b) => Number(b.primary) - Number(a.primary))
-      const to = (asked ?? emails[0]?.value)?.trim()
-      if (to === undefined) return toProblem(request, 'no_email', 'The customer has no email address. Give the address to send the link to.')
+      const to = asked?.trim() ?? emails.map((c) => c.value.trim()).find((v) => ADDRESS.test(v))
+      if (to === undefined) return toProblem(request, 'no_email', 'The customer has no email contact that is one address. Give the address to send the link to.')
       if (!ADDRESS.test(to)) return toProblem(request, 'email_invalid', 'Give one email address, such as ada@example.com.')
       const made = { live: true, created_at: now(), sent_to: to, opened_at: null, revoked_at: null }
       links.set(order.id, made)

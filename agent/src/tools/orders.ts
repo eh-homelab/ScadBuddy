@@ -979,6 +979,24 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_customer_link_get',
+    label: "Read an order's customer link",
+    description:
+      "The state of the order's newest customer link (#5283): `live`, `created_at`, `sent_to` (where its mail " +
+      'went), `opened_at` (when the customer first opened it) and `revoked_at`; all null with `live: false` when ' +
+      'the order never had one. Never the link itself.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/customer-link'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/customer-link', { params: { path: { order_id } } }),
+          `read the customer link of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_customer_link_send',
     label: 'Send the customer an order link',
     description:

@@ -169,11 +169,11 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
 ### Task 4: The order link in the back office (this session)
 
 **Files:**
-- Modify: `backend/scadbuddy/api/orders.py` (`POST /api/v1/orders/{order_id}/customer-link` sends a new link and revokes the old ones; `DELETE` revokes; `GET` shows the link's state without its token), `orders/storefront/submit.py` (`issue_link`, a wrapper over Task 2's `links.py`: it calls `revoke_order_links` and `create_order_link`, so there is one revoke path), `frontend/src/pages/OrderPage.tsx` (a "Customer link" card), `agent/src/tools/coverage.ts`
+- Modify: `backend/scadbuddy/api/orders.py` (`POST /api/v1/orders/{order_id}/customer-link` sends a new link and revokes the old ones; `DELETE` revokes; `GET` shows the link's state without its token), `orders/storefront/mail.py` (`issue_link`, a wrapper over Task 2's `links.py`: it calls `revoke_order_links` and `create_order_link`, so there is one revoke path; not in `submit.py` or `links.py`, which would make import cycles), `frontend/src/pages/OrderPage.tsx` (a "Customer link" card), `agent/src/tools/coverage.ts`
 - Test: `backend/tests/api/test_order_customer_link.py`, the OrderPage test
 
 **Interfaces:**
-- `issue_link(conn, order_id, to: str) -> str` revokes every live link of the order through `links.py` `revoke_order_links`, makes a new one with `create_order_link`, and queues `order_link` mail. A `back_office` order can get a link too. It needs a customer with an email contact, or an explicit `to` in the body. Otherwise it gets 422 `no_email`.
+- `issue_link(conn, kek, order_id, label, to: str) -> str` (the token) revokes every live link of the order through `links.py` `revoke_order_links`, makes a new one with `create_order_link`, and queues `order_link` mail. A `back_office` order can get a link too. It needs a customer with an email contact, or an explicit `to` in the body. Otherwise it gets 422 `no_email`.
 - Agent tools: `order_customer_link_send`, which is outward and returns a pending action, as other mail-sending tools do; and `order_customer_link_revoke`.
 
 - [ ] **Steps 1–5:** test first, implement, then commit `feat(storefront): send or revoke an order's customer link`.

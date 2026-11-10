@@ -855,12 +855,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   The customer link (#5283, spec §5.2 "Order link"): `mail.py` `issue_link` is the one way
   to a new link (revoke the live ones, `create_order_link`, queue `order_link`), for
   `Lifecycle.submit_order` and the back office's `POST /orders/{id}/customer-link`
-  (`send_customer_link`: `to`, or the customer's email contact, primary first; 422
+  (`send_customer_link`: `to`, or the customer's first email contact that is one address,
+  primary first, a malformed one skipped; 422
   `no_email`, `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`).
   `DELETE` revokes (`order.customer_link_revoked`, only when one was live); `GET` and
-  both writes answer `links.py` `LinkState`, never the token or its hash. All three run
-  under the order's lock. Agent `order_customer_link_send` (outward),
-  `order_customer_link_revoke` (write).
+  both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
+  under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
+  `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or

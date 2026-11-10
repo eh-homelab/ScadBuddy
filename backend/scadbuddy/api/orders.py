@@ -1416,9 +1416,10 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
         "working. The mail goes to `to` (one address), or else to the customer's email "
         "contact, the primary one first. A back-office order gets one too. Answers the "
         "link's state, never its token. Audit row `order.customer_link_sent`. 422 "
-        "`email_invalid` for anything but one address, 422 `no_email` with no `to` and no "
-        "email contact, 409 `order_not_submitted` for a cart, 409 `kek_missing` with no "
-        "key to seal the link with."
+        "`email_invalid` for a `to` that is not one address, 422 `no_email` with no `to` "
+        "and no email contact that is one address (a malformed contact is skipped), 409 "
+        "`order_not_submitted` for a cart, 409 `kek_missing` with no key to seal the link "
+        "with."
     ),
 )
 async def send_customer_link(
@@ -1433,7 +1434,8 @@ async def send_customer_link(
         if error.slug == "no_email":
             raise _to_problem(
                 "no_email",
-                "The customer has no email address. Give the address to send the link to.",
+                "The customer has no email contact that is one address. Give the address"
+                " to send the link to.",
             ) from None
         raise refused(error) from None
     except EmailInvalidError:

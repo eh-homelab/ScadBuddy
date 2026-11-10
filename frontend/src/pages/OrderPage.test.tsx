@@ -643,7 +643,7 @@ describe('OrderPage, the customer link (#5283)', () => {
     const card = await screen.findByRole('region', { name: 'Customer link' })
     await within(card).findByText('No link sent yet.')
     await user.click(within(card).getByRole('button', { name: 'Send link' }))
-    expect(await within(card).findByRole('alert')).toHaveTextContent('The customer has no email address')
+    expect(await within(card).findByRole('alert')).toHaveTextContent('The customer has no email contact that is one address')
     await user.type(within(card).getByLabelText('Send to'), 'bob@example.org')
     await user.click(within(card).getByRole('button', { name: 'Send link' }))
     expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('bob@example.org')
@@ -658,6 +658,26 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent(odd)
     expect(within(card).getByText(/Opened/)).toBeInTheDocument()
     expect(card.querySelector('b')).toBeNull()
+  })
+
+  it("says when the link's state cannot be read, holds Send until it is, and tries again", async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () =>
+        fail ? HttpResponse.json({ detail: 'database away' }, { status: 500 }) : undefined,
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByRole('alert')).toHaveTextContent("The link's state could not be read: database away")
+    // A send would revoke a live link with no confirm, so it waits for the state.
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeDisabled()
+    expect(within(card).getByText(/Sending waits until the state is read/)).toBeInTheDocument()
+    fail = false
+    await user.click(within(card).getByRole('button', { name: 'Try again' }))
+    expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
+    expect(within(card).queryByRole('alert')).toBeNull()
   })
 
   it('shows no card on a cart', async () => {

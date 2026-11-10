@@ -107,7 +107,7 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
-from scadbuddy.orders.storefront.addresses import check_address
+from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import (
     LinkState,
@@ -921,15 +921,18 @@ class Lifecycle:
         return order, token
 
     def customer_link(self, order_id: str) -> LinkState:
-        """The state of the order's newest customer link (spec §5.2), never its token."""
+        """The state of the order's newest customer link (spec §5.2), never its token. A
+        plain read: it takes no lock, so the order page's reads never wait behind a write."""
         with self.store.transaction() as conn:
-            order = self._lock(conn, order_id)
-            return link_state(conn, order.id)
+            if self.store.order(order_id, conn=conn) is None:
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            return link_state(conn, order_id)
 
     def send_customer_link(self, order_id: str, by: Actor, to: str | None) -> LinkState:
         """The shop sends the order a new customer link (spec §5.2 "Order link"), under the
         order's lock: every live link is revoked and a new one mailed (`issue_link`) to
-        ``to``, or else to the customer's email contact (the primary one first). A
+        ``to``, or else to the customer's first email contact that is one address (the
+        primary one first; a contact is free text, and a malformed one is skipped). A
         `back_office` order gets one too. Audit row `order.customer_link_sent`. Refusals:
         `order_not_found`; `order_not_submitted` on a cart; 422 `no_email` with no ``to``
         and no email contact; `EmailInvalidError`; `KekMissingError`."""
@@ -941,7 +944,8 @@ class Lifecycle:
                 raise LifecycleError(
                     "no_email", "to: the customer has no email address", unprocessable=True
                 )
-            address = check_address(address)
+            if to is not None:
+                address = check_address(address)
             issue_link(conn, self.kek, order.id, order.label, address)
             self._event(conn, order, by, "order.customer_link_sent", to=address)
             state = link_state(conn, order.id)
@@ -962,13 +966,19 @@ class Lifecycle:
         return state
 
     def _customer_email(self, conn: Conn, order: Order) -> str | None:
-        """The order's customer's email contact, the primary one first."""
+        """The customer's first email contact that is one address (`check_address`), the
+        primary one first; None when there is none."""
         if order.customer_id is None:
             return None
         customer = self.store.customer(order.customer_id, conn=conn)
         emails = [c for c in (customer.contacts if customer else []) if c.kind == "email"]
         emails.sort(key=lambda c: not c.primary)
-        return emails[0].value if emails else None
+        for contact in emails:
+            try:
+                return check_address(contact.value)
+            except EmailInvalidError:
+                continue
+        return None
 
     def _new_customer(self, conn: Conn, body: SubmitInput, email: str) -> tuple[str, str | None]:
         """`submit_order`'s step 1 for an anonymous submit: a new customer with the name,
