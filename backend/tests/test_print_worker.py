@@ -30,12 +30,20 @@ from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.operations import RemoteOperationStore
-from scadbuddy.crud.print import RemoteEvents, RemotePrintRunStore, WorkerHearsNoEventsError
+from scadbuddy.crud.print import (
+    RemoteEvents,
+    RemotePrinterStore,
+    RemotePrintRunStore,
+    RemoteReports,
+    WorkerHearsNoEventsError,
+)
 from scadbuddy.library.settings_store import PrintSettings, StoredSettings
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing import catalogue as native_catalogue_module
 from scadbuddy.worker import (
     ApiUrlMissingError,
@@ -146,6 +154,10 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
         assert print_deps.printers is not None and print_deps.reports is not None
+        # #5298 Task 29: through the API's CRUD routes, never the worker's own SQL.
+        assert isinstance(deps.printers, RemotePrinterStore)
+        assert isinstance(deps.reports, RemoteReports)
+        assert print_deps.printers is deps.printers and print_deps.reports is deps.reports
         # #4541: a worker without the reports would stop every waiting LAN sequence.
         [wait] = [
             fn
@@ -422,12 +434,21 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
     )
     try:
         assert deps.printers is not None and deps.reports is not None
-        row = deps.printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
-        deps.printers.link_lan(
+        # The worker reads the registry and the reports through the API's CRUD routes
+        # (#5298 Task 29), which this test does not serve: the API's own stores write
+        # the row, and the worker's reads answer what those read.
+        api_printers = PrinterStore(deps.database.pool, deps.kek)
+        api_reports = PrinterReportStore(deps.database.pool)
+        row = api_printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
+        api_printers.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
         )
-        deps.printers.patch(row.id, PrinterPatch(preferred_path="native"))
-        deps.reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+        api_printers.patch(row.id, PrinterPatch(preferred_path="native"))
+        api_reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
+        for read in ("get", "list", "by_bambuddy_id"):
+            monkeypatch.setattr(deps.printers, read, getattr(api_printers, read))
+        monkeypatch.setattr(deps.reports, "get", api_reports.get)
+        monkeypatch.setattr(deps.reports, "all", api_reports.all)
         hot_path = StoredSettings(
             slicer_backend="native", library_backend="native", store_backend="s3"
         )

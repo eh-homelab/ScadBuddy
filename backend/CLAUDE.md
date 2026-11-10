@@ -469,7 +469,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   its claim take an `Idempotency-Key`), and its print links, sends and outputs' last
   prints (`RemotePrintLinks`, a `PrintLinkStore` with no pool, and `RemoteOutputPrints`,
   an `OutputPrintStore` with no pool, area `links`, #5298 Task 28; each refuses the
-  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and it
+  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and its
+  printer registry, LAN reports and printers' access codes (`RemotePrinterStore`, a
+  `PrinterStore` with no pool, and `RemoteReports`, area `printers`, #5298 Task 29: a
+  printer merge runs on the API alone; the access code is opened there and answered to
+  `crud.print` only, `no-store`, never logged; a report's `put` and a virtual printer's
+  sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and
+  signs a LAN print's transfer tokens), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
@@ -1204,7 +1210,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `machine_rate_per_hour`. A merge of the three tables runs on the API only: the print
   worker's run makes or merges its printer row through `POST
   /api/v1/internal/crud/print/printers/ensure-bambuddy` (`crud/print.py`
-  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29's route taken early). Routes
+  `RemotePrinterStore`, area `printer-ensure`, #5298 Task 29). Routes
   `GET`/`PUT`/`DELETE /printers/{id}/machine-rate` (`api/machine_rates.py`). A slice quote
   is priced at the rate of the printer it sliced for (`QuoteRun.machine_rate`,
   `MachineRates.for_quote`: `printer`, else the printer linked to `printer_id`, else the

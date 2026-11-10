@@ -15,11 +15,17 @@ so a call sent again after a lost answer answers as the first did. The insert's
 `record`, `record_run` and `older_open`. A record sent again finds its run's outcome
 recorded and answers None, as a second reader does over SQL.
 
-`RemotePrinterStore` is the worker's `PrinterStore` with `ensure_bambuddy_written` over
-the route (#5298 Task 29's first route, taken early by #4625): a merge it makes runs on
-the API, which may write every table `PRINTER_REFERENCES` names. `link_bambuddy`, the
-other method that merges, refuses: it runs on the API only. Its remaining methods stay on
-the worker's SQL until Task 29.
+`RemotePrinterStore` is `printers/store.py` `PrinterStore` (Q22-Q25, #5298 Task 29) for
+the methods the print worker calls: the reads (`get`, `by_serial`, `by_bambuddy_id`,
+`list`), the access code (`open_access_code`, opened on the API and answered to
+``crud.print`` only, plan D8), a Bambuddy printer's row (`ensure_bambuddy_written`, taken
+early by #4625: a merge it makes runs on the API, which may write every table
+`PRINTER_REFERENCES` names) and a virtual-printer write's sync (`upsert_virtual`,
+`mark_virtual_listed`, from `bambuddy/virtual_printers.py`). Those two answer what the
+write changed, which a resend would not repeat, so each takes an ``Idempotency-Key``
+(`WriteKeys`'). `RemoteReports` is `printers/reports.py` `PrinterReportStore` (Q26), for
+the watch, the native follow and the LAN path. Neither holds a pool, and the store
+refuses the methods only the API calls (`PRINTERS_API_ONLY`), `link_bambuddy` among them.
 
 `RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
 4); sent again, the first record answers.
@@ -99,17 +105,28 @@ from scadbuddy.bambuddy.uploads import (
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
+from scadbuddy.core.secrets import Kek, SealError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
+from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.printers.lan_models import LanStopped
-from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.store import PrinterStore
+from scadbuddy.printers.models import BambuddyView, PrinterRow
+from scadbuddy.printers.reports import PrintEnd, PrinterReportStore
+from scadbuddy.printers.store import (
+    KekMissingError,
+    NoAccessCodeError,
+    PrinterNotFoundError,
+    PrinterStore,
+    SerialTakenError,
+    VirtualOutcome,
+    printer_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,38 +152,6 @@ class RemoteSettingsStore:
 
     def close(self) -> None:
         self._client.close()
-
-
-class RemotePrinterStore(PrinterStore):
-    """Blocking: called through ``asyncio.to_thread``, as the SQL store is. The row is
-    made or merged on the API, which announces a merge."""
-
-    def __init__(self, client: CrudSyncClient, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._client = client
-
-    def ensure_bambuddy_written(
-        self,
-        bambuddy_printer_id: int,
-        *,
-        serial: str | None,
-        name: str,
-        model: str | None,
-        listed: set[int] | frozenset[int] | None = None,
-    ) -> tuple[PrinterRow, bool]:
-        body = {
-            "bambuddy_printer_id": bambuddy_printer_id,
-            "serial": serial,
-            "name": name,
-            "model": model,
-            "listed": None if listed is None else sorted(listed),
-        }
-        answer = self._client.request("POST", f"{BASE}/printers/ensure-bambuddy", json=body).json()
-        return PrinterRow.model_validate(answer["row"]), bool(answer["written"])
-
-    def link_bambuddy(self, printer_id: str, bambuddy_printer_id: int) -> PrinterRow:
-        """The API's alone: its merge rewrites tables the worker's role cannot."""
-        raise NotImplementedError("link_bambuddy runs on the API, not in a worker")
 
 
 def _no_such_run(error: CrudRefusedError) -> bool:
@@ -838,6 +823,230 @@ class RemoteOutputPrints(OutputPrintStore):
 
 
 _refuse(RemoteOutputPrints, "OutputPrintStore", OUTPUT_PRINTS_API_ONLY)
+
+
+#: The routes' reasons for an access code it cannot answer (`api/crud_print.py`): no
+#: printer, a printer with no code, and a code sealed under another key.
+NO_SUCH_PRINTER = "no-such-printer"
+NO_ACCESS_CODE = "no-access-code"
+ACCESS_CODE_UNREADABLE = "access-code-unreadable"
+#: The route's reason for a virtual printer whose serial another row keeps.
+SERIAL_TAKEN = "serial-taken"
+#: What a worker's `KekMissingError` says when the API cannot open an access code.
+API_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the API"
+
+
+class RemotePrinterStore(PrinterStore):
+    """Blocking: called through ``asyncio.to_thread``, as the SQL store is. No pool:
+    every method the worker calls is a route under ``…/print/printers`` (areas
+    ``printer-ensure`` and ``printers``). A row is made or merged on the API, which
+    announces a merge. ``kek`` is the worker's own: the API opens the access code (plan
+    D8), but the worker still needs its KEK for a virtual printer's sealed request
+    (`bambuddy/virtual_printers.py`) and a LAN print's transfer tokens (`RemoteBlobs`),
+    so `bambuddy/print_run.py` `_registry_path` still reads it."""
+
+    def __init__(
+        self, client: CrudSyncClient, kek: Kek | None, *, previous_kek: Kek | None = None
+    ) -> None:
+        self._client = client
+        self.kek = kek
+        self.previous_kek = previous_kek
+        #: The API announces a merge; the worker announces nothing of the registry's.
+        self.events = None
+        self._keys = WriteKeys()
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("PrinterStore.pool is the API's; the worker has none")
+
+    def _row_or_none(self, path: str) -> PrinterRow | None:
+        body = self._client.request("GET", f"{BASE}/printers{path}").json()
+        return None if body is None else PrinterRow.model_validate(body)
+
+    def get(self, printer_id: str) -> PrinterRow | None:
+        if printer_uuid(printer_id) is None:
+            return None
+        return self._row_or_none(f"/{quote(printer_id, safe='')}")
+
+    def by_serial(self, serial: str) -> PrinterRow | None:
+        return self._row_or_none(f"/by-serial?{urlencode({'serial': serial})}")
+
+    def by_bambuddy_id(self, bambuddy_printer_id: int) -> PrinterRow | None:
+        return self._row_or_none(f"/by-bambuddy-id/{int(bambuddy_printer_id)}")
+
+    def list(self) -> list[PrinterRow]:
+        body = self._client.request("GET", f"{BASE}/printers").json()
+        return [PrinterRow.model_validate(row) for row in body]
+
+    def open_access_code(self, printer_id: str) -> str:
+        """The access code, opened on the API (plan D8). Each refusal is raised as the
+        SQL store raises it; no exception here carries the code."""
+        if printer_uuid(printer_id) is None:
+            raise PrinterNotFoundError(printer_id)
+        url = f"{BASE}/printers/{quote(printer_id, safe='')}/access-code"
+        try:
+            response = self._client.request("GET", url)
+        except CrudRefusedError as error:
+            reason = error.problem.get("reason")
+            if error.status == 404 and reason == NO_ACCESS_CODE:
+                raise NoAccessCodeError(printer_id) from None
+            if error.status == 404 and reason == NO_SUCH_PRINTER:
+                raise PrinterNotFoundError(printer_id) from None
+            if reason == NOT_CONFIGURED:
+                raise KekMissingError(API_NEEDS_KEK) from None
+            if _refused_as(error, ACCESS_CODE_UNREADABLE):
+                raise SealError("the access code was sealed under another key") from None
+            raise
+        return str(response.json()["code"])
+
+    def ensure_bambuddy_written(
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None = None,
+    ) -> tuple[PrinterRow, bool]:
+        body = {
+            "bambuddy_printer_id": bambuddy_printer_id,
+            "serial": serial,
+            "name": name,
+            "model": model,
+            "listed": None if listed is None else sorted(listed),
+        }
+        answer = self._client.request("POST", f"{BASE}/printers/ensure-bambuddy", json=body).json()
+        return PrinterRow.model_validate(answer["row"]), bool(answer["written"])
+
+    def _keyed(self, method: str, path: str, body: Any) -> Any:
+        """A write whose answer a resend would not repeat, under an ``Idempotency-Key``
+        (plan D5): `WriteKeys`', so a retried activity is answered as its last attempt
+        was, or a new key when the ledger holds another request under that one."""
+        url = f"{BASE}{path}"
+        try:
+            response = self._client.request(
+                method, url, json=body, idempotency_key=self._keys.next()
+            )
+        except CrudRefusedError as error:
+            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                raise
+            response = self._client.request(
+                method, url, json=body, idempotency_key=uuid.uuid4().hex
+            )
+        return response.json()
+
+    def upsert_virtual(
+        self,
+        vp_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        mode: str,
+        forwards_to: str | None,
+        view: BambuddyView,
+        may_adopt: bool = True,
+    ) -> tuple[PrinterRow, VirtualOutcome, bool]:
+        body = {
+            "serial": serial,
+            "name": name,
+            "model": model,
+            "mode": mode,
+            "forwards_to": forwards_to,
+            "view": view.model_dump(mode="json"),
+            "may_adopt": may_adopt,
+        }
+        try:
+            answer = self._keyed("PUT", f"/printers/virtual/{int(vp_id)}", body)
+        except CrudRefusedError as error:
+            if _refused_as(error, SERIAL_TAKEN):
+                raise SerialTakenError(str(error.problem.get("existing_id", ""))) from error
+            raise
+        row = PrinterRow.model_validate(answer["row"])
+        return row, answer["outcome"], bool(answer["changed"])
+
+    def mark_virtual_listed(self, listed: Iterable[int]) -> tuple[str, ...]:
+        answer = self._keyed("POST", "/printers/virtual-listed", {"listed": sorted(set(listed))})
+        return tuple(str(printer_id) for printer_id in answer["changed"])
+
+
+#: The `PrinterStore` methods only the API calls: Settings > Printers' routes, the
+#: Bambuddy sync (`printers/bambuddy_sync.py` `sync_printers`, from the API's route and
+#: housekeeping), the strip (`bambuddy/printers_now.py`) and the LAN link. The print
+#: worker has no route for them (#5298 Task 29). ``link_bambuddy`` merges rows, as
+#: ``ensure_bambuddy_written`` may, so it runs with the API's privileges only.
+PRINTERS_API_ONLY = (
+    "create",
+    "patch",
+    "link_bambuddy",
+    "mark_bambuddy_active",
+    "unlink_bambuddy",
+    "link_lan",
+    "unlink_lan",
+    "create_linked",
+    "record_bambuddy_view",
+    "set_lan_sync_error",
+    "delete",
+)
+#: The `PrinterStore` methods that only call others of its own, each of which the worker
+#: sends over a route: ``require`` and ``resolve_bambuddy_id`` (``get``) and
+#: ``ensure_bambuddy`` (``ensure_bambuddy_written``).
+PRINTERS_COMPOSED = ("require", "resolve_bambuddy_id", "ensure_bambuddy")
+
+_refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
+
+
+def _report(printer_id: str) -> str:
+    return f"{BASE}/reports/{quote(printer_id, safe='')}"
+
+
+class RemoteReports(PrinterReportStore):
+    """`printers/reports.py` `PrinterReportStore` (Q26) over ``…/print/reports`` (area
+    ``printers``). Blocking, as the SQL store is: callers on the loop use a thread. No
+    pool. A `put` answers the print that ended on that write only, so each is sent with
+    an ``Idempotency-Key`` of its own, a new UUID, which the client sends again on each
+    retry: the route answers a resend the first write's end. The watch writes from one
+    loop for as long as its connection lasts, so an activity's ordinal would not name
+    one write. `touch` is natural: it never moves ``seen_at`` back."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("PrinterReportStore.pool is the API's; the worker has none")
+
+    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
+        if printer_uuid(printer_id) is None:
+            return None
+        answer = self._client.request(
+            "PUT",
+            _report(printer_id),
+            json={"report": report, "seen_at": seen_at.isoformat()},
+            idempotency_key=uuid.uuid4().hex,
+        ).json()
+        ended = answer["ended"]
+        return None if ended is None else PrintEnd(**ended)
+
+    def touch(self, printer_id: str, seen_at: datetime) -> None:
+        if printer_uuid(printer_id) is None:
+            return
+        self._client.request(
+            "POST", f"{_report(printer_id)}/touch", json={"seen_at": seen_at.isoformat()}
+        )
+
+    def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        if printer_uuid(printer_id) is None:
+            return None
+        body = self._client.request("GET", _report(printer_id)).json()
+        return None if body is None else (body["report"], datetime.fromisoformat(body["seen_at"]))
+
+    def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
+        body = self._client.request("GET", f"{BASE}/reports").json()
+        return {
+            printer_id: (seen["report"], datetime.fromisoformat(seen["seen_at"]))
+            for printer_id, seen in body.items()
+        }
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

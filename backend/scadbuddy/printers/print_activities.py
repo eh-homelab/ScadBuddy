@@ -57,7 +57,6 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
-from scadbuddy.bambuddy.print_run import LAN_NEEDS_KEK
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsReader
@@ -216,8 +215,10 @@ class LanActivities:
             )
         try:
             code = await asyncio.to_thread(self.d.printers.open_access_code, printer_id)
-        except KekMissingError:
-            raise _failed(LAN_NEEDS_KEK, status_code=status.HTTP_503_SERVICE_UNAVAILABLE) from None
+        except KekMissingError as error:
+            # The process that opens the code lacks the key: the API's on the print
+            # worker (#5298 Task 29), which says so.
+            raise _failed(str(error), status_code=status.HTTP_503_SERVICE_UNAVAILABLE) from None
         except NoAccessCodeError:
             raise _failed(
                 f"{row.name} has no LAN access code. Link it again in Settings > Printers.",

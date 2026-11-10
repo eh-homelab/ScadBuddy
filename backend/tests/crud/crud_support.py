@@ -80,6 +80,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.print_watch.store import AutoImportStore
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store import BlobRefs
@@ -444,7 +445,8 @@ def print_crud_app(
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
-    through ``operations`` of ``kinds``, printer rows through ``printers``, the print
+    through ``operations`` of ``kinds``, printer rows through ``printers`` (the API's own
+    registry on ``store``'s pool when not given) and the LAN reports on that pool, the print
     links, sends and the queue item a reprint queued through ``links`` (the API's own
     on ``store``'s pool when not given), and the uploads, slices, background slices,
     project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
@@ -454,8 +456,12 @@ def print_crud_app(
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
-        PRINTERS: SimpleNamespace(store=printers),
         AUTO_IMPORTS: AutoImportStore(store.pool),
+        # The registry is the API's own on ``store``'s pool when not given (#5298 Task 29).
+        PRINTERS: SimpleNamespace(
+            store=printers if printers is not None else PrinterStore(store.pool, None),
+            reports=PrinterReportStore(store.pool),
+        ),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -545,6 +551,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "copy-leases",
         "links",
         "lan-imports",
+        "printers",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

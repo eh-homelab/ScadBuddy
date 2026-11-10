@@ -126,11 +126,10 @@ class WatchActivities:
             return "unlinked"
         try:
             code = await asyncio.to_thread(self.printers.open_access_code, printer_id)
-        except KekMissingError:
+        except KekMissingError as error:
+            # Where the code is opened: the API's (#5298 Task 29), or this process's.
             logger.warning(
-                "a LAN printer cannot be watched: the print worker has no"
-                " SCADBUDDY_SECRET_KEY_FILE",
-                extra={"printer_id": printer_id},
+                "a LAN printer cannot be watched: %s", error, extra={"printer_id": printer_id}
             )
             return "no-key"
         except NoAccessCodeError:

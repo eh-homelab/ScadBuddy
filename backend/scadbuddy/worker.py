@@ -71,6 +71,7 @@ from scadbuddy.crud.print import (
     RemotePrinterStore,
     RemotePrintLinks,
     RemotePrintRunStore,
+    RemoteReports,
     RemoteReprints,
     RemoteSettingsStore,
     RemoteUploadStore,
@@ -1223,7 +1224,9 @@ class PrintWorkerDeps:
     #: Native library files, read through the API's internal routes (#3827).
     library: LibraryReads | None = None
     #: The printer registry (#3823): each LAN printer's watch, on the follow queue. The
-    #: KEK opens a printer's access code; without it the watches end, saying why.
+    #: registry, the reports and the access code come from the API's CRUD routes (#5298
+    #: Task 29); the KEK unseals a virtual printer's request and signs a LAN print's
+    #: transfer tokens.
     printers: PrinterStore | None = None
     reports: PrinterReportStore | None = None
     kek: Kek | None = None
@@ -1252,8 +1255,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     """The print worker's stores, over the API's database and its internal routes. The
     Bambuddy settings, key included, are read through the API's CRUD route on every use,
     and the runs, outcomes, operations, events, uploads, slices, background slices,
-    project records, print links, sends and outputs' last prints go through its CRUD
-    routes (#5298).
+    project records, print links, sends, outputs' last prints, printer rows, LAN reports
+    and access codes go through its CRUD routes (#5298).
     ``crud``, the client of those routes, defaults to one with the worker's credential."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
@@ -1315,13 +1318,17 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # activity rows, and counts each operation it ends (#2295).
     print_runs = RemotePrintRunStore(crud)
     operations = RemoteOperationStore(crud, "print")
+    # The worker's KEK opens no access code (the API does, plan D8): it still unseals a
+    # virtual printer's request (`bambuddy/virtual_printers.py`) and signs a LAN print's
+    # transfer tokens (`RemoteBlobs`, inventory Q31).
     kek = settings_kek(settings.secret_key_file)
-    # A run's first check makes or merges a row on the API (#4625): a merge writes tables
-    # this worker's role is never granted.
+    # The registry and the LAN reports through the API (#5298 Task 29): a run's first
+    # check makes or merges a row there (#4625), whose merge writes tables this worker's
+    # role is never granted, and a printer's access code is the API's to open.
     printers = RemotePrinterStore(
-        crud.blocking(), pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file)
+        blocking, kek, previous_kek=settings_kek(settings.secret_key_previous_file)
     )
-    reports = PrinterReportStore(pool)
+    reports = RemoteReports(blocking)
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9). The
     # worker hears no ``print.run`` (#5298), so it keeps no run (`RecentRuns`): each read
     # asks the API for the subject's newest run.
@@ -1482,6 +1489,7 @@ PRINT_CRUD_AREAS = frozenset(
         "copy-leases",
         "links",
         "lan-imports",
+        "printers",
     }
 )
 
