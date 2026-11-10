@@ -422,6 +422,46 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(String(item.content)).not.toContain(DIRECTORY_NOTE_MARK)
   })
 
+  // withNote puts the note only at the start of a text block or as a paragraph of its own, so a
+  // user's line that quotes its words mid-line is the user's and is kept whole.
+  it("keeps a user's line that quotes the directory note's words mid-line (#5867)", async () => {
+    const h = hooks()
+    const quoted = `Why did you say "${DIRECTORY_NOTE_MARK} /sessions/child"? Explain it.`
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: quoted } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The session was forked.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: quoted },
+      { role: 'assistant', content: 'The session was forked.' },
+    ])
+  })
+
+  // A turn whose only text is the note (a string prompt, or a text block beside images) cleans
+  // to nothing and leaves no empty user turn behind.
+  it('retains no user turn for a turn whose only text is the directory note (#5867)', async () => {
+    const h = hooks()
+    const note = directoryNote('/sessions/parent', '/sessions/child')
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: note } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Nothing to do.' }] } },
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: note }] } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Still nothing.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'assistant', content: 'Nothing to do.' },
+      { role: 'assistant', content: 'Still nothing.' },
+    ])
+  })
+
   // #3701: a turn that failed over to another credential (harness/fallback.ts) leaves in
   // Claude Code's transcript the refused attempt's synthetic error message and the
   // continuation prompt the next credential resumed with. Neither is conversation.
