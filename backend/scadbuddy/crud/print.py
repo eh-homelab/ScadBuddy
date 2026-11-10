@@ -348,6 +348,7 @@ class ApiOnlyError(RuntimeError):
 #: worker has no route for them (#5298).
 API_ONLY = (
     "outputs_for_files",
+    "native_slice_hashes",
     "relocate",
     "copies_by_use",
     "used_since",
