@@ -419,7 +419,9 @@ async def draft_submit(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> SubmittedOrder:
     """The visitor's cart submitted as an order (`orders/storefront/submit.py`
-    `submit_draft`), for the session's account when signed in."""
+    `submit_draft`), for the session's account when signed in. A session that names no
+    live account submits as anonymous. The ``Idempotency-Key`` is bound to who sent it:
+    replayed under another session, or with none, it is 422 ``idempotency-key-reused``."""
     key = required_key(idempotency_key)
     body = await _body(
         request, SubmitBody, "submit_body_invalid", "This request is not a submit of an order."

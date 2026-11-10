@@ -15,8 +15,15 @@ visitor's, or no cart, is 404 ``draft_not_found``, checked under the order's loc
 The account comes only from the request's session (`api/crud_storefront.py`
 `store_account`); a body never names it. Signed in, the order takes the account's
 customer and is attached to the account; a cart whose visitor joined another account is
-404 ``draft_not_found`` too. The ledger's request names the account, so a key sent again
-under another session is not the same request.
+404 ``draft_not_found`` too. A session that names no live account (expired, ended or
+unknown) reads as none, so that submit is anonymous: a new customer and no attach, the
+safe side, and the page is told nothing more.
+
+A key is bound to who sent it: the ledger's request names the account, so a key sent
+again under another session, or with none, is 422 ``idempotency-key-reused``, never the
+stored reply. A lost-reply submit retried after the visitor signed in or out (or after
+its session expired) is refused that way, though its order exists; the page loads the
+cart again and finds it submitted.
 """
 
 from __future__ import annotations
