@@ -245,12 +245,19 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   its status read, it fails with "… take a snapshot to see the page, then call again."
   (`WHY_SLOW`, #5974). A turn waits for its tab at most 3 times (`TAB_WAITS_PER_TURN`), and
   after "Carry on without the tab", a typed reply, a timeout, or a reconnect to a replica
-  that cannot be reached it does not ask again that turn. A tab whose replica is only slow
-  to answer its status read counts as back (#5974): a read runs once more (if it still finds
-  no tab it fails with "The session's tab may be connected … take a snapshot, then call
-  again.", `WHY_SLOW_READ`), and the turn may
-  still wait for its tab later. Such a tab also ends a wait as soon as the wait is
-  recorded, as a tab that came back in between does, so its card closes at once. Across the user's sessions at most 10 tab waits are opened in 10 minutes
+  that cannot be reached it does not ask again that turn. Before it opens a new wait, and
+  only when the turn may still wait (no latch, waits left), the call checks the tab's status
+  once (`WaitForTab`'s `slow`, #5981): when the tab's replica is only slow to answer, no wait is
+  opened (it would show no card and still use up the turn's and the user's tab waits), and
+  the call fails with "… so the user was not asked to reopen it: take a snapshot, then call
+  again." (`WHY_SLOW_NO_WAIT`, #5974 review). After 3 such calls in a turn
+  (`TAB_WAITS_PER_TURN`), the turn carries on without the tab. Past the user's cross-session
+  limit of tab waits, a slow owner still gets this message, not "The user was not asked for the
+  tab: …"; both are true. A replica that turns slow during the wait
+  counts as back: a read runs once more (if it still finds no tab it fails with "The
+  session's tab may be connected … take a snapshot, then call again.", `WHY_SLOW_READ`),
+  the call that opened the wait does not ask for the slow answer again (a call that joined
+  that wait checks once more), and the turn may still wait for its tab later. Across the user's sessions at most 10 tab waits are opened in 10 minutes
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
   fails at once with "The user was not asked for the tab: …". Every wait opened counts,
   including ones withdrawn because their calls stopped.
