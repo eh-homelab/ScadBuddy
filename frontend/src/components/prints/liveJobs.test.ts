@@ -3,7 +3,7 @@ import type { PrinterNow, PrintSummary, QueueItem } from '../../api/types'
 import { PRINTERS_NOW } from '../../mocks/features/printersNow'
 import { PRINT_QUEUE } from '../../mocks/features/printQueue'
 import type { NowCard } from './nowCards'
-import { liveJobs, liveLabel, printRows, QUEUE_SHOWN } from './liveJobs'
+import { liveJobs, liveLabel, newStart, printRows, QUEUE_SHOWN, startedOn } from './liveJobs'
 
 const card = (printer: Partial<PrinterNow>): NowCard => ({
   printer: { ...PRINTERS_NOW[2]!, ...printer },
@@ -113,5 +113,28 @@ describe('printRows (#3745): each print once, in one list', () => {
       [38, null],
       [37, 'archive:37'],
     ])
+  })
+})
+
+describe('newStart (#5940, #5946): a working job that started since the last read', () => {
+  const read = (...jobs: [string, string][]) => jobs.map(([printer, key]) => startedOn(printer, key))
+
+  it('is a job a printer did not have before, and not one that ended', () => {
+    expect(newStart(read(['p1', 'archive:41']), read())).toBe(true)
+    expect(newStart(read(['p1', 'archive:42']), read(['p1', 'archive:41']))).toBe(true)
+    expect(newStart(read(), read(['p1', 'archive:41']))).toBe(false)
+    expect(newStart(read(['p1', 'archive:41']), read(['p1', 'archive:41']))).toBe(false)
+  })
+
+  it('is not a LAN job that ScadBuddy linked on the same printer', () => {
+    expect(newStart(read(['p1', 'archive:41']), read(['p1', 'printer:p1']))).toBe(false)
+    // Another printer's archive-less job says nothing of this one.
+    expect(newStart(read(['p1', 'archive:41']), read(['p2', 'printer:p2']))).toBe(true)
+  })
+
+  it('keeps each printer apart whatever its id holds, a "|" included', () => {
+    const odd = 'x|y'
+    expect(newStart(read([odd, 'archive:41']), read([odd, `printer:${odd}`]))).toBe(false)
+    expect(newStart(read([odd, 'archive:41']), read(['x', 'printer:x']))).toBe(true)
   })
 })
