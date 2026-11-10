@@ -165,6 +165,8 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     else:
         logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()
+    # The session cookie's key too (`accounts.py`), under its own version tag.
+    app.state.cookie_key = key
     # The last added runs first.
     app.add_middleware(VisitorCookie, key=key, prefix=STOREFRONT_PREFIX)
     app.add_middleware(

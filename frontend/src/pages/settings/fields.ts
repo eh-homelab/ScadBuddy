@@ -150,14 +150,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     advanced: true,
   },
   // #5283 — the storefront's bot check (storefront spec §5.8): Cloudflare Turnstile on
-  // design requests today (submit, sign-up and sign-in once those forms ship), on while a
+  // design requests and sign-ins today (submit and sign-up once those forms ship), on while a
   // site key is set.
   {
     name: 'storefront_turnstile_site_key',
     section: 'orders',
     label: 'Storefront bot check: Turnstile site key',
     kind: 'text',
-    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests (and on submit, sign-up and sign-in once those forms ship), and refuses them while the secret below is not set. Empty turns the check off.',
+    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests and sign-ins (and on submit and sign-up once those forms ship), and refuses them while the secret below is not set. Empty turns the check off.',
   },
   {
     name: 'storefront_turnstile_secret',
