@@ -31,9 +31,12 @@ folder yet and the destinations' touches (Q18) over the routes, with the same an
 slice start and a background slice's record are each sent with an ``Idempotency-Key`` of
 their own, which the client sends again on each retry: the route records each once. A
 claim's key is `crud/render.py` `WriteKeys`'s: the same on a retried activity, so a
-claim the last attempt won answers true again. The copy lock (Q19) stays a session lock
-on the pool until the copy lease. The methods only the API's sweeps and routes call are
-refused here (`API_ONLY`), so none reaches SQL from the worker by mistake.
+claim the last attempt won answers true again. The copy lock (Q19) is the copy lease
+over ``…/copy-leases/{key}`` (`RemoteCopyLeases`, #5298 Task 27), and a record made
+under it names the lease, which the route checks: `LeaseLostError` once another holder
+took it. So the store holds no pool: nothing it does reaches SQL from the worker. The
+methods only the API's sweeps and routes call are refused here (`API_ONLY`), and so is
+``pool``.
 
 `RemoteEvents` is the print worker's `EventBus` (Q5): `publish` hands an event to an
 outbox, never blocks and is safe from any thread, as `PgNotifyEventBus.publish` is; a
@@ -45,11 +48,12 @@ The worker does not LISTEN (plan D7), so it hears nothing: `subscribe` and
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 import uuid
 from collections import deque
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import AsyncIterator, Callable, Collection, Iterable
 from datetime import datetime, timedelta
 from typing import Any, NoReturn
 from urllib.parse import quote, urlencode
@@ -58,6 +62,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
 from scadbuddy.bambuddy.print_links import PrintReprint
 from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.progress import PrintProgress
@@ -370,14 +375,76 @@ API_ONLY = (
 )
 
 
-class RemoteUploadStore(BambuddyUploadStore):
-    """``pool`` serves only `copy_lock`, a session lock that the copy lease replaces
-    (#5298 Task 27)."""
+#: The routes' reasons: a lease another holder keeps, and a lease its token no longer
+#: holds (`api/crud_print.py`).
+LEASE_BUSY = "busy"
+LEASE_LOST = "lease-lost"
+#: How much longer than its wait an acquire's request may take, in seconds.
+LEASE_REQUEST_SLACK = 10.0
 
-    def __init__(self, client: CrudClient, pool: ConnectionPool[Connection[DictRow]]) -> None:
-        super().__init__(pool)
+
+def _lease_url(key: str) -> str:
+    return f"{BASE}/copy-leases/{quote(key, safe='')}"
+
+
+def _refused_as(error: CrudRefusedError, reason: str) -> bool:
+    return error.status == 409 and error.problem.get("reason") == reason
+
+
+class RemoteCopyLeases:
+    """`copy_leases.py` `LeaseCalls` over the routes. Each call is natural on its
+    token, so the client sends it again after a lost answer. An acquire waits on the
+    API, so its request may take ``wait`` plus `LEASE_REQUEST_SLACK`."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def acquire(self, key: str, token: str, ttl: float, wait: float) -> datetime | None:
+        try:
+            response = await self._client.request(
+                "POST",
+                _lease_url(key),
+                json={"token": token, "ttl_s": ttl, "wait_s": wait},
+                timeout=wait + LEASE_REQUEST_SLACK,
+            )
+        except CrudRefusedError as error:
+            if _refused_as(error, LEASE_BUSY):
+                return None
+            raise
+        return datetime.fromisoformat(response.json()["expires_at"])
+
+    async def renew(self, key: str, token: str, ttl: float) -> datetime | None:
+        try:
+            response = await self._client.request(
+                "PUT", _lease_url(key), json={"token": token, "ttl_s": ttl}
+            )
+        except CrudRefusedError as error:
+            if _refused_as(error, LEASE_LOST):
+                return None
+            raise
+        return datetime.fromisoformat(response.json()["expires_at"])
+
+    async def release(self, key: str, token: str) -> None:
+        await self._client.request("DELETE", f"{_lease_url(key)}?{urlencode({'token': token})}")
+
+
+class RemoteUploadStore(BambuddyUploadStore):
+    """No pool: every method the worker calls is a route, the copy lock the copy
+    lease (#5298 Task 27)."""
+
+    def __init__(self, client: CrudClient) -> None:
         self._client = client
         self._claims = WriteKeys()
+        self._leases = RemoteCopyLeases(client)
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("BambuddyUploadStore.pool is the API's; the worker has none")
+
+    @contextlib.asynccontextmanager
+    async def copy_lock(self, key: str) -> AsyncIterator[CopyLease]:
+        async with hold_lease(self._leases, key) as lease:
+            yield lease
 
     async def _get(self, path: str, query: Any) -> Any:
         url = f"{BASE}{path}?{urlencode(query, doseq=True)}"
@@ -401,10 +468,18 @@ class RemoteUploadStore(BambuddyUploadStore):
             for output_id, copies in body.items()
         }
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
-        await self._send(
-            "/uploads", {"output_id": output_id, "upload": copy.model_dump(mode="json")}
-        )
+    async def record(
+        self, output_id: str, copy: LibraryCopy, lease: CopyLease | None = None
+    ) -> None:
+        body: dict[str, Any] = {"output_id": output_id, "upload": copy.model_dump(mode="json")}
+        if lease is not None:
+            body["lease"] = lease.model_dump()
+        try:
+            await self._send("/uploads", body)
+        except CrudRefusedError as error:
+            if _refused_as(error, LEASE_LOST):
+                raise LeaseLostError(str(error)) from error
+            raise
 
     async def same_content(
         self, folder_id: int | None, target_key: str, content_key: str

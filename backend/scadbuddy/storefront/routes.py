@@ -11,11 +11,12 @@ is relayed as a stream, never held whole, as ``model/gltf-binary``. A design req
 read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
 spooled, then sent on as multipart a chunk at a time.
 
-Accounts (#5283): ``POST /account/verify`` (the bot check ``sign_in`` first) sets the
-``sb_session`` cookie from the CRUD side's answer (`accounts.py`), ``POST
-/account/sign-out`` clears it and gives the browser a new visitor, and ``GET /account``,
-``GET /account/orders`` and ``POST /draft/submit`` send the cookie's session on. Verify
-and sign-out are checked by `CrossSiteGate`, as every write is."""
+Accounts (#5283): ``POST /account/code`` (the bot check ``sign_up`` first) has the CRUD
+side mail a sign-in code and answers 204 for every address. ``POST /account/verify`` (the
+bot check ``sign_in`` first) sets the ``sb_session`` cookie from the CRUD side's answer
+(`accounts.py`), ``POST /account/sign-out`` clears it and gives the browser a new visitor,
+and ``GET /account``, ``GET /account/orders`` and ``POST /draft/submit`` send the
+cookie's session on. The POSTs are checked by `CrossSiteGate`, as every write is."""
 
 from __future__ import annotations
 
@@ -400,6 +401,19 @@ def _sign_in_required() -> ApiError:
     return ApiError(
         401, "Sign in to see your orders.", type_=f"{STOREFRONT_PROBLEMS}sign_in_required"
     )
+
+
+@visitor_router.post("/account/code", status_code=status.HTTP_204_NO_CONTENT)
+async def account_code(
+    request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """A sign-in code mailed to the address. The bot check (``sign_up``) first, whenever a
+    site key is set; then the CRUD side's request, sent once (`StorefrontCrud.account_code`).
+    The answer is 204 for every address, so it never tells whether one has an account."""
+    await require_turnstile(request, "sign_up")
+    body = await _body(request, "account_body_invalid")
+    await crud.account_code(body, visitor_id=visitor_id, client=client)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @visitor_router.post("/account/verify")

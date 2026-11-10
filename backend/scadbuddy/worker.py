@@ -1276,9 +1276,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # its runs, outcomes and operations are written there with theirs (D7).
     events = RemoteEvents(crud, metrics=metrics)
     # Its uploads, slices, slice starts, background slices and project records through
-    # the API (#5298 Tasks 25, 26); the pool holds only the copy lock until the copy
-    # lease (Task 27).
-    uploads = RemoteUploadStore(crud, pool)
+    # the API (#5298 Tasks 25, 26), and its copy lock is the API's copy lease (Task 27):
+    # the store has no pool.
+    uploads = RemoteUploadStore(crud)
 
     @contextlib.asynccontextmanager
     async def bambuddy_client() -> AsyncIterator[BambuddyClient]:
@@ -1458,6 +1458,7 @@ PRINT_CRUD_AREAS = frozenset(
         "reprints",
         "uploads",
         "previews",
+        "copy-leases",
     }
 )
 

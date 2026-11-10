@@ -176,7 +176,13 @@ async function composeFor(
 /** `message_models.py` `MessageClaim.recipients`' bound. */
 const MAX_RECIPIENTS = 20
 
-type SendArgs = { order_id: string; template: NotifyTemplate; note?: string | undefined; resend_of?: string | undefined }
+type SendArgs = {
+  order_id: string
+  template: NotifyTemplate
+  note?: string | undefined
+  resend_of?: string | undefined
+  also_when_storefront_mails?: boolean | undefined
+}
 type SendPlan = { binding: Binding; notice: Notice; approved: ApprovedMessage }
 
 /** The message a send would send now, or why it cannot be sent (nothing sent, nothing recorded). */
@@ -206,26 +212,39 @@ async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
   }
 }
 
-/** `already_notified` before anything parks (§5.2), from the backend's read-only check. */
-async function refuseIfTold(ctx: SendContext, order_id: string, template: NotifyTemplate): Promise<void> {
+/**
+ * What the backend's read-only check refuses before anything parks (§5.2): `already_notified`
+ * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
+ * template's news to the order's customer itself) unless `also_when_storefront_mails`.
+ */
+async function refuseIfTold(ctx: SendContext, args: SendArgs): Promise<void> {
+  const { order_id, template } = args
   const check = await ok(
     ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', { params: { path: { order_id }, query: { template } } }),
     `check order ${order_id}'s messages`,
   )
   const told = check.already_notified
-  if (told) {
+  if (told && args.resend_of === undefined) {
     throw new ToolError(
       `already_notified: the customer was already sent "${template}" (message ${told.id}, ${told.status}) since the ` +
         'order last changed status; name it in resend_of to send it again',
     )
   }
+  if (check.storefront_mail && !args.also_when_storefront_mails) {
+    throw new ToolError(
+      `storefront_mail: the storefront mails the "${template}" news to this order's customer itself (the order has ` +
+        'a live order link), so nothing was sent through the plugin; set also_when_storefront_mails to send it ' +
+        'here too',
+    )
+  }
 }
 
 /** The approval's line: who gets it, through what, and the text. */
-function approvalLine(message: ApprovedMessage): string {
+function approvalLine(message: ApprovedMessage, alsoStorefront = false): string {
   const to = message.to.map((r) => r.value).join(', ')
   const subject = message.subject === null ? '' : ` "${message.subject}"`
-  return `Send${subject} to ${to} through ${message.source}:\n${message.text}`
+  const also = alsoStorefront ? ' (the storefront mail also sends this)' : ''
+  return `Send${subject} to ${to} through ${message.source}${also}:\n${message.text}`
 }
 
 /** The backend's `STALE_SENDING_MINUTES` (`orders/messages.py`): a `sending` row older reads `unknown`. */
@@ -259,11 +278,22 @@ async function sendMessage(ctx: SendContext, args: SendArgs, plan: SendPlan): Pr
         subject: plan.approved.subject,
         text: plan.approved.text,
         ...(args.resend_of === undefined ? {} : { resend_of: args.resend_of }),
+        also_when_storefront_mails: args.also_when_storefront_mails === true,
       },
     })
     const message = await ok(Promise.resolve(claimed), `record the message to order ${order_id}'s customer`)
     const fresh = claimed.response.status === 201
-    if (!fresh && (message.status === 'sent' || message.status === 'failed' || message.status === 'skipped')) {
+    if (message.status === 'skipped') {
+      // §8: the storefront mails it itself (it began to between the check and the claim).
+      return {
+        sent: false,
+        message,
+        warning:
+          'the storefront mails this to the customer itself, so nothing was sent through the plugin; send it ' +
+          'with also_when_storefront_mails to send it here too',
+      }
+    }
+    if (!fresh && (message.status === 'sent' || message.status === 'failed')) {
       return { sent: message.status === 'sent', message }
     }
     const keyed = plan.binding.args.idempotency_key != null
@@ -327,7 +357,7 @@ export async function previewPersonSend(
   args: PersonSend,
 ): Promise<{ message: ApprovedMessage; digest: string }> {
   const planned = await sendPlan(ctx, args)
-  if (args.resend_of === undefined) await refuseIfTold(ctx, args.order_id, args.template)
+  await refuseIfTold(ctx, args)
   return { message: planned.approved, digest: messageDigest(planned.approved) }
 }
 
@@ -1098,7 +1128,9 @@ export const orderTools: Tool[] = [
       'binding changes before it runs, it is refused `message_changed` and nothing is sent. Each send is recorded ' +
       'on the order. A template is sent once per status change of the order: a second send is refused ' +
       "`already_notified` unless `resend_of` names the earlier message (a person's \"Send again\"). With no " +
-      'plugin bound it is refused with the text, for a person to send by hand. The answer is the recorded ' +
+      'plugin bound it is refused with the text, for a person to send by hand. When the storefront mails the ' +
+      'same news to the customer itself (`quoted` and `shipped`, on an order with a live order link), it is ' +
+      'refused `storefront_mail` unless `also_when_storefront_mails` is set. The answer is the recorded ' +
       'message: `sent`, `failed` (the plugin refused it), or `unknown` (no answer came: it may have reached the ' +
       'customer, and it is never sent again by itself).',
     input: z.object({
@@ -1108,6 +1140,13 @@ export const orderTools: Tool[] = [
       resend_of: ID.optional().describe(
         'An earlier message of this order to send again, as order_messages_list (and the order page) lists it',
       ),
+      also_when_storefront_mails: z
+        .boolean()
+        .optional()
+        .describe(
+          'Send it even when the storefront mails this news to the customer itself (a second channel, such as ' +
+            'an SMS nudge). Leave it out otherwise; a flow never sets it.',
+        ),
       approved: APPROVED_MESSAGE.optional().describe('Filled by the approval: what the person approved. Leave it out.'),
     }),
     risk: 'outward',
@@ -1122,8 +1161,11 @@ export const orderTools: Tool[] = [
     // #4442: the approval holds the message itself, so what runs is what the person saw.
     prepareApproval: async (args, ctx) => {
       const planned = await sendPlan(ctx, args)
-      if (args.resend_of === undefined) await refuseIfTold(ctx, args.order_id, args.template)
-      return { input: { ...args, approved: planned.approved }, summary: approvalLine(planned.approved) }
+      await refuseIfTold(ctx, args)
+      return {
+        input: { ...args, approved: planned.approved },
+        summary: approvalLine(planned.approved, args.also_when_storefront_mails === true),
+      }
     },
     // A flow's approval binds the message too (#4445), so a change since it is not run.
     flowBinding: (_args, resolved) => ({ approved: resolved.approved ?? null }),

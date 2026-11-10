@@ -357,6 +357,9 @@ opens every one and seals it again byte for byte).
     sends, then posts the outcome. A replayed claim sends again only when the binding maps an
     `idempotency_key` argument; otherwise a fresh `sending` row is answered as in flight (no
     outcome posted) and one that reads `unknown` is recorded `unknown`, never resent by itself.
+    A template the storefront mails to the order itself (the check's `storefront_mail`) is
+    refused `storefront_mail` before it parks unless `also_when_storefront_mails` is set (the
+    approval line then says so), and a claim that comes back `skipped` sends nothing.
     `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
     message (a person's session only, kept in the audit log as `messaging.test_send`).
     `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message

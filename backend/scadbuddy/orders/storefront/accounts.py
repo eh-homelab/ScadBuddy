@@ -1,8 +1,8 @@
 """Storefront accounts (#5283, spec 2026-11-02 §5.2): a passwordless sign-in. A visitor
 asks for a code by email (`request_code`), types it back (`verify_code`), and gets a
 server-side session. Every function runs on the caller's connection, in its transaction,
-so the route that asks for a code can queue its mail in the same one (the code route, a
-later PR).
+so the route that asks for a code queues its mail in the same one (`api/crud_storefront.py`
+`account_code`).
 
 The client: every limit below is kept per client, the browser's address as the edge
 trusts it (`core/proxies.py` `client_address`: a trusted proxy's ``X-Forwarded-For``, else
@@ -59,7 +59,7 @@ any address falls is about 10^-16 an hour, or 8 * 10^-13 a year.
 
 The bot check: whenever a site key is set, the route that verifies a code takes Turnstile
 with action ``sign_in`` (`storefront/routes.py` `account_verify`), and the route that
-asks for one (a later PR) is to take it with ``sign_up``. This extends spec §5.8.
+asks for one takes it with ``sign_up`` (`account_code`). This extends spec §5.8.
 
 Concurrency: a request and a verify each hold transaction locks on the client key, then
 on the address (`_lock`), before they count, read or spend anything. The key's lock
@@ -134,7 +134,7 @@ _CODE_SPACING: Final = re.compile(r"[\s-]")
 _DUMMY: Final = "0" * 64
 _TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43}")
 #: One plain address: no spaces, commas, brackets or control characters, one ``@`` and a
-#: dotted domain. The code route's mail step (a later PR) will check it again.
+#: dotted domain. The code route's mail step checks it again (`mail.queue_mail`).
 _EMAIL: Final = re.compile(r"[^\s@,;<>()\[\]\\\"]+@[^\s@,;<>()\[\]\\\"]+\.[^\s@,;<>()\[\]\\\".]+")
 
 

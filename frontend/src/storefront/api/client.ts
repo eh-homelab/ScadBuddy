@@ -154,6 +154,9 @@ export const store = {
   // once (a code is single-use), so it takes no Idempotency-Key.
   account: () => call<Account | null>('/account'),
   accountOrders: () => call<AccountOrders>('/account/orders'),
+  // The edge answers 204 for every address and sends it once, so it takes no key either.
+  requestCode: (email: string, turnstile: string | null = null) =>
+    call<void>('/account/code', { method: 'POST', json: { email }, turnstile }),
   signIn: (email: string, code: string, turnstile: string | null = null) =>
     call<Account>('/account/verify', { method: 'POST', json: { email, code }, turnstile }),
   signOut: () => call<void>('/account/sign-out', { method: 'POST' }),

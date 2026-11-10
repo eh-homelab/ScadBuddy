@@ -138,6 +138,10 @@ class MessageClaim(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     #: An earlier message of the order this one sends again (a person's "Send again").
     resend_of: str | None = Field(default=None, max_length=100)
+    #: Send it even when the storefront mails this news for the order itself (spec §8):
+    #: a second channel. Without it such a claim is recorded `skipped`, reason
+    #: `storefront_mail`, and nothing is sent.
+    also_when_storefront_mails: bool = False
 
 
 class MessageOutcome(BaseModel):

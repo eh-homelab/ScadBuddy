@@ -343,16 +343,18 @@ New table `order_messages` (backend migration, a new file
 Routes (`backend/scadbuddy/api/order_messages.py`, all under `/api/v1/orders/{id}/messages`):
 
 - `GET …/check?template=` (read-only, writes nothing): whether a send of the template
-  would be refused now: `already_notified` (with the message id) and, from PR 5,
-  `storefront_mail`. `prepareApproval` reads it, so a refused approval writes no row.
+  would be refused now: `already_notified` (with the message id) and `storefront_mail`
+  (a boolean, §8). `prepareApproval` reads it, so a refused approval writes no row.
 - `POST` (claim). Header `Idempotency-Key`. Under the order's row lock (`lock_order`). A
   cart is refused `order_not_submitted`.
   1. A row with that key exists: answer it as it is (200). Nothing new is written. A key
      of another order is 409 `idempotency_key_reused`, also when that order's claim
      commits the key between this claim's read and its insert (the insert's unique
      violation is caught and the row read again).
-  2. §8 says skip: write a `skipped` row and the audit row `message.skipped`; answer it.
-     (PR 5. Until then this step is absent and nothing is skipped.)
+  2. §8 says skip and the body has no `also_when_storefront_mails`: write a `skipped` row
+     (reason `storefront_mail`, `finished_at` set) and the audit row `message.skipped`;
+     answer it (201). As built (PR 5) this is asked after steps 3 and 4, so a claim they
+     refuse is refused, never recorded as skipped.
   3. A row of the same template and `episode` that is `sent`, `sending` or `unknown`
      exists and the body has no `resend_of`: refuse 409 `already_notified`, naming that
      row. This stops a flow re-run or a second session from telling the customer twice
@@ -444,8 +446,7 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 ### 8.2 The rule
 
-scadify's seam (PR 1 of #5283, branch `feat/storefront-follow`,
-`orders/storefront/mail.py`, not yet on main) is
+scadify's seam (#5283, `orders/storefront/mail.py`, on main since #5923) is
 `storefront_mail_covers(conn, order_id, event, *, host) -> bool`: true when the order has
 a live order link and a mail host is set. It does not read `source` or the visitor. This
 design only consumes it (PR 5), in the CRUD service, passing the settings snapshot's
@@ -462,8 +463,12 @@ def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | No
 - The claim route (§7.1 step 2) calls it under the order's row lock. `prepareApproval`
   (§5.2) reads the same answer through the read-only `GET …/messages/check`; the agent
   never decides it.
-- PR 5 starts only when `storefront_mail_covers` is on main. Until then nothing is
-  skipped; storefront mail does not send on main before that seam lands either.
+- As built (PR 5): `orders/messages.py` `STOREFRONT_EVENT` and `_skipped_for_storefront`,
+  with the lifecycle's `mail_host` (the running `storefront_mail_host`; None or empty
+  covers nothing). The seam ignores the event today; the real event is always passed. The
+  agent's `refuseIfTold` refuses `storefront_mail` before anything parks, and a claim that
+  comes back `skipped` (the storefront began to mail between the check and the claim)
+  sends nothing and says so in its answer's `warning`.
 - `also_when_storefront_mails: true` sends anyway. The approval summary says "the
   storefront mail also sends this". It exists for a second channel (an SMS nudge); a flow
   never sets it.
