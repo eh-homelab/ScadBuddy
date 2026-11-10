@@ -610,7 +610,7 @@ async def _run_closing_linked[T](
     """``_run`` for an accept that may accept the order (#5283), with what ``POST …/accept``
     does after its commit: the pages of the requests it cancels are closed, the balance
     request it opens is linked (``Payments.run_closing_linked``), and when it accepted the
-    order its Bambuddy projects are made, best effort (``_ensure_projects``)."""
+    order its Bambuddy projects are made, best effort (``ensure_order_projects``)."""
     before = await asyncio.to_thread(orders.store.order, order_id)
     try:
         result = await payments.service.run_closing_linked(order_id, call)
@@ -619,7 +619,7 @@ async def _run_closing_linked[T](
     if before is not None and before.status != "accepted":
         after = await asyncio.to_thread(orders.store.order, order_id)
         if after is not None and after.status == "accepted":
-            await _ensure_projects(orders, after)
+            await ensure_order_projects(orders, after)
     return result
 
 
@@ -1317,11 +1317,11 @@ async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -
     except LifecycleError as error:
         raise refused(error) from None
     await service.service.link_pending(accepted.id)
-    await _ensure_projects(orders, accepted)
+    await ensure_order_projects(orders, accepted)
     return accepted
 
 
-async def _ensure_projects(orders: OrdersComponent, accepted: Order) -> None:
+async def ensure_order_projects(orders: OrdersComponent, accepted: Order) -> None:
     """The accepted order's Bambuddy projects, best effort: waited for at most
     `PROJECTS_WAIT_SECONDS`, then left to finish."""
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would

@@ -83,18 +83,20 @@ import asyncio
 import ipaddress
 import json
 import re
+from functools import partial
 from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from scadbuddy.api.deps import PathsDep, ReadBudgetDep, StateDep
+from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
+from scadbuddy.api.orders import ensure_order_projects
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
-from scadbuddy.orders.component import OrdersComponent, OrdersDep
+from scadbuddy.orders.component import ORDERS, OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.storefront import order_page
@@ -641,6 +643,13 @@ async def order_view(
     return _answered(await order_page.view(state, reader))
 
 
+def _projects(state: AppState) -> order_page.AfterAccept:
+    """After a customer's write accepted the order: its Bambuddy projects, as
+    `POST /orders/{id}/accept` makes them (best effort)."""
+    orders: OrdersComponent = state.components.get(ORDERS)
+    return partial(ensure_order_projects, orders)
+
+
 @router.post(
     "/order/revisions/{revision_id}/answer",
     name="crud_storefront_order_answer",
@@ -658,7 +667,9 @@ async def order_answer(
     """The customer's answer to a design (`order_page.answer`)."""
     key = required_key(idempotency_key)
     reader, body = order_page.read_body(await request.body(), _account_id(account))
-    return _answered(await order_page.answer(state, reader, key, revision_id, body))
+    return _answered(
+        await order_page.answer(state, reader, key, revision_id, body, _projects(state))
+    )
 
 
 @router.post(
@@ -678,7 +689,7 @@ async def order_accept(
     """The customer accepts a price (`order_page.accept`)."""
     key = required_key(idempotency_key)
     reader, _ = order_page.read_body(await request.body(), _account_id(account))
-    return _answered(await order_page.accept(state, reader, key, quote_id))
+    return _answered(await order_page.accept(state, reader, key, quote_id, _projects(state)))
 
 
 @router.post(

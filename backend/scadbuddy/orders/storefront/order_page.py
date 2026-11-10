@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -87,6 +87,7 @@ from scadbuddy.orders.storefront.wire import (
     RevisionAnswerBody,
 )
 from scadbuddy.payments import store as payments
+from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.models import PaymentRequest, PaymentRequestView
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -582,6 +583,8 @@ class _UnreadError(Exception):
 
 
 _Act = Callable[[Conn, Access, Order, InTransaction], None]
+#: What runs once a customer's write accepted the order (the API's `ensure_order_projects`).
+AfterAccept = Callable[[Order], Awaitable[None]]
 
 
 async def _access(state: AppState, reader: Reader) -> Access | None:
@@ -605,11 +608,19 @@ async def _write(
     route: str,
     asked: dict[str, Any],
     act: _Act,
+    accepted: AfterAccept | None = None,
 ) -> CustomerOrderView | None:
     """``act`` once per ``key`` as the reader's customer, in one transaction with the
     key's ledger row; the view after it. A retry of a committed write (the same key)
     answers the view and does nothing else. None when the reader's link was revoked
-    meanwhile."""
+    meanwhile.
+
+    The write runs as `POST /orders/{id}/accept` and `/cancel` run theirs
+    (`Payments.run_closing_linked`): an answer or an accept that accepts the order, or a
+    cancel, cancels the order's open requests, and their provider pages close right after
+    the commit, so the customer cannot pay a cancelled request; a balance request the
+    acceptance opens is linked. When the order became accepted, ``accepted`` runs with
+    it (the API's `ensure_order_projects`, best effort)."""
     orders = _orders(state)
     asked = {**reader.ledger(), **asked}
 
@@ -628,12 +639,17 @@ async def _write(
             idempotent_write(conn, "storefront", key, route, asked, write)
         orders.lifecycle.tell(within)
 
+    before = await asyncio.to_thread(orders.store.order, access.order_id)
     try:
-        await asyncio.to_thread(run)
+        await state.components.get(PAYMENTS).service.run_closing_linked(access.order_id, run)
     except _UnreadError:
         return None
     except LifecycleError as error:
         raise _refusal(error) from None
+    if accepted is not None and before is not None and before.status != "accepted":
+        after = await asyncio.to_thread(orders.store.order, access.order_id)
+        if after is not None and after.status == "accepted":
+            await accepted(after)
     return await view(state, reader, attach=False)
 
 
@@ -672,7 +688,12 @@ def _quote_of(conn: Conn, orders: OrdersComponent, order: Order, quote_id: str) 
 
 
 async def answer(
-    state: AppState, reader: Reader, key: str, revision_id: str, body: dict[str, Any]
+    state: AppState,
+    reader: Reader,
+    key: str,
+    revision_id: str,
+    body: dict[str, Any],
+    accepted: AfterAccept | None = None,
 ) -> CustomerOrderView | None:
     """The customer's answer to the newest sent revision (`Lifecycle.answer_revision`):
     ``accepted``, or ``changes_requested`` with a note (422 ``note`` without). Refusals:
@@ -696,11 +717,11 @@ async def answer(
         )
 
     asked = {"revision_id": revision_id, **entry.model_dump()}
-    return await _write(state, reader, access, key, ANSWER_ROUTE, asked, act)
+    return await _write(state, reader, access, key, ANSWER_ROUTE, asked, act, accepted)
 
 
 async def accept(
-    state: AppState, reader: Reader, key: str, quote_id: str
+    state: AppState, reader: Reader, key: str, quote_id: str, accepted: AfterAccept | None = None
 ) -> CustomerOrderView | None:
     """The customer accepts a price (`Lifecycle.accept_quote`). Refusals: 404
     ``quote_not_found``, 409 ``revision_not_accepted`` (a ``design_first`` item's design
@@ -716,7 +737,8 @@ async def accept(
             order.id, quote.order_item_id, quote.id, _actor(access, order), within=within
         )
 
-    return await _write(state, reader, access, key, ACCEPT_ROUTE, {"quote_id": quote_id}, act)
+    asked = {"quote_id": quote_id}
+    return await _write(state, reader, access, key, ACCEPT_ROUTE, asked, act, accepted)
 
 
 async def cancel(
