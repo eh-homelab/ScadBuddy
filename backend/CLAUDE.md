@@ -1112,7 +1112,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     never from a body.
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
-    deletes the session, and the edge also gives the browser a new visitor. `GET
+    deletes the session, and the edge also gives the browser a new visitor. When the CRUD
+    side does not answer, the edge still signs the device out but answers 503
+    `sign_out_incomplete`, and `storefront/sign_out.py` `SignOutRetries` tries the
+    revocation again in the background: five tries over about ten minutes, each logged,
+    from an in-memory queue of at most 1000. An edge restart drops the queue, and such a
+    session ends at its expiry (30 days). A code is single-use: a sign-in whose answer is
+    lost spends it. `GET
     …/account` answers the account's email or null, and `…/account/orders` lists
     submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec

@@ -32,13 +32,14 @@ from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.client import CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.accounts import clear_session, session_of, set_session
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
+from scadbuddy.storefront.sign_out import SIGN_OUT_INCOMPLETE, SIGN_OUT_INCOMPLETE_TEXT
 from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.visitors import VISITOR_COOKIE, VISITOR_MAX_AGE
@@ -408,11 +409,22 @@ async def account_sign_out(
 ) -> Response:
     """Sign-out: the session ends on the CRUD side and its cookie is cleared. The browser
     also gets a new visitor: the old one belongs to the account, so a cart made next on a
-    shared browser is not the account's."""
+    shared browser is not the account's. When the CRUD side does not answer, this device
+    is still signed out, but the answer is 503 ``sign_out_incomplete`` and the revocation
+    is tried again in the background (`sign_out.py` `SignOutRetries`)."""
     session = session_of(request)
-    if session is not None:
-        await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    if session is not None:
+        try:
+            await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
+        except CrudUnavailableError as error:
+            logger.warning("account sign-out: the CRUD side did not answer (%s); queued", error)
+            request.app.state.sign_out_retries.add(
+                visitor_id=visitor_id, client=client, session=session
+            )
+            response = problem_response(
+                request, 503, SIGN_OUT_INCOMPLETE_TEXT, type_=SIGN_OUT_INCOMPLETE
+            )
     clear_session(response)
     response.set_cookie(
         VISITOR_COOKIE,
