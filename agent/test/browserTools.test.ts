@@ -510,19 +510,48 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const here = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 60_000, attachProbeMs: 50, log: () => {} })
     const started = Date.now()
     expect((await here.sessionTab('s-new')).connected).toBe(false)
-    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(Date.now() - started).toBeLessThan(1_000)
   })
 
-  it('counts a slow owner as back after a tab wait, so the read call runs again', async () => {
-    const { rows, store } = sharedRows()
-    rows.set('s1', OTHER_TAB)
+  /** A relay whose first `answered` status reads answer, and every later one hangs; it counts both. */
+  function slowAfter(answered: number) {
     const relay = hungRelay()
-    const calls: string[] = []
+    const seen = { calls: [] as string[], statuses: 0 }
     const forward = relay.forward
     relay.forward = (tab, request, options) => {
-      if (request.op === 'call') calls.push(request.tool)
+      if (request.op === 'call') seen.calls.push(request.tool)
+      if (request.op === 'status' && ++seen.statuses <= answered) return Promise.resolve({ op: 'status' as const, route: '/', live: [] })
       return forward(tab, request, options)
     }
+    return { relay, seen }
+  }
+
+  it.each([
+    ['read', 'browser_snapshot', {}],
+    ['write', 'browser_set_param', { name: 'width', value: 10 }],
+  ] as const)('a %s call on a slow owner opens no tab wait, so it uses none of the turn\'s or the user\'s (#5974 review)', async (_tier, name, args) => {
+    const { rows, store } = sharedRows()
+    rows.set('s1', OTHER_TAB)
+    const { relay, seen } = slowAfter(0)
+    const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
+    let waits = 0
+    const result = await runTool(tool(name), args, {
+      ...ctx(hub.forSession('s1'), browser),
+      gate: 'harness',
+      waitForTab: () => {
+        waits++
+        return Promise.resolve({ back: false, message: 'x' })
+      },
+    })
+    expect(waits).toBe(0)
+    expect(seen.calls).toHaveLength(1)
+    expect(text(result)).toMatch(/^no browser attached: .*may be connected \(its agent replica was slow to answer\), so the user was not asked to reopen it: take a snapshot, then call again\.$/s)
+  })
+
+  it('counts an owner that turns slow during the wait as back: the read runs once more, and its replica is not asked a third time', async () => {
+    const { rows, store } = sharedRows()
+    rows.set('s1', OTHER_TAB)
+    const { relay, seen } = slowAfter(1)
     const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
     let back: boolean | undefined
     const result = await runTool(tool('browser_snapshot'), {}, {
@@ -533,24 +562,28 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
       },
     })
     expect(back).toBe(true)
-    // The read ran once more after the wait.
-    expect(calls).toEqual(['snapshot', 'snapshot'])
+    expect(seen.calls).toEqual(['snapshot', 'snapshot'])
+    // The check before the wait, and the wait's own: the slow answer is reused, not asked for again.
+    expect(seen.statuses).toBe(2)
     expect(text(result)).toMatch(/The session's tab may be connected.*did not reach it: take a snapshot, then call again\.$/s)
     expect(text(result)).not.toMatch(/reconnected/)
   })
 
-  it('a write call whose wait ended reconnected, on a slow owner, says to snapshot and call again', async () => {
+  it('a write call whose wait a slow owner ended says to snapshot and call again, not that the tab reconnected', async () => {
     const { rows, store } = sharedRows()
     rows.set('s1', OTHER_TAB)
-    const hub = new TabHub({ sessionTabs: store, relay: hungRelay(), statusProbeMs: 50, log: () => {} })
+    const { relay, seen } = slowAfter(1)
+    const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
     const result = await runTool(tool('browser_set_param'), { name: 'width', value: 10 }, {
       ...ctx(hub.forSession('s1'), browser),
       gate: 'harness',
-      waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
+      waitForTab: async ({ isBack }) =>
+        (await isBack(new AbortController().signal)) ? { back: true, why: 'reconnected' as const } : { back: false, message: 'x' },
     })
     expect(result.isError).toBe(true)
-    expect(text(result)).toMatch(/^no answer from the paired ScadBuddy tab in time.*The session.s tab may be connected.*take a snapshot to see the page, then call again\.$/s)
+    expect(text(result)).toMatch(/The session.s tab may be connected.*take a snapshot to see the page, then call again\.$/s)
     expect(text(result)).not.toMatch(/dropped again/)
+    expect(seen.statuses).toBe(2)
   })
 
   it('pairs the attaching tab when the relay fails, and logs the failure', async () => {
@@ -1156,6 +1189,7 @@ describe('waiting for the tab (#815)', () => {
     let lookups = 0
     const failure = new Error('connect ECONNREFUSED postgres://user:secret@db')
     failure.name = 'PoolError'
+    // The call's own lookup, then the check before the wait (#5974 review), then the re-check.
     pairings.pairedTab = () => (++lookups === 1 ? Promise.resolve(undefined) : Promise.reject(failure))
     const hub = new TabHub({ pairings })
     const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
@@ -1164,7 +1198,7 @@ describe('waiting for the tab (#815)', () => {
       gate: 'harness',
       waitForTab: () => Promise.resolve({ back: true, why: 'reconnected' as const }),
     })
-    expect(lookups).toBe(2)
+    expect(lookups).toBe(3)
     expect(result.isError).toBe(true)
     expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
     // #1814: logged, by the error's name only, never its message.
@@ -1185,13 +1219,13 @@ describe('waiting for the tab (#815)', () => {
     await expect(status).rejects.toMatchObject({ name: 'AbortError', message: 'the call was cancelled' })
   })
 
-  /** A pairing lookup that answers the first call and then hangs until its signal aborts. */
-  function hangingLookups(): { pairings: PairingStore; seen: (AbortSignal | undefined)[] } {
+  /** A pairing lookup that answers the first `answered` calls and then hangs until its signal aborts. */
+  function hangingLookups(answered = 1): { pairings: PairingStore; seen: (AbortSignal | undefined)[] } {
     const seen: (AbortSignal | undefined)[] = []
     const pairings: PairingStore = new InMemoryPairingStore()
     pairings.pairedTab = (_principal, signal) => {
       seen.push(signal)
-      if (seen.length === 1) return Promise.resolve(undefined)
+      if (seen.length <= answered) return Promise.resolve(undefined)
       return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
     }
     return { pairings, seen }
@@ -1199,7 +1233,8 @@ describe('waiting for the tab (#815)', () => {
 
   // #1394, #1410: the tab check's signal reaches the pairing lookup, and its abort ends a hung one.
   it("hands the tab check's signal to the pairing lookup, so a hung lookup is cancelled", async () => {
-    const { pairings, seen } = hangingLookups()
+    // The call's own lookup and the check before the wait answer; the wait's check hangs.
+    const { pairings, seen } = hangingLookups(2)
     const hub = new TabHub({ pairings })
     const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
     const parked = new AbortController()
@@ -1211,7 +1246,7 @@ describe('waiting for the tab (#815)', () => {
         return Promise.resolve({ back: false, message: 'x' })
       },
     })
-    expect(seen[1]).toBe(parked.signal)
+    expect(seen[2]).toBe(parked.signal)
     parked.abort(new Error('the wait ended'))
     // Without the signal the lookup would never settle and this would time out. It
     // rejects as an aborted call does (#1814), whatever the signal's reason.

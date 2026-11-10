@@ -144,6 +144,13 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       // changed while the tab was away, and an outward call's approval was given
       // for the page as it was. The model re-checks the page and calls again.
       if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
+        // A tab whose replica is only slow to answer opens no wait (#5974 review): the wait would end
+        // at once, show the user no card, and still use up the turn's and the user's tab waits.
+        const before = await statusHere(ctx, 'before')
+        if (before?.attached === false && before.slow === true) throw new ToolError(`${outcome.error.message} ${WHY_SLOW_NO_WAIT}`)
+        // Whether a check during the wait found the owner slow: then no reconnect happened, and the
+        // checks below need not ask the same slow replica again.
+        let sawSlow = false
         const waited = await ctx.waitForTab({
           tool: `browser_${spec.tool}`,
           toolUseId: ctx.toolUseId,
@@ -153,6 +160,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // would end the turn's tab waits.
           isBack: async (signal) => {
             const status = await tabs(ctx).status(target(ctx), { signal })
+            if (!status.attached && status.slow === true) sawSlow = true
             return status.attached || status.slow === true
           },
         })
@@ -162,6 +170,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // here does not mean this replica has it. Inviting a retry would only
           // open a wait that cannot end reconnected here (#1393): say so instead,
           // in the hub's own words for why there is none (#1410).
+          if (waited.why === 'reconnected' && sawSlow) throw new ToolError(`${outcome.error.message} ${WHY_SLOW}`)
           if (waited.why === 'reconnected') {
             const here = await statusHere(ctx)
             if (here && !here.attached) throw new ToolError(`${here.reason} ${here.slow ? WHY_SLOW : WHY_STILL_GONE.reconnected}`)
@@ -171,7 +180,8 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
         outcome = await call()
         if (!outcome.ok && outcome.error.code === 'no_browser') {
           // A wait a slow owner ended is no reconnect (#5974 review): say the tab may be connected.
-          const slow = waited.why === 'reconnected' && (await statusHere(ctx).then((h) => h?.attached === false && h.slow === true))
+          const slow =
+            waited.why === 'reconnected' && (sawSlow || (await statusHere(ctx).then((h) => h?.attached === false && h.slow === true)))
           throw new ToolError(`${outcome.error.message} ${slow ? WHY_SLOW_READ : WHY_STILL_GONE[waited.why]}`)
         }
       }
@@ -195,14 +205,14 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
  * turn the not-run guidance into an unexpected error: the caller then words it
  * as if the tab might be here, and the model re-checks with browser_status.
  */
-async function statusHere(ctx: ToolContext): Promise<BrowserStatus | undefined> {
+async function statusHere(ctx: ToolContext, when: 'before' | 'after' = 'after'): Promise<BrowserStatus | undefined> {
   try {
     return await tabs(ctx).status(target(ctx), { signal: ctx.signal })
   } catch (err) {
     if (ctx.signal.aborted) throw err
     // #1814: a pool that keeps failing re-checks shows in the logs. Only the error's
     // name: its message can quote a connection string or a query (telemetry/scrub.ts).
-    console.warn(`browser tools: re-checking the tab after its wait failed (${errorName(err)})`)
+    console.warn(`browser tools: ${when === 'before' ? 'checking the tab before its wait' : 're-checking the tab after its wait'} failed (${errorName(err)})`)
     return undefined
   }
 }
@@ -223,6 +233,10 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
  */
 const WHY_SLOW =
   "The session's tab may be connected (its agent replica was slow to answer), and the call was not run: take a snapshot to see the page, then call again."
+
+/** A call that found no tab while its replica was only slow to answer: no wait is opened (#5974 review). */
+const WHY_SLOW_NO_WAIT =
+  "The session's tab may be connected (its agent replica was slow to answer), so the user was not asked to reopen it: take a snapshot, then call again."
 
 /** A read retried after a wait a slow owner ended, that still found no tab (#5974). */
 const WHY_SLOW_READ =
