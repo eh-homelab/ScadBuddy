@@ -1,11 +1,13 @@
-"""The accounts area's CRUD routes (#5283, spec 2026-11-02 §5.2): a sign-in whose session
-token comes back only in a header, sign-out, the account, and what it sees. Only the
-``storefront`` credential reaches them."""
+"""The accounts area's CRUD routes (#5283, spec 2026-11-02 §5.2): a code mailed to an
+address, a sign-in whose session token comes back only in a header, sign-out, the account,
+and what it sees. Only the ``storefront`` credential reaches them."""
 
 from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
+from typing import Any
 
 import psycopg
 import pytest
@@ -13,7 +15,13 @@ from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
 
 from scadbuddy.core.settings import Settings
-from scadbuddy.orders.storefront.accounts import FAILURES_PER_CLIENT_ADDRESS, request_code
+from scadbuddy.orders.storefront.accounts import (
+    CODES_PER_ADDRESS,
+    CODES_PER_ADDRESS_CLIENT,
+    CODES_PER_CLIENT,
+    FAILURES_PER_CLIENT_ADDRESS,
+    request_code,
+)
 from scadbuddy.storefront.wire import CLIENT_HEADER, SESSION_HEADER, VISITOR_HEADER
 from tests.api.test_crud_storefront_pay import token
 
@@ -21,6 +29,35 @@ BASE = "/api/v1/internal/crud/storefront/account"
 VISITOR = "v" * 43
 HEADERS = {VISITOR_HEADER: VISITOR, CLIENT_HEADER: "203.0.113.9"}
 PROBLEMS = "https://scadbuddy.dev/problems/storefront/"
+SHOP = "https://shop.example.com"
+CODE_SHAPE = re.compile(r"[2-9A-HJKMNP-TV-Z]{4}(-[2-9A-HJKMNP-TV-Z]{4}){3}")
+
+
+@pytest.fixture
+def public_url() -> str | None:
+    return SHOP
+
+
+@pytest.fixture
+def settings(settings: Settings, public_url: str | None) -> Iterator[Settings]:
+    """The api settings with the storefront's public URL, which the code's link starts with."""
+    yield settings.model_copy(update={"storefront_public_url": public_url})
+
+
+def mail_rows(settings: Settings) -> list[dict[str, Any]]:
+    with psycopg.connect(settings.database_url, row_factory=dict_row) as conn:
+        return conn.execute(
+            "SELECT to_address, template, context, order_id FROM storefront_mail"
+            " ORDER BY created_at"
+        ).fetchall()
+
+
+def ask_code(client: TestClient, email: str, client_address: str = "203.0.113.9") -> Any:
+    return client.post(
+        f"{BASE}/code",
+        json={"email": email},
+        headers={**headers(client), CLIENT_HEADER: client_address},
+    )
 
 
 def code_for(settings: Settings, email: str) -> str:
@@ -201,3 +238,85 @@ def test_only_the_storefront_credential_reaches_the_area(client: TestClient) -> 
     for caller in ("agent", "print"):
         sent = {**token(client, caller), **HEADERS}
         assert client.get(BASE, headers=sent).status_code == 403
+        code = client.post(f"{BASE}/code", json={"email": "a@example.com"}, headers=sent)
+        assert code.status_code == 403
+
+
+def test_a_code_request_mails_the_code_and_its_link_once(
+    client: TestClient, settings: Settings
+) -> None:
+    answer = ask_code(client, "Ada@Example.com")
+    assert answer.status_code == 204, answer.text
+    assert answer.content == b""
+    (row,) = mail_rows(settings)
+    assert row["template"] == "sign_in_code"
+    assert row["to_address"] == "ada@example.com"
+    assert row["order_id"] is None
+    code = row["context"]["code"]
+    assert CODE_SHAPE.fullmatch(code)
+    assert row["context"]["link"] == f"{SHOP}/account/sign-in#code={code}"
+    signed = client.post(
+        f"{BASE}/verify", json={"email": "ada@example.com", "code": code}, headers=headers(client)
+    )
+    assert signed.status_code == 200
+
+
+def test_the_same_answer_for_a_known_an_unknown_and_a_capped_address(
+    client: TestClient, settings: Settings
+) -> None:
+    """Enumeration-safe: an account, no account and a full mail cap answer alike. Past the
+    cap no mail is queued."""
+    sign_in(client, settings, "known@example.com")
+    with psycopg.connect(settings.database_url, row_factory=dict_row) as conn:
+        for n in range(CODES_PER_ADDRESS):
+            # Many clients, so no client's own limit stops the fill.
+            assert request_code(conn, "capped@example.com", f"198.51.100.{n}") is not None
+    before = len(mail_rows(settings))
+    answers = [
+        ask_code(client, f"{who}@example.com", f"192.0.2.{n}")
+        for n, who in enumerate(("known", "unknown", "capped"), start=10)
+    ]
+    assert {(a.status_code, a.content) for a in answers} == {(204, b"")}
+    assert {k: v for k, v in answers[0].headers.items() if k != "date"} == {
+        k: v for k, v in answers[2].headers.items() if k != "date"
+    }
+    mailed = [row["to_address"] for row in mail_rows(settings)[before:]]
+    assert mailed == ["known@example.com", "unknown@example.com"]
+
+
+def test_code_requests_are_limited_per_address_and_client_and_per_client(
+    client: TestClient, settings: Settings
+) -> None:
+    for _ in range(CODES_PER_ADDRESS_CLIENT):
+        assert ask_code(client, "ada@example.com").status_code == 204
+    over = ask_code(client, "ada@example.com")
+    assert over.status_code == 429
+    assert over.json()["type"] == f"{PROBLEMS}sign_in_limited"
+    assert int(over.headers["Retry-After"]) > 0
+    for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS_CLIENT):
+        assert ask_code(client, f"other{n}@example.com").status_code == 204
+    assert ask_code(client, "last@example.com").status_code == 429
+    # A refused request mails nothing.
+    assert len(mail_rows(settings)) == CODES_PER_CLIENT
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"email": "not an address"}, {"email": "a@example.com", "code": "x"}, {"email": 1}],
+)
+def test_a_body_that_is_not_a_code_request_is_refused(
+    client: TestClient, settings: Settings, body: dict[str, object]
+) -> None:
+    answer = client.post(f"{BASE}/code", json=body, headers=headers(client))
+    assert answer.status_code == 422
+    assert answer.json()["type"] == f"{PROBLEMS}account_body_invalid"
+    assert mail_rows(settings) == []
+
+
+@pytest.mark.parametrize("public_url", [None])
+def test_with_no_public_url_the_answer_is_the_same_and_no_mail_is_queued(
+    client: TestClient, settings: Settings
+) -> None:
+    answer = ask_code(client, "ada@example.com")
+    assert (answer.status_code, answer.content) == (204, b"")
+    assert mail_rows(settings) == []

@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
@@ -84,13 +85,17 @@ from scadbuddy.orders.models import Filament
 from scadbuddy.orders.storefront.accounts import (
     Account,
     AccountOrderRow,
+    EmailInvalidError,
     SignedIn,
     SignInLimitedError,
     account_for_session,
     account_orders,
     end_session,
+    normalized_email,
+    request_code,
     verify_code,
 )
+from scadbuddy.orders.storefront.addresses import EmailInvalidError as AddressInvalidError
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
@@ -105,6 +110,7 @@ from scadbuddy.orders.storefront.listings import (
     public_listing,
     published_listing,
 )
+from scadbuddy.orders.storefront.mail import queue_mail
 from scadbuddy.orders.storefront.renders import (
     owned_job,
     render_estimate,
@@ -139,6 +145,8 @@ from scadbuddy.storefront.wire import (
     VISITOR_ID_PROBLEM,
     TurnstileAction,
 )
+
+logger = logging.getLogger(__name__)
 
 router = crud_router("storefront")
 
@@ -569,6 +577,81 @@ async def account_verify(
         )
     response.headers[SESSION_HEADER] = signed.session_token
     return AccountView(email=signed.account.email)
+
+
+class CodeRequestBody(BaseModel):
+    """A request for a sign-in code mailed to the address (`accounts.py` `request_code`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(max_length=320)
+
+
+@router.post(
+    "/account/code",
+    name="crud_storefront_account_code",
+    status_code=status.HTTP_204_NO_CONTENT,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": CodeRequestBody.model_json_schema()}},
+        }
+    },
+)
+async def account_code(
+    request: Request,
+    state: StateDep,
+    orders: OrdersDep,
+    _visitor: Visitor,
+    client: StoreClient,
+) -> Response:
+    """A sign-in code mailed to the address (`accounts.py` `request_code`). One answer, 204,
+    whether or not the address has an account and whether or not the mail cap let a code
+    be made; only then is a ``sign_in_code`` mail queued, in the code's own transaction,
+    and sent after the commit. 422 ``account_body_invalid`` for a body or an address that
+    is not one, and 429 ``sign_in_limited`` past the client's limits: neither depends on
+    an account."""
+    body = await _body(
+        request, CodeRequestBody, "account_body_invalid", "This request is not for a code."
+    )
+    public = state.settings.storefront_public_url
+
+    def run() -> bool:
+        with orders.store.transaction() as conn:
+            code = request_code(conn, body.email, client)
+            if code is None:
+                return False
+            if public is None:
+                logger.warning("a sign-in code was not mailed: no storefront_public_url")
+                return False
+            queue_mail(
+                conn,
+                "sign_in_code",
+                normalized_email(body.email),
+                {"code": code, "link": f"{public}/account/sign-in#code={code}"},
+                None,
+            )
+            return True
+
+    try:
+        queued = await asyncio.to_thread(run)
+    except (EmailInvalidError, AddressInvalidError):
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "account_body_invalid",
+            "Enter one email address, such as ada@example.com.",
+        ) from None
+    except SignInLimitedError as error:
+        raise problem(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "sign_in_limited",
+            f"Too many codes asked for. Try again in {error.retry_after} seconds.",
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
+    if queued:
+        orders.mail.kick()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(

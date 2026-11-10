@@ -541,9 +541,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Today design requests (`request`) and sign-ins (`sign_in`)
-  take it; the actions `submit` and `sign_up` are kept for the submit and code request
-  routes still to come. The edge's page CSP (`storefront/static.py`) names
+  before it reads its body. Today design requests (`request`), code requests (`sign_up`)
+  and sign-ins (`sign_in`) take it; the action `submit` is kept for the submit route still
+  to come. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
   and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
@@ -1138,8 +1138,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
     `request_code` and `verify_code` each hold transaction locks on the client, then the
     address, so call them in a transaction. The verify route takes Turnstile
-    (`sign_in`) whenever a site key is set; the code route, a later PR, is to take it
-    (`sign_up`).
+    (`sign_in`) whenever a site key is set, and the code route takes it (`sign_up`).
+    `POST …/account/code` (`api/crud_storefront.py` `account_code`; the edge sends it
+    once, with no retry) answers 204 for every address: one with an account, one with
+    none, and one past the mail cap. Only when `request_code` made a code does it queue a
+    `sign_in_code` mail (`queue_mail`) in the code's own transaction, with the link
+    `{storefront_public_url}/account/sign-in#code=<code>`, and kick the sender after the
+    commit; with no `storefront_public_url` it queues none and logs it. An address that
+    is not one is 422 `account_body_invalid`, and a client past its limits is 429
+    `sign_in_limited`; neither depends on an account.
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit

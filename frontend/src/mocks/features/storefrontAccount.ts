@@ -4,7 +4,8 @@ import { problem } from '../handlers'
 
 /**
  * #5283 (spec 2026-11-02 §5.2; backend `storefront/routes.py` account routes): the public
- * page's sign-in and "Your orders". Any code of sixteen code symbols signs in (hyphens,
+ * page's sign-in and "Your orders". A code request answers 204 for any address. Any code
+ * of sixteen code symbols signs in (hyphens,
  * spaces and case ignored, as the CRUD side reads it); any other is 400 `sign_in_failed`,
  * one answer for every wrong code. A signed-in account has two submitted orders. Sign-out
  * ends the session. The session lasts as long as the page, as the edge's cookie would
@@ -42,6 +43,16 @@ function refused(status: number, slug: string, detail: string) {
 }
 
 export const handlers = [
+  // The edge's code route answers 204 for every address it takes.
+  http.post(`${base}/code`, async ({ request }) => {
+    const body = (await request.json()) as { email?: unknown }
+    if (typeof body.email !== 'string' || !body.email.includes('@')) {
+      return problem(422, 'Unprocessable Content', 'Enter one email address, such as ada@example.com.', {
+        type: PROBLEMS + 'account_body_invalid',
+      })
+    }
+    return new HttpResponse(null, { status: 204 })
+  }),
   http.post(`${base}/verify`, async ({ request }) => {
     const body = (await request.json()) as { email?: string; code?: string }
     const code = (body.code ?? '').replace(/[\s-]/g, '').toUpperCase()
