@@ -21,7 +21,12 @@ type Props = { src: string | null | undefined; className?: string }
  * cover out of the job's file when the card first asks for it. After
  * {@link PICTURE_MAX_TRIES} failed loads it is given up (#5877). Any change of URL starts
  * over, a URL that comes back after another included (#5877): the count is the URL's
- * while it is shown, never kept. The job's name is always beside it, so the picture is
+ * while it is shown, never kept. So a printer's cover keyed only by its job's name (no
+ * archive id, `printer_cover` in `bambuddy/pictures.py`) that was given up stays the
+ * placeholder for a next job of the same name until the page loads again (#5890). That
+ * key is rare: Bambuddy fills `cover_url` and `current_archive_id` in the same states
+ * (the job runs or is paused), and leaves the archive id empty only when it has no
+ * archive for the job. The job's name is always beside it, so the picture is
  * decorative (empty alt).
  */
 export function JobPicture({ src, className }: Props) {
