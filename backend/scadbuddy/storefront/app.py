@@ -50,6 +50,7 @@ from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.ratelimit import RequestLimit, UploadAllowance
 from scadbuddy.storefront.routes import RequestsEnabled, router, visitor_router
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
+from scadbuddy.storefront.sign_out import SignOutRetries
 from scadbuddy.storefront.static import StorefrontStatic
 from scadbuddy.storefront.turnstile import FailedChecks, SiteKey
 from scadbuddy.storefront.visitors import VisitorCookie
@@ -106,6 +107,7 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
                     return
             yield
         finally:
+            await app.state.sign_out_retries.aclose()
             await client.aclose()
 
     app = FastAPI(
@@ -125,6 +127,8 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     # The bot check's site key (#5283), for the page's config and its CSP.
     app.state.turnstile_site_key = SiteKey()
     app.state.turnstile_failures = FailedChecks()
+    # Sign-outs the CRUD side did not answer, tried again (`sign_out.py`).
+    app.state.sign_out_retries = SignOutRetries(lambda **call: client.account_sign_out(**call))
     install_problem_handlers(app)
 
     @app.exception_handler(CrudRefusedError)

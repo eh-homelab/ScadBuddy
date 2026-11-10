@@ -27,6 +27,15 @@ export type TurnstileSiteKey = Schemas['TurnstileSiteKey']
 export type ShippingOption = Schemas['PublicShippingOption']
 export type SubmittedOrder = Schemas['SubmittedOrder']
 export type ParamValue = boolean | number | string
+// Accounts (#5283, spec §5.2).
+export type Account = Schemas['AccountView']
+export type AccountOrder = Schemas['AccountOrder']
+export type AccountOrders = Schemas['AccountOrders']
+
+/** An order on "Your orders" links to the order page by its id (agreed on #5283). */
+export function ACCOUNT_ORDER_URL(orderId: string): string {
+  return `/o?order=${encodeURIComponent(orderId)}`
+}
 
 export const BASE = '/api/store/v1'
 export const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
@@ -104,6 +113,8 @@ async function call<T>(path: string, { method = 'GET', json, form, key, turnstil
     throw new StoreError(0, null, 'The shop is out of reach. Check your connection and try again.', null)
   }
   if (!response.ok) throw await refusal(response)
+  // A 204 (sign-out) has no body.
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -139,6 +150,13 @@ export const store = {
   submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
     call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
+  // Accounts: the session is the edge's HttpOnly cookie, never in a body. Verify is sent
+  // once (a code is single-use), so it takes no Idempotency-Key.
+  account: () => call<Account | null>('/account'),
+  accountOrders: () => call<AccountOrders>('/account/orders'),
+  signIn: (email: string, code: string, turnstile: string | null = null) =>
+    call<Account>('/account/verify', { method: 'POST', json: { email, code }, turnstile }),
+  signOut: () => call<void>('/account/sign-out', { method: 'POST' }),
 }
 
 /**
