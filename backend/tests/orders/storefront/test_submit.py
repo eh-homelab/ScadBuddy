@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.main import create_app
 from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import AddressInput, ContactInput, Customer
@@ -505,3 +506,124 @@ def test_another_accounts_session_cannot_submit_this_visitors_cart(
     assert rows(api, "SELECT * FROM storefront_mail") == []
     assert account_orders(api, b.id) == []
     assert account_orders(api, a.id) == [order.id]
+
+
+def test_a_submit_key_is_bound_to_the_account_that_sent_it(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """The ledger's request names the account: a key replayed under another session, or
+    none, is another request (422), never the stored reply; under the same account it is
+    the same reply and the same one order."""
+    draft = draft_of(crud, listing)
+    a_session, a = signed_in(api, "ada@example.com", TOKEN_A)
+    b_session, _b = signed_in(api, "grace@example.com", None)
+    body = submit_body(draft)
+    first = crud.post("/draft/submit", json=body, key="s1", session=a_session)
+    assert first.status_code == 200, first.text
+    for session in (b_session, None):
+        r = crud.post("/draft/submit", json=body, key="s1", session=session)
+        assert r.status_code == 422, r.text
+        assert r.json()["type"] == KEY_PROBLEM
+    again = crud.post("/draft/submit", json=body, key="s1", session=a_session)
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert rows(api, "SELECT id FROM orders WHERE submitted_at IS NOT NULL") == [
+        {"id": draft["id"]}
+    ]
+    assert len(rows(api, "SELECT id FROM storefront_mail")) == 1
+    assert account_orders(api, a.id) == [draft["id"]]
+
+
+def test_a_signed_in_submit_reuses_an_equal_address_of_the_accounts_customer(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
+) -> None:
+    """An address equal to one the customer has (case, spaces and empty lines aside) is
+    that row, and the customer is not touched; another address adds one row."""
+    owner_lifecycle.rules = rules(options=(POST,))
+    session, account = signed_in(api, "grace@example.com", TOKEN_A)
+    store = _orders(api).store
+    with _state(api).projection.pool.connection() as conn:
+        kept = store.replace_addresses(
+            conn,
+            account.customer_id,
+            [
+                AddressInput(
+                    label="Home",
+                    recipient="Ada Lovelace",
+                    lines=["1 Analytical Way"],
+                    locality="London",
+                    postal_code="N1 1AA",
+                    country="GB",
+                    default_shipping=True,
+                )
+            ],
+        )
+    before = store.customer(account.customer_id)
+    assert before is not None
+    typed = {
+        **ADDRESS,
+        "recipient": "  ada  LOVELACE ",
+        "lines": ["1  analytical way", ""],
+        "postal_code": "n1 1aa",
+    }
+    draft = draft_of(crud, listing)
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(draft, shipping_option_id="post", address=typed),
+        key="s1",
+        session=session,
+    )
+    assert r.status_code == 200, r.text
+    order = store.order(draft["id"])
+    assert order is not None and order.shipping_address_id == kept[0].id
+    assert store.customer(account.customer_id) == before
+
+    other = draft_of(crud, listing, key="a2")
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(
+            other, shipping_option_id="post", address={**ADDRESS, "lines": ["2 Engine Row"]}
+        ),
+        key="s2",
+        session=session,
+    )
+    assert r.status_code == 200, r.text
+    after = store.customer(account.customer_id)
+    assert after is not None
+    assert [(a.label, a.lines, a.default_shipping) for a in after.addresses] == [
+        ("Home", ["1 Analytical Way"], True),
+        (None, ["2 Engine Row"], False),
+    ]
+    second = store.order(other["id"])
+    assert second is not None and second.shipping_address_id == after.addresses[1].id
+
+
+def test_a_lost_anonymous_submit_retried_after_sign_in_is_another_request(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """A key is bound to who sent it: an anonymous submit's key sent again once signed in
+    is 422, though the order exists; the page loads the order again."""
+    draft = draft_of(crud, listing)
+    body = submit_body(draft)
+    assert crud.post("/draft/submit", json=body, key="s1").status_code == 200
+    session, _account = signed_in(api, "ada@example.com", TOKEN_A)
+    r = crud.post("/draft/submit", json=body, key="s1", session=session)
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == KEY_PROBLEM
+    assert len(rows(api, "SELECT id FROM orders WHERE submitted_at IS NOT NULL")) == 1
+
+
+def test_an_expired_session_submits_as_anonymous(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """A session that names no live account reads as none: the submit is anonymous, with a
+    new customer and no attach."""
+    draft = draft_of(crud, listing)
+    session, account = signed_in(api, "grace@example.com", None)
+    with _state(api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_sessions SET expires_at = now() - interval '1 second'")
+    r = crud.post("/draft/submit", json=submit_body(draft), key="s1", session=session)
+    assert r.status_code == 200, r.text
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.customer_id != account.customer_id
+    assert account_orders(api, account.id) == []

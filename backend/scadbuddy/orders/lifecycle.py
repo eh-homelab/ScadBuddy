@@ -1045,17 +1045,25 @@ class Lifecycle:
         self, conn: Conn, body: SubmitInput, order: Order
     ) -> tuple[str, str | None]:
         """`submit_order`'s step 1 for a signed-in submit: the account's customer
-        (`submitting_customer`), its name and contacts left as they are, and the given
-        address added to it, never as a default. Its id, and the address's (None without
-        one). `order_not_found` when the cart's visitor belongs to another account."""
+        (`submitting_customer`), its name and contacts left as they are. The given address
+        is the customer's equal one (`_same_address`: case, spaces and empty lines aside),
+        and then the customer is not touched; with none, it is added, never as a default.
+        The customer's row is locked first, so two submits at once add one row. Its id,
+        and the address's (None without one). `order_not_found` when the cart's visitor
+        belongs to another account."""
         assert body.account_id is not None
         customer_id = submitting_customer(conn, body.account_id, order.storefront_visitor_id)
         if customer_id is None:
             raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
         if body.address is None:
             return customer_id, None
-        address = AddressInput(**body.address.model_dump())
-        return customer_id, self.store.add_address(conn, customer_id, address).id
+        given = AddressInput(**body.address.model_dump())
+        customer = self.store.customer(customer_id, conn=conn, lock=True)
+        assert customer is not None
+        for kept in customer.addresses:
+            if _same_address(kept, given):
+                return customer_id, kept.id
+        return customer_id, self.store.add_address(conn, customer_id, given).id
 
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
@@ -5725,3 +5733,19 @@ def reap_quote_holds(refs: BlobRefs, store: OrderStore, *, grace: timedelta = QU
     The grace is every row's, so a quote recorded a moment ago is never caught between
     its ref and its row. How many holders went; the blob sweep frees the bytes."""
     return refs.drop_unlisted(QUOTE_HOLDER, store.standing_quote_ids(), older_than=grace)
+
+
+def _fold(value: str | None) -> str:
+    """A field as `_same_address` compares it: spaces collapsed, case folded."""
+    return " ".join((value or "").split()).casefold()
+
+
+def _same_address(a: AddressInput, b: AddressInput) -> bool:
+    """Whether two addresses are one place for one recipient: every field the visitor
+    gives equal once case and spaces are folded and empty lines dropped. The label and the
+    default flags are the shop's and are not compared."""
+    fields = ("recipient", "locality", "region", "postal_code", "country", "phone")
+    lines = [[_fold(line) for line in x.lines if _fold(line)] for x in (a, b)]
+    return lines[0] == lines[1] and all(
+        _fold(getattr(a, name)) == _fold(getattr(b, name)) for name in fields
+    )
