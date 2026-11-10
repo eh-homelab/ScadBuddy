@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { withServiceCredential } from '../src/api/serviceCredential.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { BackendWorkspaceBlobs } from '../src/workspace/blobs.js'
@@ -16,9 +17,9 @@ import { TEMPORAL_CLI, TEMPORAL_CLI_ENV } from './support/temporal.js'
 // #4789 end to end: the agent's SessionFiles against the real backend's hidden routes
 // (backend/tests/support/workspace_backend.py: the API on moto's S3, its own KEK and a
 // Temporal dev server), both services migrated into one database, as in production
-// (docs/ai/operating.md §13: one database, one role). It also pins the agent's trigger
-// (migration 20261027T0114Z) to the backend's own `blob_refs` table: a change there that
-// the trigger does not follow fails here.
+// (docs/ai/operating.md §13). It also pins the holds the agent takes through its CRUD routes
+// (backend api/crud_agent.py, with the agent's service credential, #5299) to the backend's
+// own `blob_refs` rows: the agent's code never touches that table, the test reads it.
 
 const BACKEND_DIR = fileURLToPath(new URL('../../backend/', import.meta.url))
 
@@ -41,8 +42,8 @@ const skip = !TEST_DATABASE_URL
 
 const kek = kekFromBase64(Buffer.alloc(32, 11).toString('base64'))
 
-/** The backend harness serving `databaseUrl`, and its base URL once it says READY. */
-async function startBackend(databaseUrl: string): Promise<{ child: ChildProcess; base: string; log: string[] }> {
+/** The backend harness serving `databaseUrl`, and its base URL and an agent credential once it says READY. */
+async function startBackend(databaseUrl: string): Promise<{ child: ChildProcess; base: string; token: string; log: string[] }> {
   const child = spawn('uv', ['run', '--frozen', 'python', '-m', 'tests.support.workspace_backend'], {
     cwd: BACKEND_DIR,
     env: { ...process.env, SCADBUDDY_DATABASE_URL: databaseUrl, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: TEMPORAL_CLI! },
@@ -52,16 +53,16 @@ async function startBackend(databaseUrl: string): Promise<{ child: ChildProcess;
   })
   const log: string[] = []
   createInterface({ input: child.stderr! }).on('line', (line) => log.push(line))
-  const base = await new Promise<string>((resolve, reject) => {
+  const [base, token] = await new Promise<[string, string]>((resolve, reject) => {
     const lines = createInterface({ input: child.stdout! })
     lines.on('line', (line) => {
-      log.push(line)
-      const ready = /^READY (\S+)$/.exec(line)
-      if (ready) resolve(ready[1]!)
+      const ready = /^READY (\S+) (\S+)$/.exec(line)
+      if (ready) resolve([ready[1]!, ready[2]!])
+      else log.push(line)
     })
     child.on('exit', (code) => reject(new Error(`the backend exited (${code}) before it was ready:\n${log.slice(-30).join('\n')}`)))
   })
-  return { child, base, log }
+  return { child, base, token, log }
 }
 
 function stopBackend(child: ChildProcess | undefined): Promise<void> {
@@ -91,7 +92,7 @@ function stopBackend(child: ChildProcess | undefined): Promise<void> {
 describe.skipIf(skip !== undefined)(`workspace files through the real backend${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let db: Database
   let drop: () => Promise<void>
-  let backend: { child: ChildProcess; base: string; log: string[] } | undefined
+  let backend: { child: ChildProcess; base: string; token: string; log: string[] } | undefined
   let files: SessionFiles
 
   beforeAll(async () => {
@@ -99,8 +100,12 @@ describe.skipIf(skip !== undefined)(`workspace files through the real backend${s
     ;({ db, drop } = throwaway)
     expect(await db.ready()).toBe(true)
     backend = await startBackend(throwaway.url)
+    const credential = { current: () => Promise.resolve(backend!.token), invalidate: () => {} }
     files = new SessionFiles(db.sql, {
-      blobs: { store: new BackendWorkspaceBlobs(backend.base), sealing: new WorkspaceSealing(testPayloadKeys(db.sql), kek) },
+      blobs: {
+        store: new BackendWorkspaceBlobs(backend.base, { fetch: withServiceCredential(globalThis.fetch, credential, backend.base) }),
+        sealing: new WorkspaceSealing(testPayloadKeys(db.sql), kek),
+      },
     })
   }, 240_000)
   afterAll(async () => {
@@ -114,8 +119,8 @@ describe.skipIf(skip !== undefined)(`workspace files through the real backend${s
         SELECT key, holder_id FROM blob_refs WHERE holder_kind = 'ai_session_file' ORDER BY holder_id`
     ).map((r) => [r.key, r.holder_id])
 
-  it("holds a file in the backend's own blob_refs, with the columns the trigger writes", async () => {
-    // The backend's table, as its migrations made it: the trigger names these columns and this key.
+  it("holds a file in the backend's own blob_refs through the CRUD routes, and releases it on delete", async () => {
+    // The backend's table, as its migrations made it: its holder is the one the trigger once wrote.
     const columns = await db.sql<{ column_name: string }[]>`
       SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'blob_refs'`
     expect(columns.map((c) => c.column_name)).toEqual(expect.arrayContaining(['key', 'holder_kind', 'holder_id', 'created_at']))
@@ -160,10 +165,13 @@ describe.skipIf(skip !== undefined)(`workspace files through the real backend${s
     )
 
     await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${parent.id}`)
+    // The rows went in a cascade: reconcile releases the parent's hold through the routes.
+    expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([[stored!.blob_key, `session:${fork.id}/downloads/part.bin`]])
     expect((await files.read(forkWs, 'downloads/part.bin'))?.bytes.equals(bytes)).toBe(true)
 
     await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${fork.id}`)
+    expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([])
     expect(await db.sql`SELECT 1 FROM ai_session_files`).toHaveLength(0)
   }, 120_000)

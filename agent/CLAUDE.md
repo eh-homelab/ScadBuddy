@@ -7,8 +7,9 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
 `ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`, and `blob_refs` through a
-trigger; `backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). `src/db/grants.ts`
+`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
+`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
+holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -29,7 +30,8 @@ on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed
 `service_credentials_agent`, as before (#5494).
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
-assistant's spend on an order. A session's successful `order_item_revision_add` (or
+holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
+"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -272,9 +274,12 @@ opens every one and seals it again byte for byte).
     the plaintext copies out), is a copy of it that each turn's placement fills and each park
     and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
-    `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
-    `blob_refs` holder with the row, which assumes one database and role for both services,
-    today's state, superseded by #5295;
+    `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; the `blob_refs` holder
+    `(ai_session_file, <workspace>/<path>)` goes through the agent's CRUD routes, backend
+    `api/crud_agent.py` `…/crud/agent/workspace-blob-refs`, #5299: `SessionFiles` holds before
+    the row that names a blob and releases after the row is gone, and `reconcile`, on the
+    sweeper's tick hourly, releases what cascades, `forgetSubject` and crashes left and holds
+    a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in `data`; on any other backend a write that cannot be sealed and stored is refused
