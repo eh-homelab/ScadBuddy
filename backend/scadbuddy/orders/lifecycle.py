@@ -596,9 +596,10 @@ class Lifecycle:
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
-        #: The running ``storefront_mail_host`` (#5283), read when a transition would mail
-        #: the customer; None queues no order mail. Set by ``OrdersComponent``.
-        self.mail_host: Callable[[], str | None] = lambda: None
+        #: Whether the running mail config has a host and a sender (#5283), read when a
+        #: transition would mail the customer; False queues no order mail. Set by
+        #: ``OrdersComponent``.
+        self.mail_ready: Callable[[], bool] = lambda: False
         #: Called after a commit that queued mail (`StorefrontMail.kick`).
         self.on_mail: Callable[[], None] = lambda: None
         #: The CRUD service's KEK, which seals an order link's token (#5283); None makes
@@ -740,11 +741,11 @@ class Lifecycle:
 
     def _mail(self, conn: Conn, order: Order, event: MailEvent, **context: Any) -> None:
         """Queue ``event``'s mail to the customer in the transition's transaction, only
-        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a mail
-        host, #5283); otherwise nothing, and it stays #5660's plugin's job. The mail goes
-        to the link's address and names the link, whose token it carries. Sent after the
-        commit (``on_mail``)."""
-        if not storefront_mail_covers(conn, order.id, event, host=self.mail_host()):
+        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a ready
+        mail config, a host and a sender, #5283); otherwise nothing, and it stays #5660's
+        plugin's job. The mail goes to the link's address and names the link, whose token it
+        carries. Sent after the commit (``on_mail``)."""
+        if not storefront_mail_covers(conn, order.id, event, ready=self.mail_ready()):
             return
         link = live_link(conn, order.id)
         assert link is not None

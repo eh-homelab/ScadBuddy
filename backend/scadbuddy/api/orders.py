@@ -1438,8 +1438,9 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
     summary="The customer mail of an order",
     description=(
         "The order's rows in the storefront mail outbox, newest first: the event, the "
-        "address, when it was queued, sent or given up, how many times the recipient "
-        "refused it, the last error and when the next try is due. Never the body, the "
+        "address, when it was queued, sent or given up, the attempts charged to it (a "
+        "recipient's refusals, and server failures answered to its own mail), the last error "
+        "and when the next try is due. At most the newest 200. Never the body, the "
         "context, a code, a link or a token. A sign-in code has no order and never shows."
     ),
 )

@@ -4,6 +4,9 @@ import type { OrderMail } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { When } from './When'
 
+/** How often the list is read again while a mail waits to be sent. */
+const WAITING_REFRESH_MS = 15_000
+
 const EVENT: Record<OrderMail['event'], string> = {
   sign_in_code: 'Sign-in code',
   order_link: 'Order link',
@@ -45,7 +48,7 @@ function State({ mail, now }: { mail: OrderMail; now: number }) {
  * #5283 (storefront spec §5.7) — the mail the shop's own server sends an order's customer:
  * each one's event, address and state (queued, sent, failed with the error, or waiting for its
  * next try), newest first. Never a body, a link or a token: the page cannot read them. A note
- * says when the shop's mail server is not set up (nothing is sent), and shows the server's last
+ * says when the shop's mail server is not set up, a host or a sender address missing (nothing is sent), and shows the server's last
  * error when it has one. Everything shown is text.
  */
 export function CustomerMail({ orderId, version = 0 }: { orderId: string; version?: number }) {
@@ -56,7 +59,16 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
   // The clock a backed-off mail is judged by, read again whenever the list is.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => setNow(Date.now()), [mail.data])
-  const unset = settings.data !== undefined && !settings.data.storefront_mail_host
+  // The sender needs a host and a sender address (`MailConfig.ready`); without both it sends nothing.
+  const unset = settings.data !== undefined && (!settings.data.storefront_mail_host || !settings.data.storefront_mail_sender)
+  // A row the sender stamps publishes nothing, so read again while a row waits.
+  const waiting = mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false
+  const refresh = mail.refresh
+  useEffect(() => {
+    if (!waiting) return
+    const timer = setInterval(() => refresh(), WAITING_REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [waiting, refresh])
 
   return (
     <section className="flex flex-col gap-2" aria-label="Customer mail">

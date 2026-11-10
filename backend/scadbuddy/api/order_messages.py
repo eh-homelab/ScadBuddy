@@ -45,8 +45,8 @@ class MessageCheck(BaseModel):
 
 
 def _messages(orders: OrdersComponent) -> OrderMessages:
-    """The record, asking the storefront overlap with the lifecycle's running mail host."""
-    return OrderMessages(orders.store, orders.lifecycle.mail_host)
+    """The record, asking the storefront overlap with the lifecycle's mail readiness."""
+    return OrderMessages(orders.store, orders.lifecycle.mail_ready)
 
 
 async def _run[T](call: Callable[[], T]) -> T:

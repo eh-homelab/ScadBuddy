@@ -725,8 +725,8 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(item).toHaveTextContent('try later')
   })
 
-  it("shows the mail server's last error, and no note once a host is set", async () => {
-    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com' })
+  it("shows the mail server's last error, and no note once a host and a sender are set", async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
     setMockMailServerError('login refused')
     mockOrderMail(ORDER_ACCEPTED, [])
     render(ORDER_ACCEPTED)
@@ -734,6 +734,14 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
     expect(within(list).queryByText(/mail server is not set up/)).toBeNull()
     expect(await within(list).findByText('No mail yet.')).toBeInTheDocument()
+  })
+
+  it('says the mail server is not set up when a host is set and the sender is not', async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: null })
+    mockOrderMail(ORDER_ACCEPTED, [])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
   })
 
   it('lists the mail a link send queues', async () => {

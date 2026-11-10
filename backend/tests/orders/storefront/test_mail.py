@@ -929,24 +929,24 @@ def test_a_customer_title_is_sent_as_plain_text(
 # -- covers and the four hooks ------------------------------------------------------------
 
 
-def test_covers_needs_a_live_link_and_a_host(rows: OrderStore, shop: Shop) -> None:
+def test_covers_needs_a_live_link_and_a_ready_mail_config(rows: OrderStore, shop: Shop) -> None:
     order = shop.order()
     with rows.transaction() as conn:
-        assert storefront_mail_covers(conn, order.id, "shipped", host="smtp.example") is False
+        assert storefront_mail_covers(conn, order.id, "shipped", ready=True) is False
     link(rows, order, revoked=True)
     with rows.transaction() as conn:
-        assert storefront_mail_covers(conn, order.id, "shipped", host="smtp.example") is False
+        assert storefront_mail_covers(conn, order.id, "shipped", ready=True) is False
     link(rows, order)
     with rows.transaction() as conn:
-        assert storefront_mail_covers(conn, order.id, "shipped", host="smtp.example") is True
-        assert storefront_mail_covers(conn, order.id, "shipped", host=None) is False
+        assert storefront_mail_covers(conn, order.id, "shipped", ready=True) is True
+        assert storefront_mail_covers(conn, order.id, "shipped", ready=False) is False
 
 
 @pytest.fixture
 def mailing(shop: Shop) -> Iterator[list[int]]:
     """The shop's lifecycle with a mail host set; each after-commit kick counted."""
     kicks: list[int] = []
-    shop.lifecycle.mail_host = lambda: "smtp.example"
+    shop.lifecycle.mail_ready = lambda: True
     shop.lifecycle.on_mail = lambda: kicks.append(1)
     yield kicks
 

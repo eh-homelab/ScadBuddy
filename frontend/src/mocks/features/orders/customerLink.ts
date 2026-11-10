@@ -74,8 +74,9 @@ export const handlers = [
       if (!ADDRESS.test(to)) return toProblem(request, 'email_invalid', 'Give one email address, such as ada@example.com.')
       const made = { live: true, created_at: now(), sent_to: to, opened_at: null, revoked_at: null }
       links.set(order.id, made)
-      // The outbox row of the link's mail: sent at once when a host is set, else it waits.
-      const sent = mockSettings().storefront_mail_host ? now() : null
+      // The outbox row of the link's mail: sent at once when a host and a sender are set, else it waits.
+      const configured = mockSettings()
+      const sent = configured.storefront_mail_host && configured.storefront_mail_sender ? now() : null
       mail.set(order.id, [
         { event: 'order_link', to, created_at: now(), sent_at: sent, failed_at: null, attempts: 0, last_error: null, next_attempt_at: now() },
         ...(mail.get(order.id) ?? []),
