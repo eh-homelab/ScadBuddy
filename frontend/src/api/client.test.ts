@@ -1030,6 +1030,19 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('says the print was not linked when the new model answers no result (#5994)', async () => {
+    printRunPoll.intervalMs = 1
+    const made = { id: 'op-4', kind: 'mesh_model_create', subject: 'trophy', status: 'running', created_at: '2026-11-10T00:00:00Z' }
+    server.use(
+      http.post('/api/v1/print-imports/193', () => HttpResponse.json(made, { status: 202 })),
+      http.get('/api/v1/operations/op-4', () => HttpResponse.json({ ...made, status: 'succeeded', result: null })),
+    )
+
+    await expect(api.importPrint(193, { source: { kind: 'archive_source' }, new_model: { name: 'Trophy', description: '' } })).rejects.toThrow(
+      'The model was made, but the print was not linked to it',
+    )
+  })
+
   it("follows a 202 to the operation's result", async () => {
     printRunPoll.intervalMs = 1
     let reads = 0
