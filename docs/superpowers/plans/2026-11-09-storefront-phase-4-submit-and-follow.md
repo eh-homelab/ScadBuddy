@@ -144,7 +144,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
   - `Lifecycle.submit_order(order_id, body: SubmitInput, by: Actor) -> tuple[Order, str]` returns the order and the new link token, in one transaction under the order lock:
     1. It links or makes the customer. It links an existing customer only when exactly one customer has that email as a contact. Otherwise it makes a new customer with the name and the email contact.
     2. It takes the number from `order_numbers`.
-    3. It runs `set_shipping_option`, which refuses 422 `address_required` for an option that ships with no address.
+    3. It runs `set_shipping_option`, which refuses 409 `shipping_address_required` (`orders/lifecycle.py`, unchanged) for an option that ships with no address.
     4. It recomputes the auto tax.
     5. It runs `apply_deposit_policy`. A deposit request opened here queues no `payment_requested` mail (no link exists yet, so `storefront_mail_covers` is false): this is intended, because the `order_link` mail of step 8 leads to the order page, which shows it.
     6. It stamps `submitted_at`.
@@ -157,7 +157,7 @@ def test_a_back_office_order_is_not_accepted_by_the_last_answer(...)  # unchange
   - One order, one number and one queued `order_link` row, with the key replayed twice.
   - An existing single contact is linked.
   - Two customers with that email give a new customer.
-  - A shipping option that ships, without an address, gets 422.
+  - A shipping option that ships, without an address, gets 409 `shipping_address_required`.
   - The deposit policy applies.
   - Another visitor's submit sees no draft (404 `draft_not_found`).
   - On the edge: 428 without a key, and a test that monkeypatches `require_turnstile` asserts it was awaited with `"submit"`.
