@@ -1679,7 +1679,8 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
   is refused `unavailable` and writes no row; and it releases after the row is gone (a
   replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
-  `reconcile`, on the sweeper's tick at most once an hour and on one replica at a time (a
+  `reconcile`, on the sweeper's tick once an hour (a run that failed, or that found no free
+  lock connection, is tried again at the next 10-minute tick) and on one replica at a time (a
   session advisory lock on a lock connection, `Database.locks`), releases every hold older
   than an hour whose row is gone or names another blob (a session's cascade, `forgetSubject`,
   a crash, a failed release), and holds every row no hold names. On `store_backend` local
