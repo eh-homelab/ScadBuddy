@@ -12,7 +12,7 @@ import { type Principal, tiersUpTo } from '../src/auth/principal.js'
 import { STATUS_PROBE_MS, TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
-import { ACK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
+import { ACK_TIMEOUT_MS, BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import type { Database } from '../src/db.js'
@@ -249,8 +249,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const { events } = JSON.parse(historyToJSON(await client.workflow.getHandle(started[0]!).fetchHistory())) as {
         events: {
           eventType: string
-          workflowExecutionStartedEventAttributes?: { workflowExecutionTimeout?: string }
+          workflowExecutionStartedEventAttributes?: { workflowExecutionTimeout?: string; workflowTaskTimeout?: string }
           activityTaskScheduledEventAttributes?: { scheduleToStartTimeout?: string }
+          workflowTaskScheduledEventAttributes?: { startToCloseTimeout?: string }
           activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } }
         }[]
       }
@@ -268,6 +269,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const deadline = seconds(events[0]?.workflowExecutionStartedEventAttributes?.workflowExecutionTimeout)
       expect(deadline).toBeGreaterThan(ACK_TIMEOUT_MS + 10_000)
       expect(elapsed).toBeLessThan(deadline - 10_000)
+      // Each workflow task has the short timeout the server holds it to (#5939): a task the cluster
+      // starts and never delivers is retried after it, not after Temporal's 10 s.
+      expect(seconds(events[0]?.workflowExecutionStartedEventAttributes?.workflowTaskTimeout)).toBe(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS)
+      const tasks = events.filter((e) => e.eventType === 'EVENT_TYPE_WORKFLOW_TASK_SCHEDULED')
+      expect(tasks.length).toBeGreaterThan(0)
+      for (const t of tasks) expect(seconds(t.workflowTaskScheduledEventAttributes?.startToCloseTimeout)).toBe(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS)
       // The dead replica's row is dropped, so the next call does not wait for it again.
       await vi.waitFor(async () => expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0))
     })

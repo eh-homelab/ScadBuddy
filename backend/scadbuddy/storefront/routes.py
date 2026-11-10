@@ -14,11 +14,19 @@ spooled, then sent on as multipart a chunk at a time.
 The customer's order page (``/o#<token>``) posts the order link's token in each body,
 which goes on unread (`order_view` and the writes under ``/order``); its answer goes back
 with the fields of `ORDER_VIEW_FIELDS` only (`_shown`). A token that reads nothing is the
-CRUD side's 404 with no body, and the edge's own 404 with no body too."""
+CRUD side's 404 with no body, and the edge's own 404 with no body too.
+
+Accounts (#5283): ``POST /account/verify`` (the bot check ``sign_in`` first) sets the
+``sb_session`` cookie from the CRUD side's answer (`accounts.py`), ``POST
+/account/sign-out`` clears it and gives the browser a new visitor, and ``GET /account``,
+``GET /account/orders`` and ``POST /draft/submit`` send the cookie's session on. Verify
+and sign-out are checked by `CrossSiteGate`, as every write is."""
 
 from __future__ import annotations
 
 import hashlib
+import logging
+import secrets
 import time
 import uuid
 from collections.abc import Callable
@@ -33,10 +41,13 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.proxies import client_address
 from scadbuddy.crud.client import CrudRefusedError, CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
+from scadbuddy.storefront.accounts import clear_session, session_of, set_session
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
+from scadbuddy.storefront.visitors import VISITOR_COOKIE, VISITOR_MAX_AGE
+from scadbuddy.storefront.visitors import sign as sign_visitor
 from scadbuddy.storefront.wire import (
     ITEM_ID,
     JOB_ID,
@@ -50,6 +61,8 @@ from scadbuddy.storefront.wire import (
 #: The largest render or draft item body the edge relays: far past any listing's values.
 MAX_RENDER_BODY: Final = 64 * 1024
 GLB_MEDIA_TYPE: Final = "model/gltf-binary"
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 visitor_router = APIRouter(prefix=STOREFRONT_PREFIX)
@@ -183,11 +196,14 @@ async def submit(request: Request, crud: Crud, visitor_id: Visitor, client: Clie
     """The visitor's cart submitted as an order (#5283, spec §5.5): 428
     ``idempotency_key_required`` without a key, then the bot check (`turnstile.py`, action
     ``submit``: 403 ``bot_check_failed``, 503 ``bot_check_unavailable``), both before the
-    body is read or the CRUD side is called."""
+    body is read or the CRUD side is called. The cookie's session goes on, so a signed-in
+    visitor submits for its account."""
     key = _request_key(request, visitor_id)
     await require_turnstile(request, "submit")
     body = await _body(request, "submit_body_invalid")
-    return await crud.submit(body, key=key, visitor_id=visitor_id, client=client)
+    return await crud.submit(
+        body, key=key, visitor_id=visitor_id, client=client, session=session_of(request)
+    )
 
 
 #: How long one replica trusts its read of `requests_enabled`.
@@ -448,3 +464,76 @@ async def order_cancel(request: Request, crud: Crud, visitor_id: Visitor) -> Any
     key = _request_key(request, visitor_id)
     body = await _body(request, "order_body_invalid")
     return await _order(crud, "cancel", body, key)
+
+
+def _sign_in_required() -> ApiError:
+    return ApiError(
+        401, "Sign in to see your orders.", type_=f"{STOREFRONT_PROBLEMS}sign_in_required"
+    )
+
+
+@visitor_router.post("/account/verify")
+async def account_verify(
+    request: Request, response: Response, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """A sign-in by the mailed code. The bot check (``sign_in``) first, whenever a site key
+    is set; then the CRUD side's verify, sent once (`StorefrontCrud.account_verify`). Its
+    new session's token becomes the ``sb_session`` cookie and is never in a body. The
+    browser's earlier session is ended there."""
+    await require_turnstile(request, "sign_in")
+    body = await _body(request, "account_body_invalid")
+    account, token = await crud.account_verify(
+        body, visitor_id=visitor_id, client=client, session=session_of(request)
+    )
+    if token is None:
+        logger.error("the CRUD side's sign-in answered with no session")
+        raise ApiError(502, "The shop could not answer this request.")
+    set_session(request, response, token)
+    return account
+
+
+@visitor_router.post("/account/sign-out", status_code=status.HTTP_204_NO_CONTENT)
+async def account_sign_out(
+    request: Request, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """Sign-out: the session ends on the CRUD side and its cookie is cleared. The browser
+    also gets a new visitor: the old one belongs to the account, so a cart made next on a
+    shared browser is not the account's."""
+    session = session_of(request)
+    if session is not None:
+        await crud.account_sign_out(visitor_id=visitor_id, client=client, session=session)
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    clear_session(response)
+    response.set_cookie(
+        VISITOR_COOKIE,
+        sign_visitor(secrets.token_urlsafe(32), request.app.state.cookie_key),
+        max_age=VISITOR_MAX_AGE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@visitor_router.get("/account")
+async def account(
+    request: Request, response: Response, crud: Crud, visitor_id: Visitor, client: Client
+) -> Any:
+    """The signed-in account, or ``null``. A cookie whose session ended is cleared."""
+    session = session_of(request)
+    if session is None:
+        return None
+    found = await crud.account(visitor_id=visitor_id, client=client, session=session)
+    if found is None:
+        clear_session(response)
+    return found
+
+
+@visitor_router.get("/account/orders")
+async def account_orders(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """What the signed-in account sees; 401 ``sign_in_required`` without a session."""
+    session = session_of(request)
+    if session is None:
+        raise _sign_in_required()
+    return await crud.account_orders(visitor_id=visitor_id, client=client, session=session)

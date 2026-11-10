@@ -123,6 +123,8 @@ export type DurableTurn = {
   tiers?: readonly Tier[] | undefined
   /** The flow run and step that send it (#2481, SendOptions.flow). */
   flow?: FlowTurn | undefined
+  /** SendOptions.withoutBackground (#5870). */
+  withoutBackground?: boolean | undefined
 }
 
 export type DurableTurnsDeps = {
@@ -261,7 +263,7 @@ export class DurableTurns {
     // history, not in `ai_session_entries`, so an AgentSession would run on with none of it).
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, turn_flow = $6, updated_at = now(), turn_started_at = now(),
          interrupt_requested = false, runtime = coalesce(runtime, 'unified')
        FROM prior
        WHERE id = $1 AND owner_kind = $2 AND (owner_id = $3 OR owner_kind = 'browser')
@@ -276,6 +278,9 @@ export class DurableTurns {
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
         // The running turn (#2320).
         turn.turnId,
+        // A turn a flow run sent, or a session with none sent, is offered no background built-in
+        // (#5870, manager.ts BACKGROUND_TOOLS).
+        turn.flow !== undefined || turn.withoutBackground === true,
       ],
     )
     if (!claimed) return undefined

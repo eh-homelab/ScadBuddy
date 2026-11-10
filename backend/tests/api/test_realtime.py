@@ -98,7 +98,7 @@ PRINTER_ID = "6f1c2a9e-3b4d-4e5f-8a7b-9c0d1e2f3a4b"
 def test_a_printer_reaches_a_socket_following_the_printers(
     client: TestClient, bus: EventBus
 ) -> None:
-    """#3823: Now printing follows `printers`; a printer's own topic is `printer:<id>`."""
+    """#3823: /prints follows `printers`; a printer's own topic is `printer:<id>`."""
     with client.websocket_connect(WS) as ws:
         subscribe(ws, "printers", f"printer:{PRINTER_ID}")
         bus.publish(PrinterEvent(kind="printer.report", printer_id=PRINTER_ID))

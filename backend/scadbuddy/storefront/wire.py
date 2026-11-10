@@ -106,9 +106,13 @@ STOREFRONT_PROBLEMS: Final = "https://scadbuddy.dev/problems/storefront/"
 #: visitor's, so the edge never shows them.
 VISITOR_ID_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}visitor_id"
 STORE_CLIENT_PROBLEM: Final = f"{STOREFRONT_PROBLEMS}store_client"
+#: A signed-in visitor's session token, from the edge's verified ``sb_session`` cookie
+#: (`storefront/accounts.py`). The CRUD side's verify sends a new one back in it too.
+SESSION_HEADER: Final = "X-ScadBuddy-Store-Session"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
 #: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
-#: made for one form does not pass another's check. Only ``request`` has a route today.
+#: made for one form does not pass another's check. ``request`` and ``sign_in`` have
+#: routes today.
 TurnstileAction = Literal["submit", "request", "sign_up", "sign_in"]
 #: The header the page sends the widget's token in.
 TURNSTILE_HEADER: Final = "X-Turnstile-Token"

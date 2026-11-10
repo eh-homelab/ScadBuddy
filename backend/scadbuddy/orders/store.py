@@ -698,6 +698,33 @@ class OrderStore:
         customer_id = row.pop("customer_id")
         return customer_id, Address.model_validate(row)
 
+    def add_address(self, conn: Conn, customer_id: str, address: AddressInput) -> Address:
+        """``address`` appended to the customer's addresses, the others kept as they are."""
+        row = conn.execute(
+            "INSERT INTO customer_addresses (customer_id, label, recipient, lines, locality,"
+            " region, postal_code, country, phone, default_shipping, default_billing, position)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, (SELECT COALESCE(MAX(position)"
+            " + 1, 0) FROM customer_addresses WHERE customer_id = %s))"
+            f" RETURNING {_ADDRESS}",
+            (
+                customer_id,
+                address.label,
+                address.recipient,
+                list(address.lines),
+                address.locality,
+                address.region,
+                address.postal_code,
+                address.country,
+                address.phone,
+                address.default_shipping,
+                address.default_billing,
+                customer_id,
+            ),
+        ).fetchone()
+        assert row is not None
+        conn.execute("UPDATE customers SET updated_at = now() WHERE id = %s", (customer_id,))
+        return Address.model_validate(row)
+
     # -- the price book's filaments (§5.1, #4250) -------------------------------------
 
     def existing_filament(

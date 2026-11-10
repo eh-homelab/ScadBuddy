@@ -127,6 +127,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
             "requests",
             "pay",
             "turnstile",
+            "accounts",
             "order",
         ]
     }
@@ -203,7 +204,16 @@ def test_the_other_callers_keep_their_paths(client: TestClient, render_token: st
 def test_the_edge_waits_for_every_area_it_calls() -> None:
     """The edge serves only once the API lists each area it calls, and the API lists
     only areas it serves whole."""
-    assert {"listings", "renders", "drafts", "requests", "pay", "turnstile", "order"} == EDGE_AREAS
+    assert {
+        "listings",
+        "renders",
+        "drafts",
+        "requests",
+        "pay",
+        "turnstile",
+        "accounts",
+        "order",
+    } == EDGE_AREAS
     assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
 
 

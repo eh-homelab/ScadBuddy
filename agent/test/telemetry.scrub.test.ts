@@ -165,6 +165,20 @@ describe('ScrubbingSpanExporter', () => {
     expect(spans.getFinishedSpans()[0]!.events[0]!.attributes).toEqual({ kept: 1 })
   })
 
+  // #5913 review: a call site that names its event otherwise (`scadbuddy.eager.failed`) still
+  // gets no exception message or stack out of the process.
+  it('drops an exception message and stack from an event of any name', async () => {
+    const spans = await exported((span) => {
+      span.addEvent('scadbuddy.eager.failed', {
+        'exception.type': 'Error',
+        'exception.message': SENTINEL,
+        'exception.stacktrace': `Error: ${SENTINEL}\n    at start (/app/x.js:1:1)`,
+      })
+    })
+    expect(everything(spans)).not.toContain(SENTINEL)
+    expect(spans.getFinishedSpans()[0]!.events[0]!.attributes).toEqual({ 'exception.type': 'Error' })
+  })
+
   it('passes a clean span through unchanged', async () => {
     const spans = await exported((span) => span.setAttribute('scadbuddy.tool', 'list_models'))
     const [span] = spans.getFinishedSpans()

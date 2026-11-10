@@ -12,7 +12,11 @@ more than the shop approved.
 It runs on an `order.changed` trigger the shop makes, matched to `accepted`,
 with a standing grant naming `queue_print`, `order_item_fulfil` and `order_attach` (an
 agent call's grant only narrows the run's); nothing here makes that trigger or approves
-that grant.
+that grant. With the inputs `notify` and `send` (#5660) it also sends the `ready` message
+through the bound messaging plugin, so its grant then also names
+`order_notify_customer_send` (spec 2026-11-08-order-notify-customer-design.md §6.2). The
+run's result says what became of it (`send`: `sent`, `skipped`, `refused`, `unknown` or
+`not_sent`).
 
 A print refused `requote_needed` (the accepted quote's sliced file is gone or changed)
 asks a person and never re-quotes: on an accepted order a new quote is open only after a
@@ -45,7 +49,8 @@ DESCRIPTION = (
     "Prints each approved or failed line item of an accepted order from its accepted "
     "quote, asks a person when a print cannot start (the order on hold, or a stale "
     "quote to re-quote), waits for the prints to end, has an agent check them and "
-    "record them, and writes the customer's message once the order is ready."
+    "record them, and writes the customer's message once the order is ready (and, with "
+    "send on, sends it through the bound messaging plugin)."
 )
 #: Who registered it: the build, never a person or an agent.
 AUTHOR: dict[str, Any] = {"kind": "builtin", "name": NAME}
@@ -67,6 +72,15 @@ INPUTS_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": "Write the customer's 'ready' message when the order is ready",
+        },
+        "send": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "With notify: send that message through the messaging plugin bound in "
+                "Settings → Orders (#5660). The trigger's grant must allow "
+                "order_notify_customer_send; a refusal is reported, never the run's end"
+            ),
         },
         "settle_hours": {
             "type": "integer",
@@ -257,6 +271,65 @@ async def settle(order_id, printed, hours):
         wait = min(wait * 2, POLL_MAX_S)
 
 
+def send_refusal(err):
+    """The agent's refusal of the send, or None when its outcome is not known. The script
+    sees a host call's failure as `Exception("<type>: <text>")` (the harness's
+    `_script_outcome`): a tool's failure is `ToolFailedError`, whatever its activity type,
+    and a denied approval `ToolApprovalDenied`. A refusal is one of the agent's own texts:
+    the tool's `<slug>: ...` (`already_notified`, `messaging_plugin_unavailable`, ...), a
+    backend 4xx, a call that "was not run", or one with no approval. Anything else (a
+    timeout, a lost answer, a 5xx) may have sent it."""
+    kind, _, text = str(err).partition(": ")
+    if kind == "ToolApprovalDenied":
+        return "the send was not approved: " + text
+    if kind != "ToolFailedError":
+        return None
+    slug, colon, _ = text.partition(": ")
+    if colon and slug and slug.replace("_", "").isalpha() and slug == slug.lower():
+        return text
+    for mark in (" was not run: ", "needs an approval", "failed (HTTP 4"):
+        if mark in text:
+            return text
+    return None
+
+
+async def send_ready_message(order_id, settings, message):
+    """What became of the composed message (#5660): `sent`, `skipped` with why, `refused`
+    with the agent's reason, `unknown` when the call failed in a way that may have sent it,
+    or `not_sent` with the tool's reason. None ends the run. Each call's key is its own
+    request id, so a retried call is answered from its first claim; another run on the same
+    ready order is refused `already_notified`."""
+    if not settings.get("send"):
+        return {
+            "status": "skipped",
+            "reason": "send is off: the message was composed for a person to send",
+        }
+    if not message.get("send_ready"):
+        return {
+            "status": "skipped",
+            "reason": "no messaging plugin is bound, or the customer has no contact of its kind",
+        }
+    try:
+        answer = data(await tool("order_notify_customer_send", {
+            "order_id": order_id, "template": "ready",
+        }))
+    except Exception as err:
+        reason = send_refusal(err)
+        if reason is None:
+            return {
+                "status": "unknown",
+                "reason": "the outcome is unknown; check the order's messages",
+            }
+        return {"status": "refused", "reason": reason}
+    if answer["sent"]:
+        return {"status": "sent", "message_id": answer["message"]["id"]}
+    return {
+        "status": "not_sent",
+        "reason": answer.get("warning") or answer["message"]["status"],
+        "message_id": answer["message"]["id"],
+    }
+
+
 async def main():
     ev = await trigger()
     if ev is None or ev["kind"] != "order.changed":
@@ -299,6 +372,7 @@ async def main():
             ]},
         )
     message = None
+    send = {"status": "skipped", "reason": "notify is off"}
     if settings["notify"]:
         # Only an order the checks made ready, never one with prints failed or skipped.
         now = data(await tool("order_get", {"order_id": order_id}))
@@ -306,7 +380,10 @@ async def main():
             message = data(await tool("order_notify_customer", {
                 "order_id": order_id, "template": "ready",
             }))
-    return {"report": done, "skipped": skipped, "message": message}
+            send = await send_ready_message(order_id, settings, message)
+        else:
+            send = {"status": "skipped", "reason": "the order is not ready"}
+    return {"report": done, "skipped": skipped, "message": message, "send": send}
 
 
 asyncio.run(main())

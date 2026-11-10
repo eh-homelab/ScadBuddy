@@ -11,8 +11,12 @@ and only the mail carries the link.
 The body names the cart the page shows (``draft_id``), so a page left open on a cart that
 was submitted meanwhile never submits the visitor's newer one. A cart that is not the
 visitor's, or no cart, is 404 ``draft_not_found``, checked under the order's lock.
-``account_id`` stays None until the storefront's accounts give the CRUD side a session to
-read it from; a body never names it.
+
+The account comes only from the request's session (`api/crud_storefront.py`
+`store_account`); a body never names it. Signed in, the order takes the account's
+customer and is attached to the account; a cart whose visitor joined another account is
+404 ``draft_not_found`` too. The ledger's request names the account, so a key sent again
+under another session is not the same request.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.lifecycle import LifecycleError, SubmitInput
 from scadbuddy.orders.models import Order
+from scadbuddy.orders.storefront.accounts import Account
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
@@ -70,7 +75,7 @@ def _refusal(error: LifecycleError) -> ApiError:
 
 
 async def submit_draft(
-    state: AppState, visitor_id: str, key: str, body: SubmitBody
+    state: AppState, visitor_id: str, key: str, body: SubmitBody, account: Account | None
 ) -> SubmittedOrder:
     """The visitor's cart ``body.draft_id`` submitted (`Lifecycle.submit_order`). A retry
     of a committed submit (the same key) answers its reply and does nothing else.
@@ -78,7 +83,11 @@ async def submit_draft(
     ``shipping_address_required``, 422 ``shipping_option_id``, 422 ``email_invalid``,
     503 ``submit_unavailable`` (no KEK to seal the link with)."""
     orders: OrdersComponent = state.components.get(ORDERS)
-    asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
+    asked = {
+        "visitor": token_sha256(visitor_id),
+        "account": None if account is None else account.id,
+        **body.model_dump(mode="json"),
+    }
 
     def lookup() -> Replay | None:
         with state.projection.pool.connection() as conn:
@@ -89,7 +98,10 @@ async def submit_draft(
         return SubmittedOrder.model_validate(reply.body)
     if ITEM_ID.fullmatch(body.draft_id) is None:
         raise draft_not_found()
-    entry = SubmitInput(**body.model_dump(exclude={"draft_id"}), account_id=None)
+    entry = SubmitInput(
+        **body.model_dump(exclude={"draft_id"}),
+        account_id=None if account is None else account.id,
+    )
 
     def write() -> Replay:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
