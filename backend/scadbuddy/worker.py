@@ -71,6 +71,7 @@ from scadbuddy.crud.print import (
     RemotePrinterStore,
     RemotePrintLinks,
     RemotePrintRunStore,
+    RemoteRackUsage,
     RemoteReports,
     RemoteReprints,
     RemoteSettingsStore,
@@ -114,7 +115,7 @@ from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
-from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
+from scadbuddy.rack.usage import lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
@@ -1215,7 +1216,8 @@ class PrintWorkerDeps:
     #: Its events, posted to the API (#5298): it does not LISTEN.
     events: RemoteEvents
     outputs: RemoteOutputs
-    rack: RackUsageStore
+    #: The rack hotends' usage, through the API's CRUD routes (#5298 Task 30): no pool.
+    rack: RemoteRackUsage
     metrics: Metrics
     print_runs: RemotePrintRunStore
     operations: RemoteOperationStore
@@ -1237,7 +1239,6 @@ class PrintWorkerDeps:
         if isinstance(self.library, RemoteLibrary):
             await self.library.aclose()
         await self.events.aclose()
-        await asyncio.to_thread(self.rack.close)
         await asyncio.to_thread(self.settings_store.close)
         await self.crud.aclose()
         await asyncio.to_thread(self.database.close)
@@ -1255,8 +1256,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     """The print worker's stores, over the API's database and its internal routes. The
     Bambuddy settings, key included, are read through the API's CRUD route on every use,
     and the runs, outcomes, operations, events, uploads, slices, background slices,
-    project records, print links, sends, outputs' last prints, printer rows, LAN reports
-    and access codes go through its CRUD routes (#5298).
+    project records, print links, sends, outputs' last prints, printer rows, LAN reports,
+    access codes and the rack hotends' usage go through its CRUD routes (#5298).
     ``crud``, the client of those routes, defaults to one with the worker's credential."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
@@ -1311,7 +1312,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     library = RemoteLibrary(
         settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT, auth=credential)
     )
-    rack = RackUsageStore(settings.database_url)
+    # Its rack hotends' usage through the API (#5298 Task 30): no pool of its own.
+    rack = RemoteRackUsage(crud)
     observer = ProgressObserver(events)
 
     # The runs and the operations through the API (#5298), which writes their events and
@@ -1490,6 +1492,7 @@ PRINT_CRUD_AREAS = frozenset(
         "links",
         "lan-imports",
         "printers",
+        "rack",
     }
 )
 

@@ -82,6 +82,8 @@ from scadbuddy.print_watch.store import AutoImportStore
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.rack.component import RACK_USAGE
+from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
@@ -442,6 +444,7 @@ def print_crud_app(
     printers: PrinterStore | None = None,
     links: PrintLinkStore | None = None,
     catalogue: Any = None,
+    rack: RackUsageStore | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
@@ -451,7 +454,8 @@ def print_crud_app(
     on ``store``'s pool when not given), and the uploads, slices, background slices,
     project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
     print records go to the watcher's store on ``store``'s pool, matched against
-    ``catalogue`` (none when not given)."""
+    ``catalogue`` (none when not given), and the rack hotends' usage goes through
+    ``rack`` (no rack route answers without one)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -462,6 +466,7 @@ def print_crud_app(
             store=printers if printers is not None else PrinterStore(store.pool, None),
             reports=PrinterReportStore(store.pool),
         ),
+        RACK_USAGE: rack,
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -552,6 +557,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "links",
         "lan-imports",
         "printers",
+        "rack",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

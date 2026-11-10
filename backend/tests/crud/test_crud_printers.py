@@ -79,8 +79,9 @@ def test_the_areas_are_served_and_awaited() -> None:
     for area in ("printer-ensure", "printers"):
         assert area in CRUD_AREAS["print"]
         assert area in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-1] == "printers"
+    # Appended, so an older API's list is a prefix of a newer one's; Task 30's ``rack``
+    # came after it.
+    assert CRUD_AREAS["print"][-2:] == ["printers", "rack"]
 
 
 def test_every_printer_method_is_remote_refused_or_named() -> None:

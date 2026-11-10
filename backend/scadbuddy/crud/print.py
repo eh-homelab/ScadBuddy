@@ -31,6 +31,19 @@ refuses the methods only the API calls (`PRINTERS_API_ONLY`), `link_bambuddy` am
 `RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
 4); sent again, the first record answers.
 
+`RemoteRackUsage` is `rack/usage.py` `RackUsageStore` (Q27, #5298 Task 30) for the
+methods the print worker calls: the hotends a run sees, their usage, a Bambuddy run's
+picks, the follow's settle of its archives, a LAN start's picks and the settles of a LAN
+start, from the follow (`lan_settle_hook`), ``lan_wait`` and the printer's watch. It holds
+no pool. A LAN start's picks replace an earlier pick of that start (deletes and inserts),
+so they are one route, one transaction on the API (plan D6). ``seen`` is natural. Every
+other write answers the rows it wrote, which a resend would not repeat, so each takes an
+``Idempotency-Key``: `WriteKeys` ``rack`` inside an activity (a retried attempt's same
+write answers as the lost one did; one whose body differs is refused 422 and sent again
+under a new key, as `RemoteBlobIndex` does), and a new UUID per call for a LAN start's
+picks, which a retried attempt ranks again: the newer pick must replace the earlier one,
+never replay it. ``spool_history`` is the API's (the rack usage route).
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -128,6 +141,8 @@ from scadbuddy.printers.store import (
     VirtualOutcome,
     printer_uuid,
 )
+from scadbuddy.rack.rank import Usage
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 
 logger = logging.getLogger(__name__)
 
@@ -1052,6 +1067,183 @@ class RemoteReports(PrinterReportStore):
             printer_id: (seen["report"], datetime.fromisoformat(seen["seen_at"]))
             for printer_id, seen in body.items()
         }
+
+
+#: The `RackUsageStore` methods only the API calls: the rack usage route's spool history
+#: (`api/printing.py`), and the ``*_in`` writes, which run on the API's connection.
+RACK_API_ONLY = (
+    "spool_history",
+    "record_picks_in",
+    "record_prints_in",
+    "record_lan_picks_in",
+    "settle_lan_in",
+    "settle_lan_ended_in",
+)
+
+
+def _unique(values: Iterable[Any]) -> list[Any]:
+    return sorted({value for value in values if value})
+
+
+class RemoteRackUsage(RackUsageStore):
+    """`RackUsageStore` (Q27) over ``…/print/rack`` (area ``rack``, #5298 Task 30). Async,
+    as the SQL store is. No pool and no migration: the API owns the tables."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+        self._keys = WriteKeys("rack")
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("RackUsageStore.pool is the API's; the worker has none")
+
+    def close(self) -> None:
+        """Nothing to close: the CRUD client is the worker's."""
+
+    async def _keyed(self, path: str, body: Any) -> Any:
+        """A write that answers the rows it wrote, under `WriteKeys`' key. A key an
+        earlier attempt of this activity spent on another write is refused 422, and this
+        write is sent again under a new one."""
+        url = f"{BASE}/rack{path}"
+        try:
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=self._keys.next()
+            )
+        except CrudRefusedError as error:
+            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                raise
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=uuid.uuid4().hex
+            )
+        return response.json()
+
+    async def _ids(self, path: str, ids: Iterable[int]) -> set[int]:
+        unique = sorted(set(ids))
+        if not unique:
+            return set()
+        url = f"{BASE}/rack{path}?{urlencode({'id': unique}, doseq=True)}"
+        return {int(found) for found in (await self._client.request("GET", url)).json()}
+
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
+        """Natural: an upsert by serial."""
+        unique = _unique(serials)
+        if unique and (printer_id is not None or printer is not None):
+            await self._client.request(
+                "POST",
+                f"{BASE}/rack/seen",
+                json={"printer_id": printer_id, "printer": printer, "serials": unique},
+            )
+
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        """A ``POST`` read: the serials stay out of the URL, so out of access logs (spec
+        §7)."""
+        unique = _unique(serials)
+        if not unique:
+            return {}
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/usage", json={"serials": unique}
+        )
+        return {
+            serial: Usage(
+                prints=row["prints"],
+                print_seconds=row["print_seconds"],
+                grams=row["grams"],
+                first_seen_at=_when(row["first_seen_at"]),
+                pending=row["pending"],
+                last_used_at=_when(row["last_used_at"]),
+            )
+            for serial, row in response.json().items()
+        }
+
+    async def record_picks(
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "queue_item_id": queue_item_id,
+            "printer_id": printer_id,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+            "copies": copies,
+        }
+        return int((await self._keyed("/picks", body))["written"])
+
+    async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/picked", queue_item_ids)
+
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/recorded-archives", archive_ids)
+
+    async def record_prints(
+        self,
+        *,
+        archive_id: int,
+        queue_item_id: int,
+        settled_at: datetime,
+        print_seconds: int | None,
+        grams: float | None,
+    ) -> int:
+        body = {
+            "archive_id": archive_id,
+            "queue_item_id": queue_item_id,
+            "settled_at": settled_at.isoformat(),
+            "print_seconds": print_seconds,
+            "grams": grams,
+        }
+        return int((await self._keyed("/prints", body))["written"])
+
+    async def record_lan_picks(
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer_id: int | None,
+        picks: Sequence[PickedHotend],
+        printer: str | None = None,
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "run_id": run_id,
+            "subtask_name": subtask_name,
+            "printer_id": printer_id,
+            "printer": printer,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+        }
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/lan-picks", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
+
+    async def settle_lan(
+        self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+    ) -> int:
+        body = {"run_id": run_id, "subtask_name": subtask_name, "timed": timed}
+        return int((await self._keyed("/settle-lan", body))["written"])
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        body = {
+            "printer": printer,
+            "subtask_name": subtask_name,
+            "ended_at": ended_at.isoformat(),
+            "timed": timed,
+        }
+        return int((await self._keyed("/settle-lan-ended", body))["written"])
+
+
+def _when(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+_refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

@@ -3,7 +3,10 @@
 
 The one store that owns the three tables. It connects on first use and applies the
 backend's migrations itself, as ``analyzers.decisions.PostgresDecisionStore`` does. Every
-public method is a coroutine that runs its query in a worker thread.
+public method is a coroutine that runs its query in a worker thread, but ``pool`` and the
+``*_in`` writes, which run on a connection the caller holds: the API's CRUD routes run
+them with their idempotency ledger row in one transaction (#5298). The print worker holds
+no pool: its store is `crud/print.py` `RemoteRackUsage`.
 """
 
 from __future__ import annotations
@@ -225,6 +228,11 @@ class RackUsageStore:
             self._migrated = True
         return self._pool
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The store's pool, open and migrated: the CRUD routes' keyed writes run on it."""
+        return self._ready()
+
     def close(self) -> None:
         with self._open_lock:
             if self._pool_open:
@@ -376,8 +384,20 @@ class RackUsageStore:
     def _record_picks(
         self, queue_item_id: int, printer: str | None, picks: list[PickedHotend], copies: int
     ) -> int:
+        with self._ready().connection() as conn:
+            return self.record_picks_in(conn, queue_item_id, printer_id, picks, copies)
+
+    @staticmethod
+    def record_picks_in(
+        conn: Connection[DictRow],
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        copies: int,
+    ) -> int:
+        """`record_picks` on ``conn``, in one transaction (a savepoint inside the caller's)."""
         written = 0
-        with self._ready().connection() as conn, conn.transaction():
+        with conn.transaction():
             for pick in picks:
                 cursor = conn.execute(
                     "INSERT INTO rack_nozzle_picks"
@@ -462,14 +482,28 @@ class RackUsageStore:
         grams: float | None,
     ) -> int:
         with self._ready().connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO rack_nozzle_prints"
-                " (archive_id, group_id, serial, settled_at, print_seconds, grams, queue_item_id)"
-                " SELECT %s, group_id, serial, %s, %s, %s, queue_item_id FROM rack_nozzle_picks"
-                " WHERE queue_item_id = %s"
-                " ON CONFLICT (archive_id, group_id) DO NOTHING",
-                (archive_id, settled_at, print_seconds, grams, queue_item_id),
+            return self.record_prints_in(
+                conn, archive_id, queue_item_id, settled_at, print_seconds, grams
             )
+
+    @staticmethod
+    def record_prints_in(
+        conn: Connection[DictRow],
+        archive_id: int,
+        queue_item_id: int,
+        settled_at: datetime,
+        print_seconds: int | None,
+        grams: float | None,
+    ) -> int:
+        """`record_prints` on ``conn``."""
+        cursor = conn.execute(
+            "INSERT INTO rack_nozzle_prints"
+            " (archive_id, group_id, serial, settled_at, print_seconds, grams, queue_item_id)"
+            " SELECT %s, group_id, serial, %s, %s, %s, queue_item_id FROM rack_nozzle_picks"
+            " WHERE queue_item_id = %s"
+            " ON CONFLICT (archive_id, group_id) DO NOTHING",
+            (archive_id, settled_at, print_seconds, grams, queue_item_id),
+        )
         return cursor.rowcount
 
     async def record_lan_picks(
@@ -496,8 +530,22 @@ class RackUsageStore:
         printer: str | None,
         picks: list[PickedHotend],
     ) -> int:
+        with self._ready().connection() as conn:
+            return self.record_lan_picks_in(conn, run_id, subtask, printer_id, printer, picks)
+
+    @staticmethod
+    def record_lan_picks_in(
+        conn: Connection[DictRow],
+        run_id: str,
+        subtask: str,
+        printer_id: int | None,
+        printer: str | None,
+        picks: Sequence[PickedHotend],
+    ) -> int:
+        """`record_lan_picks` on ``conn``: its deletes and inserts in one transaction (a
+        savepoint inside the caller's), never split across calls (plan D6)."""
         written = 0
-        with self._ready().connection() as conn, conn.transaction():
+        with conn.transaction():
             # The earlier pick's spools go with it: the newer pick may print others.
             conn.execute(
                 "DELETE FROM rack_nozzle_pick_spools WHERE lan_run_id = %s AND lan_subtask = %s",
@@ -556,16 +604,23 @@ class RackUsageStore:
 
     def _settle_lan(self, run_id: str, subtask: str | None, timed: bool) -> int:
         with self._ready().connection() as conn:
-            cursor = conn.execute(
-                _SETTLE_LAN.format(
-                    end="least(now(), (SELECT min(n.picked_at) FROM rack_nozzle_picks AS n"
-                    "  WHERE n.printer = k.printer AND n.lan_run_id IS NOT NULL"
-                    "  AND n.picked_at > k.picked_at))",
-                    where="k.lan_run_id = %(run)s"
-                    " AND (%(subtask)s::text IS NULL OR k.lan_subtask = %(subtask)s)",
-                ).encode(),
-                {"timed": timed, "run": run_id, "subtask": subtask},
-            )
+            return self.settle_lan_in(conn, run_id, subtask, timed)
+
+    @staticmethod
+    def settle_lan_in(
+        conn: Connection[DictRow], run_id: str, subtask: str | None, timed: bool
+    ) -> int:
+        """`settle_lan` on ``conn``."""
+        cursor = conn.execute(
+            _SETTLE_LAN.format(
+                end="least(now(), (SELECT min(n.picked_at) FROM rack_nozzle_picks AS n"
+                "  WHERE n.printer = k.printer AND n.lan_run_id IS NOT NULL"
+                "  AND n.picked_at > k.picked_at))",
+                where="k.lan_run_id = %(run)s"
+                " AND (%(subtask)s::text IS NULL OR k.lan_subtask = %(subtask)s)",
+            ).encode(),
+            {"timed": timed, "run": run_id, "subtask": subtask},
+        )
         return cursor.rowcount
 
     async def settle_lan_ended(
@@ -581,13 +636,20 @@ class RackUsageStore:
 
     def _settle_lan_ended(self, printer: str, subtask: str, ended_at: datetime, timed: bool) -> int:
         with self._ready().connection() as conn:
-            cursor = conn.execute(
-                _SETTLE_LAN.format(
-                    end="%(ended_at)s",
-                    where="k.printer = %(printer)s::uuid AND k.lan_subtask = %(subtask)s",
-                ).encode(),
-                {"timed": timed, "ended_at": ended_at, "printer": printer, "subtask": subtask},
-            )
+            return self.settle_lan_ended_in(conn, printer, subtask, ended_at, timed)
+
+    @staticmethod
+    def settle_lan_ended_in(
+        conn: Connection[DictRow], printer: str, subtask: str, ended_at: datetime, timed: bool
+    ) -> int:
+        """`settle_lan_ended` on ``conn``."""
+        cursor = conn.execute(
+            _SETTLE_LAN.format(
+                end="%(ended_at)s",
+                where="k.printer = %(printer)s::uuid AND k.lan_subtask = %(subtask)s",
+            ).encode(),
+            {"timed": timed, "ended_at": ended_at, "printer": printer, "subtask": subtask},
+        )
         return cursor.rowcount
 
 
