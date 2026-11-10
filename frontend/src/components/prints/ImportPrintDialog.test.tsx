@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HttpResponse, http } from 'msw'
@@ -201,10 +201,22 @@ describe('ImportPrintDialog', () => {
         )
       }),
     )
+    const real = api.listFarmArchives.bind(api)
+    const reads: Promise<ArchiveOutcome[]>[] = []
+    vi.spyOn(api, 'listFarmArchives').mockImplementation((...args) => {
+      const read = real(...args)
+      reads.push(read)
+      return read
+    })
     renderPage(<ImportPrintDialog open onOpenChange={() => {}} />)
     await waitFor(() => expect(asked).toEqual([50, 100, 150, 200]))
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // Once the 200-archive answer is in and React has run its effects, a fifth read
+    // would have started already: no timer decides it (#5999).
+    await act(async () => {
+      await reads[3]
+    })
     expect(asked).toEqual([50, 100, 150, 200])
+    expect(reads).toHaveLength(4)
   })
 
   it('follows a slow new model, then shows the import it made (#5992)', async () => {
