@@ -175,4 +175,6 @@ def test_the_print_areas_list_settings_and_the_runs(crud: CrudSyncClient) -> Non
         "events",
         "printer-ensure",
         "reprints",
+        "uploads",
+        "previews",
     ]

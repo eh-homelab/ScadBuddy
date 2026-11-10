@@ -215,6 +215,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   browser attached: …` (with why: no tab for this session, no pairing for this caller,
   the paired tab is not connected, or no database for pairing), a timeout, a tab that
   disconnected mid-call, or more than 8 calls waiting on one tab (`MAX_CALLS_PER_TAB`).
+  `browser_status` on a tab whose replica did not answer in time says `no answer from the
+  paired ScadBuddy tab in time: …` instead, a prefix of its own on purpose: the tab may
+  still be connected, so it is not one of the `no browser attached` reasons (#5962).
   In a session the browser user owns, `no browser attached` does not fail the call at
   once (#815 §2): the call parks as a `tab_disconnected` attention request (the panel's
   card and the Assistant badge), and calls that fail together share one request, as does
@@ -396,9 +399,10 @@ sequenceDiagram
   `agent-tools.<A>`, which only the caller's host worker polls (with `BridgeCall` alone,
   `dist/temporal/bridge-bundle.js`). Both queues are unversioned. The shared `agent-tools`
   is versioned, and in prod a `BridgeCall` started there waited 3.4 s for its first
-  workflow task, so the 6 s status probe ran out before the activity started. A call or
-  a status check between two healthy replicas now answers in well under a second
-  (`agent/test/bridgeRelay.temporal.test.ts`).
+  workflow task, so the status probe (then 6 s) ran out before the activity started. A call or
+  a status check between two healthy replicas now answers in well under a second on a dev
+  server (`agent/test/bridgeRelay.temporal.test.ts`). In prod each hop is slower while Temporal's
+  matching is CPU-throttled (eh-homelab/clusters#3418): status reads took 2.3–4.0 s on 2026-11-10.
 - **Every call is sealed:** the arguments and the tab's result (page snapshots, form
   contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
   workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
@@ -428,11 +432,17 @@ sequenceDiagram
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
-  tab's route and live tools, but waits at most 6 s for the answer (`STATUS_PROBE_MS`,
-  #4950), as does the check behind a chat attach: past it the tab reads "not connected".
-  Those 6 s are the ack (3 s) plus the status activity's start-to-close (3 s), with none of
-  the workflow's slack: a probe whose workflow tasks are slow on the caller reads
-  "not connected" once they run out, and does not wait for the slack (#5421).
+  tab's route and live tools, but waits at most 10 s for the answer (`STATUS_PROBE_MS`,
+  #4950); the check behind a chat attach waits 6 s (`ATTACH_PROBE_MS`), since it pairs the
+  session with the sending tab when the owner is slow. Past it `browser_status` answers not
+  attached with its own reason: the tab's replica did not answer in time, the tab may still
+  be connected, and a call may still reach it. It does not say "not connected", which is
+  kept for a tab no replica holds. The 10 s cover the ack (3 s), the status activity's
+  start-to-close (3 s), and one workflow task that Temporal never delivered and that is
+  retried after `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS` (3 s). At 6 s, prod cut off two of five
+  status reads in one turn while the same tab answered every navigate and snapshot
+  (2026-11-10, #5939, eh-homelab/clusters#3418). The probe still does not wait for the
+  workflow's slack (#5421).
   A workflow that ends on its own execution timeout is logged as one ("timed out as a
   workflow (is this replica's host worker … polling?)"), apart from an owner's failure: its
   15 s of slack covers the workflow tasks on a loaded caller and its host worker's

@@ -5,6 +5,7 @@ import json
 import pkgutil
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 import scadbuddy.api
 from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES, _name_in_openapi
 from scadbuddy.orders.estimate import StoreEstimate
+from scadbuddy.orders.models import OrderStatus
 from scadbuddy.storefront.routes import ESTIMATE_FIELDS
 from scadbuddy.tools.export_openapi import export, export_storefront
 
@@ -212,3 +214,11 @@ def test_the_storefront_estimate_type_follows_what_the_edge_sends(
     schema = spec["components"]["schemas"]["StoreEstimate"]
     assert set(schema["properties"]) == {"estimate", "price_minor"}
     assert set(schema.get("required", [])) <= {"estimate", "price_minor"}
+
+
+def test_an_account_orders_status_is_the_order_status_enum(tmp_path: Path) -> None:
+    """Review of #5957: the page's status labels are typed by this enum, so tsc names a
+    status the labels lack."""
+    spec = json.loads(export_storefront(tmp_path / "storefront.json").read_text(encoding="utf-8"))
+    status = spec["components"]["schemas"]["AccountOrder"]["properties"]["status"]
+    assert status["enum"] == list(get_args(OrderStatus))

@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
-from scadbuddy.orders.models import ItemKind, SubmitAddress
+from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -365,7 +365,8 @@ class AccountOrder(BaseModel):
 
     id: str
     number: str | None
-    status: str
+    #: The orders module's enum, so the page's labels are checked against it (#5283).
+    status: OrderStatus
     created_at: datetime
     submitted_at: datetime | None
     items: int
