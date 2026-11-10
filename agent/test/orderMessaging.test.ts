@@ -92,7 +92,10 @@ function fakeBackend(
       return Response.json({ already_notified: opts.told ?? null, storefront_mail: opts.storefrontMail ?? false })
     }
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
-      writes.push({ path, body: await request.json(), key: request.headers.get('idempotency-key') })
+      const body = (await request.json()) as Record<string, unknown>
+      writes.push({ path, body, key: request.headers.get('idempotency-key') })
+      // As the backend's row: the claim's recipients, subject and text, with its id and status.
+      message = { ...body, ...message }
       return Response.json(message, { status: opts.claim?.status ?? 201 })
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {

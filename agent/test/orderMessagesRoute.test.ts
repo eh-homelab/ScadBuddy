@@ -26,9 +26,21 @@ function signedIn(): BrowserSessions {
   return new BrowserSessions(sql)
 }
 
-/** The backend as a send reads and writes it; `customer.name` may change between calls. */
+/** A binding that gives the plugin a dedupe key (§7.2 step 4: a replayed claim may be sent again). */
+const KEYED: MessagingBinding = { ...BINDING, args: { ...BINDING.args, idempotency_key: 'key' } }
+
+/**
+ * The backend as a send reads and writes it. `customer.name`, `shop` (the order's number, the
+ * binding, the contacts) may change between calls; `shop.outcomeStatus` fails the outcome post.
+ */
 function fakeBackend() {
   const customer = { name: 'Ada' }
+  const shop = {
+    number: 'ORD-2026-7',
+    binding: BINDING as MessagingBinding | null,
+    contacts: [{ kind: 'email', value: 'ada@example.com', primary: true }],
+    outcomeStatus: 0,
+  }
   /** What the backend answers the claim with instead of a claim (a rival claim won: 409). */
   const race: { refusal: { status: number; body: object } | null } = { refusal: null }
   const claims: { body: Record<string, unknown>; key: string | null; author: string | null }[] = []
@@ -41,14 +53,14 @@ function fakeBackend() {
     const path = new URL(request.url).pathname
     if (request.method === 'GET' && path === `/api/v1/orders/${ORDER}`) {
       return Response.json({
-        order: { number: 'ORD-2026-7', currency: 'USD', minor_exponent: 2, customer_id: CUSTOMER },
+        order: { number: shop.number, currency: 'USD', minor_exponent: 2, customer_id: CUSTOMER },
         totals: { total_minor: 4250 },
       })
     }
     if (request.method === 'GET' && path === `/api/v1/customers/${CUSTOMER}`) {
-      return Response.json({ display_name: customer.name, contacts: [{ kind: 'email', value: 'ada@example.com', primary: true }] })
+      return Response.json({ display_name: customer.name, contacts: shop.contacts })
     }
-    if (request.method === 'GET' && path === '/api/v1/settings') return Response.json({ orders_customer_messaging: BINDING })
+    if (request.method === 'GET' && path === '/api/v1/settings') return Response.json({ orders_customer_messaging: shop.binding })
     if (request.method === 'GET' && path.endsWith('/messages/check')) {
       // As the backend's: a key that already claimed answers its row and no refusal.
       const claimed = byKey.get(request.headers.get('idempotency-key') ?? '')
@@ -68,18 +80,24 @@ function fakeBackend() {
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {
       const outcome = (await request.json()) as object
+      if (shop.outcomeStatus) return Response.json({ detail: 'down' }, { status: shop.outcomeStatus })
       for (const row of byKey.values()) Object.assign(row, outcome)
       return Response.json({ id: 'm2', ...outcome })
     }
     return Response.json({ detail: `unexpected ${request.method} ${path}` }, { status: 500 })
   })
-  return { backend, customer, race, claims, check }
+  return { backend, customer, race, claims, check, shop }
 }
 
 /** The plugin tool's inputSchema as BINDING expects it. */
 const SEND_EMAIL = {
   type: 'object',
-  properties: { to: { type: 'array', items: { type: 'string' } }, subject: { type: 'string' }, body: { type: 'string' } },
+  properties: {
+    to: { type: 'array', items: { type: 'string' } },
+    subject: { type: 'string' },
+    body: { type: 'string' },
+    key: { type: 'string' },
+  },
   required: ['to', 'body'],
 }
 
@@ -99,7 +117,7 @@ function fakeMessaging() {
 }
 
 function app(sessions?: BrowserSessions) {
-  const { backend, customer, race, claims, check } = fakeBackend()
+  const { backend, customer, race, claims, check, shop } = fakeBackend()
   const { messaging, sends } = fakeMessaging()
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, 'off'))
@@ -108,7 +126,7 @@ function app(sessions?: BrowserSessions) {
     origins: ORIGINS,
     remoteAddress: () => LOOPBACK,
   } as never)
-  return { hono, customer, race, claims, sends, check }
+  return { hono, customer, race, claims, sends, check, shop }
 }
 
 const post = (hono: Hono, path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -213,7 +231,8 @@ describe('the order page’s Send again (#5660)', () => {
     expect(replay.status).toBe(200)
     expect(await replay.json()).toMatchObject({ sent: true, message: { id: 'm2', status: 'sent' } })
     expect(sends).toHaveLength(1)
-    expect(claims.map((c) => c.key)).toEqual([claims[0]!.key, claims[0]!.key])
+    // The check under the key answered the sent row: no second claim, no plugin.
+    expect(claims).toHaveLength(1)
   })
 
   it('serves a replay under the same key from its first claim after the order changed (#5978)', async () => {
@@ -232,6 +251,72 @@ describe('the order page’s Send again (#5660)', () => {
     const fresh = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0031' })
     expect(fresh.status).toBe(409)
     expect(await fresh.json()).toMatchObject({ type: 'message_changed' })
+    expect(sends).toHaveLength(1)
+  })
+
+  // #5980 review: a claimed row is the record. A retry under its key never sends a message
+  // composed now; a `sending` one goes again only with a dedupe key, as the row recorded it.
+  for (const change of ['customer', 'order'] as const) {
+    it(`sends a keyed retry of a claim with no outcome as first recorded, after the ${change} changed`, async () => {
+      const { hono, customer, sends, shop } = app(signedIn())
+      shop.binding = KEYED
+      const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+      const headers = { ...COOKIE, 'idempotency-key': 'click-0040' }
+      shop.outcomeStatus = 503
+      const first = await post(hono, 'send', { ...AGAIN, digest }, headers)
+      expect(first.status).toBe(200)
+      expect(sends).toHaveLength(1)
+      shop.outcomeStatus = 0
+      if (change === 'customer') customer.name = 'Ada Lovelace'
+      else shop.number = 'ORD-2026-8'
+      const retry = await post(hono, 'send', { ...AGAIN, digest }, headers)
+      expect(retry.status).toBe(200)
+      expect(sends).toHaveLength(2)
+      expect(sends[1]).toEqual(sends[0])
+      expect(sends[1]).toMatchObject({ to: ['ada@example.com'], body: 'Hello Ada,\n\nOrder ORD-2026-7 is ready.', key: 'm2' })
+    })
+  }
+
+  it('answers a sent claim with no plugin, even with the binding and the contact gone', async () => {
+    const { hono, sends, shop } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0041' }
+    expect((await post(hono, 'send', { ...AGAIN, digest }, headers)).status).toBe(200)
+    shop.binding = null
+    shop.contacts = []
+    const retry = await post(hono, 'send', { ...AGAIN, digest }, headers)
+    expect(retry.status).toBe(200)
+    expect(await retry.json()).toMatchObject({ sent: true, message: { id: 'm2', status: 'sent' } })
+    expect(sends).toHaveLength(1)
+  })
+
+  it('sends a keyed retry to the recorded recipients after the contact was removed', async () => {
+    const { hono, sends, shop } = app(signedIn())
+    shop.binding = KEYED
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0042' }
+    shop.outcomeStatus = 503
+    await post(hono, 'send', { ...AGAIN, digest }, headers)
+    shop.outcomeStatus = 0
+    shop.contacts = []
+    const retry = await post(hono, 'send', { ...AGAIN, digest }, headers)
+    expect(retry.status).toBe(200)
+    expect(sends).toHaveLength(2)
+    expect(sends[1]).toMatchObject({ to: ['ada@example.com'] })
+  })
+
+  it('refuses no_messaging_plugin for a retry that needs the plugin once the binding is gone', async () => {
+    const { hono, sends, shop } = app(signedIn())
+    shop.binding = KEYED
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0043' }
+    shop.outcomeStatus = 503
+    await post(hono, 'send', { ...AGAIN, digest }, headers)
+    shop.outcomeStatus = 0
+    shop.binding = null
+    const retry = await post(hono, 'send', { ...AGAIN, digest }, headers)
+    expect(retry.status).toBe(409)
+    expect(await retry.json()).toMatchObject({ type: 'no_messaging_plugin' })
     expect(sends).toHaveLength(1)
   })
 
