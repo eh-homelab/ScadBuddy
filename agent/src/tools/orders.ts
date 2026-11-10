@@ -255,6 +255,11 @@ function approvalLine(message: ApprovedMessage, alsoStorefront = false): string 
   return `Send${subject} to ${to} through ${message.source}${also}:\n${message.text}`
 }
 
+/** What a send answers for a claim recorded `skipped` (§8), fresh or replayed. */
+const STOREFRONT_SKIPPED =
+  'the storefront mails this to the customer itself, so nothing was sent through the plugin; send it ' +
+  'with also_when_storefront_mails to send it here too'
+
 /** The backend's `STALE_SENDING_MINUTES` (`orders/messages.py`): a `sending` row older reads `unknown`. */
 const STALE_SENDING_MINUTES = 15
 
@@ -293,13 +298,7 @@ async function sendMessage(ctx: SendContext, args: SendArgs, plan: Pick<SendPlan
     const fresh = claimed.response.status === 201
     if (message.status === 'skipped') {
       // §8: the storefront mails it itself (it began to between the check and the claim).
-      return {
-        sent: false,
-        message,
-        warning:
-          'the storefront mails this to the customer itself, so nothing was sent through the plugin; send it ' +
-          'with also_when_storefront_mails to send it here too',
-      }
+      return { sent: false, message, warning: STOREFRONT_SKIPPED }
     }
     if (!fresh && (message.status === 'sent' || message.status === 'failed')) {
       return { sent: message.status === 'sent', message }
@@ -390,7 +389,9 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
   // The key's claim first (#5978): a retry of a send already claimed is answered from that claim,
   // never refused and never composed again (it may have reached the customer). Without one, the
   // preview's refusals stand at the send too (the storefront may have begun to mail it since),
-  // and so do the composition's and the digest.
+  // and so do the composition's and the digest. Their order (the check's before the composition's)
+  // differs from the preview's, which composes first. After a preview that is harmless: it can
+  // change which refusal a send names, never whether it sends.
   const claimed = await refuseIfTold(ctx, args, idempotencyKey(ctx))
   if (claimed) return replayClaim(ctx, args, claimed)
   const planned = await sendPlan(ctx, args)
@@ -411,6 +412,7 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
  * recipients), but it needs the binding: none is `no_messaging_plugin`.
  */
 async function replayClaim(ctx: SendContext, args: PersonSend, claimed: OrderMessage): Promise<SendAnswer> {
+  if (claimed.status === 'skipped') return { sent: false, message: claimed, warning: STOREFRONT_SKIPPED }
   if (claimed.status !== 'sending' && claimed.status !== 'unknown') {
     return { sent: claimed.status === 'sent', message: claimed }
   }

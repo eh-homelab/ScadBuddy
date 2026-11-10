@@ -48,6 +48,8 @@ function fakeBackend() {
   const check = { storefront_mail: false }
   /** The claims by their Idempotency-Key, as the backend keeps them. */
   const byKey = new Map<string, Record<string, unknown>>()
+  /** Each outcome posted, in order. */
+  const outcomes: object[] = []
   const backend = createBackendClient(BACKEND, async (input) => {
     const request = input as Request
     const path = new URL(request.url).pathname
@@ -80,13 +82,14 @@ function fakeBackend() {
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {
       const outcome = (await request.json()) as object
+      outcomes.push(outcome)
       if (shop.outcomeStatus) return Response.json({ detail: 'down' }, { status: shop.outcomeStatus })
       for (const row of byKey.values()) Object.assign(row, outcome)
       return Response.json({ id: 'm2', ...outcome })
     }
     return Response.json({ detail: `unexpected ${request.method} ${path}` }, { status: 500 })
   })
-  return { backend, customer, race, claims, check, shop }
+  return { backend, customer, race, claims, check, shop, byKey, outcomes }
 }
 
 /** The plugin tool's inputSchema as BINDING expects it. */
@@ -117,7 +120,7 @@ function fakeMessaging() {
 }
 
 function app(sessions?: BrowserSessions) {
-  const { backend, customer, race, claims, check, shop } = fakeBackend()
+  const { backend, customer, race, claims, check, shop, byKey, outcomes } = fakeBackend()
   const { messaging, sends } = fakeMessaging()
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, 'off'))
@@ -126,7 +129,7 @@ function app(sessions?: BrowserSessions) {
     origins: ORIGINS,
     remoteAddress: () => LOOPBACK,
   } as never)
-  return { hono, customer, race, claims, sends, check, shop }
+  return { hono, customer, race, claims, sends, check, shop, byKey, outcomes }
 }
 
 const post = (hono: Hono, path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -318,6 +321,47 @@ describe('the order page’s Send again (#5660)', () => {
     expect(retry.status).toBe(409)
     expect(await retry.json()).toMatchObject({ type: 'no_messaging_plugin' })
     expect(sends).toHaveLength(1)
+  })
+
+  /** A send whose outcome post failed, then its row as the backend reads it later: `status`. */
+  async function claimedThen(status: string, binding: MessagingBinding) {
+    const made = app(signedIn())
+    made.shop.binding = binding
+    const { digest } = (await (await post(made.hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0050' }
+    made.shop.outcomeStatus = 503
+    await post(made.hono, 'send', { ...AGAIN, digest }, headers)
+    made.shop.outcomeStatus = 0
+    for (const row of made.byKey.values()) row.status = status
+    made.outcomes.length = 0
+    return { ...made, retry: () => post(made.hono, 'send', { ...AGAIN, digest }, headers) }
+  }
+
+  it('answers a replayed skipped claim with the storefront warning, as a fresh one', async () => {
+    const { retry, sends } = await claimedThen('skipped', BINDING)
+    const answer = await retry()
+    expect(answer.status).toBe(200)
+    expect(await answer.json()).toMatchObject({ sent: false, message: { status: 'skipped' }, warning: expect.stringMatching(/storefront mails this/) })
+    expect(sends).toHaveLength(1)
+  })
+
+  it('records unknown and sends nothing again for an unknown claim under an unkeyed binding', async () => {
+    const { retry, sends, outcomes } = await claimedThen('unknown', BINDING)
+    const answer = await retry()
+    expect(answer.status).toBe(200)
+    expect(await answer.json()).toMatchObject({ sent: false, warning: expect.stringMatching(/it was not sent again/) })
+    expect(sends).toHaveLength(1)
+    expect(outcomes).toEqual([{ status: 'unknown', reason: 'no_answer' }])
+  })
+
+  it('records unknown and sends nothing again when the keyed binding’s plugin changed since the claim', async () => {
+    const { retry, sends, outcomes, shop } = await claimedThen('unknown', KEYED)
+    shop.binding = { ...KEYED, source: 'remote:other-mail' }
+    const answer = await retry()
+    expect(answer.status).toBe(200)
+    expect(await answer.json()).toMatchObject({ sent: false, warning: expect.stringMatching(/it was not sent again/) })
+    expect(sends).toHaveLength(1)
+    expect(outcomes).toEqual([{ status: 'unknown', reason: 'no_answer' }])
   })
 
   it('forwards the backend’s 404 as it is', async () => {
