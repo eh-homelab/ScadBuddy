@@ -66,6 +66,28 @@ const EXEC_SLACK_MS = 30_000
 
 type SandboxResponse = Awaited<ReturnType<typeof fetch>>
 
+/** How much of an error answer's body is read and shown; the rest is cancelled unread. */
+export const ERROR_BODY_MAX_BYTES = 500
+
+/** The first `max` bytes of a body, the rest cancelled: a pod may send an error body that never ends. */
+async function bodyHead(res: SandboxResponse, max: number): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  const reader = res.body?.getReader()
+  if (!reader) return ''
+  try {
+    while (size < max) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(Buffer.from(value))
+      size += value.byteLength
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).subarray(0, max).toString('utf8')
+}
+
 /** A JSON body read under a cap: past it, a SandboxError, whatever the pod claims. */
 async function cappedJson(res: SandboxResponse, max: number, what: string): Promise<unknown> {
   const chunks: Buffer[] = []
@@ -144,8 +166,8 @@ export class SandboxClient {
       throw new SandboxError(`the sandbox did not answer ${method} ${path}: ${err instanceof Error ? err.message : String(err)}`)
     }
     if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new SandboxError(`the sandbox answered ${res.status} to ${method} ${path}: ${text.slice(0, 500)}`)
+      const text = await bodyHead(res, ERROR_BODY_MAX_BYTES).catch(() => '')
+      throw new SandboxError(`the sandbox answered ${res.status} to ${method} ${path}: ${text}`)
     }
     return res
   }
@@ -249,8 +271,11 @@ export type SyncBack = { written: string[]; removed: string[]; left: { path: str
  */
 export type Kept = Map<string, string | undefined>
 
-/** What a sync in saw: the pod's files after it, and the paths it named that never sync. */
-export type SyncedIn = { files: Map<string, string>; unsynced: Set<string> }
+/**
+ * What a sync in saw: the pod's files after it, the paths it named that never sync, and the
+ * session's files it did not send (past the per-file cap; the pod's copy, if any, deleted).
+ */
+export type SyncedIn = { files: Map<string, string>; unsynced: Set<string>; notSent: string[] }
 
 const LARGE = 'large'
 
@@ -271,8 +296,10 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
 
 /**
  * Makes the pod's files match the session directory's: each changed file sent, each one the
- * directory no longer has deleted there, except the `kept` ones (see Kept). Returns the pod's
- * manifest as it is then.
+ * directory no longer has deleted there, except the `kept` ones (see Kept). A session file past
+ * the per-file cap is not sent, and the pod's copy of it is deleted, so a command never reads an
+ * older copy as if it were the session's; it is named in `notSent`. Returns the pod's manifest
+ * as it is then.
  */
 export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncedIn> {
   const local = await localManifest(dir, limits)
@@ -286,8 +313,17 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
     if (!there.has(rel) || now !== was) kept.delete(rel)
     else stays.add(rel)
   }
+  const notSent: string[] = []
   for (const [rel, entry] of local) {
-    if ('tooLarge' in entry || stays.has(rel)) continue
+    if (stays.has(rel)) continue
+    if ('tooLarge' in entry) {
+      notSent.push(rel)
+      if (there.has(rel)) {
+        await client.delete(rel)
+        there.delete(rel)
+      }
+      continue
+    }
     if (there.get(rel) !== entry.sha256) {
       await client.put(rel, entry.bytes)
       there.set(rel, entry.sha256)
@@ -300,7 +336,7 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
       there.delete(rel)
     }
   }
-  return { files: there, unsynced: new Set(remote.unsynced) }
+  return { files: there, unsynced: new Set(remote.unsynced), notSent }
 }
 
 /** The session directory's copy at `rel` as Kept records it. */
@@ -375,8 +411,8 @@ export const UNSYNCED_REASON =
   'its path never comes back to the session: only names of letters, digits, "_", "." and "-" that do not start with ".", ' +
   'at most 4 levels deep and outside node_modules and __pycache__, sync; it stays in the sandbox pod while the pod lasts'
 
-/** One command's run, with its sync. */
-export type ShellRun = { result: ExecResult; back: SyncBack }
+/** One command's run, with its sync: `notSent` names the session's files the command did not see (SyncedIn). */
+export type ShellRun = { result: ExecResult; back: SyncBack; notSent: string[] }
 
 /** Each session's calls, one at a time on this worker: a sync never runs into another. */
 const chains = new Map<string, Promise<unknown>>()
@@ -419,7 +455,7 @@ export function runInSandbox(
         const result = await client.exec(shell, command, timeoutMs)
         const back = await syncBack(client, options.dir, before, options.limits, kept)
         await client.setKept(kept)
-        return { result, back }
+        return { result, back, notSent: before.notSent }
       } catch (err) {
         if (err instanceof SandboxError) options.sandboxes.release?.(options.sessionId, endpoint)
         throw err

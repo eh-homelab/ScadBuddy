@@ -129,6 +129,38 @@ describe('sandbox pods on Kubernetes', () => {
     expect([...kube.pods.keys()]).toEqual(['theirs'])
   })
 
+  it('never deletes a pod made in the same second as the first unless it made it itself', async () => {
+    const second = '2026-11-09T00:00:01.000Z'
+    // creationTimestamp has whole seconds: every pod here is made in the same one.
+    kube.stamp = () => {
+      ++kube.next
+      return second
+    }
+    const theirs = (name: string): FakePod => ({
+      metadata: { name, labels: { [APP_LABEL]: APP, [SESSION_LABEL]: SESSION }, creationTimestamp: second },
+      spec: { containers: [{ name: 'sandbox', env: [{ name: 'SCADBUDDY_SANDBOX_TOKEN', value: name }] }] },
+      status: { phase: 'Running', podIP: '10.42.0.7', conditions: [{ type: 'Ready', status: 'True' }] },
+    })
+    // Another replica's pod sorts after this one's: that replica may already use it (its listing came
+    // before this pod existed), so it stays; this replica uses its own.
+    kube.onCreate = () => kube.pods.set(`${APP}-z`, theirs(`${APP}-z`))
+    const mine = await sandboxes.acquire(SESSION, AbortSignal.timeout(5_000))
+    expect(mine.token).not.toBe(`${APP}-z`)
+    expect([...kube.pods.keys()].sort()).toEqual([`${APP}-1`, `${APP}-z`])
+    // A replica that finds both, having made neither, deletes neither and takes the first.
+    const base = new URL(`http://127.0.0.1:${(kube.server.address() as AddressInfo).port}`)
+    const other = () => new KubernetesSandboxes(config, plainApi(base), { resolveProxy: async () => 'http://10.43.0.20:3128', pollMs: 10 })
+    kube.onCreate = undefined
+    expect(await other().acquire(SESSION, AbortSignal.timeout(5_000))).toEqual(mine)
+    expect(kube.pods.size).toBe(2)
+    // A replica whose own new pod sorts after another's made in the same second gives up its own.
+    kube.pods.clear()
+    kube.onCreate = () => kube.pods.set(`${APP}-0`, theirs(`${APP}-0`))
+    const loser = other()
+    expect((await loser.acquire(SESSION, AbortSignal.timeout(5_000))).token).toBe(`${APP}-0`)
+    expect([...kube.pods.keys()]).toEqual([`${APP}-0`])
+  })
+
   it('looks again after a release, and sweeps every pod that has ended', async () => {
     const endpoint = await sandboxes.acquire(SESSION, AbortSignal.timeout(5_000))
     const pod = [...kube.pods.values()][0]!

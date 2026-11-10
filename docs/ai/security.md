@@ -873,7 +873,10 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   directory alone. The record is untrusted like the rest of what the pod says, and it only
   decides what the pod keeps, never what the session directory gets. A file that could not
   be read back for any other reason is not kept, and the next command's sync removes it from
-  the pod. The exec server streams each file to disk and back, at most 256 MiB, and keeps a
+  the pod. A session file past `workspace_file_max_bytes` is never sent: the sync deletes the
+  pod's copy at that path, so a command never reads an older copy in its place, and the result
+  names it (`files_not_in_sandbox`). An error answer from the pod is read only to its first
+  500 bytes. The exec server streams each file to disk and back, at most 256 MiB, and keeps a
   file it is sent only when its sha256 matches. The turn's write-back then records the
   directory in `SessionFiles`, as it does for `Write`.
 - **Egress.** The pod reaches only the egress proxy

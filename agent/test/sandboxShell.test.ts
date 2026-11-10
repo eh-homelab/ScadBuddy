@@ -109,6 +109,20 @@ describe('Bash in the session sandbox', () => {
     expect(after.stdout).toBe('mine')
   })
 
+  it("deletes the sandbox's older copy of a session file past the per-file cap, and says the command did not see it", async () => {
+    ctx.limits = async () => ({ fileMaxBytes: 10, workspaceMaxBytes: 1000 })
+    await writeFile(path.join(dir, 'grown.txt'), 'old')
+    expect(content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text).stdout).toBe('old')
+    // The session's copy grows past the cap (Claude Code's own Write, say): the pod's older copy must not stand in for it.
+    await writeFile(path.join(dir, 'grown.txt'), 'x'.repeat(100))
+    const body = content((await runShell(ctx, 'bash', { command: 'cat grown.txt' })).text)
+    expect(body.stdout).toBe('')
+    expect(body.stderr).toContain('No such file')
+    expect(body.files_not_in_sandbox).toEqual([{ path: 'grown.txt', reason: expect.stringContaining('per-file cap of 10 bytes') }])
+    expect(body.files_removed).toBeUndefined()
+    expect(await readFile(path.join(dir, 'grown.txt'), 'utf8')).toBe('x'.repeat(100))
+  })
+
   it('names the paths a command made that never come back', async () => {
     const body = content(
       (await runShell(ctx, 'bash', { command: "echo x > 'my notes.txt'; mkdir -p a/b/c/d && echo y > a/b/c/d/e.txt; echo z > .hidden" })).text,
