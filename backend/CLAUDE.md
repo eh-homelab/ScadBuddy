@@ -539,8 +539,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Today only design requests (`request`) take it; the actions
-  `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
+  before it reads its body. Today design requests (`request`) and sign-ins (`sign_in`)
+  take it; the actions `submit` and `sign_up` are kept for the submit and code request
   routes still to come. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
@@ -1077,16 +1077,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
     when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
     live code signs in from any client. No address can be locked: requests are limited
-    per address and client (3 an hour) and per client (10), wrong guesses per client (20),
-    never per address, and a client is `core/proxies.py` `client_key` (IPv4 address,
-    IPv6 /64). The mail cap is 20 live codes per address: past it `request_code` returns
-    None, raises nothing, and the caller answers as usual and sends no mail. A full cap
+    per address and client (3 an hour) and per client (10), wrong guesses per client and
+    address (20 an hour) and per client (200), never per address, and a client is
+    `core/proxies.py` `client_key` (IPv4 address, IPv6 /64), so one guesser on a shared
+    network does not stop sign-in at other addresses. The mail cap is 20 live codes per
+    address: past it `request_code` returns None, raises nothing, and the caller answers
+    as usual and sends no mail; the refused request still counts toward the client's
+    limits (a used, expired row). A full cap
     means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
     it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
     the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
     `request_code` and `verify_code` each hold transaction locks on the client, then the
-    address, so call them in a transaction. The code route, a later PR, is to take
-    Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a site key is set.
+    address, so call them in a transaction. The verify route takes Turnstile
+    (`sign_in`) whenever a site key is set; the code route, a later PR, is to take it
+    (`sign_up`).
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit
@@ -1095,7 +1099,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     The order page attaches an order whose link was opened while signed in, in its own
     transaction.
   - Old code and failure rows are pruned as new rows are written, and every expired
-    session at each sign-in. There is no sweep.
+    session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
+    joined an account.
+  - The routes: the edge's `storefront/accounts.py` keeps the session in the
+    `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
+    Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
+    CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
+    session, and submit and the order page take the account from it, never from a body.
+    `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
+    answers the new token in that header only, never in a body. `POST …/account/sign-out`
+    deletes the session, and the edge also gives the browser a new visitor. `GET
+    …/account` and `…/account/orders` list submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by

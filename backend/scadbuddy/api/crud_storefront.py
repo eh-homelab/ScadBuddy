@@ -43,6 +43,16 @@ its caps and under this process's upload gate as it arrives (`storefront/uploads
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
 
+Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
+token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
+reads into the request's account; submit and the order page take the account from there,
+never from a body. ``POST …/account/verify`` signs in by a mailed code and sends the new
+session's token back in `SESSION_HEADER` (never in the body, so no logged or relayed JSON
+holds it), ending the session the browser held; one refusal, 400 ``sign_in_failed``, for
+any code that reads nothing, and 429 ``sign_in_limited``. ``POST …/account/sign-out``
+deletes the session's row. ``GET …/account`` is the account or ``null``, and ``GET
+…/account/orders`` what it sees (401 ``sign_in_required`` with no live session).
+
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
 edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
@@ -70,6 +80,16 @@ from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront.accounts import (
+    Account,
+    AccountOrderRow,
+    SignedIn,
+    SignInLimitedError,
+    account_for_session,
+    account_orders,
+    end_session,
+    verify_code,
+)
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
@@ -97,17 +117,22 @@ from scadbuddy.orders.storefront.turnstile import (
     verify,
 )
 from scadbuddy.orders.storefront.wire import (
+    AccountOrder,
+    AccountOrders,
+    AccountView,
     AddListingItem,
     DraftView,
     PublicListing,
     PublicListings,
     RenderBody,
+    SignInBody,
     StoreRender,
 )
 from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    SESSION_HEADER,
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
     VISITOR_ID_PROBLEM,
@@ -461,3 +486,131 @@ async def turnstile_verify(
     config = await asyncio.to_thread(_turnstile_config, state)
     verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
     return TurnstileVerdict(verdict=verdict)
+
+
+def store_session(request: Request) -> str | None:
+    """The session token the edge took from its verified ``sb_session`` cookie, if any. Only
+    the ``storefront`` credential reaches here (`crud_router`), so no other caller sends it.
+    A token that names no live session reads as none (`account_for_session`)."""
+    return request.headers.get(SESSION_HEADER) or None
+
+
+StoreSession = Annotated[str | None, Depends(store_session)]
+
+
+async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
+    """The account of the request's session, or None. Submit and the order page take the
+    account from here, never from a body."""
+    if session is None:
+        return None
+
+    def read() -> Account | None:
+        with orders.store.transaction() as conn:
+            return account_for_session(conn, session)
+
+    return await asyncio.to_thread(read)
+
+
+StoreAccount = Annotated[Account | None, Depends(store_account)]
+
+
+@router.post(
+    "/account/verify",
+    name="crud_storefront_account_verify",
+    response_model=AccountView,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": SignInBody.model_json_schema()}},
+        }
+    },
+)
+async def account_verify(
+    request: Request,
+    response: Response,
+    orders: OrdersDep,
+    visitor: Visitor,
+    client: StoreClient,
+    session: StoreSession,
+) -> AccountView:
+    """A sign-in by the code mailed to the address (`accounts.py` `verify_code`). The new
+    session's token goes back in `SESSION_HEADER`, never in the body; the session the
+    browser held is ended. One refusal, 400 ``sign_in_failed``, for any code that reads
+    nothing; 429 ``sign_in_limited`` once the client guessed wrong too often."""
+    body = await _body(
+        request, SignInBody, "account_body_invalid", "This request is not a sign-in."
+    )
+
+    def run() -> SignedIn | None:
+        with orders.store.transaction() as conn:
+            return verify_code(
+                conn, body.email, body.code, client, visitor_id=visitor, previous_session=session
+            )
+
+    try:
+        signed = await asyncio.to_thread(run)
+    except SignInLimitedError as error:
+        raise problem(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "sign_in_limited",
+            f"Too many wrong codes. Try again in {error.retry_after} seconds.",
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
+    if signed is None:
+        raise problem(
+            status.HTTP_400_BAD_REQUEST,
+            "sign_in_failed",
+            "That code is wrong or has expired. Ask for a new one.",
+        )
+    response.headers[SESSION_HEADER] = signed.session_token
+    return AccountView(email=signed.account.email)
+
+
+@router.post(
+    "/account/sign-out",
+    name="crud_storefront_account_sign_out",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def account_sign_out(
+    orders: OrdersDep, _visitor: Visitor, _client: StoreClient, session: StoreSession
+) -> Response:
+    """Sign-out: the session's row is deleted (`end_session`). No session does nothing."""
+    if session is not None:
+
+        def run() -> None:
+            with orders.store.transaction() as conn:
+                end_session(conn, session)
+
+        await asyncio.to_thread(run)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/account", name="crud_storefront_account")
+async def account(
+    account: StoreAccount, _visitor: Visitor, _client: StoreClient
+) -> AccountView | None:
+    """The signed-in account; ``null`` when the request has no live session."""
+    return None if account is None else AccountView(email=account.email)
+
+
+@router.get("/account/orders", name="crud_storefront_account_orders")
+async def account_orders_route(
+    orders: OrdersDep, account: StoreAccount, _visitor: Visitor, _client: StoreClient
+) -> AccountOrders:
+    """What the account sees (`accounts.py` `account_orders`); 401 ``sign_in_required``
+    with no live session."""
+    if account is None:
+        raise problem(
+            status.HTTP_401_UNAUTHORIZED, "sign_in_required", "Sign in to see your orders."
+        )
+    found = account
+
+    def read() -> list[AccountOrderRow]:
+        with orders.store.transaction() as conn:
+            return account_orders(conn, found.id)
+
+    rows = await asyncio.to_thread(read)
+    return AccountOrders(
+        orders=[AccountOrder.model_validate(row, from_attributes=True) for row in rows]
+    )

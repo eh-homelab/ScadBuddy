@@ -23,6 +23,7 @@ from scadbuddy.orders.storefront.accounts import (
     CODES_PER_ADDRESS_CLIENT,
     CODES_PER_CLIENT,
     FAILURES_PER_CLIENT,
+    FAILURES_PER_CLIENT_ADDRESS,
     EmailInvalidError,
     SignedIn,
     SignInLimitedError,
@@ -260,10 +261,15 @@ def test_a_verify_compares_as_many_digests_whatever_codes_are_live(
 def test_the_mail_cap_makes_no_code_and_raises_nothing(conn: Conn) -> None:
     others = [code_for(conn, client=f"198.51.100.{n}") for n in range(CODES_PER_ADDRESS)]
     assert len({*others}) == CODES_PER_ADDRESS
-    # Past the cap: no code, no row, no refusal; the caller sends nothing.
+    # Past the cap: no live code, no refusal; the caller sends nothing. The request is
+    # kept as a used row, for the client's own limits.
     assert request_code(conn, EMAIL, CLIENT) is None
-    count = conn.execute("SELECT count(*) AS n FROM storefront_sign_in_codes").fetchone()
-    assert count is not None and count["n"] == CODES_PER_ADDRESS
+    count = conn.execute(
+        "SELECT count(*) FILTER (WHERE used_at IS NULL) AS live,"
+        " count(*) FILTER (WHERE client = %s) AS mine FROM storefront_sign_in_codes",
+        (CLIENT,),
+    ).fetchone()
+    assert count == {"live": CODES_PER_ADDRESS, "mine": 1}
     # Not a lockout: a code another client's request put in the inbox signs in here.
     assert verify(conn, others[-1]) is not None
     # Other addresses are not capped by it.
@@ -329,6 +335,36 @@ def test_requests_at_once_never_pass_a_cap(conn: Conn, pg_conninfo: str) -> None
     ).fetchone()
     assert rows is not None
     assert rows["ada"] == CODES_PER_ADDRESS_CLIENT and rows["n"] == issued == 8
+
+
+def test_wrong_guesses_at_one_address_never_stop_a_sign_in_at_another(conn: Conn) -> None:
+    other = code_for(conn, "bob@example.com", LAPTOP)
+    mine = code_for(conn)
+    for _ in range(FAILURES_PER_CLIENT_ADDRESS):
+        assert verify(conn, wrong(mine)) is None
+    with pytest.raises(SignInLimitedError):
+        verify(conn, mine)
+    # The same key (one shared network) still signs in at another address.
+    assert verify(conn, other, email="bob@example.com") is not None
+
+
+def test_a_key_is_refused_past_its_wrong_guesses_at_all_addresses(conn: Conn) -> None:
+    for n in range(FAILURES_PER_CLIENT):
+        assert verify(conn, "ABCD-EFGH-JKMN-PQRS", email=f"x{n % 20}@example.com") is None
+    with pytest.raises(SignInLimitedError):
+        verify(conn, "ABCD-EFGH-JKMN-PQRS", email="fresh@example.com")
+
+
+def test_requests_the_cap_answers_still_count_toward_the_clients_limits(conn: Conn) -> None:
+    fill_cap(conn)
+    for _ in range(CODES_PER_ADDRESS_CLIENT):
+        assert request_code(conn, EMAIL, CLIENT) is None
+    with pytest.raises(SignInLimitedError):
+        request_code(conn, EMAIL, CLIENT)
+    for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS_CLIENT):
+        request_code(conn, f"other{n}@example.com", CLIENT)
+    with pytest.raises(SignInLimitedError):
+        request_code(conn, "fresh@example.com", CLIENT)
 
 
 def test_wrong_guesses_are_limited_per_client(conn: Conn) -> None:

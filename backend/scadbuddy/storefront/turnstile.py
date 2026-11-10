@@ -1,6 +1,7 @@
-"""The edge's bot check (#5283, spec 2026-11-02 §5.8): Cloudflare Turnstile. Today only
-design requests take it (action ``request``); ``submit``, ``sign_up`` and ``sign_in`` are
-kept for the submit, code request and sign-in routes still to come.
+"""The edge's bot check (#5283, spec 2026-11-02 §5.8): Cloudflare Turnstile. Today design
+requests (action ``request``) and sign-ins (``sign_in``, `routes.py` `account_verify`) take
+it; ``submit`` and ``sign_up`` are kept for the submit and code request routes still to
+come.
 
 The edge holds no Turnstile secret: the CRUD service keeps it sealed under its KEK and
 calls Cloudflare's Siteverify itself (`orders/storefront/turnstile.py`). A route that
