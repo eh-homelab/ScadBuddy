@@ -589,6 +589,8 @@ class Fulfilment(BaseModel):
     attempt: int
     #: A ``test`` attempt prints a revision for the shop, and names it.
     purpose: FulfilmentPurpose = "production"
+    #: The revision the attempt printed: a test print's, or for a production attempt the
+    #: item's current revision when it was recorded (#5704). None before the item had one.
     revision_id: str | None = None
     quantity: int
     outcome: Outcome

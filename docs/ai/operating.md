@@ -27,7 +27,8 @@ covers the same ground more briefly.
   - `all` (the default): everything, as every pod ran before the roles.
   - `api`: the HTTP server (the routes, the chat and bridge sockets, `/mcp`, the
     loopback `/internal/*` routes), its sweeps and start-time passes, and its own
-    `agent-tools.<hostname>` queue (browser calls for its tabs). It polls neither
+    `agent-tools.<hostname>` queue (browser calls for its tabs, and the `BridgeCall`
+    workflows of its own calls to a tab on another replica, #5862). It polls neither
     `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs
     no `AgentSession` turn (§1.2).
   - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
@@ -90,9 +91,11 @@ covers the same ground more briefly.
   out, a read up to three times and a write at once, and the script sees the error
   (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
-  another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
+  another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
-  [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
+  [browser-bridge.md](browser-bridge.md#replicas)). Until #5862 the workflow ran on the
+  shared `agent-tools`; it now runs on the caller's own `agent-tools.<hostname>` (see the
+  next item). The Postgres relay of #1916 ran
   beside it for one release, and #4868 removed it: every replica with the KEK since then
   claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
@@ -115,7 +118,23 @@ covers the same ground more briefly.
   `PgPayloadKeys` caches any key it opens for 30 s, a `bridge-<uuid>` one included, and
   this build caches none. Once no replica
   runs a build before #4780, nothing takes those tasks but replicas that have the
-  workflow.
+  workflow. Since #5862 no new call starts a workflow on `agent-tools`, so none of this
+  applies to a call made by a replica of that build.
+- **Browser calls across a rollout of #5862.** A replica of #5862's build starts each
+  `BridgeCall` on its own host queue, `agent-tools.<hostname>`, which only its own host worker
+  polls (with `dist/temporal/bridge-bundle.js`), unversioned. In prod the shared, versioned
+  `agent-tools` once took 3.4 s to hand a `BridgeCall`'s first workflow task to a poller,
+  and the status probe's 6 s ran out before the activity started (#5862). On the host queue
+  the workflow tasks run at once on the caller, and the activity at once on the owner: a
+  status check between two healthy replicas answers in well under a second
+  (`agent/test/bridgeRelay.temporal.test.ts`). The workflow's 15 s of slack
+  (`WORKFLOW_SLACK_MS`, [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)) now
+  covers those tasks on a loaded caller and its host worker's reconnect, no longer a failed
+  task on an old replica. While a replica of the build before #5862 still runs, its calls
+  still start on `agent-tools`, so the shared bundle (`agent/src/temporal/workflows.ts`)
+  keeps `BridgeCall` for them. The
+  activity, `bridge.tab`, is unchanged, so a call reaches a tab on a replica of either
+  build.
 
 ### 1.1 Routing the UI's origin to the agent
 
@@ -1623,26 +1642,39 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   backend is older than the routes (404), or when it cannot be reached. `moveToBlobs`
   refuses the same way and moves nothing. The agent logs the cause once at start, and
   `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
-  "refused", ...}`, checked at most once a minute).
+  "refused", ...}`, checked at most once a minute). In the API pod the agent can start
+  before the backend container answers (#5868): a refused connection reads "the backend is
+  not up yet", and the start-up check waits for the backend's `/healthz`, logged once as
+  "waiting for the backend", trying again after 1 s doubling to 30 s
+  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)); then it logs where
+  the files go and moves them. A write or read asks the backend each time, so it works
+  as soon as the backend answers, with no restart.
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
   `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
   answers 404, so every file already in the blob store cannot be read (`unavailable`)
   until the backend is on a blob store again; new writes go to `data`. `workspace_files`
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
-- The holder: a trigger on `ai_session_files` (migration
-  `20261027T0114Z_session_files_blobs.sql`) writes and removes each row's holder
-  `(ai_session_file, <workspace>/<path>)` in the backend's `blob_refs`, in the
-  transaction that writes or removes the row (a delete, the sweep, a session's cascade,
-  `forgetSubject`), so the blob sweep keeps a blob while a row names it. This assumes
-  **one database and one role for both services**: the agent's
-  `SCADBUDDY_DATABASE_URL` is the backend's, and its role may write `blob_refs` (the
-  agent already reads the backend's `workflow_runs` the same way). Giving the agent a
-  database or role of its own breaks every workspace write on s3.
-  `agent/test/workspaceBlobs.backend.e2e.test.ts` pins the trigger to the backend's
-  table: it migrates both services into one database, runs the real API on moto's S3
-  (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
-  change to that table the trigger does not follow fails it.
+- The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the
+  backend's `blob_refs`, so the blob sweep keeps a blob while a row names it. The agent
+  never writes that table: it holds and releases through its CRUD routes
+  (`backend/scadbuddy/api/crud_agent.py`, `/api/v1/internal/crud/agent/workspace-blob-refs`,
+  the `crud.agent` service credential; #5299, part of #5295). `SessionFiles`
+  (`agent/src/workspace/store.ts`) holds before it writes the row that names a blob
+  (a write, a fork's copy, the move out of `data`), so a write the backend refuses to hold
+  is refused `unavailable` and writes no row; and it releases after the row is gone (a
+  replacement's old blob, a delete, the principals' sweep). A failed release is only logged.
+  `reconcile`, on the sweeper's tick at most once an hour, releases every hold older than an
+  hour whose row is gone or names another blob (a session's cascade, `forgetSubject`, a
+  crash, a failed release), and holds every row no hold names. On `store_backend` local
+  nothing is held. The trigger that once did this (migration
+  `20261027T0114Z_session_files_blobs.sql`) is dropped by
+  `20261110T0112Z_drop_session_files_hold_blob.sql`; its rows keep the same holder, so they
+  stay valid, and the API revokes `blob_refs` from the agent's role at every start
+  (`backend/scadbuddy/auth/revoke.py` `RETIRED_GRANTS`).
+  `agent/test/workspaceBlobs.backend.e2e.test.ts` runs the holds against the real API on
+  moto's S3 (`backend/tests/support/workspace_backend.py`), both services migrated into one
+  database, and checks the `blob_refs` rows the routes write.
 - The working directory (plan 2026-10-13 Step 9.5, decision Q5,
   [`agent/src/workspace/directory.ts`](../../agent/src/workspace/directory.ts)): a
   session's Claude Code runs in `<SCADBUDDY_SESSION_DIR>/<session id>/` (§2), a working copy

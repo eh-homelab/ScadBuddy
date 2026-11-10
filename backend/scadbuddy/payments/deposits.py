@@ -51,7 +51,12 @@ logger = logging.getLogger(__name__)
 ORDER_NUMBER: Final = re.compile(r"\bORD-(\d{4})-0*(\d{1,9})\b", re.IGNORECASE)
 #: Digits, and digits joined by single spaces or hyphens: one run for `mask`.
 _DIGIT_RUN: Final = re.compile(r"\d(?:[ -]?\d)*")
-#: The fewest digits a run holds for `mask` to hide it.
+#: The fewest digits a run holds for `mask` to hide it. The re-mask migration
+#: (`20261109T1420Z_bank_deposits_remask.sql`, #5852) hides runs of four or more instead.
+#: It is a one-off pass over text stored under the old rule, so it chose the safer side:
+#: it cannot check which order numbers exist, so it masks them all, and masking a run of
+#: four as well loses only a hint on old rows. New text keeps runs of four (a year, a
+#: card's last four), which do not identify an account.
 MASKED_DIGITS: Final = 5
 #: The longest text kept of a deposit.
 DESCRIPTION_CHARS: Final = 200

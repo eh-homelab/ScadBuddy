@@ -401,6 +401,9 @@ loop cannot fill the table: 6 a minute per pod and 30 a minute per caller, then 
   `resolve` and the scopes do not change. Lifetime **15 minutes** (§11 D4). The caller exchanges again at
   half-life (7.5 minutes) and at once on a `401` from any route; on a failed exchange it keeps
   the current credential until it expires and retries every 5 s doubling to 60 s.
+  As built in the agent (#5868): a refused connection is not a failed exchange. The backend
+  is not up yet, so the agent tries again at its next call to the backend (which would be
+  refused too) and logs the wait once (`agent/src/api/backendUp.ts`).
 - Rows: about one per pod per 7.5 minutes; 10 caller pods today (§2.4 replicas: render 2,
   print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 1,900 rows
   a day. The storefront (#5282) adds its pods to this count once it is built. `delete_expired` already forgets rows expired more than `older_than` ago

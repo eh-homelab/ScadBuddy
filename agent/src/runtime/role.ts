@@ -6,7 +6,8 @@ import type { AgentRole } from '../config.js'
 // Deployment exists).
 //
 // `api` still polls its own `agent-tools.<identity>`: a tab's socket is in that process, so the
-// browser calls other replicas make for it (`bridge.tab`, #4780) run there, and so do a classic
+// browser calls other replicas make for it (`bridge.tab`, #4780) run there, as do the BridgeCall
+// workflows of the calls it makes for a tab on another replica (#5862), and so do a classic
 // session's Monitor commands and, until Step 8.1, a DurableSession's pinned `turn:` calls that it
 // listed there. Classic sessions still run in-process wherever SessionManager.send runs, until
 // Step 6.3. It polls neither `agent-sessions` nor the shared `agent-tools`, nor a session host
@@ -19,7 +20,7 @@ export type RoleParts = {
   sharedWorkers: boolean
   /** `agent-sessions.<identity>`: AgentSession's turns on this process's warm cache. */
   sessionHost: boolean
-  /** `agent-tools.<identity>`: pinned calls, Monitor commands and `bridge.tab`. Every role. */
+  /** `agent-tools.<identity>`: pinned calls, Monitor commands, `bridge.tab` and this process's BridgeCalls. Every role. */
   hostWorker: true
 }
 
