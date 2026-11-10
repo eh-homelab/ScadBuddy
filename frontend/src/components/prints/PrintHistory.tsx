@@ -364,12 +364,18 @@ export function PrintHistory({ fixedSlug, live }: { fixedSlug?: string; live?: r
 /**
  * #3745 — reads the history's first page again when a working job ends or ScadBuddy
  * links its archive: the print's row then needs the archive's own state (its outcome,
- * or the print ScadBuddy made of it) to stay in the list in place. A read per change
- * of a job, never per poll of the printers.
+ * or the print ScadBuddy made of it) to stay in the list in place. It reads at once,
+ * and once more {@link REFRESH_AGAIN_MS} later. Two reads per change of a job, never
+ * per poll of the printers.
  */
+/** #3745 — how long after a job's change the history's first page is read once more. */
+export const REFRESH_AGAIN_MS = 5_000
+
 function useRefreshOnJobChange(live: readonly LiveJob[] | undefined, refresh: () => void) {
   const seen = useRef<Set<string> | null>(null)
   const latest = useLatest(refresh)
+  const again = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(again.current), [])
   const jobs = live
     ? live
         .flatMap((job) => (job.kind === 'working' ? [`${job.key}${job.card.printer.linked ? ' linked' : ''}`] : []))
@@ -381,7 +387,12 @@ function useRefreshOnJobChange(live: readonly LiveJob[] | undefined, refresh: ()
     const now = new Set(jobs ? jobs.split('\n') : [])
     const before = seen.current
     seen.current = now
-    if (before !== null && [...before].some((job) => !now.has(job))) latest.current()
+    if (before === null || ![...before].some((job) => !now.has(job))) return
+    latest.current()
+    // Bambuddy may not have recorded the archive's outcome yet when the printer has
+    // already ended the job: one more read, a little later, takes it.
+    clearTimeout(again.current)
+    again.current = setTimeout(() => latest.current(), REFRESH_AGAIN_MS)
   }, [jobs, latest])
 }
 

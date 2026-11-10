@@ -383,8 +383,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
   records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
   person's (no subject). The Customize page, the dialog's
-  first read and its analysis, and the Prints page's queue and history panels ask
-  Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  first read and its analysis, and the Prints page ask Bambuddy nothing on these
+  backends (#4601, #4629); the Prints page reads Bambuddy's queue and history only after
+  its "Show Bambuddy's queue and print history" button (#3745).
   A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
   row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
   `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks

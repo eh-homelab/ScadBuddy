@@ -3,7 +3,9 @@ import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output, PrinterNow, PrintPage, PrintProgress, PrintSummary } from '../api/types'
+import { QUEUE_SHOWN } from '../components/prints/liveJobs'
 import { NOW_POLL_MS } from '../components/prints/NowPrinting'
+import { REFRESH_AGAIN_MS } from '../components/prints/PrintHistory'
 import { PRINTERS_NOW, setPrintersNow } from '../mocks/features/printersNow'
 import { PRINT_QUEUE, setPrintQueue } from '../mocks/features/printQueue'
 import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
@@ -991,6 +993,61 @@ describe('one list (#3745): the printers above, each print once below', () => {
     })
     await waitFor(async () => expect(await item(41)).toHaveTextContent('Succeeded'))
     expect(await rows()).toEqual(['archive:90', '41', '35'])
+  })
+
+  it("names the queue's tail only on the unfiltered list, which shows the queued rows", async () => {
+    const keychain = PRINT_QUEUE.find((entry) => entry.id === 259)!
+    setPrintQueue(Array.from({ length: QUEUE_SHOWN + 3 }, (_, i) => ({ ...keychain, id: 1000 + i, position: i })))
+    const { unmount } = render()
+    expect(await screen.findByTestId('print-queue-more')).toHaveTextContent("3 more waiting in Bambuddy's queue.")
+    unmount()
+
+    render('/prints?status=failed')
+    await waitFor(async () => expect(await rows()).toEqual(['36']))
+    expect(await screen.findByTestId('farm-totals')).toBeInTheDocument()
+    expect(screen.queryByTestId('print-queue-more')).toBeNull()
+  })
+
+  it('reads the history once more a little later, when Bambuddy had not yet recorded the outcome', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    setPrintQueue([])
+    let outcome = 'printing'
+    let reads = 0
+    server.use(
+      http.get('/api/v1/prints', () => {
+        reads += 1
+        return HttpResponse.json({
+          items: [{ ...summaryOf(37), status: outcome }, summaryOf(35)],
+          next_cursor: null,
+        } satisfies PrintPage)
+      }),
+    )
+    render()
+    expect(await item(37)).toHaveTextContent('Printing 66% · 54m left')
+    const first = reads
+
+    // The printer has ended the job, but Bambuddy still says the archive prints.
+    setPrintersNow(PRINTERS_NOW.map((printer) => (printer.printer_id === 2 ? { ...printer, activity: 'idle' } : printer)))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    await waitFor(() => expect(reads).toBe(first + 1))
+    expect(await item(37)).toHaveTextContent('Printing')
+
+    outcome = 'completed'
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_AGAIN_MS)
+    })
+    await waitFor(async () => expect(await item(37)).toHaveTextContent('Succeeded'))
+    expect(reads).toBe(first + 2)
+    // One more read only.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(REFRESH_AGAIN_MS * 3)
+    })
+    expect(reads).toBe(first + 2)
   })
 
   it('narrows only the archived prints when filtered, with a working one\'s live state in place', async () => {

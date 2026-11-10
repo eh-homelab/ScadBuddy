@@ -8,7 +8,7 @@ import { QueueNotes, usePrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
 import { modelPath } from '../lib/deeplink'
 import { nativeBackends } from '../lib/printerRegistry'
-import { parsePrintsQuery, readStoredPrintsView } from '../lib/printsQuery'
+import { isFiltered, parsePrintsQuery, readStoredPrintsView } from '../lib/printsQuery'
 import { useAsync } from '../lib/useAsync'
 import { Button } from '@/components/ui/button'
 
@@ -38,6 +38,9 @@ export function PrintsPage() {
     useMemo(() => working?.map((job) => job.key) ?? null, [working]),
   )
   const jobs = useMemo(() => liveJobs(now.cards ?? [], queue.items ?? []), [now.cards, queue.items])
+  // A filtered list shows no queued row (`printRows`), so it names no tail of the queue.
+  const [params] = useSearchParams()
+  const filtered = isFiltered(parsePrintsQuery(params))
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">
@@ -52,7 +55,7 @@ export function PrintsPage() {
         {settled &&
           (bambuddy ? (
             <>
-              <QueueNotes queue={queue} tail={queueTail(queue.items ?? [])} />
+              <QueueNotes queue={queue} tail={filtered ? 0 : queueTail(queue.items ?? [])} />
               <PrintHistory live={jobs} />
             </>
           ) : (
