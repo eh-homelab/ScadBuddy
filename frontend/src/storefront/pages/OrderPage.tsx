@@ -28,6 +28,8 @@ const NO_ORDER = 'This link does not open an order. It may have been replaced by
 
 /** What `/o` reads with no token and no order id (the payment provider sends a payer here). */
 const NO_LINK = 'Open your order from the link in your mail.'
+/** What an account's order id that opens nothing reads (the order is not this account's, or the session ended). */
+const NO_ACCOUNT_ORDER = 'We cannot open this order. Sign in to your account again to see your orders.'
 
 /**
  * `/o#<token>`: the customer's order (spec §5.2, §5.6). The token is the order link's,
@@ -55,13 +57,18 @@ export function OrderPage() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const keys = useRef(new ActionKey())
+  /** The newest read or write: an older answer that comes back late must not replace a newer one. */
+  const latest = useRef(0)
 
   const load = useCallback(async () => {
     setError(null)
+    const mine = ++latest.current
     try {
       if (who === null) return
-      setOrder(await store.orderView(who))
+      const read = await store.orderView(who)
+      if (mine === latest.current) setOrder(read)
     } catch (caught) {
+      if (mine !== latest.current) return
       if (caught instanceof StoreError && caught.status === 404) setOrder(null)
       else setError(errorText(caught))
     }
@@ -77,11 +84,14 @@ export function OrderPage() {
     if (busy) return false
     setBusy(true)
     setError(null)
+    const mine = ++latest.current
     try {
-      setOrder(await send(keys.current.for(what)))
+      const written = await send(keys.current.for(what))
+      if (mine === latest.current) setOrder(written)
       keys.current.done()
       return true
     } catch (caught) {
+      if (mine !== latest.current) return false
       if (caught instanceof StoreError && caught.status === 404 && caught.type === null) setOrder(null)
       else setError(errorText(caught))
       return false
@@ -109,7 +119,7 @@ export function OrderPage() {
       <section>
         <h1 className="sf-h1">Your order</h1>
         <div className="sf-panel">
-          <p className="sf-lead">{NO_ORDER}</p>
+          <p className="sf-lead">{token ? NO_ORDER : NO_ACCOUNT_ORDER}</p>
         </div>
       </section>
     )

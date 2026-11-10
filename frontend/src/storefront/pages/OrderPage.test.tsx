@@ -185,6 +185,37 @@ describe('OrderPage', () => {
     expect(await screen.findByText(/This link does not open an order/)).toBeInTheDocument()
   })
 
+  it('says an account order that opens nothing suggests signing in', async () => {
+    server.use(http.post('/api/store/v1/order/view', () => new HttpResponse(null, { status: 404 })))
+    renderPage(<OrderPage />, { route: '/o?order=o1' })
+    expect(await screen.findByText(/Sign in to your account again/)).toBeInTheDocument()
+    expect(screen.queryByText(/This link does not open an order/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a write\'s order when an older read answers after it', async () => {
+    const answered = {
+      ...ORDER,
+      items: [{ ...ORDER.items[0]!, revisions: [{ ...ORDER.items[0]!.revisions[0]!, can_answer: false, answer: 'accepted' }] }],
+    } satisfies CustomerOrder
+    let reads = 0
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('/api/store/v1/order/view', async () => {
+        if (reads++ > 0) await held
+        return HttpResponse.json(ORDER)
+      }),
+      http.post('/api/store/v1/order/revisions/:id/answer', () => HttpResponse.json(answered)),
+    )
+    const { user } = renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    await user.click(await screen.findByRole('button', { name: 'Check for updates' }))
+    await user.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(await screen.findByText('You accepted this design.')).toBeInTheDocument()
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.getByText('You accepted this design.')).toBeInTheDocument()
+  })
+
   it('asks for changes only with a note', async () => {
     const answered = {
       ...ORDER,
