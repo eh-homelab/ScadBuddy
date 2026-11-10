@@ -363,9 +363,16 @@ opens every one and seals it again byte for byte).
     `routes/messagingBinding.ts` checks a binding for Settings → Orders and sends a test
     message (a person's session only, kept in the audit log as `messaging.test_send`).
     `routes/orderMessages.ts` is the order page's "Send again": a preview answers the message
-    composed now and its digest, and the send takes only the template, `resend_of` and the
-    digest, composes again and refuses `message_changed` on a difference (a person's session
-    only; `tools/orders.ts` `previewPersonSend`, `personSend`).
+    composed now and its digest, and the send takes only the template, `resend_of`,
+    `also_when_storefront_mails` and the digest, composes again and refuses `message_changed`
+    on a difference (a person's session only; `tools/orders.ts` `previewPersonSend`,
+    `personSend`). Both refuse `storefront_mail` without the flag, which the page sends once
+    the person says yes to "Send it here too?" or presses "Send here too"; the send asks the
+    check under its own key first, so a retry of a send already claimed is answered from that
+    claim and refused nothing, `message_changed` included (#5978). The claimed row is the record:
+    an ended one is answered with no plugin, binding or contact; one with no outcome is sent
+    again only when the binding maps `idempotency_key`, with the row's own recipients and text,
+    and needs the binding (none is `no_messaging_plugin`) but no contact.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

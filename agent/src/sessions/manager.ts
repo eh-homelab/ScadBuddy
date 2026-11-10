@@ -258,7 +258,8 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
           // test can still be held up (a lock, the pool) until a later wait has
           // opened, so it resolves only this wait's row, never the session's (#1360).
           // The check gets the same signal, so one that hangs (#1352) is cancelled
-          // with the wait rather than held for the life of the process.
+          // with the wait rather than held for the life of the process. A slow tab owner
+          // counts as back (tools/browser.ts, #5962), so it resolves the wait `reconnected`.
           onParked: async (parked, questionId) => {
             if ((await isBack(parked)) && !parked.aborted) await reconnected(questionId)
           },

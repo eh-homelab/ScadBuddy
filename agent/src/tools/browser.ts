@@ -148,7 +148,13 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           tool: `browser_${spec.tool}`,
           toolUseId: ctx.toolUseId,
           signal: ctx.signal,
-          isBack: async (signal) => (await tabs(ctx).status(target(ctx), { signal })).attached,
+          // A slow owner counts as back (#5962 review): the tab may still be connected; a read's
+          // retry below finds out, and a write says to snapshot and call again. Read as gone, it
+          // would end the turn's tab waits.
+          isBack: async (signal) => {
+            const status = await tabs(ctx).status(target(ctx), { signal })
+            return status.attached || status.slow === true
+          },
         })
         if (!waited.back) throw new ToolError(`${outcome.error.message} ${waited.message}`)
         if (spec.risk !== 'read') {
@@ -158,13 +164,15 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // in the hub's own words for why there is none (#1410).
           if (waited.why === 'reconnected') {
             const here = await statusHere(ctx)
-            if (here && !here.attached) throw new ToolError(`${here.reason} ${WHY_STILL_GONE.reconnected}`)
+            if (here && !here.attached) throw new ToolError(`${here.reason} ${here.slow ? WHY_SLOW : WHY_STILL_GONE.reconnected}`)
           }
           throw new ToolError(tabBackNotRun(`browser_${spec.tool}`, waited.why))
         }
         outcome = await call()
         if (!outcome.ok && outcome.error.code === 'no_browser') {
-          throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
+          // A wait a slow owner ended is no reconnect (#5974 review): say the tab may be connected.
+          const slow = waited.why === 'reconnected' && (await statusHere(ctx).then((h) => h?.attached === false && h.slow === true))
+          throw new ToolError(`${outcome.error.message} ${slow ? WHY_SLOW_READ : WHY_STILL_GONE[waited.why]}`)
         }
       }
       if (outcome.ok) return spec.answer ? spec.answer(outcome.result, ctx) : json(outcome.result ?? null)
@@ -208,6 +216,17 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
     `Re-check the page (browser_status, then browser_snapshot) and call ${tool} again if it is still what you want.`
   )
 }
+
+/**
+ * After a wait that ended `reconnected`, when the tab's replica only answered slowly: the tab may
+ * well be there, and no reconnect need have happened (a slow probe also ends a wait, #5974).
+ */
+const WHY_SLOW =
+  "The session's tab may be connected (its agent replica was slow to answer), and the call was not run: take a snapshot to see the page, then call again."
+
+/** A read retried after a wait a slow owner ended, that still found no tab (#5974). */
+const WHY_SLOW_READ =
+  "The session's tab may be connected (its agent replica was slow to answer), but the call did not reach it: take a snapshot, then call again."
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {

@@ -69,6 +69,7 @@ from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRuns
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings, SettingsReader, StoredSettings
@@ -757,7 +758,7 @@ class PrintActivities:
                 printer=run.printer,
                 plates=lan_plates(result),
             )
-        except psycopg.Error as exc:
+        except (psycopg.Error, CrudUnavailableError, CrudRefusedError) as exc:
             logger.warning(
                 "could not record the last print of run %s: %s", run.id, type(exc).__name__
             )

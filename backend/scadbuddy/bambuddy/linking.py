@@ -25,6 +25,9 @@ Bambuddy library, so neither way above finds it. Bambuddy still archives it from
 hash of the native slice the run uploaded. `link_lan_starts` scans for it, by the
 starts' own days (#5724). The prints list runs it for each subject with a LAN start
 that no archive names yet (`print_history._link_lan_prints`).
+
+An import (#4698) must never take a print ScadBuddy made before these passes linked it:
+`link_archive` runs them for one archive first.
 """
 
 from __future__ import annotations
@@ -39,12 +42,13 @@ import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import QueueItem
+from scadbuddy.bambuddy.models import Archive, QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.print_library.ids import is_native_id
 
@@ -114,6 +118,9 @@ _last_lan_scan: dict[str, float] = {}
 #: (``backend/app/api/routes/print_queue.py``) puts a skipped item back to ``pending``,
 #: so it is read on like any pending one, until the backstop (#1704).
 _SETTLED = ("done", "failed", "cancelled")
+#: How many subjects whose slices' hashes were not read yet one archive's pass reads at
+#: most (`link_archive`), newest slice first.
+ARCHIVE_PASS_SUBJECTS = 20
 
 
 async def link_item(
@@ -154,7 +161,7 @@ async def owned_queue_items(
         owned.add(meta.queue_item_id)
     try:
         known = await links.for_subject(PrintSubject.output(meta.id))
-    except psycopg.Error:
+    except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
         logger.exception("could not read an output's print links", extra={"output_id": meta.id})
     else:
         owned.update(link.queue_item_id for link in known if link.queue_item_id is not None)
@@ -308,7 +315,7 @@ async def scan_library_by_hash(
         return
     try:
         await link_subject_by_hash(client, uploads, links, PrintSubject.library(file_id))
-    except (ApiError, psycopg.Error):
+    except (ApiError, psycopg.Error, CrudUnavailableError, CrudRefusedError):
         # A failed scan found nothing, so the next read may try again.
         _last_library_scan.pop(file_id, None)
         logger.exception(
@@ -441,3 +448,41 @@ async def link_library_prints(
             )
 
     await asyncio.gather(*(guarded(row.queue_item_id, row.library_file_id) for row in pending))
+
+
+async def link_archive(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    links: PrintLinkStore,
+    archive: Archive,
+) -> list[PrintLink]:
+    """The link passes above for one archive (#4698 review), before an import may take
+    it: ScadBuddy links its own prints only when a read runs these, so an archive it
+    printed can have no link yet. The library files' queue items that name an archive
+    now are linked (`link_library_prints`); then the archive's ``content_hash`` is
+    matched against every subject's slices, Bambuddy's and native (a queued print's and
+    a LAN start's, as `link_subject_by_hash` and `link_lan_starts` match them), after
+    the hashes not read yet of the subjects whose send window holds the archive's day
+    (at most `ARCHIVE_PASS_SUBJECTS`) are read. Each subject that matches gets the link
+    its own pass would have written. Returns those links."""
+    await link_library_prints(client, links)
+    if not archive.content_hash:
+        return []
+    if archive.created_at is not None:
+        nearby = await uploads.unhashed_near(
+            archive.created_at, ARCHIVE_PASS_SUBJECTS, before=SCAN_BEFORE, after=SCAN_AFTER
+        )
+        for owner in nearby:
+            # Reads and keeps each slice's hash, as a scan of the subject would.
+            await _slice_hashes(client, uploads, owner)
+    found: list[PrintLink] = []
+    for owner in await uploads.slice_owners(archive.content_hash):
+        link = PrintLink(
+            archive_id=archive.id,
+            matched_by="content_hash",
+            plate_id=archive.plate_id,
+            printer_id=archive.printer_id,
+        )
+        await links.record(PrintSubject.from_run_subject(owner), link)
+        found.append(link)
+    return found

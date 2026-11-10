@@ -153,14 +153,14 @@ def test_one_template_is_told_once_per_status_change(client: TestClient, order_i
     cancelled = client.post(f"/api/v1/orders/{order_id}/cancel")
     assert cancelled.status_code == 200, cancelled.text
     after = client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "ready"})
-    assert after.json() == {"already_notified": None, "storefront_mail": False}
+    assert after.json() == {"already_notified": None, "storefront_mail": False, "claimed": None}
     assert claim(client, order_id, "k5").status_code == 201
 
 
 def test_the_check_writes_nothing(client: TestClient, order_id: str) -> None:
     check = client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "ready"})
     assert check.status_code == 200
-    assert check.json() == {"already_notified": None, "storefront_mail": False}
+    assert check.json() == {"already_notified": None, "storefront_mail": False, "claimed": None}
     assert client.get(f"/api/v1/orders/{order_id}/messages").json() == []
     assert events(client, order_id) == []
 
@@ -388,6 +388,47 @@ def test_a_template_the_storefront_mails_is_skipped(
         assert events(client, order_id) == ["message.sending"]
     # A template with no storefront event never asks the seam.
     assert [asked[1] for asked in fake.asked] == ([event, event] if event else [])
+
+
+def test_the_check_reads_told_and_storefront_mail_in_one_transaction(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _covers(monkeypatch, True)
+    told = claim(client, order_id, "k1", claim_body("shipped", also_when_storefront_mails=True))
+    assert told.status_code == 201, told.text
+    check = client.get(
+        f"/api/v1/orders/{order_id}/messages/check", params={"template": "shipped"}
+    ).json()
+    assert check["already_notified"]["id"] == told.json()["id"]
+    assert check["storefront_mail"] is True
+    # The claim asked nothing (its flag), and the check asked once.
+    assert len(fake.asked) == 1
+
+
+def test_the_check_answers_a_claimed_key_with_its_row_and_no_refusal(
+    client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry after a lost answer is served from its first claim: the check under that
+    key answers the row, and neither `already_notified` nor `storefront_mail`."""
+    fake = _covers(monkeypatch, False)
+    first = claim(client, order_id, "k1", claim_body("shipped"))
+    assert (first.status_code, first.json()["status"]) == (201, "sending")
+    fake.covers = True
+    check = client.get(
+        f"/api/v1/orders/{order_id}/messages/check",
+        params={"template": "shipped"},
+        headers={"Idempotency-Key": "k1"},
+    ).json()
+    assert check == {"already_notified": None, "storefront_mail": False, "claimed": first.json()}
+    # Another key meets both refusals.
+    other = client.get(
+        f"/api/v1/orders/{order_id}/messages/check",
+        params={"template": "shipped"},
+        headers={"Idempotency-Key": "k2"},
+    ).json()
+    assert other["claimed"] is None
+    assert other["already_notified"]["id"] == first.json()["id"]
+    assert other["storefront_mail"] is True
 
 
 def test_a_skip_does_not_count_as_told(

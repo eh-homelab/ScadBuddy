@@ -931,6 +931,8 @@ class Lifecycle:
                 raise LifecycleError("draft_empty", f"{order.label} has no item")
             rules = self.rules()
             option_id = body.shipping_option_id
+            if rules.shipping_options:
+                self._shipping_in_currency(order, rules)
             if option_id is None and rules.shipping_options:
                 raise LifecycleError(
                     "shipping_option_id", "shipping_option_id: choose one", unprocessable=True
@@ -1059,7 +1061,8 @@ class Lifecycle:
         (`submitting_customer`), its name and contacts left as they are. The given address
         is the customer's equal one (`_same_address`: case, spaces and empty lines aside),
         and then the customer is not touched; with none, it is added, never as a default.
-        The customer's row is locked first, so two submits at once add one row and an
+        The account's row is locked first (`submitting_customer`), then the customer's, so
+        two submits at once add one row, make one new customer for an archived one, and an
         archive waits for this submit. A customer the shop has archived takes no order, as
         in `create_order`: the submit makes a new customer as an anonymous one does
         (`_new_customer`, with the account's verified email as its contact), and the account
@@ -1268,7 +1271,9 @@ class Lifecycle:
         on ``option_id``; an option that ships needs the order's shipping address
         (`shipping_address_required`), a pickup does not. The audit row is
         ``shipping.option_set``. A cart's option is the visitor's alone
-        (`order_not_submitted`, ``check_visitors_cart``)."""
+        (`order_not_submitted`, ``check_visitors_cart``). An order not in the shop's
+        currency (``orders_currency``) takes no option: 409 `shipping_currency_mismatch`
+        (no conversion); None still removes."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_visitors_cart(order, by)
@@ -1288,17 +1293,33 @@ class Lifecycle:
         self._told(_Change(order))
         return order
 
+    @staticmethod
+    def _shipping_in_currency(order: Order, rules: OrderRules) -> None:
+        """409 `shipping_currency_mismatch` when ``order`` is not in the shop's currency:
+        the options' amounts are in it, and none is converted."""
+        if order.currency != rules.shop_currency:
+            raise LifecycleError(
+                "shipping_currency_mismatch",
+                f"order {order.label} is in {order.currency}, but the shop's shipping options"
+                f" are priced in {rules.shop_currency}; they cannot be set on it",
+            )
+
     def _shipping_option(
         self, conn: Conn, order: Order, by: Actor, option_id: str | None, rules: OrderRules
     ) -> Order:
         """`set_shipping_option`'s write on the locked ``order``, with no check of who
-        asks or of the state: the order as the write left it."""
+        asks or of the state: the order as the write left it. An option is priced in the
+        shop's currency and the order may be in another (a cart made before the shop
+        changed it); there is no conversion, so that is a 409
+        `shipping_currency_mismatch` (`_shipping_in_currency`). None removes the shipping
+        charges in any currency."""
         charges: list[ChargeInput] = [
             charge
             for charge in self.store.charges(order.id, conn=conn)
             if not charge.auto and charge.kind != "shipping"
         ]
         if option_id is not None:
+            self._shipping_in_currency(order, rules)
             option = next((o for o in rules.shipping_options if o.id == option_id), None)
             if option is None:
                 raise LifecycleError(

@@ -10,6 +10,7 @@ import pytest
 
 from scadbuddy.bambuddy.print_links import (
     LanArchiveLink,
+    PrintImport,
     PrintLink,
     PrintLinkStore,
     PrintReprint,
@@ -197,8 +198,9 @@ async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
 
 
 def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conninfo: str) -> None:
-    # #609 review: the page's DISTINCT ON walks (archive_id DESC, outputs first,
-    # first_seen, subject); an index in that order spares it a sort of the whole table.
+    # #609 review: the page's DISTINCT ON walks (archive_id DESC, imports last (#4698),
+    # outputs first, first_seen, subject); an index in that order spares it a sort of the
+    # whole table.
     with psycopg.connect(pg_conninfo) as conn:
         definitions = [
             row[0]
@@ -207,7 +209,10 @@ def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conn
                 " AND tablename = 'print_links'"
             )
         ]
-    owner = "(archive_id DESC, ((subject ~~ 'library:%'::text)), first_seen, subject)"
+    owner = (
+        "(archive_id DESC, ((subject ~~ 'model:%'::text)), ((subject ~~ 'library:%'::text)),"
+        " first_seen, subject)"
+    )
     assert any(owner in d for d in definitions), definitions
 
 
@@ -348,3 +353,96 @@ async def test_deleting_outputs_deletes_their_sends(links: PrintLinkStore) -> No
 
     assert await links.sends_for(OUT) == []
     assert len(await links.sends_for(LIBRARY)) == 1
+
+
+# --- #4698: a print imported onto a model ------------------------------------------
+
+TROPHY = PrintSubject.model("basketball-trophy")
+
+
+def imported(archive_id: int, slug: str = "basketball-trophy", **fields: object) -> PrintImport:
+    return PrintImport.model_validate(
+        {
+            "archive_id": archive_id,
+            "slug": slug,
+            "source": "archive",
+            "filename": "basketball_trophy_elan.gcode.3mf",
+            "size": 1234,
+            "sha256": "ab" * 32,
+            **fields,
+        }
+    )
+
+
+async def test_an_import_links_the_archive_to_its_model(links: PrintLinkStore) -> None:
+    owner = await links.record_import(imported(193), printer_id=1, plate_id=1)
+
+    assert owner is None
+    linked = await links.linked(193)
+    assert linked is not None
+    assert (linked.subject, linked.matched_by, linked.printer_id) == (TROPHY.key, "import", 1)
+    assert (linked.output_id, linked.library_file_id, linked.slug) == (
+        None,
+        None,
+        "basketball-trophy",
+    )
+    record = await links.import_of(193)
+    assert record is not None
+    assert (record.slug, record.source, record.size) == ("basketball-trophy", "archive", 1234)
+    assert record.imported_at is not None
+    [page_row] = await links.page(limit=10, subjects=[TROPHY])
+    assert page_row.archive_id == 193
+
+
+async def test_an_import_of_a_linked_archive_writes_nothing_and_names_the_owner(
+    links: PrintLinkStore,
+) -> None:
+    await links.record(OUT, link(193))
+
+    owner = await links.record_import(imported(193))
+
+    assert owner is not None and owner.subject == OUT.key
+    assert await links.import_of(193) is None
+    assert await links.for_subject(TROPHY) == []
+
+
+async def test_a_second_import_names_the_first(links: PrintLinkStore) -> None:
+    await links.record_import(imported(193))
+
+    owner = await links.record_import(imported(193, slug="other-model"))
+
+    assert owner is not None and owner.subject == TROPHY.key
+    record = await links.import_of(193)
+    assert record is not None and record.slug == "basketball-trophy"
+
+
+async def test_a_run_s_link_wins_over_an_import_made_before_it(links: PrintLinkStore) -> None:
+    await links.record_import(imported(193))
+    await links.record(OUT, link(193))
+
+    owner = await links.linked(193)
+    assert owner is not None and owner.subject == OUT.key
+    [row] = await links.page(limit=10)
+    assert (row.archive_id, row.output_id) == (193, OUTPUT)
+    assert await links.output_for(193) == OUTPUT
+
+
+async def test_the_linked_archives_among_some_ids(links: PrintLinkStore) -> None:
+    await links.record(OUT, link(18))
+    await links.record_import(imported(193))
+
+    assert await links.linked_among([18, 19, 193]) == {18, 193}
+    assert await links.linked_among([]) == set()
+
+
+async def test_forgetting_a_model_forgets_its_imports(links: PrintLinkStore) -> None:
+    await links.record_import(imported(193))
+    await links.record_reprint(TROPHY, PrintReprint(queue_item_id=90, archive_id=193))
+    await links.record(OUT, link(18))
+
+    await links.delete_models(["basketball-trophy"])
+
+    assert await links.linked(193) is None
+    assert await links.import_of(193) is None
+    assert 90 not in (await links.jobs(queue_items=[90])).queue_items
+    assert await links.output_for(18) == OUTPUT

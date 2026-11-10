@@ -466,7 +466,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the projects' printers, folderless projects and destination touches
   (`RemoteUploadStore`, a `BambuddyUploadStore` with no pool, whose copy lock is the API's
   copy lease, `bambuddy/copy_leases.py`, #5298 Task 27; a method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
-  its claim take an `Idempotency-Key`), and it
+  its claim take an `Idempotency-Key`), and its print links, sends and outputs' last
+  prints (`RemotePrintLinks`, a `PrintLinkStore` with no pool, and `RemoteOutputPrints`,
+  an `OutputPrintStore` with no pool, area `links`, #5298 Task 28; each refuses the
+  methods only the API calls with `ApiOnlyError`, `pending_library` among them), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
@@ -479,6 +482,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
+  be (the archive's file and slicer project, Bambuddy library files by name and hash, the
+  printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
+  links the archive to a model as a `print_links` row with the subject `model:<slug>` and
+  `matched_by` `import`, beside its `print_imports` row (`PrintLinkStore.record_import`).
+  Both routes first run the link passes for the one archive (`linking.link_archive`), so a
+  print ScadBuddy made is linked to its run and refused (409), never imported; a run's
+  link found later still owns the print (`_OWNER_ORDER` puts `model:` last). One import
+  of an archive runs at a time (`PrintLinkStore.import_lock`); one that waits past
+  `IMPORT_LOCK_WAIT_S` (30 s) is a 409 to send again. Every owner lookup (`archive_origin`,
+  `archive_run_plates`) orders as `_OWNER_ORDER` does.
+  Only a source the listing finds is read. A printer file is kept as a Bambuddy library
+  file in the inbox folder. A model's delete forgets its imports (`delete_models`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -820,7 +836,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `storefront_shipping_options` while `draft` or `quoted`: an unknown id is 422 on
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
-  the address while such an option stays (`_no_option_ships`, the same slug). A payment
+  the address while such an option stays (`_no_option_ships`, the same slug). An order
+  not in the shop's currency (`orders_currency`) takes no option, in the back office and
+  in a storefront submit alike: 409 `shipping_currency_mismatch` (`_shipping_in_currency`;
+  null still removes), and its draft view lists none. A payment
   that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
   page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
@@ -1099,8 +1118,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Past prints (#4777, §3.2): `ItemCreate.archive_id` alone (any other source or `kind` is
   422) makes a Bambuddy archive an item (`api/orders.py` `_archive_item`): a `model` item of
   the output whose `print_links` row owns it, else a `library_file` item of the library file
-  that owns it, else (an output or file gone since, or an output whose template was deleted,
-  falls through too) a `library_file` item of
+  that owns it, else (an output or file gone since, an output whose template was deleted,
+  or a print imported onto a model, #4698, falls through too) a `library_file` item of
   a copy of its printed file (`/archives/{id}/download`) in the native library,
   `orders/past_prints.py` `copied_file`, one per archive (`archive_library_copies`, reused while
   the file is not trashed); 409 `archive_gone`, and `archive_copy_not_native` when a copy is
@@ -1210,7 +1229,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
     session, never from a body. Submit takes the account from it (the edge sends the
     cookie's session on): the order takes the account's customer, makes none (unless the shop archived that
-    customer: then it makes a new one and the account links to it), and is
+    customer: then it makes a new one and the account links to it; the account's row is
+    locked first, then the customer's, so two submits at once make one), and is
     attached to the account (`attach_order`); a cart whose visitor joined another account
     is 404 `draft_not_found`. The order page takes it too (`/o?order=<id>`, `order_page.ByAccount`).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
