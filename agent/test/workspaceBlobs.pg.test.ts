@@ -331,7 +331,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
 
     it('refuses a write when the backend cannot be reached to say where files go', async () => {
       await backend.stop()
-      await refusedWith(files, /could not be reached/)
+      await refusedWith(files, /the backend is not up yet \(\/healthz\)/)
       await backend.start()
     })
 

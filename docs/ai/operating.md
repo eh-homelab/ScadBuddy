@@ -1623,7 +1623,13 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   backend is older than the routes (404), or when it cannot be reached. `moveToBlobs`
   refuses the same way and moves nothing. The agent logs the cause once at start, and
   `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
-  "refused", ...}`, checked at most once a minute).
+  "refused", ...}`, checked at most once a minute). In the API pod the agent can start
+  before the backend container answers (#5868): a refused connection reads "the backend is
+  not up yet", and the start-up check waits for the backend's `/healthz`, logged once as
+  "waiting for the backend", trying again after 1 s doubling to 30 s
+  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)); then it logs where
+  the files go and moves them. A write or read asks the backend each time, so it works
+  as soon as the backend answers, with no restart.
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
   `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
   answers 404, so every file already in the blob store cannot be read (`unavailable`)

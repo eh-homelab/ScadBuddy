@@ -58,6 +58,7 @@ import {
   serviceCredentialMiddleware,
   withServiceCredential,
 } from './api/serviceCredential.js'
+import { untilBackendAnswers } from './api/backendUp.js'
 import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
@@ -130,7 +131,7 @@ import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
-import { BackendWorkspaceBlobs } from './workspace/blobs.js'
+import { BackendWorkspaceBlobs, WorkspaceBlobError } from './workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
 
@@ -424,14 +425,15 @@ const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, {
 // backend with store_backend local do they stay in Postgres; on any other, a write this agent
 // cannot seal (no KEK) or store (the backend cannot mint the URLs, is too old, or is down) is
 // refused rather than kept in plaintext.
+const workspaceBlobStore = new BackendWorkspaceBlobs(
+  config.backendUrl,
+  serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
+)
 const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
       blobs: {
-        store: new BackendWorkspaceBlobs(
-          config.backendUrl,
-          serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
-        ),
+        store: workspaceBlobStore,
         ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
       },
     })
@@ -452,14 +454,22 @@ const workspaceBytesStatus = workspace
       return workspaceBytes.status
     }
   : undefined
-// Once migrations have applied: say where the files go (once, the cause when refused), and move
-// the files written before #4789 (or while the backend kept no blobs) to blobs; what is left is
-// retried at the next start.
+// Once migrations have applied and the backend answers: say where the files go (once, the cause
+// when refused), and move the files written before #4789 (or while the backend kept no blobs) to
+// blobs; what is left is retried at the next start. The API pod's sidecar can start before the
+// backend container answers (#5868): until /healthz answers this waits, logged once, with
+// back-off (backendUp.ts); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
       if (!ready) return
+      await untilBackendAnswers(() => workspaceBlobStore.backend(), {
+        unreachable: (err) => err instanceof WorkspaceBlobError && err.unreachable,
+        log: (message) => console.log(`workspace files: ${message}`),
+      })
+      // A status read while the backend was down would be served for up to a minute.
+      workspaceBytes = undefined
       const status = await workspaceBytesStatus()
       if (status.store !== 'blobs' && status.unreadable_files) {
         console.error(`workspace files: ${status.unreadable_files} file(s) in the blob store cannot be read from here: ${status.reason}`)

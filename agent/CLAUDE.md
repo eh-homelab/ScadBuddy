@@ -25,7 +25,9 @@ The agent's service credential (`src/api/serviceCredential.ts`, wired in `main.t
 `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` (both is a `ConfigError`)
 `ExchangeCredential` exchanges that proof at the backend's `POST /api/v1/auth/service-token`
 for a 15-minute credential, renews it at half-life and after a 401, and falls back to the view
-on a 404 while it has a database; otherwise `ServiceCredential` reads the sealed one from
+on a 404 while it has a database. A failed exchange is tried again after 5 s doubling to 60 s,
+but a refused connection (the backend not up yet, `src/api/backendUp.ts` `backendNotUp`, #5868)
+is tried again at the next call and logged once as "waiting for the backend". Without a proof `ServiceCredential` reads the sealed one from
 `service_credentials_agent`, as before (#5494).
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
