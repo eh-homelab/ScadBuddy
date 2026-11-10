@@ -74,6 +74,13 @@ same way, `vite.config.ts`).
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
   after each send, because a token passes one check only. The mocks keep the check off.
+  Accounts (#5283, spec §5.2): `pages/SignInPage.tsx` (`/account/sign-in`; the address and
+  the mailed code, the code filled from a link's `#code=` and then dropped from the
+  address; Turnstile `sign_in`) and `pages/AccountPage.tsx` (`/account`; "Your orders",
+  each linking through `api/client.ts` `ACCOUNT_ORDER_URL` to `/o?order=<id>`, and
+  sign-out, which on a 503 `sign_out_incomplete` shows the edge's text). The session is
+  the edge's HttpOnly cookie; the page never sees it. Mocks
+  `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
