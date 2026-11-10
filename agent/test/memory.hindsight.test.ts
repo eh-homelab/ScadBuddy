@@ -462,6 +462,25 @@ describe('memory hooks against a fake Hindsight', () => {
     ])
   })
 
+  // withNote puts the note at the very start of a string or text block, never after other text, so
+  // a user's paragraph that starts with the note's words, after a paragraph of their own, is kept.
+  it("keeps a user's paragraph that starts with the directory note's words after other text (#5904 review)", async () => {
+    const h = hooks()
+    const typed = `What does this mean?\n\n${DIRECTORY_NOTE_MARK} /sessions/child.`
+    const file = await transcript([
+      { type: 'user', message: { role: 'user', content: typed } },
+      { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'The session was forked.' }] } },
+    ])
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(file))
+    await h.settled()
+    const item = (fake.retains()[0]!.body as { items: Record<string, unknown>[] }).items[0]!
+    expect(String(item.content).split('\n').map((l) => JSON.parse(l) as unknown)).toEqual([
+      { role: 'system', content: `REF-ID: conversation:${SESSION}` },
+      { role: 'user', content: typed },
+      { role: 'assistant', content: 'The session was forked.' },
+    ])
+  })
+
   // A turn whose only text is the note (a string prompt, or a text block beside images) cleans
   // to nothing and leaves no empty user turn behind.
   it('retains no user turn for a turn whose only text is the directory note (#5867)', async () => {
