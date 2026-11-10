@@ -27,6 +27,11 @@ SIGN_OUT_INCOMPLETE_TEXT: Final = (
     "You are signed out on this device. The shop could not end the session yet,"
     " and it keeps trying."
 )
+#: The answer when the queue was full: no retry is promised.
+SIGN_OUT_NOT_QUEUED_TEXT: Final = (
+    "You are signed out on this device. The shop could not end the session;"
+    " it ends on its own within 30 days."
+)
 #: Seconds before each try: five tries, 600 s in all.
 SIGN_OUT_RETRY_DELAYS: Final = (30.0, 60.0, 120.0, 180.0, 210.0)
 SIGN_OUT_RETRIES_MAX: Final = 1000
@@ -73,6 +78,10 @@ class SignOutRetries:
                 continue
             except CrudRefusedError as error:
                 logger.error("sign-out retry %d of %d: refused (%s); stopping", n, tries, error)
+                return
+            except Exception:
+                # Every give-up is logged: the task's exception is never read.
+                logger.exception("sign-out retry %d of %d failed; stopping", n, tries)
                 return
             logger.info("sign-out retry %d of %d ended the session", n, tries)
             return

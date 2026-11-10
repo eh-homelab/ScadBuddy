@@ -8,6 +8,26 @@ function day(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+/**
+ * What a customer reads for each order status (backend `orders/models.py` `OrderStatus`).
+ * A submitted order not yet quoted is still `draft`. A status this map lacks reads
+ * "In progress", never the internal name.
+ */
+const STATUS_LABELS: Record<string, string> = {
+  draft: 'Received',
+  quoted: 'Quote ready',
+  accepted: 'Accepted',
+  in_production: 'Being made',
+  ready: 'Ready',
+  shipped: 'Shipped',
+  closed: 'Complete',
+  cancelled: 'Cancelled',
+}
+
+function statusLabel(status: string): string {
+  return (Object.hasOwn(STATUS_LABELS, status) && STATUS_LABELS[status]) || 'In progress'
+}
+
 function OrderRow({ order }: { order: AccountOrder }) {
   const placed = order.submitted_at ?? order.created_at
   return (
@@ -16,7 +36,7 @@ function OrderRow({ order }: { order: AccountOrder }) {
         {order.number ?? 'Your order'}
       </Link>
       <p className="sf-hint">
-        {`${day(placed)} · ${order.items} ${order.items === 1 ? 'item' : 'items'} · ${order.status.replace(/_/g, ' ')}`}
+        {`${day(placed)} · ${order.items} ${order.items === 1 ? 'item' : 'items'} · ${statusLabel(order.status)}`}
       </p>
     </li>
   )
