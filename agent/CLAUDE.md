@@ -134,12 +134,11 @@ opens every one and seals it again byte for byte).
   of a turn on Temporal is a `ToolCall` workflow of its own, `session-<id>-call-<tool_use_id>`
   (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
   `tools_as_activities` switch is gone, Step 9.9), started with `requestEagerStart` on the turn's
-  replica's own agent-tools worker connection while it polls, once its build has been made current and until its
-  stop begins, so a terminating pod takes no eager calls (AgentWorker `connection`, #5865; it stays so when a later build is promoted, and Temporal grants an eager start
+  replica's own agent-tools worker connection while it polls, once its build has been made current (AgentWorker
+  `connection`, #5865; it stays so when a later build is promoted, and Temporal grants an eager start
   to such a superseded build, whose worker then runs the call: measured on a dev server, Server
   1.32.0, `toolCallLatency.temporal.test.ts` `SUPERSEDED`; the call's span attribute `scadbuddy.eager` says
-  `started`, `declined`, `failed` or `fallback`, and a `failed` span has the error's name and message as its
-  `scadbuddy.eager.failed` event): the first workflow task comes back in the start's answer
+  `started`, `declined`, `failed` or `fallback`): the first workflow task comes back in the start's answer
   without waiting on matching, and the activity is dispatched eagerly to the same worker when it is
   on agent-tools and the worker has a free slot (a pinned server's call goes to `agent-tools.<hostname>`
   through matching). Both need the server's `system.enableEagerWorkflowStart` and

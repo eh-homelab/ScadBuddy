@@ -1029,8 +1029,7 @@ const temporalWorker =
         // instead, and its activity too when the call is not pinned and the worker has a free slot.
         // Temporal grants that to a build a later one has superseded too (an old replica during a
         // rollout): the old build runs the call's first task and activity (measured on a dev server,
-        // Server 1.32.0, test/toolCallLatency.temporal.test.ts `SUPERSEDED`) until its stop() begins,
-        // when `connection()` stops offering the connection. A call it declines goes
+        // Server 1.32.0, test/toolCallLatency.temporal.test.ts `SUPERSEDED`). A call it declines goes
         // through matching to the current build; the call's span says which (`scadbuddy.eager`).
         ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).

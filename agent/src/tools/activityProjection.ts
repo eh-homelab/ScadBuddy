@@ -172,9 +172,6 @@ export function toolCallStarter(deps: ToolCallStarterDeps): ToolCallStarter {
  */
 export const EAGER_ATTRIBUTE = 'scadbuddy.eager'
 
-/** The call span's event when its eager start `failed`: the error's name and message, never a payload. */
-export const EAGER_FAILED_EVENT = 'scadbuddy.eager.failed'
-
 /**
  * The call started on the worker's own connection with `requestEagerStart` (ToolCallStarterDeps
  * `eager`), its handle on `client`: the result is long-polled on the client's own connection, which
@@ -197,8 +194,6 @@ async function startEagerly(
   } catch (err) {
     if (err instanceof WorkflowExecutionAlreadyStartedError) throw err
     span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
-    const error = err instanceof Error ? err : new Error(String(err))
-    span?.addEvent(EAGER_FAILED_EVENT, { 'exception.type': error.name, 'exception.message': error.message })
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)
