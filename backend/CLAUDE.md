@@ -637,7 +637,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Customize page's "Add to order…" and an output's "Order this" (`AddToOrderDialog`); mocks
   `src/mocks/features/orders/`; `lib/ordersQuery.ts` keeps the list's filters in the URL.
   Phase 4, flows (#4252): `builtin_flow.py` is the built-in `order-fulfilment` flow (its
-  script, inputs `notify` and `settle_hours`), registered by
+  script, inputs `notify`, `send` and `settle_hours`), registered by
   `ensure_builtin_flow` at the component's start when the name never had a version
   (`FlowDefinitions.register_new`, `FlowExistsError`), and as a new version when the newest
   is still an unedited built-in one with another script (#4673, `_upgraded`:
@@ -662,8 +662,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   input `settle_hours` (default 48; past it the run ends with a summary and no check);
   an item a failed print left `queued` anyway counts as printed. Only then does it ask
   the agent to record the attempts under a grant kept to the order, and with `notify`,
-  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing; a send
-  through a plugin is #5660). `ensure_builtin_flow` runs as a task beside the
+  once the re-read order is `ready`, call `order_notify_customer` (`read`: it composes the text and sends nothing),
+  and with `send` too (#5660) and the answer's `send_ready`, `order_notify_customer_send` (`outward`,
+  so the trigger's grant must name it); the result's `send` says `sent`, `skipped`, `refused` (the agent's refusal only),
+  `unknown` (a failure that may have sent it) or `not_sent`, and none ends the run. `ensure_builtin_flow` runs as a task beside the
   component's start; it reads the versions first (a name with any registers nothing,
   unless the newest is an unedited older built-in), then runs `check_script` and registers nothing that fails it, and the version's commit names the built-in
   (`ScadBuddy-Flow-Builtin`), so the versions list and reconcile read its author as the

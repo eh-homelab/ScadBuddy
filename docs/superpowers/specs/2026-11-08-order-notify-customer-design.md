@@ -294,6 +294,28 @@ sends nothing until a person sets `send` true. Without the rule, a run with `sen
 parks the send for a `workflow_run_decisions` approval. No send starts without a
 person's yes.
 
+As built (PR 4): the run's result carries `send`, which says what became of the message.
+The run page shows it with the rest of the result:
+
+- `{"status": "sent", "message_id": …}`: the plugin took it.
+- `{"status": "skipped", "reason": …}`: `notify` is off, the order is not ready, `send` is
+  off (the message was composed for a person to send), or no plugin is bound or the
+  customer has no contact of its kind.
+- `{"status": "refused", "reason": …}`: the agent refused it (`already_notified`, a denied
+  approval, `messaging_plugin_unavailable`, `message_changed`, a backend 4xx, a call that was
+  not run). The run goes on to its end.
+- `{"status": "unknown", "reason": "the outcome is unknown; check the order's messages"}`: the
+  call failed in a way that may have sent it (a timeout, a lost answer, a 5xx). The script sees
+  a failed call only as `Exception("<type>: <text>")` (the harness's `_script_outcome`), so
+  `send_refusal` tells a refusal by the agent's own texts; nothing is sent again.
+- `{"status": "not_sent", "reason": …, "message_id": …}`: it was claimed, but the plugin
+  refused it or did not answer (`failed`, `unknown`, in flight).
+
+A run never sends one message twice. A retried call keeps its request id, which is its
+claim key, so the backend answers the first claim. Another run on the same ready order
+finds the template told since the order's last status change (`episode`), so it is
+refused `already_notified`.
+
 ## 7. The audit record, failure and retry
 
 ### 7.1 The record (CRUD service)
