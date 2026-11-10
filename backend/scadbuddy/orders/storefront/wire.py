@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
-from scadbuddy.orders.models import ItemKind
+from scadbuddy.orders.models import ItemKind, OrderStatus
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -307,3 +307,35 @@ class DraftView(BaseModel):
     currency: str
     minor_exponent: int
     items: list[DraftItem]
+
+
+class SignInBody(BaseModel):
+    """A sign-in: the address and the code mailed to it (`orders/storefront/accounts.py`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(max_length=320)
+    #: Sixteen characters (`XXXX-XXXX-XXXX-XXXX`); spaces, hyphens and lower case are taken too.
+    code: str = Field(max_length=32)
+
+
+class AccountView(BaseModel):
+    """The signed-in visitor's account, as the page shows it."""
+
+    email: str
+
+
+class AccountOrder(BaseModel):
+    """One order on "Your orders": no cost, note or event, only what the list shows."""
+
+    id: str
+    number: str | None
+    #: The orders module's enum, so the page's labels are checked against it (#5283).
+    status: OrderStatus
+    created_at: datetime
+    submitted_at: datetime | None
+    items: int
+
+
+class AccountOrders(BaseModel):
+    orders: list[AccountOrder]

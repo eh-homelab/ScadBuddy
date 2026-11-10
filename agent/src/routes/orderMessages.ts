@@ -72,7 +72,7 @@ function refusal(c: Context, err: ToolError) {
     return c.json({ detail: 'the backend refused the agent; nothing was sent', type: 'upstream_error' }, 502)
   }
   const slug = /^([a-z_]+):/.exec(err.message)?.[1]
-  const conflict = slug === 'message_changed' || slug === 'already_notified' || slug === 'no_messaging_plugin' || slug === 'no_contact'
+  const conflict = slug === 'message_changed' || slug === 'already_notified' || slug === 'no_messaging_plugin' || slug === 'no_contact' || slug === 'storefront_mail'
   const status = slug === 'messaging_plugin_unavailable' ? 503 : conflict ? 409 : 422
   return c.json({ detail: err.message, ...(slug ? { type: slug } : {}) }, status)
 }

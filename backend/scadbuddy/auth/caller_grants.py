@@ -70,15 +70,12 @@ PRINT_GRANTS: Grants = {
     "print_runs": _ALL,
     "print_links": ("SELECT", "INSERT"),
     "print_sends": ("SELECT", "INSERT", "UPDATE"),
-    # Uploads, slices and projects (`bambuddy/uploads.py`).
-    "output_bambuddy_uploads": _ALL,
-    "output_bambuddy_slices": _ALL,
-    "print_preview_slices": ("SELECT", "INSERT", "UPDATE"),
-    "print_slice_starts": ("INSERT",),
-    "project_print_targets": ("SELECT", "INSERT", "UPDATE"),
-    "folderless_projects": _ALL,
-    # ON CONFLICT DO UPDATE reads the row it updates.
-    "destination_touches": ("SELECT", "INSERT", "UPDATE"),
+    # Rewritten by the printer merge (`PrinterReference("project_print_targets",
+    # "printer")`) until #5298 Task 29. The uploads, slices, slice starts, background
+    # slices, project targets, folderless projects and destination touches go through
+    # the API's CRUD routes (`crud/print.py` `RemoteUploadStore`, #5298 Tasks 25, 26);
+    # an existing role keeps those grants until the revoke.
+    "project_print_targets": ("SELECT", "UPDATE"),
     "output_last_prints": ("SELECT", "INSERT", "UPDATE"),
     # A native run's slice (`slicing/store.py` `start`) and held presets.
     "native_slices": ("SELECT", "INSERT", "UPDATE"),
@@ -101,11 +98,7 @@ PRINT_GRANTS: Grants = {
     "native_spool_uses": ("SELECT", "INSERT", "UPDATE"),
 }
 #: The bigserial keys the print worker inserts with.
-PRINT_SEQUENCES = (
-    "print_preview_slices_id_seq",
-    "print_slice_starts_id_seq",
-    "native_slices_id_seq",
-)
+PRINT_SEQUENCES = ("native_slices_id_seq",)
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, and reads
 #: flow runs and their decisions. Its workspace files' `blob_refs` holds go through the

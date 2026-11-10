@@ -1044,6 +1044,12 @@ export const settingsDefaults = {
   storefront_render_concurrency: 2,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
+  // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
+  storefront_mail_host: null,
+  storefront_mail_port: 587,
+  storefront_mail_user: null,
+  storefront_mail_sender: null,
+  storefront_mail_tls: 'starttls',
   // #5283 — the bot check: off with no site key; the secret is reported only as a flag.
   storefront_turnstile_site_key: null,
   // #4953 — whether a fulfilled line item may be unfulfilled.

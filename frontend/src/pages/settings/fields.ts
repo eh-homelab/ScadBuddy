@@ -13,6 +13,7 @@ export type SectionId =
   | 'rendering'
   | 'fonts'
   | 'git-remote'
+  | 'storefront-mail'
   | 'preview'
   | 'diagnostics'
   | 'administration'
@@ -150,14 +151,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     advanced: true,
   },
   // #5283 — the storefront's bot check (storefront spec §5.8): Cloudflare Turnstile on
-  // design requests today (submit, sign-up and sign-in once those forms ship), on while a
+  // design requests and sign-ins today (submit and sign-up once those forms ship), on while a
   // site key is set.
   {
     name: 'storefront_turnstile_site_key',
     section: 'orders',
     label: 'Storefront bot check: Turnstile site key',
     kind: 'text',
-    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests (and on submit, sign-up and sign-in once those forms ship), and refuses them while the secret below is not set. Empty turns the check off.',
+    help: 'Cloudflare Turnstile\'s public site key for the storefront\'s host. Set, the storefront asks for the check on design requests and sign-ins (and on submit and sign-up once those forms ship), and refuses them while the secret below is not set. Empty turns the check off.',
   },
   {
     name: 'storefront_turnstile_secret',
@@ -393,6 +394,48 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     label: 'Token',
     kind: 'secret',
     help: 'A token (or password) with write access to the remote, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again.',
+  },
+  // #5283 — the storefront's mail, sent by the CRUD service. The password is not a
+  // setting: it is sealed apart (`StorefrontMailPassword`).
+  {
+    name: 'storefront_mail_host',
+    section: 'storefront-mail',
+    label: 'SMTP host',
+    kind: 'text',
+    help: 'Such as smtp.example.com. Empty sends no mail: order links and sign-in codes wait, and order updates are left to a plugin.',
+  },
+  {
+    name: 'storefront_mail_port',
+    section: 'storefront-mail',
+    label: 'SMTP port',
+    kind: 'count',
+    help: 'Usually 587 with STARTTLS.',
+  },
+  {
+    name: 'storefront_mail_user',
+    section: 'storefront-mail',
+    label: 'SMTP user',
+    kind: 'text',
+    help: 'The login. Empty sends without one.',
+  },
+  {
+    name: 'storefront_mail_sender',
+    section: 'storefront-mail',
+    label: 'Sender',
+    kind: 'text',
+    help: 'The From address of every mail, such as shop@example.com.',
+  },
+  {
+    name: 'storefront_mail_tls',
+    section: 'storefront-mail',
+    label: 'TLS',
+    kind: 'select',
+    choices: [
+      { value: 'starttls', label: 'STARTTLS on the port (usually 587)' },
+      { value: 'implicit', label: 'Implicit TLS (usually 465)' },
+      { value: 'none', label: 'None, a relay with no login' },
+    ],
+    help: 'STARTTLS needs a server that offers it. A login is never sent without TLS.',
   },
   {
     name: 'log_level',

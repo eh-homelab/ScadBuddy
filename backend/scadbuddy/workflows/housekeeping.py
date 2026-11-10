@@ -202,6 +202,14 @@ BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
 #: patch; on the prune Schedule too, so carts go with the sweeps off as well.
 STOREFRONT_DRAFTS_SWEEP = "housekeeping_sweep_storefront_drafts"
 STOREFRONT_DRAFTS_PATCH = "housekeeping-sweep-storefront-drafts"
+#: #5283: send the storefront mail the after-commit send left queued
+#: (`orders.storefront.mail.StorefrontMail.send_queued`); a row is given up after
+#: `MAX_ATTEMPTS` charged refusals. Last, behind its own patch; on the prune Schedule too,
+#: as the payment closes are though they call a provider: a mail that failed reaches the
+#: customer within `PRUNE_INTERVAL`, not the sweeps' interval, and with no SMTP host it
+#: sends nothing.
+STOREFRONT_MAIL_SWEEP = "housekeeping_send_storefront_mail"
+STOREFRONT_MAIL_PATCH = "housekeeping-send-storefront-mail"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -231,6 +239,7 @@ SWEEPS = (
     PAYMENT_CAPTURES_SWEEP,
     BANK_DEPOSITS_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
+    STOREFRONT_MAIL_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -256,7 +265,8 @@ SWEEPS = (
 #: signed-in sessions (#4975), behind `AUTH_SESSIONS_PATCH`. And the payment pages whose
 #: close failed (#5700), behind `PAYMENT_CLOSES_PATCH`. And the PayPal captures whose
 #: outcome was never told (#4959), behind `PAYMENT_CAPTURES_PATCH`. And the idle
-#: storefront carts (#5282), behind `STOREFRONT_DRAFTS_PATCH`.
+#: storefront carts (#5282), behind `STOREFRONT_DRAFTS_PATCH`. And the storefront mail
+#: left unsent (#5283), behind `STOREFRONT_MAIL_PATCH`.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -272,6 +282,7 @@ PRUNE_SWEEPS = (
     PAYMENT_CLOSES_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
+    STOREFRONT_MAIL_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -338,6 +349,11 @@ BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
 #: deletes, then two deletes.
 STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
+#: One `send_queued` call: a pass of up to 50 rows, and any pass a kick asked for meanwhile,
+#: all of which stop claiming `mail.PASS_BUDGET` (8 min) after the call started; a row in
+#: flight then has at most a few 20 s steps (`mail.SMTP_TIMEOUT`) left.
+#: A server that does not answer stops the pass at its first row.
+STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -384,6 +400,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return BANK_DEPOSITS_TIMEOUT
     if sweep == STOREFRONT_DRAFTS_SWEEP:
         return STOREFRONT_DRAFTS_TIMEOUT
+    if sweep == STOREFRONT_MAIL_SWEEP:
+        return STOREFRONT_MAIL_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -442,6 +460,8 @@ class Housekeeping:
             if sweep == BANK_DEPOSITS_SWEEP and not workflow.patched(BANK_DEPOSITS_PATCH):
                 continue
             if sweep == STOREFRONT_DRAFTS_SWEEP and not workflow.patched(STOREFRONT_DRAFTS_PATCH):
+                continue
+            if sweep == STOREFRONT_MAIL_SWEEP and not workflow.patched(STOREFRONT_MAIL_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

@@ -3,6 +3,8 @@ import { Link, Route, Routes, useParams } from 'react-router'
 import { store, type Draft } from './api/client'
 import { RequestForm } from './components/RequestForm'
 import { DraftChanged } from './draftCount'
+import { AccountPage } from './pages/AccountPage'
+import { SignInPage } from './pages/SignInPage'
 import { CustomizePage } from './pages/CustomizePage'
 import { DraftPage } from './pages/DraftPage'
 import { ListingsPage } from './pages/ListingsPage'
@@ -52,6 +54,9 @@ export function App() {
             Print shop
           </Link>
           <nav aria-label="Shop">
+            <Link className="sf-link" to="/account">
+              Account
+            </Link>
             <Link className="sf-cart" to="/draft" aria-label={count ? `Your order, ${count} ${count === 1 ? 'item' : 'items'}` : 'Your order'}>
               Your order
               {count ? (
@@ -68,6 +73,8 @@ export function App() {
             <Route path="/l/:id" element={<CustomizeRoute />} />
             <Route path="/draft" element={<DraftPage />} />
             <Route path="/request" element={<RequestRoute />} />
+            <Route path="/account" element={<AccountPage />} />
+            <Route path="/account/sign-in" element={<SignInPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </main>

@@ -922,3 +922,25 @@ describe('OrderItemsTable · library file items', () => {
     expect(within(row(ITEM_DRAFT)).queryByTestId('item-library-file')).toBeNull()
   })
 })
+
+// #5283: a storefront order's customer accepts a price; the row records a typed one only.
+describe('OrderItemsTable · a storefront order (#5283)', () => {
+  beforeEach(() => {
+    resetMockState()
+    Object.assign(state.orders.find((o) => o.id === ORDER_DRAFT)!, { source: 'storefront', submitted_at: '2026-10-19T09:00:00Z' })
+  })
+
+  it('records a typed unit price without accepting it', async () => {
+    const accepted = vi.spyOn(api, 'acceptOrderQuote')
+    const { user } = render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    expect(within(row(ITEM_DRAFT)).queryByRole('button', { name: 'Accept unit price' })).toBeNull()
+    const input = screen.getByRole('textbox', { name: 'Unit price for Name Keychain' })
+    await user.clear(input)
+    await user.type(input, '12.5')
+    await user.click(within(row(ITEM_DRAFT)).getByRole('button', { name: 'Record unit price' }))
+    await waitFor(() => expect(quotesOfDraft().some((q) => q.unit_price_minor === 1250)).toBe(true))
+    expect(quotesOfDraft().some((q) => q.accepted)).toBe(false)
+    expect(accepted).not.toHaveBeenCalled()
+  })
+})

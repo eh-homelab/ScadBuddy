@@ -461,7 +461,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   runs, their outcomes, its operations and the events it publishes go through the same
   routes (`RemotePrintRunStore`, `RemoteOutcomes`, `crud/operations.py`
   `RemoteOperationStore`, `RemoteEvents`; the API writes each with its event and
-  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), and it
+  activity row, and logs a posted event once by its id, of `EVENT_KINDS` only), as do
+  its Bambuddy uploads, their slices, its slice starts, the dialog's background slices,
+  the projects' printers, folderless projects and destination touches
+  (`RemoteUploadStore`, a `BambuddyUploadStore` whose pool holds only the copy lock; a
+  method only the API calls raises `ApiOnlyError`; a slice start, a background slice and
+  its claim take an `Idempotency-Key`), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning
@@ -554,8 +559,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Today only design requests (`request`) take it; the actions
-  `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
+  before it reads its body. Today design requests (`request`) and sign-ins (`sign_in`)
+  take it; the actions `submit` and `sign_up` are kept for the submit and code request
   routes still to come. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set,
   and until the edge's first site-key read succeeds (`SiteKey.ever_read`).
@@ -835,6 +840,52 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`_close_deposit`), and their pages are closed after the commit. Routes in
   `api/order_payments.py`; agent `order_deposit_set` and `order_balance_waive` (outward),
   `order_deposit_waive` and `order_shipping_option_set` (write).
+  The storefront's mail (#5283, spec 2026-11-02 §5.7, migration
+  `20261109T0751Z_storefront_mail.sql`): `orders/storefront/mail.py`, `mail_templates.py`
+  (plain text), `links.py` (an order's links: `create_order_link` keeps the token's sha256
+  and the token sealed under the KEK, AAD `storefront_order_links:<id>`;
+  `revoke_order_links` drops the sealed token) and `addresses.py` (`check_address`: exactly
+  one addr-spec, else `EmailInvalidError`, slug `email_invalid`). A change writes a
+  `storefront_mail` row in its own transaction (`queue_mail`), so a rollback leaves none;
+  `orders/store.py` `MAIL_QUEUED` stays set until `Lifecycle._told` kicks
+  `StorefrontMail.send_queued` on the API's loop (a top-level rollback clears it). A pass
+  (one at a time per process; one asked for meanwhile runs after it, also when asked for
+  at the release; a call and the passes it takes on stop claiming `PASS_BUDGET` after the
+  call started) leases one row at a time (`lease_until`, `FOR UPDATE SKIP LOCKED`,
+  committed), sends with no connection held, and stamps the result. A server or setup
+  failure (anything the SMTP session raises that is not the recipient's: connect, TLS and
+  a certificate error, login and a non-ASCII password, sender, timeout; or a password
+  bound to another connection) charges no row: the process backs off (1 min, doubling to
+  1 h; the backoff is per process, which fits the one API replica: several replicas
+  would each back off on their own, while the shared `storefront_mail_server` row stays
+  the shop's view of the last error) and keeps the error in `storefront_mail_server` (`GET /storefront/mail`). One the
+  server answered to the row's own mail counts on the row (`server_failures`): at 3 in a
+  row it charges the row an attempt, so one crafted row cannot hold the queue's head. A
+  recipient refusal (`SMTPRecipientsRefused`, or a 5xx `SMTPDataError` about the
+  recipient or the message, by `_recipients_fault`'s rule: a reply naming the row's
+  `to_address` as a whole address is the row's; one naming the sender as a whole
+  address, or with a setup word outside the recipient's address, is the server's)
+  charges the row (`next_attempt_at` 1, 2, 4 ... min, at most
+  1 h; given up after 8); a message that cannot be built (a template or header error, a
+  revoked link, `link_revoked`) fails it at once. Every order mail names its link (`link_id`, never the token) and
+  carries `{storefront_public_url}/o#{token}`. The
+  `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
+  is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
+  price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
+  (`shipped`) queue only when `storefront_mail_covers` (a live link and a
+  `storefront_mail_host`), to the link's `sent_to`. The SMTP settings are env-seeded
+  `storefront_mail_*` (Settings → Storefront mail), a person's to change
+  (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). One setting picks the TLS,
+  `storefront_mail_tls`: `starttls` (the server must offer it; without it, a server
+  failure, never plain), `implicit` (`SMTP_SSL`) or `none` (plain, only with no user:
+  `SettingsStore.save` refuses a user with it, 422, on the merged result, and the sender
+  refuses it as a server failure). The password is sealed in `storefront_mail_secret`,
+  bound to the host, port, user and TLS mode it was saved for (columns and AAD);
+  `PUT`/`DELETE /storefront/mail/password` are a person's only. A `sign_in_code` row's
+  context carries `code` and `link` (`{storefront_public_url}/account/sign-in#code=<code>`,
+  built by the caller), both required by the template. One not sent within `CODE_TTL`
+  (10 min) of `created_at` is given up as `expired` with both cleared, at the start of
+  every pass (the sweep's too), and the claim never takes one.
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
@@ -1078,7 +1129,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   older than `STALE_SENDING_MINUTES` reads `unknown`, is never sent again by itself and has
   no sweep; only a person marks it sent (`…/mark-sent`, `PERSON_ENDPOINTS`). The plugin
   binding is the stored setting `orders_customer_messaging` (`MessagingBinding`; no secret,
-  a secret-looking `fixed_args` key is refused; an unreadable one loads as none).
+  a secret-looking `fixed_args` key is refused; an unreadable one loads as none). The
+  storefront overlap (spec §8): a `quoted` or `shipped` claim is recorded `skipped`, reason
+  `storefront_mail`, audit row `message.skipped`, when `storefront_mail_covers` says the
+  storefront mails that news to the order itself (`STOREFRONT_EVENT`, asked with the
+  lifecycle's `mail_host`), unless the body sets `also_when_storefront_mails`; the check
+  answers it as `storefront_mail`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
@@ -1093,16 +1149,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     an account exists (enumeration-safe). Only a salted sha256 is kept. A code dies only
     when used or after an hour (`CODE_TTL`); wrong guesses never spend it, and a correct
     live code signs in from any client. No address can be locked: requests are limited
-    per address and client (3 an hour) and per client (10), wrong guesses per client (20),
-    never per address, and a client is `core/proxies.py` `client_key` (IPv4 address,
-    IPv6 /64). The mail cap is 20 live codes per address: past it `request_code` returns
-    None, raises nothing, and the caller answers as usual and sends no mail. A full cap
+    per address and client (3 an hour) and per client (10), wrong guesses per client and
+    address (20 an hour) and per client (200), never per address, and a client is
+    `core/proxies.py` `client_key` (IPv4 address, IPv6 /64), so one guesser on a shared
+    network does not stop sign-in at other addresses. The mail cap is 20 live codes per
+    address: past it `request_code` returns None, raises nothing, and the caller answers
+    as usual and sends no mail; the refused request still counts toward the client's
+    limits (a used, expired row). A full cap
     means 20 live codes in the owner's inbox, and a sign-in marks them all used, freeing
     it. `verify_code` always makes 20 compares, padding with a dummy digest. The bound is
     the code (about 10^-17 an hour per address; the arithmetic is in the docstring).
     `request_code` and `verify_code` each hold transaction locks on the client, then the
-    address, so call them in a transaction. The code route, a later PR, is to take
-    Turnstile (`sign_up`), and the verify route (`sign_in`), whenever a site key is set.
+    address, so call them in a transaction. The verify route takes Turnstile
+    (`sign_in`) whenever a site key is set; the code route, a later PR, is to take it
+    (`sign_up`).
   - `verify_code` makes the account at the first sign-in. It links the one unarchived
     customer with that email contact, else makes a new customer. It joins a visitor of no
     account, rotates the session (the old row is deleted), and stores only the 256-bit
@@ -1111,7 +1171,26 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     The order page attaches an order whose link was opened while signed in, in its own
     transaction.
   - Old code and failure rows are pruned as new rows are written, and every expired
-    session at each sign-in. There is no sweep.
+    session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
+    joined an account.
+  - The routes: the edge's `storefront/accounts.py` keeps the session in the
+    `sb_session` cookie (`s1.<token>.<mac>` under the edge's cookie key; HttpOnly,
+    Secure, SameSite=Lax) and sends its token as `X-ScadBuddy-Store-Session`. On the
+    CRUD side, area `accounts` (`api/crud_storefront.py`): `store_account` resolves the
+    session, and submit and the order page are to take the account from it (a later PR),
+    never from a body.
+    `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
+    answers the new token in that header only, never in a body. `POST …/account/sign-out`
+    deletes the session, and the edge also gives the browser a new visitor. When the CRUD
+    side does not answer, the edge still signs the device out but answers 503
+    `sign_out_incomplete`, and `storefront/sign_out.py` `SignOutRetries` tries the
+    revocation again in the background: five tries over about ten minutes, each logged,
+    from an in-memory queue of at most 1000; every give-up is logged. When the queue is
+    full, nothing is queued and the 503's text says the session ends on its own instead.
+    An edge restart drops the queue, and such a session ends at its expiry (30 days). A code is single-use: a sign-in whose answer is
+    lost spends it. `GET
+    …/account` answers the account's email or null, and `…/account/orders` lists
+    submitted orders only, with no cost or note.
 - `backend/scadbuddy/payments/` — the payments seam (#4957, epic #4962, spec
   `2026-11-02-storefront-design.md`, plan `2026-11-07-storefront-phase-2-payments-deposits.md`):
   a payment request asks the customer for money through a provider's hosted page, or by

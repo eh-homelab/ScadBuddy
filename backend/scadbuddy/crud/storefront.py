@@ -12,6 +12,9 @@ comes back as a stream (`CrudStream`), which the edge relays without holding it 
 design request goes as multipart made from the files the edge spooled, read a chunk at a
 time in a thread, in one call that is never retried (its body cannot be sent twice); each
 file's name is escaped (`escape_filename`), and the CRUD side decodes it.
+An account call (#5283) also sends the session token of the edge's verified ``sb_session``
+cookie (`SESSION_HEADER`). A sign-in is sent once, never retried (a code is single use),
+and its new session's token comes back in that header, never in the body.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -33,6 +36,7 @@ from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    SESSION_HEADER,
     TURNSTILE_VERIFY_SECONDS,
     VISITOR_HEADER,
     escape_filename,
@@ -43,7 +47,7 @@ from scadbuddy.storefront.wire import (
 #: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
 #: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
-    {"listings", "renders", "drafts", "requests", "pay", "turnstile"}
+    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"}
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
@@ -74,6 +78,13 @@ async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> A
             yield chunk
         yield b"\r\n"
     yield f"--{boundary}--\r\n".encode()
+
+
+def _headers(visitor_id: str, client: str, session: str | None = None) -> dict[str, str]:
+    headers = {VISITOR_HEADER: visitor_id, CLIENT_HEADER: client}
+    if session is not None:
+        headers[SESSION_HEADER] = session
+    return headers
 
 
 class StorefrontCrud:
@@ -107,15 +118,53 @@ class StorefrontCrud:
         client: str,
         content: bytes | None = None,
         key: str | None = None,
+        session: str | None = None,
     ) -> Any:
         response = await self._crud.request(
             method,
             f"{BASE}{path}",
             content=content,
             idempotency_key=key,
-            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+            headers=_headers(visitor_id, client, session),
         )
         return response.json()
+
+    async def account_verify(
+        self, body: bytes, *, visitor_id: str, client: str, session: str | None
+    ) -> tuple[Any, str | None]:
+        """``POST …/storefront/account/verify``: the visitor's JSON body as it came, and
+        the session the browser held (which the sign-in ends). The account and the new
+        session's token, from `SESSION_HEADER` of the answer. Sent once, never retried
+        (``budget=0``): a code is single use, so a replay of a sign-in that committed
+        would only fail."""
+        response = await self._crud.request(
+            "POST",
+            f"{BASE}/account/verify",
+            content=body,
+            budget=0.0,
+            headers=_headers(visitor_id, client, session),
+        )
+        return response.json(), response.headers.get(SESSION_HEADER)
+
+    async def account_sign_out(self, *, visitor_id: str, client: str, session: str) -> None:
+        """``POST …/storefront/account/sign-out``: the session's row is deleted."""
+        await self._crud.request(
+            "POST",
+            f"{BASE}/account/sign-out",
+            headers=_headers(visitor_id, client, session),
+        )
+
+    async def account(self, *, visitor_id: str, client: str, session: str) -> Any:
+        """``GET …/storefront/account``: the session's account, or None."""
+        return await self._call(
+            "GET", "/account", visitor_id=visitor_id, client=client, session=session
+        )
+
+    async def account_orders(self, *, visitor_id: str, client: str, session: str) -> Any:
+        """``GET …/storefront/account/orders``: what the session's account sees."""
+        return await self._call(
+            "GET", "/account/orders", visitor_id=visitor_id, client=client, session=session
+        )
 
     async def listings(self, *, visitor_id: str, client: str) -> Any:
         """``GET …/storefront/listings``: the published listings."""

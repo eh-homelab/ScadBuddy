@@ -366,7 +366,11 @@ asks for a reason and records it.
 `add_revision`, `send_revision`, `answer_revision` (customer), `submit_order` (customer),
 `set_deposit`, `waive_balance`. On a `storefront` order, the `answer_revision` or
 `accept_quote` that leaves every open item `approved` runs `accept_order` in the same
-transaction, as the customer (decision 11). Each takes the order's row lock, writes an `order_events` row, and
+transaction, as the customer (decision 11). Only the customer's own accept (or the shop's
+"Accept for the customer") accepts the order this way; a shop's `cancel_item` that leaves
+every open item `approved` does not, and the shop accepts the order itself. When
+`accept_order` refuses (a payment in flight, a hold), the item's accept still commits and the
+audit row `order.accept_skipped` names the refusal. Each takes the order's row lock, writes an `order_events` row, and
 publishes `order.changed` / `order_item.changed`, as every transition does.
 
 ### 6.3 Refusals
@@ -376,7 +380,9 @@ New `LifecycleError` slugs: `item_has_no_design`, `revision_not_newest`,
 `revision_not_quoted` (a `together` send or accept with no quote of the revision),
 `revision_not_accepted` (a price accept, or "Add to model photos", before the design is
 accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
-(a write only a draft allows), `deposit_unpaid`, `balance_unpaid` (§8).
+(a write only a draft allows), `deposit_unpaid`, `balance_unpaid` (§8), `customer_accepts` (the shop's own accept of a revision, a quote or a
+custom price on a storefront order; and "Accept for the customer" by anyone but the shop's
+staff), `order_not_storefront` ("Accept for the customer" on a back-office order).
 
 ### 6.4 The customer actor
 
@@ -385,7 +391,9 @@ or account's id. The CRUD service builds it from the visitor id (and, once signe
 account) that the storefront sends in request headers: `X-ScadBuddy-Visitor` (the verified
 visitor id) and `X-ScadBuddy-Store-Client` (the client address the storefront resolved,
 which keys the per-client render limit, §5.4). It takes those headers only from a call
-made with the storefront's service credential, and never from a request body.
+made with the storefront's service credential, and never from a request body. A customer actor
+acts only on the order whose `customer_id` its principal names; any other order is 404
+`order_not_found`, so its existence does not leak.
 
 ## 7. Payments: what the storefront needs from #4957
 

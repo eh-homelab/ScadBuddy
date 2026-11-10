@@ -497,6 +497,16 @@ async def test_a_trigger_with_no_approved_grant_is_not_moved(
     assert left.notice == NEWER_NOTICE
 
 
+class _IdleMail:
+    """The storefront's mail (#5283) as `_run` uses it: bound to the loop, stopped at the end."""
+
+    def bind(self, loop: asyncio.AbstractEventLoop) -> None:
+        del loop
+
+    async def stop(self) -> None:
+        return None
+
+
 @pytest.mark.parametrize(
     ("switch", "flows", "registered"),
     [(True, "defs", True), (False, "defs", False), (True, None, False)],
@@ -526,6 +536,7 @@ async def test_the_component_registers_it_only_when_switched_on_with_flows(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_IdleMail(),
     )
     async with component._run(cast(component.OrdersComponent, orders)):
         await asyncio.sleep(0)
@@ -566,6 +577,7 @@ async def test_a_slow_registration_never_holds_up_the_start(
         ),
         lifecycle=None,
         integrations=None,
+        mail=_IdleMail(),
     )
     async with asyncio.timeout(5):
         async with component._run(cast(component.OrdersComponent, orders)):
@@ -651,10 +663,14 @@ class _Host:
             if self.send_error is not None:
                 raise Exception(self.send_error)
             if args["order_id"] in self.told:
-                # A refused call is the tool's failure, as the script sees it in a real run.
+                # What a later run sees: the tool's `prepareApproval` pre-check
+                # (agent `tools/orders.ts` `refuseIfTold`) refuses before anything parks or
+                # is claimed, and the agent's activity says it "was not run"
+                # (`toolActivities.ts` `refuseOrRetry`), wrapped by the harness.
                 raise Exception(
-                    'ToolFailedError: already_notified: the customer was already sent "ready" '
-                    "(message m1, sent)"
+                    "ToolFailedError: order_notify_customer_send was not run: already_notified: "
+                    'the customer was already sent "ready" (message m1, sent) since the order '
+                    "last changed status; name it in resend_of to send it again"
                 )
             if self.send_answer is not None:
                 return json.dumps(self.send_answer)
@@ -860,7 +876,9 @@ def test_a_second_run_on_the_same_ready_order_never_sends_twice() -> None:
     result = again.run()
     assert len(again.sends) == 1
     assert result["send"]["status"] == "refused"
-    assert result["send"]["reason"].startswith("already_notified")
+    assert result["send"]["reason"].startswith(
+        "order_notify_customer_send was not run: already_notified:"
+    )
     assert result["report"] == {"summary": "ok"}
 
 
@@ -905,6 +923,40 @@ def test_a_failed_send_is_refused_only_on_the_agents_refusal(
     result = host.run()
     assert len(host.sends) == 1
     assert result["send"] == {"status": status, "reason": reason}
+    assert result["report"] == {"summary": "ok"}
+
+
+#: The claim's 409 as a flow script sees it: the backend's `already_notified` detail
+#: (`orders/messages.py` `claim`, problem title "Conflict"), as agent `call.ts` `ok` words
+#: the failure and `registry.ts` `failedWith` wraps the backend's text, then the harness's
+#: `ToolFailedError`.
+CLAIM_RACE_409 = (
+    "ToolFailedError: record the message to order o1's customer failed (HTTP 409): "
+    + json.dumps(
+        {
+            "untrusted_data": {
+                "tool": "order_notify_customer_send",
+                "source": "the backend's error detail, which can relay Bambuddy's or another "
+                "upstream's own message",
+                "content": "Conflict: ORD-1's customer was already sent 'ready' (message m1, "
+                "sent) since its last status change; name it in resend_of to send it again",
+            }
+        },
+        indent=2,
+    )
+)
+
+
+def test_a_run_that_loses_the_claim_race_is_refused() -> None:
+    """Review of #5932: two runs both pass the `already_notified` pre-check, and a concurrent
+    run claims first after this run's check passed; this run's claim is then the backend's
+    409. It is refused, and nothing is sent again."""
+    host = _ready_host(send=True, send_error=CLAIM_RACE_409)
+    result = host.run()
+    assert len(host.sends) == 1
+    assert result["send"]["status"] == "refused"
+    assert "failed (HTTP 409)" in result["send"]["reason"]
+    assert "name it in resend_of to send it again" in result["send"]["reason"]
     assert result["report"] == {"summary": "ok"}
 
 

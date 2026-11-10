@@ -1129,8 +1129,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   (`/api/v1/internal/crud/print/runs`, `…/outcomes`, `…/operations`, `…/events`, #5298):
   the API writes each with its event and activity row, and takes only the
   `print.progress`, `print.settled`, `printer.report` and `printer.changed` events from
-  it, each logged once by its id. The worker does not `LISTEN`. It waits until the API
-  lists the `settings`, `runs`, `operations` and `events` areas before it serves. Its
+  it, each logged once by its id. Its copies in Bambuddy's library, their slices, its
+  slice starts, the print dialog's background slices, the projects' printers, the
+  projects without their folder yet and the destinations' touches go through them as
+  well (`…/uploads`, `…/slices`, `…/slice-starts`, `…/previews`, `…/project-targets`,
+  `…/folderless`, `…/destination-touches`; a slice start, a background slice and its
+  claim take an `Idempotency-Key`). The worker does not `LISTEN`. It waits until the API
+  lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
+  `events`, `printer-ensure`, `reprints`, `uploads` and `previews`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
@@ -2102,6 +2108,40 @@ over them) also runs, not required, on a PR that touches `e2e-stack/**`, `backen
 the workflow. The backend's native-run tests against the fake printer
 (`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`) run in every
 `backend-pytest` shard: the Dockerfile's `test` stage carries mosquitto and both fakes.
+
+### Storefront (#5284)
+
+The customer storefront runs as its own Deployment, `scadbuddy-storefront`, from the same
+image: `python -m scadbuddy.storefront` serves the edge on port 8083, with `GET /healthz`
+for its probes. Its public host is `https://michaels-workshop.nullreference.io` (the
+owner's choice on #5284). The back office keeps its own hosts. The plan is
+`docs/superpowers/plans/2026-11-10-storefront-phase-5-go-live.md`, and eh-homelab/clusters
+holds the manifests (until that PR merges, the deploy below skips the file with a notice).
+
+- **No database, no key, no Temporal.** The edge refuses to start when
+  `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
+  `SCADBUDDY_TEMPORAL_ADDRESS` is set (`storefront/settings.py` `FORBIDDEN_ENV`, #5295).
+  It is an HTTP client of the CRUD port only: `SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`,
+  with a projected ServiceAccount token (audience `scadbuddy`) named by
+  `SCADBUDDY_SERVICE_TOKEN_FILE`.
+- **Environment:** `SCADBUDDY_STOREFRONT_COOKIE_KEY_FILE` (32 bytes or more; a 1Password
+  item, `scadbuddy-storefront-cookie-key` in `homelab - prod`), `SCADBUDDY_STOREFRONT_PUBLIC_URL`
+  (an https origin), `SCADBUDDY_TRUSTED_PROXIES` (the Envoy proxy pods' CIDRs, so render
+  limits and the bot check see the visitor's address) and `SCADBUDDY_LOG_LEVEL`. The API
+  also takes `SCADBUDDY_STOREFRONT_PUBLIC_URL`: it builds the mailed links from it.
+- **Rolling the cookie key** signs every visitor and account out once. Change the
+  1Password item, then restart the Deployment.
+- **Routes on the public host:** everything goes to the storefront, except the prefix
+  `/api/v1/payments/webhooks/`, which goes to the API's port 8080 so providers can reach
+  their webhooks. A back-office path there answers the storefront's own page or 404, never
+  the back office.
+- **Network:** the API's port 8082 admits the storefront's pods. The storefront's egress
+  allows DNS, the API's 8082 and the tracing endpoint, and nothing else (no 5432, no
+  Temporal).
+- **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-storefront.yaml`
+  (`MANIFEST_STOREFRONT`) like the other workers: one digest-pinned `image:` line and the
+  three `scadbuddy.eh-homelab.io/{version,revision,source}` annotations, which the
+  manifest must carry or the deploy fails.
 
 ### Switching continuous deploy off
 

@@ -21,4 +21,10 @@ describe('the storefront App', () => {
     renderPage(<App />)
     expect(await screen.findByRole('link', { name: 'Your order' })).toBeInTheDocument()
   })
+
+  it('links to the account and serves its pages', async () => {
+    renderPage(<App />, { route: '/account/sign-in' })
+    expect(screen.getByRole('link', { name: 'Account' })).toHaveAttribute('href', '/account')
+    expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
+  })
 })

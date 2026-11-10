@@ -347,6 +347,15 @@ class Payments:
         await self._close_pages(r for r in after if r.status == "cancelled" and r.id not in before)
         return result
 
+    async def run_closing_linked[T](self, order_id: str, call: Callable[[], T]) -> T:
+        """`run_closing`, then a link for each request ``call`` opened: a lifecycle call
+        that may accept the order (a customer's last accept, #5283), which cancels the
+        order's open and failed requests and opens a balance request."""
+        before = await self.request_ids(order_id)
+        result = await self.run_closing(order_id, call)
+        await self.link_opened(order_id, before)
+        return result
+
     async def cancel_order(self, order_id: str, cancel: Callable[[], Order]) -> Order:
         """``cancel`` cancels the order and its open and failed requests."""
         return await self.run_closing(order_id, cancel)

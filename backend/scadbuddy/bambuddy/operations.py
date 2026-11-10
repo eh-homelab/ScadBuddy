@@ -156,7 +156,7 @@ def bambuddy_kinds_over(
                 await uploads.touch_destination("project", filed.project_id)
             else:
                 await uploads.touch_destination("folder", filed.folder_id)
-        except psycopg.Error:
+        except (psycopg.Error, CrudUnavailableError, CrudRefusedError):
             logger.warning("could not touch the destination of %s", meta.id, exc_info=True)
         return _json(filed)
 

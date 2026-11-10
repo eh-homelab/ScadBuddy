@@ -196,7 +196,7 @@ export function OrderItemsTable({
         return (
           <span className="flex flex-col items-end gap-1">
             {edits.price ? (
-              <UnitPriceEditor orderId={orderId} item={item} currency={currency} exponent={exponent} onChanged={onChanged} />
+              <UnitPriceEditor orderId={orderId} item={item} currency={currency} exponent={exponent} onChanged={onChanged} storefront={order.source === 'storefront'} />
             ) : (
               <UnitPrice item={item} currency={currency} exponent={exponent} />
             )}
@@ -498,7 +498,8 @@ function ItemMenu({
 /**
  * #4954 — the empty row under the items: a custom item's title, quantity and unit price,
  * and optional SKU, notes and "Requires printing". Enter in any field saves it, priced
- * and accepted as it is saved (`kind: "custom"`); the row then clears for the next one.
+ * as it is saved (`kind: "custom"`): accepted on a back-office order, `quoted` for the
+ * customer on a storefront one (#5283); the row then clears for the next one.
  * On an accepted, in-production or ready order (`mode` `after_acceptance`, #5541) the first
  * save asks the person to confirm, as Add item does; the second adds the item on that route,
  * its price `quoted`, not accepted. A change to the row asks again.
@@ -837,12 +838,16 @@ function UnitPriceEditor({
   currency,
   exponent,
   onChanged,
+  storefront = false,
 }: {
   orderId: string
   item: OrderItemDetail
   currency: string
   exponent: number
   onChanged: () => void
+  /** #5283 — a storefront order, whose customer accepts a price: the typed one is recorded
+   * only, and the item's drawer offers "Accept for the customer…". */
+  storefront?: boolean
 }) {
   const priced = editorQuote(item)
   const price = priced ? { minor: priced.quote.unit_price_minor, accepted: priced.accepted } : null
@@ -873,8 +878,17 @@ function UnitPriceEditor({
     let recorded = false
     try {
       if (item.kind === 'custom') {
-        // #4954 — a custom item's price is its own field, accepted as it is saved.
+        // #4954 — a custom item's price is its own field. The server accepts it as it is
+        // saved on a back-office order; on a storefront order it stays `quoted` for the
+        // customer to accept (#5283).
         await api.updateOrderItem(orderId, item.id, { unit_price_minor: minor })
+        setTyped(null)
+        onChanged()
+        return
+      }
+      if (storefront) {
+        // The customer accepts it: record a new price only.
+        if (reuse === null) await api.quoteOrderItem(orderId, item.id, { unit_price_minor: minor })
         setTyped(null)
         onChanged()
         return
@@ -928,9 +942,15 @@ function UnitPriceEditor({
         {/* Named without the item's title: the input beside it names the item, and a
             button named after it would match every `{ name: <title> }` lookup of the row's
             title link (Playwright matches names by substring). */}
-        <Button type="submit" size="xs" aria-label="Accept unit price" disabled={busy || (unchanged && settled)}>
-          Accept
-        </Button>
+        {storefront ? (
+          <Button type="submit" size="xs" aria-label="Record unit price" disabled={busy || unchanged}>
+            Record
+          </Button>
+        ) : (
+          <Button type="submit" size="xs" aria-label="Accept unit price" disabled={busy || (unchanged && settled)}>
+            Accept
+          </Button>
+        )}
       </span>
       {((price && !price.accepted) || item.revised_after_acceptance) && <NotAccepted />}
       {error && (

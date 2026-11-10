@@ -33,6 +33,8 @@ No address can be locked: nothing one client does stops another from signing in.
   on a laptop, and every code in the inbox works, whoever asked for it.
 - Requests are limited per address and client (`CODES_PER_ADDRESS_CLIENT`, 3 an hour)
   and per client (`CODES_PER_CLIENT`, 10 an hour); each refusal is `SignInLimitedError`.
+  A request the mail cap answers with None still counts toward both, so a client
+  hammering a capped address is limited like any other.
 - Mail to one address is capped (`CODES_PER_ADDRESS`, 20): the cap counts the address's
   live codes (unused and unexpired), from all clients. Past the cap `request_code` answers
   as usual, raising nothing, but makes no code and returns None, so no mail is sent. That
@@ -43,22 +45,27 @@ No address can be locked: nothing one client does stops another from signing in.
   others can send at most 20 an hour.
 - There is no address-wide guess budget: it would be a lock.
 
-The guess bound. Wrong guesses are limited per client: `FAILURES_PER_CLIENT` (20) an hour
-here, by the client key above, and on the edge the bot check's failure limits (#5857: per
-IPv4 address or IPv6 /64, and per /24 or /48). A guess is compared with every live code
-of the address, and the cap bounds those too: at most 20 are live. Each guess has a
-chance of at most 20 in 30^16 (4.3 * 10^23), about 4.6 * 10^-23. At G = 2 * 10^5 guesses
-an hour (10^4 clients each at its limit, solving the bot check every time), that is about
-10^-17 an hour, or 8 * 10^-14 a year, per address.
+The guess bound. Wrong guesses are limited per client key (above):
+`FAILURES_PER_CLIENT_ADDRESS` (20) an hour at one address, so a shared network (CGNAT,
+one /64) where one user guesses does not lose sign-in at other addresses, and
+`FAILURES_PER_CLIENT` (200) an hour at all addresses. On the edge the bot check's failure
+limits apply too (#5857: per IPv4 address or IPv6 /64, and per /24 or /48). A guess is
+compared with every live code of the address, and the cap bounds those: at most 20 are
+live. Each guess has a chance of at most 20 in 30^16 (4.3 * 10^23), about 4.6 * 10^-23.
+With N = 10^4 client keys, each solving the bot check every time: one address takes at
+most 20 * N = 2 * 10^5 guesses an hour, about 10^-17 an hour or 8 * 10^-14 a year; all
+addresses together take at most 200 * N = 2 * 10^6 guesses an hour, so the chance that
+any address falls is about 10^-16 an hour, or 8 * 10^-13 a year.
 
-The bot check: whenever a site key is set, the route that asks for a code takes
-Turnstile with action ``sign_up``, and the route that verifies one with ``sign_in`` (the
-account routes, a later PR). This extends spec §5.8.
+The bot check: whenever a site key is set, the route that verifies a code takes Turnstile
+with action ``sign_in`` (`storefront/routes.py` `account_verify`), and the route that
+asks for one (a later PR) is to take it with ``sign_up``. This extends spec §5.8.
 
-Concurrency: a request and a verify each hold transaction locks on the client, then on
-the address (`_lock`), before they count, read or spend anything, so requests at once
-never pass a cap and a code signs in at most once. Each caller must run them inside a
-transaction.
+Concurrency: a request and a verify each hold transaction locks on the client key, then
+on the address (`_lock`), before they count, read or spend anything. The key's lock
+covers its counts at all addresses (the 200), and the address's lock its counts there
+(the 20 and the caps), so requests at once never pass a cap, guesses at once never pass a
+limit, and a code signs in at most once. Each caller must run them inside a transaction.
 
 Enumeration: `request_code` does the same thing for every valid address, whether or not
 an account exists. Under the cap it makes and returns a code, and the route queues the
@@ -89,7 +96,7 @@ import math
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final
 
 from scadbuddy.core.proxies import client_key
@@ -107,7 +114,10 @@ CODES_PER_CLIENT: Final = 10
 #: Live codes one address may have, from all clients: the mail cap, and the most a
 #: verify compares.
 CODES_PER_ADDRESS: Final = 20
-FAILURES_PER_CLIENT: Final = 20
+#: Wrong guesses one client key may make at one address in `LIMIT_WINDOW`.
+FAILURES_PER_CLIENT_ADDRESS: Final = 20
+#: Wrong guesses one client key may make at all addresses in `LIMIT_WINDOW`.
+FAILURES_PER_CLIENT: Final = 200
 LIMIT_WINDOW: Final = timedelta(hours=1)
 #: How long a code lives; with the cap, others can mail an address at most 20 an hour.
 CODE_TTL: Final = timedelta(hours=1)
@@ -235,6 +245,14 @@ def request_code(conn: Conn, email: str, client: str) -> str | None:
         (CODES_PER_ADDRESS, address),
     ).fetchone()
     if capped is not None and capped["full"]:
+        # A row already used and expired: it counts toward this client's limits, never
+        # toward the cap, and no code can match it.
+        conn.execute(
+            "INSERT INTO storefront_sign_in_codes"
+            " (id, email, client, code_sha256, expires_at, used_at)"
+            " VALUES (%s, %s, %s, '', now(), now())",
+            (secrets.token_hex(16), address, client),
+        )
         return None
     code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LENGTH))
     row_id = secrets.token_hex(16)
@@ -269,13 +287,19 @@ def verify_code(
     """The sign-in ``code`` makes for ``email``, or None for any code that reads nothing
     (wrong, expired, used, or no code at all): one answer, so a
     caller says nothing more. `SignInLimitedError` once ``client`` guessed wrong
-    `FAILURES_PER_CLIENT` times in the window."""
+    `FAILURES_PER_CLIENT_ADDRESS` times at this address, or `FAILURES_PER_CLIENT` times at
+    all addresses, in the window.
+
+    A code is used once and never replayed, so no code hands out a session twice. The
+    trade: when the sign-in commits and its answer is lost on the way back, the person is
+    still signed out and the code is spent, so they ask for a new code."""
     try:
         address: str | None = normalized_email(email)
     except EmailInvalidError:
         address = None
     client = client_key(client)
     _lock(conn, client, address)
+    # Over either limit, refused before any code is compared.
     _limit(
         conn,
         "SELECT count(*) AS n, min(failed_at) AS oldest, now() AS now"
@@ -283,6 +307,15 @@ def verify_code(
         (client,),
         FAILURES_PER_CLIENT,
     )
+    if address is not None:
+        _limit(
+            conn,
+            "SELECT count(*) AS n, min(failed_at) AS oldest, now() AS now"
+            " FROM storefront_sign_in_failures"
+            " WHERE client = %s AND email = %s AND failed_at > now() - %s",
+            (client, address),
+            FAILURES_PER_CLIENT_ADDRESS,
+        )
     # A malformed visitor id answers as a wrong code does, before any code is read,
     # compared or marked used.
     if address is None or (visitor_id is not None and VISITOR_ID.fullmatch(visitor_id) is None):
@@ -392,13 +425,15 @@ def _join(conn: Conn, visitor_id: str, account_id: str) -> None:
 
 
 def account_for_session(conn: Conn, token: str) -> Account | None:
-    """The account of a live session, or None for any token that names none."""
+    """The account of a live session, or None for any token that names none, and for an
+    account whose customer no longer exists (submit and the order page need one)."""
     if _TOKEN.fullmatch(token) is None:
         return None
     row = conn.execute(
         "SELECT a.id, a.email, a.customer_id, s.id AS session_id,"
         " s.last_seen_at < now() - interval '1 minute' AS stale"
         " FROM storefront_sessions s JOIN storefront_accounts a ON a.id = s.account_id"
+        " JOIN customers c ON c.id = a.customer_id"
         " WHERE s.token_sha256 = %s AND s.expires_at > now()",
         (_token_digest(token),),
     ).fetchone()
@@ -455,3 +490,30 @@ def attach_order(conn: Conn, account_id: str, order_id: str) -> None:
         " ON CONFLICT DO NOTHING",
         (account_id, order_id),
     )
+
+
+@dataclass(frozen=True)
+class AccountOrderRow:
+    """One order as "Your orders" lists it: never a cost, a note or an event."""
+
+    id: str
+    number: str | None
+    status: str
+    created_at: datetime
+    submitted_at: datetime | None
+    items: int
+
+
+def account_orders(conn: Conn, account_id: str) -> list[AccountOrderRow]:
+    """`orders_of_account`'s submitted orders, newest first, as "Your orders" lists them.
+    An order never submitted (a cart, or one attached by its link before it was) is left
+    out."""
+    rows = conn.execute(
+        "SELECT o.id, o.number, o.status, o.created_at, o.submitted_at,"
+        " (SELECT count(*) FROM order_items i WHERE i.order_id = o.id) AS items"
+        f" FROM orders o WHERE o.id IN (SELECT id FROM ({_OWNED}) owned)"
+        " AND o.submitted_at IS NOT NULL"
+        " ORDER BY o.created_at DESC, o.id",
+        {"a": account_id},
+    ).fetchall()
+    return [AccountOrderRow(**row) for row in rows]

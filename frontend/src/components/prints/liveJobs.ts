@@ -64,6 +64,40 @@ export function liveJobs(cards: readonly NowCard[], queue: readonly QueueItem[])
   return jobs
 }
 
+/**
+ * #5940 — a working job as `usePrintQueue`'s `started` names it: the registry printer
+ * it is on, and its {@link LiveJob} key. #5946 — a pair, never one string, so no
+ * character in a printer's id can be taken for the line between the two.
+ */
+export interface StartedJob {
+  printerId: string
+  key: string
+}
+
+export function startedOn(printerId: string, key: string): StartedJob {
+  return { printerId, key }
+}
+
+/**
+ * #3745, #5940 — whether a printers read shows a job that started since the read
+ * `before`: a key a printer did not have then. A job that ended is no start. Nor is a
+ * job that had no archive on its printer then (`printer:<id>`) and has one now:
+ * ScadBuddy linked it, so it is the same job. A job that ended and another that started
+ * with an archive between two reads of the printers looks the same, and its queue item
+ * then leaves at the queue's next poll. Each list holds at most one job per printer, as
+ * {@link liveJobs} makes one working entry per card: `before` is keyed by printer, so
+ * a second job for one printer would replace the first (#5949).
+ */
+export function newStart(now: readonly StartedJob[], before: readonly StartedJob[]): boolean {
+  const was = new Map(before.map((job) => [job.printerId, job.key]))
+  return now.some(({ printerId, key }) => {
+    const last = was.get(printerId)
+    if (last === key) return false
+    const unlinked = `printer:${printerId}`
+    return !(last === unlinked && key !== unlinked)
+  })
+}
+
 /** How many pending items {@link liveJobs} leaves to Bambuddy's queue page. */
 export function queueTail(queue: readonly QueueItem[]): number {
   return Math.max(0, queue.filter((item) => item.status === 'pending').length - QUEUE_SHOWN)

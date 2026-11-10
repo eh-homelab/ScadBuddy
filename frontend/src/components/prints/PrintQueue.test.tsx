@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../../api/client'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import { PRINT_QUEUE, setPrintQueue } from '../../mocks/features/printQueue'
@@ -8,14 +8,14 @@ import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type * as Embed from '../../lib/embed'
 import { LiveJobItem } from './LiveJobItem'
-import { liveJobs, QUEUE_SHOWN, queueTail } from './liveJobs'
+import { liveJobs, QUEUE_SHOWN, queueTail, startedOn, type StartedJob } from './liveJobs'
 import { QUEUE_POLL_MS, QueueNotes, usePrintQueue } from './PrintQueue'
 
 /**
  * #3745 — the queue as the Prints page reads it: its notes, and its pending items as
  * rows of a list. `started` stands for the printers' working jobs.
  */
-function PrintQueue({ started = null }: { started?: string[] | null }) {
+function PrintQueue({ started = null }: { started?: StartedJob[] | null }) {
   const queue = usePrintQueue(true, started)
   const jobs = liveJobs([], queue.items ?? [])
   return (
@@ -37,6 +37,17 @@ vi.mock('../../lib/embed', async (original) => ({
   ...(await original<typeof Embed>()),
   isEmbedded: () => frame.embedded,
 }))
+
+/** #5946 — a filtered list's notes, and whether the queue has answered yet. */
+function FilteredNotes() {
+  const queue = usePrintQueue(true, null)
+  return (
+    <>
+      <QueueNotes queue={queue} tail={0} filtered />
+      <output data-testid="queue-read">{queue.items === null ? 'waiting' : 'read'}</output>
+    </>
+  )
+}
 
 afterEach(() => {
   frame.embedded = false
@@ -280,16 +291,71 @@ describe('PrintQueue (#2351)', () => {
     await screen.findByTestId('queue-item-259')
     expect(reads).toBe(1)
     // The printers' first read is no news, nor a job that ends.
-    rerender(<PrintQueue started={['archive:90']} />)
+    rerender(<PrintQueue started={[startedOn('p1', 'archive:90')]} />)
     rerender(<PrintQueue started={[]} />)
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20))
     })
     expect(reads).toBe(1)
     // A job that starts reads the queue now, not a poll later.
-    rerender(<PrintQueue started={['archive:37']} />)
+    rerender(<PrintQueue started={[startedOn('p2', 'archive:37')]} />)
     await waitFor(() => expect(reads).toBe(2))
     server.events.removeListener('request:start', listener)
+  })
+
+  it('takes a LAN job that ScadBuddy links for the same job, not a new start (#5940)', async () => {
+    let reads = 0
+    const listener = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === '/api/v1/farm/queue') reads += 1
+    }
+    server.events.on('request:start', listener)
+    onTestFinished(() => {
+      server.events.removeListener('request:start', listener)
+    })
+    const { rerender } = renderPage(<PrintQueue started={[startedOn('p1', 'printer:p1')]} />)
+    await screen.findByTestId('queue-item-259')
+    expect(reads).toBe(1)
+    // Its archive comes once ScadBuddy links it: `printer:p1` becomes `archive:41`.
+    rerender(<PrintQueue started={[startedOn('p1', 'archive:41')]} />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(reads).toBe(1)
+    // The next job on that printer is a start.
+    rerender(<PrintQueue started={[startedOn('p1', 'archive:42')]} />)
+    await waitFor(() => expect(reads).toBe(2))
+  })
+
+  it('tells printers apart by their id as given, a "|" in it included (#5946)', async () => {
+    let reads = 0
+    const listener = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname === '/api/v1/farm/queue') reads += 1
+    }
+    server.events.on('request:start', listener)
+    onTestFinished(() => {
+      server.events.removeListener('request:start', listener)
+    })
+    const odd = 'x|y'
+    const { rerender } = renderPage(<PrintQueue started={[startedOn(odd, `printer:${odd}`)]} />)
+    await screen.findByTestId('queue-item-259')
+    expect(reads).toBe(1)
+    rerender(<PrintQueue started={[startedOn(odd, 'archive:41')]} />)
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(reads).toBe(1)
+  })
+
+  it('draws nothing on a filtered list without the farm totals (#5946)', async () => {
+    server.use(http.get('/api/v1/farm/stats', () => HttpResponse.json({ detail: 'boom' }, { status: 502 })))
+    const stats = vi.spyOn(api, 'getFarmStats')
+    renderPage(<FilteredNotes />)
+    await waitFor(() => expect(stats).toHaveBeenCalled())
+    await act(async () => {
+      await stats.mock.results[0]!.value.catch(() => {})
+    })
+    await waitFor(() => expect(screen.getByTestId('queue-read')).toHaveTextContent('read'))
+    expect(screen.queryByTestId('print-queue')).toBeNull()
   })
 
   it('says a failed read', async () => {

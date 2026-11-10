@@ -289,6 +289,8 @@ async def test_a_failing_sweep_fails_its_activity(
                 # #5700: the payment pages whose close failed.
                 service=SimpleNamespace(retry_closes=_broken_async, settle_captures=_broken_async),
                 bank=None,  # #4961: the linked account, read by the stubbed sync
+                # #5283: the storefront mail left unsent.
+                mail=SimpleNamespace(send_queued=_broken(OSError("the database is gone"))),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -438,6 +440,11 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "sync_deposits", slow_deposits)
 
+    # #5283: the storefront mail left unsent, an SMTP send per row.
+    def slow_mail() -> int:
+        time.sleep(0.1)
+        return 0
+
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -460,6 +467,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             # #4959: the pending captures, a provider read or two per request.
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
             bank=None,  # #4961: the linked account, read by the stubbed sync
+            mail=SimpleNamespace(send_queued=slow_mail),
             temporal=object,
             store=None,
             refs=None,

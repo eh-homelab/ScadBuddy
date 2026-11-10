@@ -67,6 +67,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The customer's answer to a design revision (#5280, spec 2026-11-02 §4.3): the shop records it by hand in phase 1 and the customer gives it on the storefront in phase 4; an agent never answers for the customer.",
   },
   {
+    operation: 'POST /api/v1/orders/{order_id}/items/{item_id}/accept-for-customer',
+    reason:
+      "A person's \"Accept for the customer\" on a storefront order (#5283, spec 2026-11-02 §6.1): the shop's signed-in staff say why the customer did not accept themselves. The lifecycle refuses any actor but a browser (`customer_accepts`), so an agent never accepts for the customer.",
+  },
+  {
     operation: "POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model",
     reason: "A person's choice in the Revisions panel (#5280, spec 2026-11-02 §4.6); add_model_media adds the agent's own photos.",
   },
@@ -181,6 +186,17 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ).map((operation) => ({
     operation,
     reason: "Settings → Payments (#4957): a person connects, disconnects and chooses a provider; its credentials are never an agent's.",
+  })),
+  ...(
+    [
+      'GET /api/v1/storefront/mail',
+      'GET /api/v1/storefront/mail/password',
+      'PUT /api/v1/storefront/mail/password',
+      'DELETE /api/v1/storefront/mail/password',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason: "Settings → Storefront mail (#5283): a person sets the shop's SMTP password and reads the server's state; the password is sealed and never an agent's.",
   })),
   ...(
     [

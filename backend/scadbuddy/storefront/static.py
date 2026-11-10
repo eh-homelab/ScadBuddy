@@ -57,8 +57,8 @@ TURNSTILE_CSP: Final = STOREFRONT_CSP.replace(
 
 
 def storefront_csp(turnstile: bool) -> str:
-    """The page's policy: `TURNSTILE_CSP` while the bot check is on, else the first-party
-    `STOREFRONT_CSP`."""
+    """The page's policy: `TURNSTILE_CSP` while the check is on, or until the edge's first
+    site-key read succeeds (`SiteKey.ever_read`), else the first-party `STOREFRONT_CSP`."""
     return TURNSTILE_CSP if turnstile else STOREFRONT_CSP
 
 

@@ -434,6 +434,8 @@ export type RevisionAnswer = Revision['answer']
 export type Approval = OrderItem['approval']
 export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
 export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
+/** #5283 — the shop's "Accept for the customer" on a storefront order. */
+export type AcceptForCustomerInput = Schemas['AcceptForCustomerBody']
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']
@@ -477,6 +479,8 @@ export type ProviderStatus = Schemas['ProviderStatus']
 export type ProviderConnect = Schemas['ProviderConnect']
 /** #4961 — the shop's bank account linked through Plaid, beside the providers. */
 export type BankStatus = Schemas['BankStatus']
+export type MailPasswordStatus = Schemas['MailPasswordStatus']
+export type MailStatusView = Schemas['MailStatusView']
 export type BankKeys = Schemas['BankKeys']
 export type BankLinkCreate = Schemas['BankLinkCreate']
 export type BankUnlinked = Schemas['BankUnlinked']

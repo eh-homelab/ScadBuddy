@@ -259,6 +259,8 @@ import type {
   BankKeys,
   BankLinkCreate,
   BankStatus,
+  MailPasswordStatus,
+  MailStatusView,
   BankUnlinked,
   DepositSuggestion,
   OrderMessage,
@@ -271,6 +273,7 @@ import type {
   Quote,
   Revision,
   RevisionAnswerInput,
+  AcceptForCustomerInput,
   RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
@@ -2461,6 +2464,13 @@ export const api = {
   bankLinkToken: () => request<{ link_token: string }>('/payments/bank/link-token', { method: 'POST' }),
   linkBank: (body: BankLinkCreate) => request<BankStatus>('/payments/bank/link', { method: 'POST', body: JSON.stringify(body) }),
   unlinkBank: () => request<BankUnlinked>('/payments/bank/link', { method: 'DELETE' }),
+  /** #5283 — whether the storefront's SMTP password is set (and for which connection), and
+   * the mail server's last failure; the password is never read back. */
+  storefrontMail: () => request<MailStatusView>('/storefront/mail'),
+  storefrontMailPassword: () => request<MailPasswordStatus>('/storefront/mail/password'),
+  setStorefrontMailPassword: (password: string) =>
+    request<MailPasswordStatus>('/storefront/mail/password', { method: 'PUT', body: JSON.stringify({ password }) }),
+  forgetStorefrontMailPassword: () => request<MailPasswordStatus>('/storefront/mail/password', { method: 'DELETE' }),
   bankReconnected: () => request<void>('/payments/bank/reconnected', { method: 'POST' }),
   orderBankDeposits: (orderId: string) => request<DepositSuggestion[]>(`/orders/${seg(orderId)}/bank-deposits`),
   recordOrderBankDeposit: (orderId: string, transactionId: string) =>
@@ -2738,6 +2748,9 @@ export const api = {
   /** #4673 — the image a slice quote's sliced file holds for `plate` (404 when it holds none). */
   quotePlateThumbnailUrl: (orderId: string, itemId: string, quoteId: string, plate: number) =>
     `${API_BASE}/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/plates/${plate}/thumbnail`,
+  /** #5283 — the shop accepts a revision or a quote for a storefront order's customer, with a reason. */
+  acceptForCustomer: (orderId: string, itemId: string, body: AcceptForCustomerInput) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/accept-for-customer`, { method: 'POST', body: JSON.stringify(body) }),
   acceptOrderQuote: (orderId: string, itemId: string, quoteId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/quotes/${seg(quoteId)}/accept`, { method: 'POST' }),
   recordFulfilment: (orderId: string, itemId: string, body: FulfilmentInput) =>

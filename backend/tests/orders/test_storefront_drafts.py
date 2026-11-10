@@ -666,6 +666,38 @@ def test_the_visitor_sweep_takes_idle_visitors_with_no_order_and_old_renders(
     assert ages is not None and ages["n"] == 2
 
 
+def test_the_visitor_sweep_keeps_a_visitor_that_joined_an_account(
+    visitors: VisitorStore,
+    owner_conn: Connection[DictRow],
+    pool: PgPool,
+) -> None:
+    joined = visitors.ensure("j" * 43)
+    alone = visitors.ensure("k" * 43)
+    customer = owner_conn.execute(
+        "INSERT INTO customers (display_name) VALUES ('Ada') RETURNING id"
+    ).fetchone()
+    assert customer is not None
+    account = owner_conn.execute(
+        "INSERT INTO storefront_accounts (email, customer_id) VALUES ('ada@example.com', %s)"
+        " RETURNING id",
+        (customer["id"],),
+    ).fetchone()
+    assert account is not None
+    owner_conn.execute(
+        "UPDATE storefront_visitors SET account_id = %s WHERE id = %s",
+        (account["id"], joined.id),
+    )
+    for visitor in (joined, alone):
+        _idle(owner_conn, None, visitor)
+    with pool.connection() as conn:
+        swept = visitors.sweep(
+            conn, visitors_before=NOW - timedelta(days=30), renders_before=NOW - timedelta(days=1)
+        )
+    assert swept == (1, 0)
+    left = {r["id"] for r in owner_conn.execute("SELECT id FROM storefront_visitors")}
+    assert left == {joined.id}
+
+
 def _listed(lifecycle: Lifecycle) -> list[str]:
     """The sweep's candidates, read and released: a list that may be stale by the time
     each cart is taken."""

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from scadbuddy.api.orders import check_path
 from scadbuddy.orders.actor import current_actor
-from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.message_models import (
     STALE_SENDING_MINUTES,
@@ -39,6 +39,14 @@ class MessageCheck(BaseModel):
 
     #: The message that already told the customer since the order's last status change.
     already_notified: OrderMessage | None
+    #: The storefront mails this template's news to the order's customer itself (spec §8),
+    #: so a claim without `also_when_storefront_mails` would be recorded `skipped`.
+    storefront_mail: bool
+
+
+def _messages(orders: OrdersComponent) -> OrderMessages:
+    """The record, asking the storefront overlap with the lifecycle's running mail host."""
+    return OrderMessages(orders.store, orders.lifecycle.mail_host)
 
 
 async def _run[T](call: Callable[[], T]) -> T:
@@ -61,7 +69,7 @@ async def _run[T](call: Callable[[], T]) -> T:
 )
 async def list_order_messages(order_id: str, orders: OrdersDep) -> list[OrderMessage]:
     check_path(order_id)
-    return await _run(lambda: OrderMessages(orders.store).list(order_id))
+    return await _run(lambda: _messages(orders).list(order_id))
 
 
 @router.get(
@@ -71,16 +79,21 @@ async def list_order_messages(order_id: str, orders: OrdersDep) -> list[OrderMes
     description=(
         "Writes nothing. `already_notified` is the message that already told the customer "
         "this template since the order's last status change (`sent`, `sending` or "
-        "`unknown`), which a claim without `resend_of` is refused for. 409 "
-        "`order_not_submitted` for a cart."
+        "`unknown`), which a claim without `resend_of` is refused for. `storefront_mail` is "
+        "true when the storefront mails this template's news to the order's customer itself "
+        "(`quoted` and `shipped`, on an order with a live order link while a mail host is "
+        "set), so a claim without `also_when_storefront_mails` would be recorded `skipped`. "
+        "409 `order_not_submitted` for a cart."
     ),
 )
 async def check_order_message(
     order_id: str, orders: OrdersDep, template: Annotated[NotifyTemplate, Query()]
 ) -> MessageCheck:
     check_path(order_id)
-    told = await _run(lambda: OrderMessages(orders.store).told(order_id, template))
-    return MessageCheck(already_notified=told)
+    messages = _messages(orders)
+    told = await _run(lambda: messages.told(order_id, template))
+    mails = await _run(lambda: messages.storefront_mails(order_id, template))
+    return MessageCheck(already_notified=told, storefront_mail=mails)
 
 
 @router.post(
@@ -97,7 +110,11 @@ async def check_order_message(
         "status change and the body names no `resend_of`; 409 `message_in_flight` when "
         "`resend_of` is still being sent (a stale one reads `unknown` and may be sent "
         "again); 422 on `resend_of` for a message not of this order or of another "
-        "template; 409 `order_not_submitted` for a cart."
+        "template; 409 `order_not_submitted` for a cart. When the storefront mails this "
+        "template's news for the order itself and the body has no "
+        "`also_when_storefront_mails`, the message is recorded `skipped` (reason "
+        "`storefront_mail`, audit row `message.skipped`) instead of `sending`: the agent "
+        "sends nothing."
     ),
     responses={status.HTTP_200_OK: {"model": OrderMessage, "description": "Already claimed"}},
 )
@@ -111,7 +128,7 @@ async def claim_order_message(
     check_path(order_id, idempotency_key)
     by = current_actor()
     message, written = await _run(
-        lambda: OrderMessages(orders.store).claim(order_id, idempotency_key, body, by)
+        lambda: _messages(orders).claim(order_id, idempotency_key, body, by)
     )
     if not written:
         response.status_code = status.HTTP_200_OK
@@ -134,7 +151,7 @@ async def record_order_message_outcome(
 ) -> OrderMessage:
     check_path(order_id, message_id)
     by = current_actor()
-    return await _run(lambda: OrderMessages(orders.store).outcome(order_id, message_id, body, by))
+    return await _run(lambda: _messages(orders).outcome(order_id, message_id, body, by))
 
 
 @router.post(
@@ -151,4 +168,4 @@ async def mark_order_message_sent(
 ) -> OrderMessage:
     check_path(order_id, message_id)
     by = current_actor()
-    return await _run(lambda: OrderMessages(orders.store).mark_sent(order_id, message_id, by))
+    return await _run(lambda: _messages(orders).mark_sent(order_id, message_id, by))

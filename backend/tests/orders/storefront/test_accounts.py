@@ -23,10 +23,12 @@ from scadbuddy.orders.storefront.accounts import (
     CODES_PER_ADDRESS_CLIENT,
     CODES_PER_CLIENT,
     FAILURES_PER_CLIENT,
+    FAILURES_PER_CLIENT_ADDRESS,
     EmailInvalidError,
     SignedIn,
     SignInLimitedError,
     account_for_session,
+    account_orders,
     account_owns_order,
     attach_order,
     end_session,
@@ -260,10 +262,15 @@ def test_a_verify_compares_as_many_digests_whatever_codes_are_live(
 def test_the_mail_cap_makes_no_code_and_raises_nothing(conn: Conn) -> None:
     others = [code_for(conn, client=f"198.51.100.{n}") for n in range(CODES_PER_ADDRESS)]
     assert len({*others}) == CODES_PER_ADDRESS
-    # Past the cap: no code, no row, no refusal; the caller sends nothing.
+    # Past the cap: no live code, no refusal; the caller sends nothing. The request is
+    # kept as a used row, for the client's own limits.
     assert request_code(conn, EMAIL, CLIENT) is None
-    count = conn.execute("SELECT count(*) AS n FROM storefront_sign_in_codes").fetchone()
-    assert count is not None and count["n"] == CODES_PER_ADDRESS
+    count = conn.execute(
+        "SELECT count(*) FILTER (WHERE used_at IS NULL) AS live,"
+        " count(*) FILTER (WHERE client = %s) AS mine FROM storefront_sign_in_codes",
+        (CLIENT,),
+    ).fetchone()
+    assert count == {"live": CODES_PER_ADDRESS, "mine": 1}
     # Not a lockout: a code another client's request put in the inbox signs in here.
     assert verify(conn, others[-1]) is not None
     # Other addresses are not capped by it.
@@ -329,6 +336,36 @@ def test_requests_at_once_never_pass_a_cap(conn: Conn, pg_conninfo: str) -> None
     ).fetchone()
     assert rows is not None
     assert rows["ada"] == CODES_PER_ADDRESS_CLIENT and rows["n"] == issued == 8
+
+
+def test_wrong_guesses_at_one_address_never_stop_a_sign_in_at_another(conn: Conn) -> None:
+    other = code_for(conn, "bob@example.com", LAPTOP)
+    mine = code_for(conn)
+    for _ in range(FAILURES_PER_CLIENT_ADDRESS):
+        assert verify(conn, wrong(mine)) is None
+    with pytest.raises(SignInLimitedError):
+        verify(conn, mine)
+    # The same key (one shared network) still signs in at another address.
+    assert verify(conn, other, email="bob@example.com") is not None
+
+
+def test_a_key_is_refused_past_its_wrong_guesses_at_all_addresses(conn: Conn) -> None:
+    for n in range(FAILURES_PER_CLIENT):
+        assert verify(conn, "ABCD-EFGH-JKMN-PQRS", email=f"x{n % 20}@example.com") is None
+    with pytest.raises(SignInLimitedError):
+        verify(conn, "ABCD-EFGH-JKMN-PQRS", email="fresh@example.com")
+
+
+def test_requests_the_cap_answers_still_count_toward_the_clients_limits(conn: Conn) -> None:
+    fill_cap(conn)
+    for _ in range(CODES_PER_ADDRESS_CLIENT):
+        assert request_code(conn, EMAIL, CLIENT) is None
+    with pytest.raises(SignInLimitedError):
+        request_code(conn, EMAIL, CLIENT)
+    for n in range(CODES_PER_CLIENT - CODES_PER_ADDRESS_CLIENT):
+        request_code(conn, f"other{n}@example.com", CLIENT)
+    with pytest.raises(SignInLimitedError):
+        request_code(conn, "fresh@example.com", CLIENT)
 
 
 def test_wrong_guesses_are_limited_per_client(conn: Conn) -> None:
@@ -477,6 +514,41 @@ def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Con
     attach_order(conn, signed.account.id, stranger)
     attach_order(conn, signed.account.id, stranger)
     assert sorted(orders_of_account(conn, signed.account.id)) == sorted([mine, stranger])
+
+
+def test_a_sign_in_whose_answer_was_lost_spends_its_code(conn: Conn) -> None:
+    """Review of #5936: verify is single-use, never replayed, so it never hands out a
+    session twice. A sign-in that committed but whose answer never reached the browser
+    leaves the code spent: the person asks for a new one, which signs in."""
+    code = code_for(conn)
+    with conn.transaction():
+        lost = verify(conn, code)
+    assert lost is not None  # committed; the answer is then lost on its way back
+    with conn.transaction():
+        assert verify(conn, code) is None
+    fresh = code_for(conn)
+    with conn.transaction():
+        signed = verify(conn, fresh)
+    assert signed is not None and signed.account.id == lost.account.id
+    assert signed.session_token != lost.session_token
+
+
+def test_an_attached_order_never_submitted_is_not_listed(conn: Conn) -> None:
+    signed = sign_in(conn)
+    bob = customer(conn, "Bob", "bob@example.com")
+    row = conn.execute(
+        "INSERT INTO orders (source, customer_id, number, currency, created_by)"
+        """ VALUES ('back_office', %s, 9002, 'USD', '{"kind": "user", "principal": "shop"}')"""
+        " RETURNING id",
+        (bob,),
+    ).fetchone()
+    assert row is not None
+    unsubmitted = str(row["id"])
+    attach_order(conn, signed.account.id, unsubmitted)
+    assert unsubmitted in orders_of_account(conn, signed.account.id)
+    assert account_orders(conn, signed.account.id) == []
+    conn.execute("UPDATE orders SET submitted_at = now() WHERE id = %s", (unsubmitted,))
+    assert [o.id for o in account_orders(conn, signed.account.id)] == [unsubmitted]
 
 
 def test_a_visitor_of_another_account_is_not_moved(conn: Conn) -> None:
