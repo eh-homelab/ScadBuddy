@@ -333,3 +333,32 @@ def test_with_no_public_url_the_answer_is_the_same_and_no_mail_is_queued(
     answer = ask_code(client, "ada@example.com")
     assert (answer.status_code, answer.content) == (204, b"")
     assert mail_rows(settings) == []
+
+
+def code_rows(settings: Settings, email: str) -> int:
+    with psycopg.connect(settings.database_url, row_factory=dict_row) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM storefront_sign_in_codes WHERE email = %s", (email,)
+        ).fetchone()
+        assert row is not None
+        return int(row["n"])
+
+
+def test_an_address_the_mailer_refuses_is_one_422_whatever_its_cap(
+    client: TestClient, settings: Settings
+) -> None:
+    """Review of #5970: an address `request_code` takes but the mail's `check_address`
+    refuses is checked first, so it is 422 under its cap and at it, and makes no code."""
+    address = "a:b@example.com"
+    under = ask_code(client, address)
+    assert under.status_code == 422
+    assert under.json()["type"] == f"{PROBLEMS}account_body_invalid"
+    assert code_rows(settings, address) == 0
+    with psycopg.connect(settings.database_url, row_factory=dict_row) as conn:
+        for n in range(CODES_PER_ADDRESS):
+            assert request_code(conn, address, f"198.51.100.{n}") is not None
+    capped = ask_code(client, address, "192.0.2.50")
+    assert capped.status_code == 422
+    assert capped.json()["detail"] == under.json()["detail"]
+    assert code_rows(settings, address) == CODES_PER_ADDRESS
+    assert mail_rows(settings) == []

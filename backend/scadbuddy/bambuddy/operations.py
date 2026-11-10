@@ -258,7 +258,9 @@ def bambuddy_kinds_over(
         # Whose remembered print options apply, as for a print from the dialog: the
         # output's model, or the library file's own (#976, #1754).
         subject = PrintSubject.parse(link.subject)
-        slug = None if link.output_id is None else (await require(outputs, link.output_id)).slug
+        slug = (
+            link.slug if link.output_id is None else (await require(outputs, link.output_id)).slug
+        )
         return {
             "printer_id": printer_id,
             "plate_id": plate_id,

@@ -82,7 +82,7 @@ class SceneView(BaseModel):
     hand_edited: bool
 
 
-async def _create(
+async def create_mesh_model(
     ops: OperationCommands,
     response: Response,
     catalogue: Catalogue,
@@ -146,7 +146,7 @@ async def create_from_mesh(
         if body.library_file_id is not None
         else {"kind": "output", "output_id": body.output_id}
     )
-    return await _create(
+    return await create_mesh_model(
         ops,
         response,
         catalogue,
@@ -222,7 +222,7 @@ async def create_from_upload(
         async def claim(claims: ClaimStore) -> Held:
             return await asyncio.to_thread(claims.hold_file, path, digest)
 
-        return await _create(
+        return await create_mesh_model(
             ops,
             response,
             catalogue,
