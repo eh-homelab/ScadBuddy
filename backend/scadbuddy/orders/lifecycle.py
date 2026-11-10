@@ -935,14 +935,14 @@ class Lifecycle:
         primary one first; a contact is free text, and a malformed one is skipped). A
         `back_office` order gets one too. Audit row `order.customer_link_sent`. Refusals:
         `order_not_found`; `order_not_submitted` on a cart; 422 `no_email` with no ``to``
-        and no email contact; `EmailInvalidError`; `KekMissingError`."""
+        and no email contact that is one address; `EmailInvalidError`; `KekMissingError`."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
             address = to if to is not None else self._customer_email(conn, order)
             if address is None:
                 raise LifecycleError(
-                    "no_email", "to: the customer has no email address", unprocessable=True
+                    "no_email", "to: the customer has no email contact that is one address", unprocessable=True
                 )
             if to is not None:
                 address = check_address(address)

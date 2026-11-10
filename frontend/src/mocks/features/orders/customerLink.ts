@@ -6,7 +6,8 @@ import { now, PROBLEMS, problem, Refused, state } from './state'
 /**
  * #5283 — an order's customer link (backend `api/orders.py` `…/customer-link`): its newest
  * link's state, never the token. A send revokes the live link and makes a new one, to `to` or
- * the customer's primary email contact; with neither it is 422 `no_email`, as the backend's.
+ * the customer's first email contact that is one address (the primary one first); with neither it is
+ * 422 `no_email`, as the backend's.
  */
 
 const NONE: CustomerLinkState = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
