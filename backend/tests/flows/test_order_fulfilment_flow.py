@@ -4,6 +4,7 @@ edit or delete."""
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import uuid
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pydantic_monty
 import pytest
 
 from scadbuddy.core.events import OrderChanged, OrderItemChanged
@@ -651,10 +653,12 @@ class _Host:
             if self.send_error is not None:
                 raise Exception(self.send_error)
             if args["order_id"] in self.told:
-                # A refused call is the tool's failure, as the script sees it in a real run.
+                # The claim's 409 (`already_notified`), as the script sees it in a real run:
+                # the tool's own text (agent `call.ts` `ok`), wrapped by the harness.
                 raise Exception(
-                    'ToolFailedError: already_notified: the customer was already sent "ready" '
-                    "(message m1, sent)"
+                    f"ToolFailedError: record the message to order {args['order_id']}'s customer "
+                    'failed (HTTP 409): Conflict: ORD-1\'s customer was already sent "ready" '
+                    "(message m1, sent) since its last status change"
                 )
             if self.send_answer is not None:
                 return json.dumps(self.send_answer)
@@ -860,7 +864,8 @@ def test_a_second_run_on_the_same_ready_order_never_sends_twice() -> None:
     result = again.run()
     assert len(again.sends) == 1
     assert result["send"]["status"] == "refused"
-    assert result["send"]["reason"].startswith("already_notified")
+    assert "failed (HTTP 409)" in result["send"]["reason"]
+    assert "already sent" in result["send"]["reason"]
     assert result["report"] == {"summary": "ok"}
 
 
@@ -906,6 +911,46 @@ def test_a_failed_send_is_refused_only_on_the_agents_refusal(
     assert len(host.sends) == 1
     assert result["send"] == {"status": status, "reason": reason}
     assert result["report"] == {"summary": "ok"}
+
+
+def _send_refusal_source() -> str:
+    """The script's `send_refusal` function, as the script defines it."""
+    tree = ast.parse(SCRIPT)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "send_refusal":
+            return ast.get_source_segment(SCRIPT, node) or ""
+    raise AssertionError("SCRIPT defines no send_refusal")
+
+
+def _in_monty(code: str) -> Any:
+    """`code`'s last expression, run in Monty's sandbox as the flows harness runs a script."""
+    with pydantic_monty.Monty() as pool, pool.checkout() as session:
+        return session.feed_run(code)
+
+
+def test_send_refusal_runs_in_the_real_sandbox() -> None:
+    """Review of #5919: the script runs in Monty, not CPython, so `send_refusal`'s string
+    methods are checked there: one missing fails here, not in a customer's run."""
+    cases = {
+        "ToolFailedError: already_notified: told": "already_notified: told",
+        "ToolFailedError: record the message to order o1's customer failed (HTTP 409): told": (
+            "record the message to order o1's customer failed (HTTP 409): told"
+        ),
+        "ToolFailedError: order_notify_customer_send was not run: no worker": (
+            "order_notify_customer_send was not run: no worker"
+        ),
+        "ToolApprovalDenied: timed out": "the send was not approved: timed out",
+        "ToolFailedError: order_notify_customer_send may have run: no heartbeat": None,
+        "ToolFailedError: record the message failed (HTTP 503)": None,
+        "TimeoutError: no answer": None,
+    }
+    code = (
+        _send_refusal_source()
+        + "\nout = []\nfor text in "
+        + repr(list(cases))
+        + ":\n    out.append(send_refusal(Exception(text)))\nout\n"
+    )
+    assert _in_monty(code) == list(cases.values())
 
 
 def test_a_send_the_plugin_did_not_take_is_not_sent() -> None:
