@@ -597,7 +597,10 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     // The first check's wait is withdrawn just as its slow answer comes back.
     const first = new AbortController()
     const status = tabs.status.bind(tabs)
+    const second = new AbortController()
+    let secondReads = 0
     tabs.status = async (t, options) => {
+      if (options?.signal === second.signal) secondReads++
       const answer = await status(t, options)
       if (options?.signal === first.signal) first.abort()
       return answer
@@ -607,11 +610,12 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
       gate: 'harness',
       waitForTab: async ({ isBack }) => {
         await isBack(first.signal)
-        await isBack(new AbortController().signal)
+        await isBack(second.signal)
         return { back: true, why: 'reconnected' as const }
       },
     })
     // The second check asked the replica itself: the cancelled check's answer was not reused.
+    expect(secondReads).toBe(1)
     expect(seen.statuses).toBe(2)
   })
 
