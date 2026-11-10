@@ -28,6 +28,7 @@ const REASON: Record<string, string> = {
   transport: 'the plugin could not be reached',
   no_answer: 'no answer came',
   unavailable: 'the plugin was not available',
+  storefront_mail: 'the storefront mails it itself',
 }
 
 /** The send's slug when the agent refused it (`message_changed`), else null. */
