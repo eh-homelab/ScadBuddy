@@ -304,7 +304,8 @@ def verify_code(
         _failed(conn, client, address)
         return None
     conn.execute(
-        "UPDATE storefront_sign_in_codes SET used_at = now() WHERE email = %s AND used_at IS NULL",
+        "UPDATE storefront_sign_in_codes SET used_at = now()"
+        " WHERE email = %s AND used_at IS NULL AND expires_at > now()",
         (address,),
     )
     account = _account(conn, address)
@@ -348,7 +349,11 @@ def _account(conn: Conn, address: str) -> Account:
 
 def _customer(conn: Conn, address: str) -> str:
     """The one customer, not archived, with ``address`` as an email contact; else a new
-    customer with it as the primary email contact."""
+    customer with it as the primary email contact.
+
+    A customer with two email contacts may have an account for each, and both accounts
+    see that customer's orders. That is intended: each address is one the customer
+    gave the shop."""
     found = conn.execute(
         "SELECT DISTINCT c.id FROM customers c JOIN customer_contacts k ON k.customer_id = c.id"
         " WHERE c.archived_at IS NULL AND k.kind = 'email' AND lower(trim(k.value)) = %s",
@@ -371,8 +376,11 @@ def _customer(conn: Conn, address: str) -> str:
 def _join(conn: Conn, visitor_id: str, account_id: str) -> None:
     """The visitor joins the account, unless it belongs to another one already: a shared
     browser's earlier account keeps its orders."""
+    # An upsert: the edge normally registers the visitor first, but a visitor whose row
+    # was pruned (or never written) still joins, with a fresh row seen now.
     conn.execute(
-        "INSERT INTO storefront_visitors (token_sha256, account_id) VALUES (%s, %s)"
+        "INSERT INTO storefront_visitors (token_sha256, account_id, last_seen_at)"
+        " VALUES (%s, %s, now())"
         " ON CONFLICT (token_sha256) DO UPDATE SET account_id = EXCLUDED.account_id,"
         " last_seen_at = now() WHERE storefront_visitors.account_id IS NULL",
         (visitor_sha256(visitor_id), account_id),

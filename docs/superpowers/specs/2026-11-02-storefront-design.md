@@ -238,8 +238,10 @@ not a boundary (the review of PR #5287).
   storefront sends the verified id to the CRUD service in a header (§6.4).
   `storefront_visitors` stores the id's sha256, created and last-seen times, and the account it belongs to, if any. A draft order names its visitor
   (`orders.storefront_visitor_id`).
-- **Account.** "Sign up to save" asks for an email and sends a six-digit code **(call:
-  passwordless, no passwords to store or reset)**. `storefront_accounts`: email
+- **Account.** "Sign up to save" asks for an email and sends a sixteen-character code
+  from Crockford's base32 without 0 and 1, shown in groups of four, and the mail carries a
+  sign-in link (#5283, [comment 6757727525](https://github.com/eh-homelab/ScadBuddy/issues/5283#issuecomment-6757727525))
+  **(call: passwordless, no passwords to store or reset)**. `storefront_accounts`: email
   (verified), `customer_id`, created and last sign-in times. On verify, the visitor joins
   the account and its drafts move with it. An account is linked to a `customers` row: an
   existing customer with that verified email contact, else a new one. The shop sees the

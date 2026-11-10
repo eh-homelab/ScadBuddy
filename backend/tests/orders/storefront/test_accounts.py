@@ -413,6 +413,30 @@ def visitor_row(conn: Conn, visitor_id: str) -> str:
     return str(row["id"])
 
 
+def test_a_visitor_with_no_row_still_joins(conn: Conn) -> None:
+    unknown = "u" * 43
+    code = code_for(conn)
+    signed = verify_code(conn, EMAIL, code, CLIENT, visitor_id=unknown, previous_session=None)
+    assert signed is not None
+    row = conn.execute(
+        "SELECT account_id, last_seen_at > now() - interval '1 minute' AS fresh"
+        " FROM storefront_visitors WHERE token_sha256 = %s",
+        (hashlib.sha256(unknown.encode()).hexdigest(),),
+    ).fetchone()
+    assert row is not None and row["account_id"] == signed.account.id and row["fresh"]
+
+
+def test_a_sign_in_marks_only_live_codes_used(conn: Conn) -> None:
+    old = code_for(conn, client=LAPTOP)
+    conn.execute("UPDATE storefront_sign_in_codes SET expires_at = now() - interval '1 second'")
+    sign_in(conn)
+    row = conn.execute(
+        "SELECT used_at FROM storefront_sign_in_codes WHERE client = %s", (LAPTOP,)
+    ).fetchone()
+    assert row is not None and row["used_at"] is None
+    assert verify(conn, old, client=LAPTOP) is None
+
+
 def test_the_visitor_joins_the_account_and_its_orders_are_the_accounts(conn: Conn) -> None:
     code = code_for(conn)
     signed = verify_code(conn, EMAIL, code, CLIENT, visitor_id=VISITOR, previous_session=None)
