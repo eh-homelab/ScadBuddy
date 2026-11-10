@@ -143,5 +143,29 @@ describe('OrderMessages (#5660)', () => {
       expect(screen.queryByRole('status')).not.toBeInTheDocument()
       expect(screen.queryByText('Sent.')).not.toBeInTheDocument()
     })
+
+    // #5922's review: an error is the first order's too.
+    it('shows no error of a send that fails after the order changed', async () => {
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      let asked = false
+      server.use(
+        http.post('/api/v1/ai/orders/:id/messages/send', async () => {
+          asked = true
+          await held
+          return HttpResponse.json({ detail: 'already_notified: told', type: 'already_notified' }, { status: 409 })
+        }),
+      )
+      const { user, rerender } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+      const list = await screen.findByRole('list', { name: 'Customer messages' })
+      await user.click(within(list).getByRole('button', { name: 'Send again' }))
+      const shown = await screen.findByRole('region', { name: 'Message to send' })
+      await user.click(within(shown).getByRole('button', { name: 'Send' }))
+      await waitFor(() => expect(asked).toBe(true))
+      rerender(<OrderMessages orderId={ORDER_DRAFT} />)
+      release()
+      await waitFor(() => expect(within(screen.getByRole('list', { name: 'Customer messages' })).getByRole('button', { name: 'Send again' })).toBeEnabled())
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
   })
 })
