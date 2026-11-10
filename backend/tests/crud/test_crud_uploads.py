@@ -37,8 +37,8 @@ pytestmark = pytest.mark.requires_postgres
 
 OUTPUT = "a" * 32
 OTHER = "b" * 32
-#: What the print worker still runs on its pool: the copy lock, until #5298 Task 27 (Q19).
-STILL_SQL = {"copy_lock"}
+#: What the print worker still runs on SQL: nothing, since the copy lease (#5298 Task 27).
+STILL_SQL: set[str] = set()
 
 
 def copy(
@@ -78,7 +78,7 @@ async def crud(store: SettingsStore) -> AsyncIterator[CrudClient]:
 
 @pytest.fixture
 def remote(crud: CrudClient, store: SettingsStore) -> RemoteUploadStore:
-    return RemoteUploadStore(crud, store.pool)
+    return RemoteUploadStore(crud)
 
 
 def _rows(store: SettingsStore, table: str) -> list[dict[str, Any]]:
@@ -322,7 +322,7 @@ async def test_a_retried_activity_claims_under_the_same_key(
     assert first.id is not None and second.id is not None
 
     async def claim(row_id: int) -> bool:
-        return await RemoteUploadStore(crud, store.pool).claim_preview(row_id)
+        return await RemoteUploadStore(crud).claim_preview(row_id)
 
     assert await ActivityEnvironment().run(claim, first.id)
     await sql.retire_preview(first.id)

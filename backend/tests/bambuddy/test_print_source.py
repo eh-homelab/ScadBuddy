@@ -1072,7 +1072,7 @@ class _RecordFailsOnce(_Copies):
         super().__init__()
         self.failed = False
 
-    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+    async def record(self, output_id: str, copy: LibraryCopy, lease: object = None) -> None:
         if not self.failed:
             self.failed = True
             raise RuntimeError("the worker died")
