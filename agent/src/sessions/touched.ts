@@ -585,6 +585,12 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...ids(field(result, 'archive_ids')).map((id) => ({ type: 'print_archive' as const, id, action: 'modified' as const, before })),
     ]
   },
+  // #4698: the archive becomes a print of the model; a new model is created with it.
+  import_print: (input, result) => {
+    const archive = bambuddyId(input.archive_id)
+    const touched: Touch[] = archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+    return field(result, 'created_model') === true ? [...touched, ...modelCreated(result)] : touched
+  },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []

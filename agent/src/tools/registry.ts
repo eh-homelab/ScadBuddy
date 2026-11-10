@@ -34,6 +34,8 @@ export type BambuddyScope =
   | 'Manage Queue'
   | 'Manage Projects'
   | 'Manage Archives'
+  /** #4698: Bambuddy's `can_control_printer`, which reads the printer's storage over FTP. */
+  | 'Control Printer'
   /** #4747: Bambuddy's `settings:update`, which no API key holds while its auth is on. */
   | 'Settings (admin only)'
 

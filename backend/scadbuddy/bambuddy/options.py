@@ -38,7 +38,10 @@ def options_scope(subject: PrintSubject, slug: str | None) -> str | None:
     subject key ``library:<file id>``. Both live in the one store, the per-model maps
     (``model_print_options``, ``model_print_choices``); a model id is a slug or
     ``builtin:<slug>``, never ``library:``, so the two kinds never meet. ``None`` for
-    an output whose model is not known."""
+    an output whose model is not known. A print imported onto a model (#4698) takes
+    that model's, as its outputs' prints do."""
+    if subject.kind == "model":
+        return subject.slug
     return slug if subject.kind == "output" else subject.key
 
 

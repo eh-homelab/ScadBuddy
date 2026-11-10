@@ -310,6 +310,10 @@ class ArchiveExtra(BambuddyModel):
     printable_objects: dict[str, str] = Field(default_factory=dict)
     filament_slots: list[ArchiveFilamentSlot] = Field(default_factory=list)
     filament_used_mm: float | None = None
+    #: Bambuddy archived the print without its 3MF (#4698): the printer did not serve it
+    #: (``routes/archives.py`` line 589 at maziggy/bambuddy@f9080d1 reads this marker).
+    no_3mf_available: bool = False
+    no_3mf_reason: str | None = None
 
 
 class ArchiveDetail(Archive):
@@ -437,6 +441,27 @@ class PrinterMediaFile(BambuddyModel):
     mtime: datetime | None = None
     #: ``timelapse`` or ``ipcam``.
     kind: str
+
+
+class PrinterFile(BambuddyModel):
+    """One entry of ``GET /printers/{id}/files`` (Bambuddy ``services/bambu_ftp.py``
+    ``list_files``, lines 876-882 at f9080d1): ``mtime`` only when the FTP listing gave a
+    time it could read."""
+
+    name: str
+    path: str
+    is_directory: bool = False
+    size: int = 0
+    mtime: datetime | None = None
+
+
+class PrinterFiles(BambuddyModel):
+    """``GET /printers/{id}/files?path=`` (``routes/printers.py`` lines 1604-1629 at
+    f9080d1): ``warnings`` holds ``printer_unavailable`` when the printer did not answer."""
+
+    path: str
+    files: list[PrinterFile] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PrinterMedia(BambuddyModel):

@@ -29,6 +29,11 @@ share both tables (#1750).
 ``output_bambuddy_prints`` and ``library_bambuddy_prints``, which
 ``*_drop_legacy_print_links.sql`` (#1772) drops.
 
+``print_imports`` holds what each import read (#4698): an archive ScadBuddy did not
+start, that a person linked to a model. Its ``print_links`` row has the subject
+``model:<slug>`` and ``matched_by`` ``import``, and both rows are written in one
+transaction (`PrintLinkStore.record_import`), only while no link names the archive.
+
 ``lan_print_archives`` holds the LAN start each archive became (#5661). It is keyed by
 the archive, has no subject column, and is created by
 ``20261108T1604Z_lan_print_archives.sql``. The API writes it as it reads a link found by
@@ -44,19 +49,38 @@ queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol
 
-from psycopg import Connection
+from psycopg import AsyncConnection, Connection
+from psycopg.errors import LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.subject import PrintSubject
 
-MatchedBy = Literal["queue_item", "content_hash"]
+MatchedBy = Literal["queue_item", "content_hash", "import"]
+
+#: Where an imported print's 3MF was read from (#4698, `bambuddy/print_import.py`).
+ImportSource = Literal["archive", "archive_source", "library", "printer"]
+
+#: The first key of ``pg_advisory_xact_lock(int, int)`` that serialises the imports of
+#: one archive ("SBPI").
+IMPORT_LOCK_CLASS = 0x5342_5049
+#: The class of `PrintLinkStore.import_lock`'s session lock, one per archive.
+IMPORT_SESSION_LOCK_CLASS = 0x5342_5053
+#: How long an import waits for another import of the same archive before it is refused
+#: (`ImportBusyError`), so requests never pile up behind a slow FTP read or new model.
+IMPORT_LOCK_WAIT_S = 30.0
+
+
+class ImportBusyError(Exception):
+    """Another import of the archive held `PrintLinkStore.import_lock` past
+    `IMPORT_LOCK_WAIT_S`."""
 
 
 class PrintLink(BaseModel):
@@ -79,6 +103,28 @@ class LinkedPrint(PrintLink):
     library_file_id: int | None = None
     #: A library file's name as its queue item reported it; None for an output's.
     name: str | None = None
+    #: The model an imported print is linked to (#4698); None for an output's or a
+    #: library file's print.
+    slug: str | None = None
+
+
+class PrintImport(BaseModel):
+    """What an import read (#4698): the model, the source the person chose, and the file."""
+
+    archive_id: int
+    slug: str
+    source: ImportSource
+    #: The library file chosen, or the library copy a printer file was kept as.
+    library_file_id: int | None = None
+    printer_id: int | None = None
+    printer_path: str | None = None
+    filename: str
+    size: int | None = None
+    sha256: str | None = None
+    #: Whether the import made its model (``new_model``), so a repeat answers the same.
+    created_model: bool = False
+    #: Set by the database.
+    imported_at: datetime | None = None
 
 
 class PrintSend(BaseModel):
@@ -141,7 +187,8 @@ class ScadBuddyJob(BaseModel):
     subject: str
     output_id: str | None = None
     library_file_id: int | None = None
-    #: The output's template, when ScadBuddy knows it; ``None`` for a library file.
+    #: The output's template, when ScadBuddy knows it, or the model an imported print is
+    #: linked to (#4698, its reprint); ``None`` for a library file.
     slug: str | None = None
     #: The print run that queued or started it. ``None`` for ScadBuddy's reprint of an
     #: archive (an operation, not a run), and for an item only a link names (a send from
@@ -172,7 +219,7 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
         subject=subject.key,
         output_id=subject.output_id,
         library_file_id=subject.file_id,
-        slug=row["slug"] if subject.output_id is not None else None,
+        slug=row["slug"] if subject.output_id is not None else subject.slug,
         run_id=row["run_id"],
         archive_id=row["archive_id"],
         matched_by=matched_by,
@@ -238,11 +285,16 @@ class PendingLibraryPrint(BaseModel):
 #: A subject that is a library file's; every other is an output's.
 _LIBRARY = "subject LIKE 'library:%%'"
 
-#: Which of an archive's links owns it: an output's before a library file's, then the
-#: first seen, the lower subject on a tie. Every lookup of an owner orders by this, so
-#: the proxy's gate, the list and the detail can never name different owners (#609
-#: review). The ``print_links_owner`` index is in this order.
-_OWNER_ORDER = f"({_LIBRARY}), first_seen, subject, queue_item_id"
+#: A subject that is a model's: an imported print's (#4698).
+_MODEL = "subject LIKE 'model:%%'"
+
+#: Which of an archive's links owns it: an output's before a library file's, both before
+#: an import's (#4698 review: ScadBuddy links its own prints lazily, so a run's link can
+#: come after an import and must still own the print), then the first seen, the lower
+#: subject on a tie. Every lookup of an owner orders by this, so the proxy's gate, the
+#: list and the detail can never name different owners (#609 review). The
+#: ``print_links_owner`` index is in this order.
+_OWNER_ORDER = f"({_MODEL}), ({_LIBRARY}), first_seen, subject, queue_item_id"
 
 #: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
 _LINKED = "SELECT DISTINCT ON (archive_id) * FROM print_links"
@@ -282,7 +334,12 @@ def _last_run(sends: list[PrintSend]) -> list[PrintSend]:
 def _linked_print(row: dict[str, Any]) -> LinkedPrint:
     subject = PrintSubject.parse(row["subject"])
     return LinkedPrint.model_validate(
-        {**row, "output_id": subject.output_id, "library_file_id": subject.file_id}
+        {
+            **row,
+            "output_id": subject.output_id,
+            "library_file_id": subject.file_id,
+            "slug": subject.slug,
+        }
     )
 
 
@@ -335,6 +392,61 @@ class PrintLinkStore:
             for link in await self.for_subject(subject)
             if link.queue_item_id is not None
         }
+
+    async def record_import(
+        self, record: PrintImport, *, printer_id: int | None = None, plate_id: int | None = None
+    ) -> LinkedPrint | None:
+        """Link ``record.archive_id`` to its model (#4698), with ``record``: None once
+        both rows are written. When a link names the archive already, nothing is written
+        and that link (its owner) is returned. Imports of one archive are serialised, so
+        two at once cannot both win."""
+        return await asyncio.to_thread(self._record_import, record, printer_id, plate_id)
+
+    @asynccontextmanager
+    async def import_lock(self, archive_id: int) -> AsyncIterator[None]:
+        """Held, across every replica, while one request imports ``archive_id`` (#4698
+        review): from its owner check through the model it makes and the printer file it
+        keeps to `record_import`, so two imports of one archive never both make a model or
+        a library copy. A session lock on a connection of its own, as
+        `BambuddyUploadStore.copy_lock` takes one: the section spans Bambuddy calls and an
+        operation, longer than a pooled connection should be held. Its key differs from
+        `record_import`'s transaction lock, which runs inside it on another connection.
+        Waiting longer than `IMPORT_LOCK_WAIT_S` raises `ImportBusyError`."""
+        pool = self._pool
+        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
+        conn = await AsyncConnection.connect(conninfo, autocommit=True)
+        try:
+            # `lock_timeout` bounds an advisory lock's wait too.
+            await conn.execute(
+                "SELECT set_config('lock_timeout', %s, false)",
+                (f"{int(IMPORT_LOCK_WAIT_S * 1000)}ms",),
+            )
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(%s, %s)",
+                    (IMPORT_SESSION_LOCK_CLASS, archive_id % (2**31)),
+                )
+            except LockNotAvailable as e:
+                raise ImportBusyError(archive_id) from e
+            yield
+        finally:
+            await conn.close()
+
+    async def import_of(self, archive_id: int) -> PrintImport | None:
+        """What the import of ``archive_id`` read, or None when it was not imported."""
+        return await asyncio.to_thread(self._import_of, archive_id)
+
+    async def linked_among(self, archive_ids: Sequence[int]) -> set[int]:
+        """Which of ``archive_ids`` any link names (#4698: the unlinked archives)."""
+        if not archive_ids:
+            return set()
+        return await asyncio.to_thread(self._linked_among, sorted(set(archive_ids)))
+
+    async def delete_models(self, slugs: Iterable[str]) -> None:
+        """Forget the imports onto deleted models (#4698), as `delete_outputs` forgets
+        their outputs' prints."""
+        keys = [PrintSubject.model(slug).key for slug in slugs]
+        await asyncio.to_thread(self._delete_subjects, keys)
 
     async def delete_outputs(self, output_ids: Iterable[str]) -> None:
         """Forget deleted outputs' links and sends, and the attachments of each print no
@@ -488,6 +600,77 @@ class PrintLinkStore:
                     " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)",
                     (sorted({row["archive_id"] for row in unlinked}),),
                 )
+                conn.execute(
+                    "DELETE FROM print_imports AS i WHERE i.archive_id = ANY(%s) AND NOT"
+                    " EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = i.archive_id)",
+                    (sorted({row["archive_id"] for row in unlinked}),),
+                )
+
+    def _record_import(
+        self, record: PrintImport, printer_id: int | None, plate_id: int | None
+    ) -> LinkedPrint | None:
+        subject = PrintSubject.model(record.slug)
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
+            )
+            owner = conn.execute(
+                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
+                (record.archive_id,),
+            ).fetchone()
+            if owner is not None:
+                return _linked_print(dict(owner))
+            # A row left by a link forgotten since (a model deleted while its copy of
+            # this row stayed) is replaced.
+            conn.execute(
+                "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
+                " printer_id, printer_path, filename, size, sha256, created_model)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
+                " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
+                " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
+                " filename = EXCLUDED.filename, size = EXCLUDED.size,"
+                " sha256 = EXCLUDED.sha256, created_model = EXCLUDED.created_model,"
+                " imported_at = now()",
+                (
+                    record.archive_id,
+                    record.slug,
+                    record.source,
+                    record.library_file_id,
+                    record.printer_id,
+                    record.printer_path,
+                    record.filename,
+                    record.size,
+                    record.sha256,
+                    record.created_model,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO print_links"
+                " (subject, archive_id, matched_by, plate_id, printer_id, name)"
+                " VALUES (%s, %s, 'import', %s, %s, %s)",
+                (subject.key, record.archive_id, plate_id, printer_id, record.filename),
+            )
+        return None
+
+    def _import_of(self, archive_id: int) -> PrintImport | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT archive_id, slug, source, library_file_id, printer_id, printer_path,"
+                " filename, size, sha256, created_model, imported_at FROM print_imports"
+                " WHERE archive_id = %s",
+                (archive_id,),
+            ).fetchone()
+        return None if row is None else PrintImport.model_validate(dict(row))
+
+    def _linked_among(self, archive_ids: list[int]) -> set[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT archive_id FROM print_links WHERE archive_id = ANY(%s)",
+                (archive_ids,),
+            ).fetchall()
+        return {row["archive_id"] for row in rows}
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:

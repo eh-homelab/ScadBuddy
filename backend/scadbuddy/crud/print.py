@@ -372,6 +372,9 @@ API_ONLY = (
     "forget_project_target",
     "forget_all_project_targets",
     "destination_touches",
+    # The import routes' link pass for one archive (#4698, `linking.link_archive`).
+    "slice_owners",
+    "unhashed_near",
 )
 
 
