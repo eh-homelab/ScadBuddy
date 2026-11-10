@@ -77,13 +77,14 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Query, Request, status
+from fastapi import Depends, Query, Request, status
 from psycopg import Connection
 from psycopg.rows import DictRow
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     EventsDep,
+    OutputsDep,
     PrintLinksDep,
     PrintRunsDep,
     SettingsStoreDep,
@@ -497,9 +498,14 @@ async def library_gone(queue_item_id: int, links: PrintLinksDep) -> None:
     await links.library_gone(queue_item_id)
 
 
-def _last_prints(uploads: BambuddyUploadStore) -> OutputPrintStore:
-    # The pool the API's own `OutputStore.prints` is on (`api/deps.py`).
-    return OutputPrintStore(uploads.pool)
+def _last_prints(outputs: OutputsDep) -> OutputPrintStore:
+    """The API's own `OutputStore.prints` (`api/deps.py`)."""
+    if outputs.prints is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "this API keeps no last prints")
+    return outputs.prints
+
+
+LastPrintsDep = Annotated[OutputPrintStore, Depends(_last_prints)]
 
 
 @router.put(
@@ -507,10 +513,10 @@ def _last_prints(uploads: BambuddyUploadStore) -> OutputPrintStore:
     name="crud_print_record_last_print",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def record_last_print(output_id: str, body: LastPrintWrite, uploads: UploadsDep) -> None:
+async def record_last_print(output_id: str, body: LastPrintWrite, prints: LastPrintsDep) -> None:
     """Natural: set by the output's key, so a resend leaves what one send left."""
     await asyncio.to_thread(
-        _last_prints(uploads).record,
+        prints.record,
         output_id,
         queue_item_id=body.queue_item_id,
         slice_job_id=body.slice_job_id,
@@ -525,11 +531,11 @@ async def record_last_print(output_id: str, body: LastPrintWrite, uploads: Uploa
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def record_lan_last_print(
-    output_id: str, body: LanLastPrintWrite, uploads: UploadsDep
+    output_id: str, body: LanLastPrintWrite, prints: LastPrintsDep
 ) -> None:
     """Natural: recorded again for the same run it keeps the stage written since."""
     await asyncio.to_thread(
-        _last_prints(uploads).record_lan,
+        prints.record_lan,
         output_id,
         run_id=body.run_id,
         printer=body.printer,
@@ -542,10 +548,12 @@ async def record_lan_last_print(
     name="crud_print_record_lan_progress",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def record_lan_progress(output_id: str, body: LanProgressWrite, uploads: UploadsDep) -> None:
+async def record_lan_progress(
+    output_id: str, body: LanProgressWrite, prints: LastPrintsDep
+) -> None:
     """Natural: it sets the run's stage and whether it settled."""
     await asyncio.to_thread(
-        _last_prints(uploads).record_lan_progress,
+        prints.record_lan_progress,
         output_id,
         body.run_id,
         stage=body.stage,

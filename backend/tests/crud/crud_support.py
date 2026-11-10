@@ -72,6 +72,7 @@ from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, CheckoutLeases, InstallPermits
+from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings, SettingsStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
@@ -456,6 +457,8 @@ def print_crud_app(
         print_runs=SimpleNamespace(store=runs, outcomes=outcomes),
         print_links=links if links is not None else PrintLinkStore(store.pool),
         uploads=BambuddyUploadStore(store.pool),
+        # The API's `OutputStore`, of which the routes read only its last prints.
+        outputs=SimpleNamespace(prints=OutputPrintStore(store.pool)),
         events=events,
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
