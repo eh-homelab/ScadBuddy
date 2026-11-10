@@ -6,7 +6,7 @@ import type { Database } from '../src/db.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { payloadKeyLock, SubjectForgotten } from '../src/temporal/payloadCodec.js'
-import { BackendWorkspaceBlobs, WORKSPACE_BLOBS } from '../src/workspace/blobs.js'
+import { BackendWorkspaceBlobs, WORKSPACE_BLOB_REFS, WORKSPACE_BLOBS } from '../src/workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from '../src/workspace/sealing.js'
 import { SessionFiles, sha256, type WorkspaceRef } from '../src/workspace/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
@@ -17,7 +17,9 @@ import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.
 // under a key of the file's own, which is wrapped under the session's data key (a
 // principal's: the KEK). The backend here is a stand-in for its hidden routes
 // (backend api/internal_workspace.py, api/internal_blobs.py), which mint the URLs:
-// the store reaches it only through BackendWorkspaceBlobs, as in production.
+// the store reaches it only through BackendWorkspaceBlobs, as in production. Its holds
+// stand in for the backend's `blob_refs` rows of kind `ai_session_file`, which the agent
+// writes and drops only through its CRUD routes (backend api/crud_agent.py, #5299).
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
 const MIB = 1024 * 1024
@@ -34,6 +36,12 @@ class FakeBackend {
   puts = 0
   storeBackend: 'local' | 's3' = 's3'
   routes: 'ok' | 'unavailable' | 'missing' = 'ok'
+  /** `blob_refs`' `ai_session_file` rows: `<key> <holder>` → when held (ms). */
+  readonly holds = new Map<string, number>()
+  /** Every hold and release the agent sent, in order: `hold <key> <holder>`, `release …`. */
+  readonly refCalls: string[] = []
+  /** How the hold and release routes answer: `refused` as a 403. */
+  refs: 'ok' | 'refused' = 'ok'
   server!: Server
   base = ''
 
@@ -74,6 +82,7 @@ class FakeBackend {
         return { status: 503, body: JSON.stringify({ detail: 'the native slicer needs SCADBUDDY_API_INTERNAL_URL' }), type: 'application/problem+json' }
       }
     }
+    if (url.pathname.startsWith(WORKSPACE_BLOB_REFS)) return this.refsRoute(req.method ?? 'GET', url, body)
     if (req.method === 'POST' && url.pathname === `${WORKSPACE_BLOBS}/uploads`) {
       const pending = `pending-workspace-${randomBytes(16).toString('hex')}`
       return json({ pending_key: pending, url: { url: `${this.base}/blob/${pending}`, headers: { 'X-ScadBuddy-Transfer': 'tok' }, expires_at } })
@@ -104,6 +113,40 @@ class FakeBackend {
       return data ? { status: 200, body: data, type: 'application/octet-stream' } : { status: 404 }
     }
     return { status: 404 }
+  }
+
+  /** backend api/crud_agent.py's holds over `holds`. */
+  refsRoute(method: string, url: URL, body: Buffer): { status: number; body?: string; type?: string } {
+    const json = (value: unknown) => ({ status: 200, body: JSON.stringify(value), type: 'application/json' })
+    if (this.refs === 'refused') return { status: 403, body: JSON.stringify({ detail: 'not this credential' }), type: 'application/problem+json' }
+    if (method === 'POST') {
+      const { key, holder_id: holder, older_than_seconds: older } = JSON.parse(body.toString()) as { key: string; holder_id: string; older_than_seconds?: number }
+      const id = `${key} ${holder}`
+      if (url.pathname === WORKSPACE_BLOB_REFS) {
+        this.refCalls.push(`hold ${id}`)
+        this.holds.set(id, Date.now())
+        return { status: 204 }
+      }
+      this.refCalls.push(`release ${id}`)
+      const at = this.holds.get(id)
+      const released = at !== undefined && (older === undefined || at <= Date.now() - older * 1000)
+      if (released) this.holds.delete(id)
+      return json({ released })
+    }
+    const older = Number(url.searchParams.get('older_than_seconds') ?? 0)
+    const limit = Number(url.searchParams.get('limit') ?? 500)
+    const after = url.searchParams.get('after_holder_id')
+    const afterKey = url.searchParams.get('after_key') ?? ''
+    const listed = [...this.holds]
+      .filter(([, at]) => at <= Date.now() - older * 1000)
+      .map(([id]) => {
+        const [key, holder_id] = [id.slice(0, id.indexOf(' ')), id.slice(id.indexOf(' ') + 1)]
+        return { key: key!, holder_id: holder_id! }
+      })
+      .sort((a, b) => a.holder_id.localeCompare(b.holder_id) || a.key.localeCompare(b.key))
+      .filter((h) => after === null || h.holder_id > after || (h.holder_id === after && h.key > afterKey))
+      .slice(0, limit)
+    return json({ holds: listed, next: listed.length === limit ? listed.at(-1) : null })
   }
 }
 
@@ -136,8 +179,9 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     return r
   }
   const holders = async () =>
-    (await db.sql<{ key: string; holder_id: string }[]>`
-      SELECT key, holder_id FROM blob_refs WHERE holder_kind = 'ai_session_file' ORDER BY holder_id`).map((r) => [r.key, r.holder_id])
+    [...backend.holds.keys()]
+      .map((id) => [id.slice(0, id.indexOf(' ')), id.slice(id.indexOf(' ') + 1)])
+      .sort((a, b) => a[1]!.localeCompare(b[1]!) || a[0]!.localeCompare(b[0]!))
   const all = async (it: AsyncIterable<Buffer>) => {
     const parts: Buffer[] = []
     for await (const part of it) parts.push(part)
@@ -147,11 +191,6 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    // The backend's own table (backend migrations 20260928T0900Z, 20261007T0900Z), in the one database both use.
-    await db.sql`
-      CREATE TABLE IF NOT EXISTS blob_refs (
-        key text NOT NULL, holder_kind text NOT NULL, holder_id text NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (key, holder_kind, holder_id))`
     backend = new FakeBackend()
     await backend.start()
     sealing = new WorkspaceSealing(testPayloadKeys(db.sql), kek)
@@ -244,9 +283,10 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     ].sort((x, y) => x[1]!.localeCompare(y[1]!)))
     const childWs: WorkspaceRef = { kind: 'session', sessionId: child.id }
     expect((await files.read(childWs, 'a.txt'))?.bytes.toString()).toBe('from the parent')
-    // Forgetting the parent leaves the fork's copy whole.
+    // Forgetting the parent leaves the fork's copy whole; reconcile releases the parent's hold.
     await forgetSubject({ sql: db.sql }, `session-${sessionId}`)
     expect((await files.read(childWs, 'a.txt'))?.bytes.toString()).toBe('from the parent')
+    expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([[parent!.blob_key, `session:${child.id}/a.txt`]])
   })
 
@@ -254,6 +294,8 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     await files.write(ws, 'secret.txt', Buffer.from('forget me'))
     const kept = (await row('secret.txt'))!
     await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${sessionId}`)
+    // The rows went in a cascade, which tells the backend nothing: reconcile releases the hold.
+    expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
     expect(await holders()).toEqual([])
     expect(backend.blobs.has(kept.blob_key!)).toBe(true) // until the backend's sweep
     await expect(
@@ -331,7 +373,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
 
     it('refuses a write when the backend cannot be reached to say where files go', async () => {
       await backend.stop()
-      await refusedWith(files, /could not be reached/)
+      await refusedWith(files, /the backend is not up yet \(\/healthz\)/)
       await backend.start()
     })
 
@@ -458,6 +500,130 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${child.id}`).toHaveLength(0)
       // The key the creation committed went with the row.
       expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
+    })
+  })
+  describe('holds through the CRUD routes, not a trigger (#5299)', () => {
+    it('holds a blob before the row that names it is written', async () => {
+      let atHold: unknown = 'not held'
+      const hold = BackendWorkspaceBlobs.prototype.hold
+      const store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      store.hold = async function (key: string, holder: string) {
+        atHold = (await row('a.txt')) ?? null
+        return hold.call(this, key, holder)
+      }
+      const watched = new SessionFiles(db.sql, { blobs: { store, sealing } })
+      await watched.write(ws, 'a.txt', Buffer.from('held first'))
+      expect(atHold).toBeNull()
+      const stored = await row('a.txt')
+      expect(backend.refCalls).toEqual([`hold ${stored!.blob_key} session:${sessionId}/a.txt`])
+    })
+
+    it('fails a write the backend refuses to hold, and writes no row', async () => {
+      backend.refs = 'refused'
+      const error = await files.write(ws, 'a.txt', Buffer.from('unheld')).catch((err: unknown) => err)
+      expect(error).toMatchObject({ code: 'unavailable' })
+      expect((error as Error).message).toMatch(/refused the workspace blob hold \(HTTP 403/)
+      expect((error as Error).message).toMatch(/nothing was written/)
+      expect(await row('a.txt')).toBeUndefined()
+    })
+
+    it('releases the old blob after a replacement, a delete and a sweep', async () => {
+      await files.write(ws, 'a.txt', Buffer.from('one'))
+      const first = (await row('a.txt'))!.blob_key!
+      await files.write(ws, 'a.txt', Buffer.from('two'))
+      const second = (await row('a.txt'))!.blob_key!
+      const holder = `session:${sessionId}/a.txt`
+      expect(backend.refCalls).toEqual([`hold ${first} ${holder}`, `hold ${second} ${holder}`, `release ${first} ${holder}`])
+      expect(await holders()).toEqual([[second, holder]])
+      expect(await files.delete(ws, 'a.txt')).toBe(true)
+      expect(backend.refCalls.at(-1)).toBe(`release ${second} ${holder}`)
+      expect(await holders()).toEqual([])
+      const principal: WorkspaceRef = { kind: 'principal', principalKind: 'bearer', principalId: 'token:t1' }
+      await files.write(principal, 'p.txt', Buffer.from('mine'))
+      const swept = (await row('p.txt', 'principal:bearer:token:t1'))!.blob_key!
+      expect(await files.sweep(0)).toBe(1)
+      expect(backend.refCalls.at(-1)).toBe(`release ${swept} principal:bearer:token:t1/p.txt`)
+      expect(await holders()).toEqual([])
+    })
+
+    it('deletes the row when a release fails, and reconcile releases the hold later', async () => {
+      await files.write(ws, 'a.txt', Buffer.from('one'))
+      const key = (await row('a.txt'))!.blob_key!
+      backend.refs = 'refused'
+      expect(await files.delete(ws, 'a.txt')).toBe(true)
+      expect(await holders()).toEqual([[key, `session:${sessionId}/a.txt`]])
+      backend.refs = 'ok'
+      expect(await files.reconcile(0)).toEqual({ released: 1, held: 0 })
+      expect(await holders()).toEqual([])
+    })
+
+    it('releases an orphan hold older than the grace, and keeps a younger one', async () => {
+      const old = `workspace-${'1'.repeat(64)}`
+      const young = `workspace-${'2'.repeat(64)}`
+      backend.holds.set(`${old} session:${sessionId}/gone.txt`, Date.now() - 2 * 3600_000)
+      backend.holds.set(`${young} session:${sessionId}/coming.txt`, Date.now())
+      await files.write(ws, 'kept.txt', Buffer.from('kept'))
+      const kept = (await row('kept.txt'))!.blob_key!
+      // An hour's grace: only the old orphan goes; the young one may be a write about to land.
+      expect(await files.reconcile(3600_000)).toEqual({ released: 1, held: 0 })
+      expect(await holders()).toEqual([
+        [young, `session:${sessionId}/coming.txt`],
+        [kept, `session:${sessionId}/kept.txt`],
+      ])
+    })
+
+    it('releases a hold whose row names another blob, and holds a row no hold names', async () => {
+      await files.write(ws, 'a.txt', Buffer.from('one'))
+      const key = (await row('a.txt'))!.blob_key!
+      const stale = `workspace-${'3'.repeat(64)}`
+      backend.holds.set(`${stale} session:${sessionId}/a.txt`, Date.now() - 2 * 3600_000)
+      // A row whose hold was lost (written by an older pod after the trigger was dropped, say).
+      backend.holds.delete(`${key} session:${sessionId}/a.txt`)
+      expect(await files.reconcile(3600_000)).toEqual({ released: 1, held: 1 })
+      expect(await holders()).toEqual([[key, `session:${sessionId}/a.txt`]])
+    })
+
+    it('reconciles across pages of holds', async () => {
+      for (let n = 0; n < 501; n += 1) backend.holds.set(`workspace-${n.toString(16).padStart(64, '0')} session:${sessionId}/f${n}`, 0)
+      expect(await files.reconcile(0)).toEqual({ released: 501, held: 0 })
+      expect(backend.holds.size).toBe(0)
+    })
+
+    it('holds nothing when the backend keeps the bytes in Postgres (store_backend local)', async () => {
+      backend.storeBackend = 'local'
+      await files.write(ws, 'a.txt', Buffer.from('inline'))
+      expect(await files.delete(ws, 'a.txt')).toBe(true)
+      expect(backend.refCalls).toEqual([])
+    })
+  })
+  describe('review of 610034b0b', () => {
+    it('reconciles on one replica at a time: a second caller skips while the lock is held', async () => {
+      const orphan = `workspace-${'4'.repeat(64)}`
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      const replica = (store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })) =>
+        new SessionFiles(db.sql, { locks: db.locks, blobs: { store, sealing } })
+      // The first replica's reconcile holds the lock while it lists the holds.
+      let listing!: () => void
+      const listed = new Promise<void>((resolve) => (listing = resolve))
+      let finish!: () => void
+      const finished = new Promise<void>((resolve) => (finish = resolve))
+      const slow = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      const list = slow.listHolds.bind(slow)
+      slow.listHolds = async (olderThanSeconds) => {
+        listing()
+        await finished
+        return list(olderThanSeconds)
+      }
+      const first = replica(slow).reconcile(0)
+      await listed
+      const second = replica()
+      expect(await second.reconcile(0)).toEqual({ released: 0, held: 0, skipped: true })
+      expect(backend.holds.size).toBe(1)
+      finish()
+      expect(await first).toEqual({ released: 1, held: 0 })
+      // Once the lock is free again the next caller runs.
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      expect(await second.reconcile(0)).toEqual({ released: 1, held: 0 })
     })
   })
 })

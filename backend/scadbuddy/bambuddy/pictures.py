@@ -50,10 +50,15 @@ def printer_cover(printer_id: int, archive_id: int | None, job_name: str | None)
     The job's archive keys it: Bambuddy makes one archive per print and its status names
     it while the job runs or is paused (``current_archive_id``, maziggy/bambuddy f9080d1
     ``backend/app/api/routes/printers.py`` lines 730-748), so the browser's copy of one
-    print's cover is never shown for another. Job names repeat (every keychain variant
-    prints as ``Name_Keychain_Font_Basic_Plate_1``), so with no archive the name only
-    changes the URL when the job's name changes, and the route lets no browser keep that
-    cover (`api/farm.py` `get_printer_cover`); with neither, nothing keys it."""
+    print's cover is never shown for another. That holds only for this key. Job names
+    repeat (every keychain variant prints as ``Name_Keychain_Font_Basic_Plate_1``), and
+    the status carries nothing else per job (``PrinterStatus`` at f9080d1,
+    ``backend/app/schemas/printer.py`` from line 347: ``subtask_name``, ``gcode_file``,
+    ``current_archive_id`` and the per-plate ``current_plate_id``). So with no archive the
+    name keys the URL, which changes only when the job's name does: a card that stays
+    on the page keeps one job's cover for the next job of the same name, until the page
+    loads again. The route lets no browser keep such a cover (`api/farm.py`
+    `get_printer_cover`), so a load always asks again. With neither, nothing keys it."""
     url = f"{FARM}/printers/{printer_id}/cover"
     if archive_id is not None:
         return f"{url}?{urlencode({'archive': archive_id})}"

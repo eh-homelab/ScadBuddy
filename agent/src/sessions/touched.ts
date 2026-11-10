@@ -329,6 +329,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_cancel: () => [],
   order_reopen: () => [],
   order_request_payment: () => [],
+  // A customer message (#5660): the order's messages and its audit line record it.
+  order_notify_customer_send: () => [],
   // Deposits, the waivers and the shipping option (#5281): the order's audit line records them.
   order_deposit_set: () => [],
   order_deposit_waive: () => [],

@@ -4343,7 +4343,12 @@ class Lifecycle:
                 if (
                     existing.order_item_id != item_id
                     or existing.purpose != purpose
-                    # A production attempt names the item's current revision (#5704).
+                    # A production claim names the item's current revision (#5704), and the
+                    # request names none, so only a test print's revision is compared. A
+                    # production claim's revision cannot move while its print may still
+                    # start: no revision is added while a print of the item is in flight
+                    # (`print_in_flight`). Once the print has ended, a retry gets back the
+                    # run's claim with the revision it printed, which is the right answer.
                     or (purpose == "test" and existing.revision_id != revision_id)
                 ):
                     # One key on `/print` and on a revision's `/test-print` is two

@@ -14,6 +14,7 @@ import {
   UserImagesSchema,
 } from '../src/sessions/images.js'
 import { event } from '../src/sessions/protocol.js'
+import { withNote } from '../src/sessions/turnCore.js'
 import { condense } from '../src/tools/sessions.js'
 import { frontendClientMessages, frontendParseServerEvent } from './support/frontendProtocol.js'
 
@@ -162,6 +163,16 @@ describe('userPrompt (#1866)', () => {
     const prompt = userPrompt('again', [image('image/png', PNG)])
     expect(await all(prompt)).toEqual(await all(prompt))
     expect(await all(prompt)).toHaveLength(1)
+  })
+
+  it("takes a directory note before the user's text, after the images, again on each iteration (#5867)", async () => {
+    const prompt = withNote(userPrompt('look', [image('image/png', PNG)]), 'moved')
+    if (typeof prompt === 'string') throw new Error('a stream stays a stream')
+    const [message] = await all(prompt)
+    expect((message?.message.content as { type: string; text?: string }[]).map((b) => b.text ?? b.type)).toEqual(['image', 'moved', 'look'])
+    expect(await all(prompt)).toEqual([message])
+    expect(withNote('look', 'moved')).toBe('moved\n\nlook')
+    expect(withNote('look', undefined)).toBe('look')
   })
 })
 

@@ -1,6 +1,8 @@
 """Take back a caller's database role (#5298 Task 11): every privilege the API granted it
 in the current schema, and its row policies, so the deployment can drop the role
-(CNPG's `ensure: absent`). The role itself stays; dropping it is the deployment's.
+(CNPG's `ensure: absent`). The role itself stays; dropping it is the deployment's. A
+caller that keeps its role loses only the tables dropped from its list
+(`RETIRED_GRANTS`, `revoke_tables`).
 
 The API granted a caller's role its tables and sequences (`render/worker_role.py`
 `grant_role`, from `auth/caller_grants.py`), USAGE on the schema, its credential view
@@ -15,6 +17,7 @@ belongs to granted, and leaves the rest.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from psycopg import Connection, sql
@@ -28,9 +31,46 @@ RETIRED_ROLES: tuple[str, ...] = ("scadbuddy_projects",)
 
 
 def revoke_retired(conn: Connection[Any]) -> list[str]:
-    """`revoke_role` each of `RETIRED_ROLES`, after the grants at start; the roles that
-    still held something."""
-    return [role for role in RETIRED_ROLES if revoke_role(conn, role)]
+    """`revoke_role` each of `RETIRED_ROLES`, and `revoke_tables` each of
+    `RETIRED_GRANTS`, after the grants at start; the roles that still held something."""
+    roles = [role for role in RETIRED_ROLES if revoke_role(conn, role)]
+    roles += [role for role, tables in RETIRED_GRANTS.items() if revoke_tables(conn, role, tables)]
+    return roles
+
+
+#: The tables a caller's role no longer touches, taken back at every start: `grant_role`
+#: never revokes, so a table dropped from a caller's list (`auth/caller_grants.py`) is
+#: listed here. The agent's `blob_refs`: its workspace files are held through the CRUD
+#: routes (`api/crud_agent.py`, #5299), no longer by its trigger.
+RETIRED_GRANTS: Mapping[str, tuple[str, ...]] = {"scadbuddy_agent": ("blob_refs",)}
+
+
+def revoke_tables(conn: Connection[Any], role: str, tables: tuple[str, ...]) -> list[str]:
+    """Revoke what this connection's roles granted ``role`` on ``tables`` in the current
+    schema, under `GRANT_LOCK`; the tables it took back. Idempotent; a missing role or
+    table, or a role this connection is a member of, is a no-op."""
+    revoked: list[str] = []
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
+        cur = conn.cursor(row_factory=tuple_row)
+        found = cur.execute(MINE, (role,)).fetchone()
+        if found is None or found[0]:
+            return revoked
+        held = cur.execute(
+            "SELECT DISTINCT c.relname FROM pg_class c, aclexplode(c.relacl) a"
+            " WHERE c.relnamespace = current_schema()::regnamespace AND c.relname = ANY(%s)"
+            " AND a.grantee = %s::regrole AND pg_has_role(current_user, a.grantor, 'MEMBER')"
+            " ORDER BY c.relname",
+            (list(tables), role),
+        ).fetchall()
+        for (name,) in held:
+            conn.execute(
+                sql.SQL("REVOKE ALL ON TABLE {} FROM {}").format(
+                    sql.Identifier(name), sql.Identifier(role)
+                )
+            )
+            revoked.append(name)
+    return revoked
 
 
 #: Whether the role named is ``current_user`` or one it is a member of, through

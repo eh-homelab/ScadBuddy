@@ -9,7 +9,9 @@ API has migrated and granted (`open_for_caller`), while a worker on the API's ow
 (the deployment before it makes the roles) migrates as it always did.
 
 The projects worker has no list and no role: it holds no database (#5298), and the API
-takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`).
+takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`). A
+table dropped from a list is taken back at every start too (`auth/revoke.py`
+`RETIRED_GRANTS`): `grant_role` never revokes.
 
 A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
@@ -105,16 +107,16 @@ PRINT_SEQUENCES = (
     "native_slices_id_seq",
 )
 
-#: What the agent (`agent/`) touches of the backend's: it follows the event log, reads
-#: flow runs and their decisions, and its session files' trigger
-#: (`ai_session_files_hold_blob`, not SECURITY DEFINER) holds and drops `blob_refs`.
+#: What the agent (`agent/`) touches of the backend's: it follows the event log, and reads
+#: flow runs and their decisions. Its workspace files' `blob_refs` holds go through the
+#: CRUD routes (`api/crud_agent.py`, #5299); `auth/revoke.py` `RETIRED_GRANTS` takes back
+#: the table it once held.
 AGENT_GRANTS: Grants = {
     "events": _READ,
     "workflow_runs": _READ,
     "workflow_run_decisions": _READ,
     "flow_grants": ("SELECT", "UPDATE"),
     "flow_grant_uses": _READ,
-    "blob_refs": ("SELECT", "INSERT", "DELETE"),
 }
 
 GRANTS: Mapping[ServiceCaller, Grants] = {

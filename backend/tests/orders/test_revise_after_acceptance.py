@@ -339,6 +339,37 @@ def test_a_clock_step_back_never_makes_the_priced_designs_attempt_stale(
     assert shop.get_item(item).status == "fulfilled"
 
 
+@pytest.mark.parametrize("how", ["print", "hand"])
+def test_a_production_attempt_names_the_items_current_revision(
+    shop: Shop, pool: PgPool, how: str
+) -> None:
+    """#5704: `OrderStore.insert_fulfilment` stores the item's current revision on a
+    production attempt, by hand and by a print's claim: the design it printed."""
+    order, item = shop.accepted()
+
+    def attempt() -> Fulfilment:
+        if how == "print":
+            return _printed(shop, pool, order, item)
+        return shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="failed"), BY
+        )
+
+    first = attempt()
+    assert first.revision_id == shop.rows.revisions(item.id)[0].id
+    if how == "print":
+        # A print that made the item's quantity refuses another: this one made nothing.
+        shop.lifecycle.update_fulfilment(
+            order.id, item.id, first.id, FulfilmentInput(quantity=0, outcome="failed"), BY
+        )
+    revise(shop, order, item)
+    new = requote(shop, order, item, 1200)
+    shop.lifecycle.accept_quote(order.id, item.id, new.id, BY)
+    second = attempt()
+    assert second.revision_id == shop.rows.revisions(item.id)[1].id
+    stored = {f.id: f.revision_id for f in shop.rows.fulfilments(item.id)}
+    assert stored == {first.id: first.revision_id, second.id: second.revision_id}
+
+
 def test_an_item_with_an_accepted_attempt_refuses_it(shop: Shop) -> None:
     """#5592: units accepted of the agreed design are real goods. A new design would count
     them as made of it, so the revision is refused, and nothing changes."""
