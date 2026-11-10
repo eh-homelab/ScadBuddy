@@ -170,12 +170,30 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             asyncio.run(run())
         with store.pool.connection() as conn:
-            for table in ("print_outcomes", "events"):
+            # Its uploads, slices, slice starts, background slices, folderless projects
+            # and destination touches too (#5298 Tasks 25, 26).
+            for table in (
+                "print_outcomes",
+                "events",
+                "output_bambuddy_uploads",
+                "output_bambuddy_slices",
+                "print_slice_starts",
+                "print_preview_slices",
+                "folderless_projects",
+                "destination_touches",
+            ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
                 conn.rollback()
-            # A native print's spool uses and the printer merge still read the runs.
+            # A native print's spool uses and the printer merge still read the runs, and
+            # the merge rewrites a project's printer.
             conn.execute("SELECT 1 FROM print_runs")
+            conn.execute("UPDATE project_print_targets SET printer = printer WHERE false")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(
+                    "INSERT INTO project_print_targets (project_id, printer_id) VALUES (1, 1)"
+                )
+            conn.rollback()
     finally:
         store.close()
 

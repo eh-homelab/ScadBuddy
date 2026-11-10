@@ -1,7 +1,7 @@
 import { TimeoutFailure, WorkflowFailedError } from '@temporalio/client'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { STATUS_PROBE_MS } from '../src/bridge/hub.js'
-import { BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
+import { ACK_TIMEOUT_MS, BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, hostTabs, type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
 import type { TabOwnerStore } from '../src/bridge/tabOwners.js'
 import { BRIDGE_CALL_WORKFLOW } from '../src/temporal/bridgeCall.js'
 import { resetTracing, testTracing } from './support/tracing.js'
@@ -257,8 +257,9 @@ describe('TemporalTabRelay', () => {
       expect.objectContaining({ taskQueue: 'agent-tools.a', workflowTaskTimeout: BRIDGE_WORKFLOW_TASK_TIMEOUT_MS }),
     )
     // Temporal's default is 10 s: a task the cluster records as started and never delivers
-    // held the call that long, and a status read gave up at 6 s. The retry needs the rest.
-    expect(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS).toBeLessThanOrEqual(STATUS_PROBE_MS / 2)
+    // held the call that long, past the status probe. The probe covers the ack (3 s), the status
+    // activity's start-to-close (3 s) and one such task retried (#5962).
+    expect(STATUS_PROBE_MS).toBeGreaterThanOrEqual(ACK_TIMEOUT_MS + 3_000 + BRIDGE_WORKFLOW_TASK_TIMEOUT_MS)
   })
 
   describe('workflow task timeouts on the agent.bridge.call span (#5939)', () => {

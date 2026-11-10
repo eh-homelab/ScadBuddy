@@ -9,7 +9,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Principal, tiersUpTo } from '../src/auth/principal.js'
-import { STATUS_PROBE_MS, TabHub, type TabConnection } from '../src/bridge/hub.js'
+import { TabHub, type TabConnection } from '../src/bridge/hub.js'
+
+/** The wall-clock bound on one status read or call across replicas (#5862's regression took 3.4 s). */
+const ROUTING_BOUND_MS = 3_000
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
 import { ACK_TIMEOUT_MS, BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, TemporalTabRelay } from '../src/bridge/relay.js'
@@ -203,10 +206,11 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const call = performance.now() - before
       console.log(`bridge across replicas: status ${status.toFixed(0)} ms, call ${call.toFixed(0)} ms`)
       // 281-298 ms and 107-133 ms on an idle machine; the wall clock also counts this process's CPU
-      // work (the owner row's read, sealing), so on a loaded runner it gets half the probe's 6 s,
-      // which the regression crossed. The routing itself is bounded from the history below.
-      expect(status).toBeLessThan(STATUS_PROBE_MS / 2)
-      expect(call).toBeLessThan(STATUS_PROBE_MS / 2)
+      // work (the owner row's read, sealing), so on a loaded runner it gets 3 s, which the 3.4 s
+      // regression crossed. A fixed bound, not the probe's: the probe grew to 10 s for prod's
+      // throttled Temporal (#5962). The routing itself is bounded from the history below.
+      expect(status).toBeLessThan(ROUTING_BOUND_MS)
+      expect(call).toBeLessThan(ROUTING_BOUND_MS)
       expect(onB.calls).toHaveLength(1)
       // Each workflow ran on the caller's own queue, its one activity on the owner's.
       expect(started).toHaveLength(2)

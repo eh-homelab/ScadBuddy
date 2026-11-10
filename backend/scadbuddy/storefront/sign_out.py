@@ -6,8 +6,9 @@ expires (`SESSION_MAX_AGE`, 30 days). So the edge answers 503 ``sign_out_incompl
 never success, and tries the revocation again in the background: `SIGN_OUT_RETRY_DELAYS`
 (five tries over about ten minutes), each try and the give-up logged.
 
-The queue is in memory and bounded (`SIGN_OUT_RETRIES_MAX`): a full queue takes no more
-and logs it. An edge restart drops the queue; a session it held then ends at its expiry.
+The queue is in memory and bounded (`SIGN_OUT_RETRIES_MAX`): a full queue takes no more,
+and the route logs the sign-out "not queued". An edge restart drops the queue; a session it
+held then ends at its expiry.
 """
 
 from __future__ import annotations
@@ -60,7 +61,8 @@ class SignOutRetries:
     def add(self, *, visitor_id: str, client: str, session: str) -> bool:
         """Queue a revocation; False when the queue is full (the session then expires)."""
         if len(self._tasks) >= self._limit:
-            logger.warning("sign-out retries: the queue is full; the session ends at its expiry")
+            # The caller logs the warning ("not queued"): one line per sign-out.
+            logger.debug("sign-out retries: the queue is full")
             return False
         task = asyncio.create_task(self._retry(visitor_id, client, session))
         self._tasks.add(task)
