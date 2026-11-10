@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { StoreError, errorText, store, type PayCheckout } from '../api/client'
 import { formatMoney } from '../../lib/money'
 
@@ -160,7 +160,10 @@ export function PayPage() {
                   Back to your order
                 </button>
               ) : (
-                <p className="sf-hint">Open your order from the link in your mail.</p>
+                <p className="sf-hint">
+                  Open your order from the link in your mail, or see{' '}
+                  <Link to="/account">Your orders</Link>.
+                </p>
               )}
             </>
           ) : (

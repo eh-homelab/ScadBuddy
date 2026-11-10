@@ -118,8 +118,8 @@ describe('PayPage', () => {
 
   it('renders the buttons for the request\'s PayPal order and thanks the payer on approval', async () => {
     await approve()
-    expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
-    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
+    expect(screen.getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual(['/account'])
     expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
   })
 
@@ -130,7 +130,7 @@ describe('PayPage', () => {
     const { default: userEvent } = await import('@testing-library/user-event')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Back to your order' }))
     expect(navigate).toHaveBeenCalledWith(-1)
-    expect(screen.queryByText('Open your order from the link in your mail.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Open your order from the link in your mail/)).not.toBeInTheDocument()
   })
 
   it('offers no way back when the pay link opened in a tab of its own', async () => {
@@ -138,7 +138,7 @@ describe('PayPage', () => {
     history(1)
     await approve()
     expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
-    expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
+    expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
   })
 
   it.each(['https://elsewhere.example/o', `${window.location.origin}/draft`, `${window.location.origin}/order`])(
@@ -147,7 +147,7 @@ describe('PayPage', () => {
       referrer(from)
       await approve()
       expect(screen.queryByRole('button', { name: 'Back to your order' })).not.toBeInTheDocument()
-      expect(screen.getByText('Open your order from the link in your mail.')).toBeInTheDocument()
+      expect(screen.getByText(/Open your order from the link in your mail/)).toBeInTheDocument()
     },
   )
 

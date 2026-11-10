@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { useLocation } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import { formatMoney } from '../../lib/money'
 import {
   ActionKey,
@@ -95,6 +95,9 @@ export function OrderPage() {
         <h1 className="sf-h1">Your order</h1>
         <div className="sf-panel">
           <p className="sf-lead">{NO_LINK}</p>
+          <p className="sf-hint">
+            Have an account? See <Link to="/account">Your orders</Link>.
+          </p>
         </div>
       </section>
     )

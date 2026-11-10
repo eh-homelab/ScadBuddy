@@ -175,6 +175,7 @@ describe('OrderPage', () => {
     const sent = serve(ORDER)
     renderPage(<OrderPage />, { route: '/o' })
     expect(await screen.findByText('Open your order from the link in your mail.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Your orders' })).toHaveAttribute('href', '/account')
     expect(sent).toEqual([])
   })
 
