@@ -601,6 +601,8 @@ def test_one_queue_item_is_one_bambuddy_read_and_carries_its_scadbuddy_job(
     assert body["ams_mapping"] == [4, -1]
     assert body["scadbuddy"]["output_id"] == "o" * 32
     assert body["scadbuddy"]["archive_id"] == 107
+    # #3742's picture, as the list gives it: ScadBuddy's own for its job.
+    assert body["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
     assert one.call_count == 1
     assert not every.called
 
@@ -615,6 +617,7 @@ def test_a_queue_item_bambuddy_queued_has_no_scadbuddy_job(client: TestClient) -
     assert response.status_code == 200, response.text
     assert response.json()["scadbuddy"] is None
     assert response.json()["printer_name"] == _item(257)["printer_name"]
+    assert response.json()["picture"] == "/api/v1/farm/library/1615/thumbnail"
 
 
 @respx.mock

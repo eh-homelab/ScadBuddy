@@ -118,14 +118,15 @@ export function PrintQueue() {
 
 /**
  * #3743 — the item's name, as a link: ScadBuddy's own item to its ScadBuddy page
- * ({@link scadbuddyJobPath}); any other to Bambuddy's queue page, which has no route for
- * one item (`frontend/src/App.tsx` and `QueuePage.tsx` at maziggy/bambuddy@2ce0d93),
- * in a new tab, which escapes the frame's sandbox.
+ * ({@link scadbuddyJobPath}: its print once linked, else its queue item page, #3744);
+ * any other to Bambuddy's queue page, which has no route for one item
+ * (`frontend/src/App.tsx` and `QueuePage.tsx` at maziggy/bambuddy@2ce0d93), in a new
+ * tab, which escapes the frame's sandbox.
  */
 function ItemName({ item, name, queueUrl }: { item: QueueItem; name: string; queueUrl: string | null }) {
   if (item.scadbuddy) {
     return (
-      <Link to={scadbuddyJobPath(item.scadbuddy)} className={`min-w-0 truncate ${LINK}`}>
+      <Link to={scadbuddyJobPath(item.scadbuddy, item.id)} className={`min-w-0 truncate ${LINK}`}>
         {name}
       </Link>
     )

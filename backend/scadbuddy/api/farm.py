@@ -196,11 +196,13 @@ async def get_queue_item(
     """One queue item, whoever queued it, in any state (#3744): Bambuddy's own
     ``GET /queue/{id}``, one call. A job ScadBuddy queued carries ``scadbuddy`` even
     once it has finished, so its page can go on to the print. A 404 is an item Bambuddy
-    no longer has: deleted, or gone with its archive."""
+    no longer has: deleted, or gone with its archive. Its ``picture`` (#3742) is the
+    list's."""
     async with client_for(store.load()) as client:
         item = await client.queue_item(item_id)
-    matches = await _jobs(links, [item])
-    return FarmQueueItem(**item.model_dump(), scadbuddy=matches.queue_items.get(item.id))
+    job = (await _jobs(links, [item])).queue_items.get(item.id)
+    picture = queue_item_picture(item, job)
+    return FarmQueueItem(**item.model_dump(), scadbuddy=job, picture=picture)
 
 
 async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:

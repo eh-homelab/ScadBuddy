@@ -79,9 +79,9 @@ describe('PrintQueue (#2351)', () => {
     ])
     renderPage(<PrintQueue />)
 
-    // Not archived yet: the output's page.
+    // Not archived yet: its queue item page (#3744).
     const keychain = await screen.findByTestId('queue-item-259')
-    expect(within(keychain).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/edit/luna-0002')
+    expect(within(keychain).getByRole('link', { name: 'Luna keychain' })).toHaveAttribute('href', '/prints/queue/259')
     // Archived: its print.
     expect(within(screen.getByTestId('queue-item-261')).getByRole('link', { name: 'Luna again' })).toHaveAttribute(
       'href',

@@ -29,7 +29,12 @@ describe('scadbuddyJobPath (#3743)', () => {
     expect(scadbuddyJobPath(job({ archive_id: 35 }))).toBe('/prints/35')
   })
 
-  it("opens the output's page until then", () => {
+  it('opens its queue item page until then, for a queue item (#3744)', () => {
+    expect(scadbuddyJobPath(job({}), 259)).toBe('/prints/queue/259')
+    expect(scadbuddyJobPath(job({ archive_id: 35 }), 259)).toBe('/prints/35')
+  })
+
+  it("opens the output's page until then, for a job with no queue item", () => {
     expect(scadbuddyJobPath(job({}))).toBe('/edit/luna-0002')
   })
 
