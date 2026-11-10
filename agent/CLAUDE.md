@@ -146,8 +146,8 @@ opens every one and seals it again byte for byte).
   ([constants.go](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go))
   and not overridden in prod's `scadbuddy-temporal-v2-dynamicconfig` (read 2026-11-10);
   `test/toolCallLatency.temporal.test.ts`
-  times each phase around the activity (`TOOL_CALL_BENCH_REPORT=1` prints them, `TOOL_CALL_BENCH_ASSERT=1`
-  fails a median overhead over 1 s) and checks how each call was started; without Temporal the calls run in the turn's
+  times each phase around the activity when asked (`TOOL_CALL_BENCH_REPORT=1` prints them,
+  `TOOL_CALL_BENCH_ASSERT=1` fails a median overhead over 1 s) and always checks how each call was started; without Temporal the calls run in the turn's
   process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
   below); a turn whose transcript last ran in another directory (a fork's first) is told so in
   its prompt (`sessions/directoryNote.ts`, #5867). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
