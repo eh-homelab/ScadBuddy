@@ -1,7 +1,7 @@
 import { Client } from '@temporalio/client'
 import { historyToJSON } from '@temporalio/common/proto-utils'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
-import { Worker } from '@temporalio/worker'
+import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -23,8 +23,9 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 
 // #4780: browser_* calls between agent replicas go through Temporal to the replica that
 // holds the tab (bridge/relay.ts). Each replica here has its own hub, relay and host
-// worker on a queue of its own (main.ts HOST_QUEUE), as main.ts wires them; one shared
-// worker runs the BridgeCall workflow, as every replica's `agent-tools` worker does.
+// worker on a queue of its own (main.ts HOST_QUEUE), as main.ts wires them, and that worker
+// runs the BridgeCall workflows its replica starts (#5862). Nothing polls the shared
+// `agent-tools` queue here: a call must never need it.
 
 const WORKFLOWS = fileURLToPath(new URL('../src/temporal/bridgeCall.ts', import.meta.url))
 const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
@@ -59,9 +60,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     let env: TestWorkflowEnvironment
     let db: Database
     let drop: () => Promise<void>
-    let workflowQueue: string
-    let workflowWorker: Worker
-    let workflowRunning: Promise<void>
+    /** BridgeCall alone, as main.ts's host worker carries it (dist/temporal/bridge-bundle.js). */
+    let bundle: WorkflowBundle
     let replicas: Replica[] = []
     // Every client and worker seals bridge payloads, as main.ts's do with the KEK.
     let payloadDir: string
@@ -76,7 +76,6 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const relay = new TemporalTabRelay({
         owners: new PostgresTabOwnerStore(db.sql),
         hostQueue: queue,
-        workflowQueue,
         ...(options.sealed === false
           ? {}
           : {
@@ -99,6 +98,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         connection: env.nativeConnection,
         taskQueue: queue,
         activities: relay.hostActivities(),
+        workflowBundle: bundle,
         dataConverter,
       })
       const r: Replica = { hub, relay, queue, worker, running: worker.run() }
@@ -140,14 +140,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       keys = testPayloadKeys(db.sql)
       dataConverter = subjectDataConverter(keys, new FilePayloadStore(payloadDir))
       client = new Client({ connection: env.connection, namespace: env.namespace ?? 'default', dataConverter })
-      workflowQueue = `agent-tools-bridge-${randomUUID()}`
-      workflowWorker = await Worker.create({
-        connection: env.nativeConnection,
-        taskQueue: workflowQueue,
-        workflowsPath: WORKFLOWS,
-        dataConverter,
-      })
-      workflowRunning = workflowWorker.run()
+      bundle = await bundleWorkflowCode({ workflowsPath: WORKFLOWS })
     }, 120_000)
     beforeEach(async () => {
       await db.sql`TRUNCATE ai_browser_pairings, ai_session_tabs, ai_tab_owners`
@@ -162,8 +155,6 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       replicas = []
     })
     afterAll(async () => {
-      workflowWorker?.shutdown()
-      await workflowRunning
       await env?.teardown()
       await drop?.()
       if (payloadDir) await rm(payloadDir, { recursive: true, force: true })
@@ -183,6 +174,41 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       expect(outcome).toEqual({ ok: true, result: { tool: 'snapshot', args: { depth: 2 } } })
       expect(onB.calls).toHaveLength(1)
       expect(onC.calls).toHaveLength(0)
+    })
+
+    it("reaches another replica's tab in well under a second, on the two replicas' own queues only (#5862)", async () => {
+      const a = await replica('a')
+      const b = await replica('b')
+      const onB = await tab(b.hub, () => ({ ok: true, result: 'from b' }))
+      await owned(TAB, b.queue)
+      a.hub.pairSession('s1', TAB)
+      // The first status check, as a chat attach or browser_status makes it: in prod its workflow
+      // task waited 3.4 s on the shared, versioned `agent-tools` queue, and the 6 s probe read the
+      // tab as not connected (#5862).
+      let before = performance.now()
+      expect(await a.hub.status({ principal: browser, sessionId: 's1' })).toMatchObject({ attached: true, route: '/m/box' })
+      const status = performance.now() - before
+      before = performance.now()
+      expect(await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })).toEqual({ ok: true, result: 'from b' })
+      const call = performance.now() - before
+      console.log(`bridge across replicas: status ${status.toFixed(0)} ms, call ${call.toFixed(0)} ms`)
+      expect(status).toBeLessThan(1_000)
+      expect(call).toBeLessThan(1_000)
+      expect(onB.calls).toHaveLength(1)
+      // Each workflow ran on the caller's own queue, its one activity on the owner's.
+      expect(started).toHaveLength(2)
+      for (const id of started) {
+        const { events } = JSON.parse(historyToJSON(await client.workflow.getHandle(id).fetchHistory())) as {
+          events: {
+            eventType: string
+            workflowExecutionStartedEventAttributes?: { taskQueue?: { name?: string } }
+            activityTaskScheduledEventAttributes?: { taskQueue?: { name?: string } }
+          }[]
+        }
+        expect(events[0]?.workflowExecutionStartedEventAttributes?.taskQueue?.name).toBe(a.queue)
+        const scheduled = events.filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED')
+        expect(scheduled.map((e) => e.activityTaskScheduledEventAttributes?.taskQueue?.name)).toEqual([b.queue])
+      }
     })
 
     it('answers not connected within the ack timeout when the replica holding the tab is gone', async () => {

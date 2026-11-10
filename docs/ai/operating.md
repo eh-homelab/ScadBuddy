@@ -27,7 +27,8 @@ covers the same ground more briefly.
   - `all` (the default): everything, as every pod ran before the roles.
   - `api`: the HTTP server (the routes, the chat and bridge sockets, `/mcp`, the
     loopback `/internal/*` routes), its sweeps and start-time passes, and its own
-    `agent-tools.<hostname>` queue (browser calls for its tabs). It polls neither
+    `agent-tools.<hostname>` queue (browser calls for its tabs, and the `BridgeCall`
+    workflows of its own calls to a tab on another replica, #5862). It polls neither
     `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs
     no `AgentSession` turn (§1.2).
   - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
@@ -90,9 +91,11 @@ covers the same ground more briefly.
   out, a read up to three times and a write at once, and the script sees the error
   (`flow_session_check` retries without limit).
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
-  another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
+  another replica is a `BridgeCall` workflow, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
-  [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
+  [browser-bridge.md](browser-bridge.md#replicas)). Until #5862 the workflow ran on the
+  shared `agent-tools`; it now runs on the caller's own `agent-tools.<hostname>` (see the
+  next item). The Postgres relay of #1916 ran
   beside it for one release, and #4868 removed it: every replica with the KEK since then
   claims its tabs in `ai_tab_owners` (one without it claims none, #4949), so a call finds the owner there or answers "not connected".
   A new replica's tab has no row until its host worker polls, so for those first seconds
@@ -115,7 +118,23 @@ covers the same ground more briefly.
   `PgPayloadKeys` caches any key it opens for 30 s, a `bridge-<uuid>` one included, and
   this build caches none. Once no replica
   runs a build before #4780, nothing takes those tasks but replicas that have the
-  workflow.
+  workflow. Since #5862 no new call starts a workflow on `agent-tools`, so none of this
+  applies to a call made by a replica of that build.
+- **Browser calls across a rollout of #5862.** A replica of #5862's build starts each
+  `BridgeCall` on its own host queue, `agent-tools.<hostname>`, which only its own host worker
+  polls (with `dist/temporal/bridge-bundle.js`), unversioned. In prod the shared, versioned
+  `agent-tools` once took 3.4 s to hand a `BridgeCall`'s first workflow task to a poller,
+  and the status probe's 6 s ran out before the activity started (#5862). On the host queue
+  the workflow tasks run at once on the caller, and the activity at once on the owner: a
+  status check between two healthy replicas answers in well under a second
+  (`agent/test/bridgeRelay.temporal.test.ts`). The workflow's 15 s of slack
+  (`WORKFLOW_SLACK_MS`, [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)) now
+  covers those tasks on a loaded caller and its host worker's reconnect, no longer a failed
+  task on an old replica. While a replica of the build before #5862 still runs, its calls
+  still start on `agent-tools`, so the shared bundle (`agent/src/temporal/workflows.ts`)
+  keeps `BridgeCall` for them. The
+  activity, `bridge.tab`, is unchanged, so a call reaches a tab on a replica of either
+  build.
 
 ### 1.1 Routing the UI's origin to the agent
 
