@@ -857,7 +857,9 @@ class Lifecycle:
            With ``body.account_id`` (from the CRUD side's session, never a body) it takes
            the account's customer (`_account_customer`) and makes none, unless the shop
            has archived that customer: then it makes a new one and the account links to it;
-        2. takes the year's number (`OrderStore.claim_draft`);
+        2. takes the year's number (`OrderStore.claim_draft`) and the shop's currency
+           (``orders_currency``): a cart holds no amount, so one made before the shop
+           changed its currency is submitted in the new one;
         3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
            one that ships with no address), which
         4. recomputes the auto tax;
@@ -895,8 +897,6 @@ class Lifecycle:
                 raise LifecycleError("draft_empty", f"{order.label} has no item")
             rules = self.rules()
             option_id = body.shipping_option_id
-            if rules.shipping_options:
-                self._shipping_in_currency(order, rules)
             if option_id is None and rules.shipping_options:
                 raise LifecycleError(
                     "shipping_option_id", "shipping_option_id: choose one", unprocessable=True
@@ -913,7 +913,11 @@ class Lifecycle:
                 customer_id, address_id = self._account_customer(tx, body, order)
             customer = customer_actor(customer_id, order.storefront_visitor_id or "")
             order = self.store.claim_draft(
-                tx, order.id, customer_id=customer_id, shipping_address_id=address_id
+                tx,
+                order.id,
+                customer_id=customer_id,
+                shipping_address_id=address_id,
+                currency=rules.shop_currency,
             )
             self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)

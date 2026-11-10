@@ -282,26 +282,26 @@ def test_the_draft_view_shows_the_shipping_options(
     ]
 
 
-def test_a_cart_in_another_currency_than_the_shops_lists_no_options(
+def test_a_cart_made_before_the_shop_changed_currency_shows_the_shops(
     api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
 ) -> None:
-    """The cart keeps the currency it was made in; the options are priced in the shop's
-    ``orders_currency`` now and never converted, so the view lists none."""
+    """A cart holds no amount: the view shows the shop's ``orders_currency`` now and its
+    options, since the submit takes that currency."""
     draft = draft_of(crud, listing)
     owner_lifecycle.rules = rules(options=(POST,), currency="JPY")
     r = crud.get("/draft")
     assert r.status_code == 200, r.text
     view = r.json()
-    assert (view["currency"], view["minor_exponent"]) == ("USD", 2)
-    assert view["shipping_options"] == []
+    assert (view["currency"], view["minor_exponent"]) == ("JPY", 0)
+    assert [o["id"] for o in view["shipping_options"]] == ["post"]
     assert view["id"] == draft["id"]
 
 
-def test_a_submit_of_a_cart_in_another_currency_is_409(
+def test_a_submit_of_a_cart_made_before_the_shop_changed_currency_takes_the_shops(
     api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
 ) -> None:
-    """No 500 yen becomes 5.00 dollars: the submit is refused, with its own text, and the
-    cart stays a draft."""
+    """The visitor is never stuck with a cart in the old currency: the submit gives the
+    order the shop's currency, and the option is charged in it, never converted."""
     draft = draft_of(crud, listing)
     owner_lifecycle.rules = rules(options=(POST,), currency="JPY")
     r = crud.post(
@@ -309,11 +309,16 @@ def test_a_submit_of_a_cart_in_another_currency_is_409(
         json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
         key="s1",
     )
-    assert r.status_code == 409, r.text
-    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}shipping_currency_mismatch"
+    assert r.status_code == 200, r.text
     order = _orders(api).store.order(draft["id"])
-    assert order is not None and order.submitted_at is None
-    assert rows(api, "SELECT 1 FROM order_charges WHERE order_id = %s", draft["id"]) == []
+    assert order is not None and order.submitted_at is not None
+    assert order.currency == "JPY"
+    shipping = rows(
+        api,
+        "SELECT amount_minor FROM order_charges WHERE order_id = %s AND kind = 'shipping'",
+        draft["id"],
+    )
+    assert [row["amount_minor"] for row in shipping] == [POST.amount_minor]
 
 
 def test_the_deposit_policy_applies(
@@ -463,11 +468,6 @@ def test_a_422_refusal_keeps_its_own_slug(slug: str) -> None:
         ("order_submitted", "This order is sent already."),
         ("draft_empty", "Your order is empty. Add something to it first."),
         ("shipping_address_required", "This way of shipping needs your address."),
-        (
-            "shipping_currency_mismatch",
-            "The shop's prices changed currency after you started this order, so it cannot"
-            " be shipped as it is. Start a new order.",
-        ),
     ],
 )
 def test_a_409_refusal_with_its_own_text_keeps_its_slug(slug: str, own: str) -> None:
