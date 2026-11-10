@@ -198,7 +198,7 @@ async function startEagerly(
     }
     span?.setAttribute(EAGER_ATTRIBUTE, 'failed')
     // Why, as an exception event: the exporter scrubs its message (telemetry/scrub.ts), and keeps its type.
-    span?.recordException(err as Error)
+    span?.recordException(err instanceof Error ? err : String(err))
     return undefined
   }
   return deps.client.workflow.getHandle(options.workflowId)
