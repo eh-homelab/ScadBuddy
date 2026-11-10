@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from scadbuddy.api import orders as orders_api
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -450,11 +451,36 @@ def test_the_last_acceptance_accepts_the_order_as_the_customer(
     assert by.session == f"link:{link['id']}"
 
 
-@pytest.mark.xfail(reason="closing helper lands with #5923", strict=True, raises=AssertionError)
+def open_deposit(api: TestClient, made: Any) -> str:
+    """An open fake-provider deposit request on the order, with a hosted page ``r1``."""
+    with _orders(api).store.transaction() as conn:
+        deposit = payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="deposit",
+            provider="fake",
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        payments.set_request_link(
+            conn, deposit.id, provider_ref="r1", hosted_url="https://pay.example/1", link_error=None
+        )
+    return deposit.id
+
+
 def test_the_customers_last_accept_closes_an_open_deposit_requests_page(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#5923 review: the accept that accepts the order cancels its open requests, and their
+    provider pages close right after the commit; the order's projects are then made."""
     monkeypatch.setattr(FAKE, "cancelled", [])
+    ensured: list[str] = []
+
+    async def ensure(store: object, integrations: object, order_id: str) -> None:
+        ensured.append(order_id)
+
+    monkeypatch.setattr(orders_api, "ensure_projects", ensure)
     made = make_order(api, crud)
     with _orders(api).store.transaction() as conn:
         deposit = payments.insert_request(
@@ -475,6 +501,21 @@ def test_the_customers_last_accept_closes_an_open_deposit_requests_page(
     with _orders(api).store.transaction() as conn:
         found = {r.id: r.status for r in payments.requests_for_order(conn, made.order.id)}
     assert found[deposit.id] == "cancelled"
+    assert FAKE.cancelled == ["r1"]
+    assert ensured == [made.order.id]
+
+
+def test_the_customers_cancel_closes_an_open_deposit_requests_page(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FAKE, "cancelled", [])
+    made = make_order(api, crud)
+    deposit = open_deposit(api, made)
+    r = made.reader.cancel(key="k1")
+    assert r.status_code == 200, r.text
+    with _orders(api).store.transaction() as conn:
+        found = {q.id: q.status for q in payments.requests_for_order(conn, made.order.id)}
+    assert found[deposit] == "cancelled"
     assert FAKE.cancelled == ["r1"]
 
 

@@ -1,0 +1,16 @@
+{
+  "queued": {
+    "type": "https://scadbuddy.dev/problems/storefront/sign_out_incomplete",
+    "title": "Service Unavailable",
+    "status": 503,
+    "detail": "You are signed out on this device. The shop could not end the session yet, and it keeps trying.",
+    "instance": "/api/store/v1/account/sign-out"
+  },
+  "not_queued": {
+    "type": "https://scadbuddy.dev/problems/storefront/sign_out_incomplete",
+    "title": "Service Unavailable",
+    "status": 503,
+    "detail": "You are signed out on this device. The shop could not end the session; it ends on its own within 30 days.",
+    "instance": "/api/store/v1/account/sign-out"
+  }
+}

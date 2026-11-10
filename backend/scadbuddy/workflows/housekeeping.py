@@ -203,10 +203,11 @@ BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
 STOREFRONT_DRAFTS_SWEEP = "housekeeping_sweep_storefront_drafts"
 STOREFRONT_DRAFTS_PATCH = "housekeeping-sweep-storefront-drafts"
 #: #5283: send the storefront mail the after-commit send left queued
-#: (`orders.storefront.mail.StorefrontMail.send_queued`), each row at most `MAX_ATTEMPTS`
-#: times. Last, behind its own patch; on the prune Schedule too, as the payment closes are
-#: though they call a provider: a mail that failed reaches the customer within
-#: `PRUNE_INTERVAL`, not the sweeps' interval, and with no SMTP host it sends nothing.
+#: (`orders.storefront.mail.StorefrontMail.send_queued`); a row is given up after
+#: `MAX_ATTEMPTS` charged refusals. Last, behind its own patch; on the prune Schedule too,
+#: as the payment closes are though they call a provider: a mail that failed reaches the
+#: customer within `PRUNE_INTERVAL`, not the sweeps' interval, and with no SMTP host it
+#: sends nothing.
 STOREFRONT_MAIL_SWEEP = "housekeeping_send_storefront_mail"
 STOREFRONT_MAIL_PATCH = "housekeeping-send-storefront-mail"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
@@ -348,8 +349,9 @@ BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
 #: deletes, then two deletes.
 STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
-#: One pass of up to 50 rows (`send_queued`), which stops claiming at `mail.PASS_BUDGET`
-#: (8 min); a row in flight then has at most a few 20 s steps (`mail.SMTP_TIMEOUT`) left.
+#: One `send_queued` call: a pass of up to 50 rows, and any pass a kick asked for meanwhile,
+#: all of which stop claiming `mail.PASS_BUDGET` (8 min) after the call started; a row in
+#: flight then has at most a few 20 s steps (`mail.SMTP_TIMEOUT`) left.
 #: A server that does not answer stops the pass at its first row.
 STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.

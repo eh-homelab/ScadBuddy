@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Agent, type Dispatcher, fetch } from 'undici'
-import { dirBytes, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
+import { dirBytes, dirFileSha256, dirFiles, readDirFile, removeDirFile, writeDirFile } from '../workspace/directory.js'
 import { type ExecResult, type KeptRecord, keptValue, type Manifest, SHA_HEADER, type Shell, syncPath, UNSYNCED_MAX } from './protocol.js'
 
 // The agent's side of a session's sandbox (#5864, issue comment "Design" §2-§3): the client of the
@@ -65,6 +65,31 @@ export const JSON_MAX_BYTES = 16 * 1024 * 1024
 const EXEC_SLACK_MS = 30_000
 
 type SandboxResponse = Awaited<ReturnType<typeof fetch>>
+
+/** How much of an error answer's body is read and shown; the rest is cancelled unread. */
+export const ERROR_BODY_MAX_BYTES = 500
+
+/**
+ * The first `max` bytes of a body, the rest cancelled: a pod may send an error body that never
+ * ends. The cut may split a UTF-8 character, which then reads as U+FFFD at the end.
+ */
+async function bodyHead(res: SandboxResponse, max: number): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  const reader = res.body?.getReader()
+  if (!reader) return ''
+  try {
+    while (size < max) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(Buffer.from(value))
+      size += value.byteLength
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).subarray(0, max).toString('utf8')
+}
 
 /** A JSON body read under a cap: past it, a SandboxError, whatever the pod claims. */
 async function cappedJson(res: SandboxResponse, max: number, what: string): Promise<unknown> {
@@ -144,8 +169,8 @@ export class SandboxClient {
       throw new SandboxError(`the sandbox did not answer ${method} ${path}: ${err instanceof Error ? err.message : String(err)}`)
     }
     if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      throw new SandboxError(`the sandbox answered ${res.status} to ${method} ${path}: ${text.slice(0, 500)}`)
+      const text = await bodyHead(res, ERROR_BODY_MAX_BYTES).catch(() => '')
+      throw new SandboxError(`the sandbox answered ${res.status} to ${method} ${path}: ${text}`)
     }
     return res
   }
@@ -242,26 +267,35 @@ export type SyncBack = { written: string[]; removed: string[]; left: { path: str
 
 /**
  * The files a sync back left in the pod past a cap, by path: what the session directory held
- * at that path then (its sha256, `large` past the per-file cap, or undefined for none). Until
+ * at that path then (its sha256, past the per-file cap too, or undefined for none). Until
  * the session directory's copy changes, a sync in neither sends nor deletes such a path, so
  * the file stays in the pod for as long as the pod lasts. The pod itself keeps the record
  * (GET and PUT /v1/kept), so a sync in on any worker sees it; a new pod starts with none.
  */
 export type Kept = Map<string, string | undefined>
 
-/** What a sync in saw: the pod's files after it, and the paths it named that never sync. */
-export type SyncedIn = { files: Map<string, string>; unsynced: Set<string> }
+/**
+ * What a sync in saw: the pod's files after it, the paths it named that never sync, and the
+ * session's files it did not send (past the per-file cap; the pod's copy, if any, deleted).
+ */
+export type SyncedIn = { files: Map<string, string>; unsynced: Set<string>; notSent: string[] }
 
+/** What Kept records for a session file it could not hash (it went away while read). */
 const LARGE = 'large'
 
-/** Each worker file's sha256, by path: the session directory's files that sync. */
-async function localManifest(dir: string, limits: SyncLimits): Promise<Map<string, { sha256: string; bytes: Buffer } | { tooLarge: true }>> {
-  const out = new Map<string, { sha256: string; bytes: Buffer } | { tooLarge: true }>()
+type LocalFile = { sha256: string; bytes: Buffer } | { sha256: string; tooLarge: true }
+
+/**
+ * Each worker file's sha256, by path: the session directory's files that sync. A file past the
+ * per-file cap is hashed as a stream, never held, so Kept sees when it changes.
+ */
+async function localManifest(dir: string, limits: SyncLimits): Promise<Map<string, LocalFile>> {
+  const out = new Map<string, LocalFile>()
   for (const rel of (await dirFiles(dir)).keys()) {
     if (!syncPath(rel)) continue
     const bytes = await readDirFile(dir, rel, limits.fileMaxBytes)
     if (!bytes) {
-      out.set(rel, { tooLarge: true })
+      out.set(rel, { sha256: (await dirFileSha256(dir, rel)) ?? LARGE, tooLarge: true })
       continue
     }
     out.set(rel, { sha256: createHash('sha256').update(bytes).digest('hex'), bytes })
@@ -271,8 +305,11 @@ async function localManifest(dir: string, limits: SyncLimits): Promise<Map<strin
 
 /**
  * Makes the pod's files match the session directory's: each changed file sent, each one the
- * directory no longer has deleted there, except the `kept` ones (see Kept). Returns the pod's
- * manifest as it is then.
+ * directory no longer has deleted there, except the `kept` ones (see Kept). A session file past
+ * the per-file cap is not sent, and the pod's copy of it is deleted, so a command never reads an
+ * older copy as if it were the session's; it is named in `notSent`. A kept path is the exception:
+ * the pod's own copy stays, and the path is not named. Returns the pod's manifest
+ * as it is then.
  */
 export async function syncIn(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept = new Map()): Promise<SyncedIn> {
   const local = await localManifest(dir, limits)
@@ -281,13 +318,22 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
   const stays = new Set<string>()
   for (const [rel, was] of kept) {
     const entry = local.get(rel)
-    const now = entry === undefined ? undefined : 'tooLarge' in entry ? LARGE : entry.sha256
+    const now = entry?.sha256
     // Gone from the pod (a new pod), or changed in the session since: the session's copy counts again.
     if (!there.has(rel) || now !== was) kept.delete(rel)
     else stays.add(rel)
   }
+  const notSent: string[] = []
   for (const [rel, entry] of local) {
-    if ('tooLarge' in entry || stays.has(rel)) continue
+    if (stays.has(rel)) continue
+    if ('tooLarge' in entry) {
+      notSent.push(rel)
+      if (there.has(rel)) {
+        await client.delete(rel)
+        there.delete(rel)
+      }
+      continue
+    }
     if (there.get(rel) !== entry.sha256) {
       await client.put(rel, entry.bytes)
       there.set(rel, entry.sha256)
@@ -300,14 +346,14 @@ export async function syncIn(client: SandboxClient, dir: string, limits: SyncLim
       there.delete(rel)
     }
   }
-  return { files: there, unsynced: new Set(remote.unsynced) }
+  return { files: there, unsynced: new Set(remote.unsynced), notSent }
 }
 
 /** The session directory's copy at `rel` as Kept records it. */
 async function localState(dir: string, rel: string, limits: SyncLimits): Promise<string | undefined> {
   if (!(await dirFiles(dir)).has(rel)) return undefined
   const bytes = await readDirFile(dir, rel, limits.fileMaxBytes)
-  return bytes ? createHash('sha256').update(bytes).digest('hex') : LARGE
+  return bytes ? createHash('sha256').update(bytes).digest('hex') : ((await dirFileSha256(dir, rel)) ?? LARGE)
 }
 
 /**
@@ -375,8 +421,8 @@ export const UNSYNCED_REASON =
   'its path never comes back to the session: only names of letters, digits, "_", "." and "-" that do not start with ".", ' +
   'at most 4 levels deep and outside node_modules and __pycache__, sync; it stays in the sandbox pod while the pod lasts'
 
-/** One command's run, with its sync. */
-export type ShellRun = { result: ExecResult; back: SyncBack }
+/** One command's run, with its sync: `notSent` names the session's files the command did not see (SyncedIn). */
+export type ShellRun = { result: ExecResult; back: SyncBack; notSent: string[] }
 
 /** Each session's calls, one at a time on this worker: a sync never runs into another. */
 const chains = new Map<string, Promise<unknown>>()
@@ -419,7 +465,7 @@ export function runInSandbox(
         const result = await client.exec(shell, command, timeoutMs)
         const back = await syncBack(client, options.dir, before, options.limits, kept)
         await client.setKept(kept)
-        return { result, back }
+        return { result, back, notSent: before.notSent }
       } catch (err) {
         if (err instanceof SandboxError) options.sandboxes.release?.(options.sessionId, endpoint)
         throw err
