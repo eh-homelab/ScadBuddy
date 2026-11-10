@@ -12,9 +12,10 @@ comes back as a stream (`CrudStream`), which the edge relays without holding it 
 design request goes as multipart made from the files the edge spooled, read a chunk at a
 time in a thread, in one call that is never retried (its body cannot be sent twice); each
 file's name is escaped (`escape_filename`), and the CRUD side decodes it.
-An account call (#5283) also sends the session token of the edge's verified ``sb_session``
-cookie (`SESSION_HEADER`). A sign-in is sent once, never retried (a code is single use),
-and its new session's token comes back in that header, never in the body.
+An account call and a submit (#5283) also send the session token of the edge's verified
+``sb_session`` cookie (`SESSION_HEADER`), when there is one. A sign-in is sent once, never
+retried (a code is single use), and its new session's token comes back in that header,
+never in the body.
 
 It imports no database code: the edge's import test (`tests/storefront/test_edge.py`)
 checks it.
@@ -213,11 +214,19 @@ class StorefrontCrud:
             "DELETE", f"/draft/items/{item_id}", visitor_id=visitor_id, client=client, key=key
         )
 
-    async def submit(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+    async def submit(
+        self, body: bytes, *, key: str, visitor_id: str, client: str, session: str | None
+    ) -> Any:
         """``POST …/storefront/draft/submit``: the visitor's JSON body as it came, unread,
-        and the request's ``Idempotency-Key``."""
+        the request's ``Idempotency-Key`` and the session, if any, whose account submits."""
         return await self._call(
-            "POST", "/draft/submit", visitor_id=visitor_id, client=client, content=body, key=key
+            "POST",
+            "/draft/submit",
+            visitor_id=visitor_id,
+            client=client,
+            content=body,
+            key=key,
+            session=session,
         )
 
     async def requests_enabled(

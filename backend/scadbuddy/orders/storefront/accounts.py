@@ -83,7 +83,8 @@ customer with the address as its primary email contact, and the shop merges by h
 
 What an account sees (§5.2): the orders its visitors made (`storefront_visitors.account_id`,
 set at verify for a visitor of no account; a visitor of another account is never moved)
-and the orders attached to it (`attach_order`: a link opened while signed in). Each
+and the orders attached to it (`attach_order`: a link opened while signed in, or a
+submit while signed in, `Lifecycle.submit_order`). Each
 request deletes codes past `KEEP_ROWS`, each wrong guess failures past it, and each
 sign-in every expired session, so the tables need no sweep.
 """
@@ -479,13 +480,28 @@ def account_owns_order(conn: Conn, account_id: str, order_id: str) -> bool:
 
 
 def attach_order(conn: Conn, account_id: str, order_id: str) -> None:
-    """The order joins the account: its link was opened while signed in (§5.2). The
-    caller checked the link. A second attach does nothing."""
+    """The order joins the account: its link was opened while signed in (§5.2), or it was
+    submitted while signed in. The caller checked the link or the cart. A second attach
+    does nothing."""
     conn.execute(
         "INSERT INTO storefront_account_orders (account_id, order_id) VALUES (%s, %s)"
         " ON CONFLICT DO NOTHING",
         (account_id, order_id),
     )
+
+
+def submitting_customer(conn: Conn, account_id: str, visitor_row: str | None) -> str | None:
+    """The customer a signed-in submit takes (§5.5 step 1): the account's. None when the
+    cart's visitor (``visitor_row``, `storefront_visitors.id`) belongs to another account,
+    whose cart this session may not submit, and when the account no longer exists."""
+    row = conn.execute(
+        "SELECT a.customer_id, v.account_id AS visitor_account FROM storefront_accounts a"
+        " LEFT JOIN storefront_visitors v ON v.id = %s WHERE a.id = %s",
+        (visitor_row, account_id),
+    ).fetchone()
+    if row is None or row["visitor_account"] not in (None, account_id):
+        return None
+    return str(row["customer_id"])
 
 
 @dataclass(frozen=True)

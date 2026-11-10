@@ -5,6 +5,7 @@ only and refuse another site's page; a cookie the edge did not sign is never sen
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator
 
 import pytest
@@ -87,6 +88,31 @@ def test_the_session_goes_on_to_the_crud_side_and_a_new_sign_in_names_the_old_on
     assert crud_mock["orders"].calls.last.request.headers[SESSION_HEADER] == TOKEN
     sign_in(edge)
     assert crud_mock["verify"].calls.last.request.headers[SESSION_HEADER] == TOKEN
+
+
+def test_a_submit_sends_the_session_on_and_an_anonymous_one_sends_none(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """The CRUD side takes the submit's account from the session (`store_account`)."""
+    route = crud_mock.post("/api/v1/internal/crud/storefront/draft/submit").respond(
+        200, json={"id": "o1", "number": "ORD-2026-1", "email": "ada@example.com"}, headers=CRUD
+    )
+    body = {"draft_id": "o1", "name": "Ada", "email": "ada@example.com"}
+
+    def submit() -> None:
+        r = edge.post(
+            "/api/store/v1/draft/submit",
+            json=body,
+            headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+        )
+        assert r.status_code == 200, r.text
+
+    submit()
+    assert SESSION_HEADER not in route.calls.last.request.headers
+    sign_in(edge)
+    submit()
+    assert route.calls.last.request.headers[SESSION_HEADER] == TOKEN
 
 
 def test_a_failed_bot_check_stops_a_sign_in_before_the_crud_side(

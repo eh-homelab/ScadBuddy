@@ -13,9 +13,9 @@ spooled, then sent on as multipart a chunk at a time.
 
 Accounts (#5283): ``POST /account/verify`` (the bot check ``sign_in`` first) sets the
 ``sb_session`` cookie from the CRUD side's answer (`accounts.py`), ``POST
-/account/sign-out`` clears it and gives the browser a new visitor, and ``GET /account``
-and ``GET /account/orders`` send the cookie's session on. The two POSTs are checked by
-`CrossSiteGate`, as every write is."""
+/account/sign-out`` clears it and gives the browser a new visitor, and ``GET /account``,
+``GET /account/orders`` and ``POST /draft/submit`` send the cookie's session on. Verify
+and sign-out are checked by `CrossSiteGate`, as every write is."""
 
 from __future__ import annotations
 
@@ -183,11 +183,14 @@ async def submit(request: Request, crud: Crud, visitor_id: Visitor, client: Clie
     """The visitor's cart submitted as an order (#5283, spec §5.5): 428
     ``idempotency_key_required`` without a key, then the bot check (`turnstile.py`, action
     ``submit``: 403 ``bot_check_failed``, 503 ``bot_check_unavailable``), both before the
-    body is read or the CRUD side is called."""
+    body is read or the CRUD side is called. The cookie's session goes on, so a signed-in
+    visitor submits for its account."""
     key = _request_key(request, visitor_id)
     await require_turnstile(request, "submit")
     body = await _body(request, "submit_body_invalid")
-    return await crud.submit(body, key=key, visitor_id=visitor_id, client=client)
+    return await crud.submit(
+        body, key=key, visitor_id=visitor_id, client=client, session=session_of(request)
+    )
 
 
 #: How long one replica trusts its read of `requests_enabled`.

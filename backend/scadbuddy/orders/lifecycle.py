@@ -43,6 +43,7 @@ from scadbuddy.orders.models import (
     SHOWN_IMAGES,
     TAKES_ITEMS,
     Actor,
+    AddressInput,
     AddressSnapshot,
     Approval,
     Attachment,
@@ -107,6 +108,7 @@ from scadbuddy.orders.store import (
     quote_file_keys,
     revision_subject,
 )
+from scadbuddy.orders.storefront.accounts import attach_order, submitting_customer
 from scadbuddy.orders.storefront.addresses import check_address
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import create_order_link, live_link
@@ -301,8 +303,8 @@ class ShipmentEdit(BaseModel):
 class SubmitInput(BaseModel):
     """A visitor's submit of its cart (#5283, spec §5.5): who it is, where the mail goes,
     the shipping option and, when that ships, the address. ``email`` is one address
-    (`check_address`). ``account_id`` comes only from the CRUD side's session lookup,
-    never from a body; nothing sets it until the storefront's accounts do."""
+    (`check_address`). ``account_id`` comes only from the CRUD side's session lookup
+    (`api/crud_storefront.py` `store_account`), never from a body."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -842,27 +844,29 @@ class Lifecycle:
         under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
         the bus then): it
 
-        1. makes a new customer (`_new_customer`) with the name, ``body.email`` as its
-           primary contact and the address given as its default shipping address, which is
-           the order's. It never links or writes an existing customer, whatever its
-           contacts: a typed email proves nothing (spec §5.2; only a verified account
-           links a customer, and the shop merges customers by hand). Once the storefront's
-           accounts set ``body.account_id`` (from the CRUD side's session, never a body),
-           this step takes the account's customer instead;
+        1. without an account, makes a new customer (`_new_customer`) with the name,
+           ``body.email`` as its primary contact and the address given as its default
+           shipping address, which is the order's. It never links or writes an existing
+           customer, whatever its contacts: a typed email proves nothing (spec §5.2; only
+           a verified account links a customer, and the shop merges customers by hand).
+           With ``body.account_id`` (from the CRUD side's session, never a body) it takes
+           the account's customer (`_account_customer`) and makes none;
         2. takes the year's number (`OrderStore.claim_draft`);
         3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
            one that ships with no address), which
         4. recomputes the auto tax;
         5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
            queues no `payment_requested` mail, since no link exists yet: the order link's
-           mail leads to the page that shows it). The customer is new, so a ``first_order``
-           rule always applies to an anonymous submit, even when the email has ordered
+           mail leads to the page that shows it). An anonymous submit's customer is new, so
+           a ``first_order`` rule always applies to it, even when the email has ordered
            before; the shop can change the deposit before it accepts (§8). A policy that
            applies only in another currency sets none, and `deposit.policy_skipped` tells
            the shop;
         6. stamps ``submitted_at``;
         7. makes the order link (`create_order_link`);
-        8. queues the `order_link` mail to ``body.email``.
+        8. queues the `order_link` mail to ``body.email``;
+        9. with an account, attaches the order to it (`attach_order`), so it is in the
+           account's "Your orders" even when the cart's visitor never joined the account.
 
         Everything after step 1 is recorded as the customer (`customer_actor`, with the
         cart's visitor row as the session). The order and the link's token, which is
@@ -870,7 +874,8 @@ class Lifecycle:
         the order is a storefront cart of ``cart_of``'s; `order_submitted` once submitted;
         `draft_empty` with no item; 422 `shipping_option_id` with no option when the shop
         lists some, or one it does not list; `shipping_address_required`;
-        `EmailInvalidError`; `KekMissingError` with no KEK."""
+        `EmailInvalidError`; `KekMissingError` with no KEK. With an account, also
+        `order_not_found` when the cart's visitor belongs to another account."""
         email = check_address(body.email)
         with self.store.transaction(conn) as tx:
             order = self._lock(tx, order_id)
@@ -894,7 +899,10 @@ class Lifecycle:
                     f"shipping_option_id: no shipping option {option_id}",
                     unprocessable=True,
                 )
-            customer_id, address_id = self._new_customer(tx, body, email)
+            if body.account_id is None:
+                customer_id, address_id = self._new_customer(tx, body, email)
+            else:
+                customer_id, address_id = self._account_customer(tx, body, order)
             customer = customer_actor(customer_id, order.storefront_visitor_id or "")
             order = self.store.claim_draft(
                 tx, order.id, customer_id=customer_id, shipping_address_id=address_id
@@ -913,6 +921,8 @@ class Lifecycle:
             queue_mail(
                 tx, "order_link", email, {"order": order.label, "link_id": link_id}, order.id
             )
+            if body.account_id is not None:
+                attach_order(tx, body.account_id, order.id)
             order = self.store.order(order.id, conn=tx) or order
         if conn is None:
             self._told(_Change(order))
@@ -932,6 +942,22 @@ class Lifecycle:
             conn=conn,
         )
         return made.id, made.addresses[0].id if made.addresses else None
+
+    def _account_customer(
+        self, conn: Conn, body: SubmitInput, order: Order
+    ) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for a signed-in submit: the account's customer
+        (`submitting_customer`), its name and contacts left as they are, and the given
+        address added to it, never as a default. Its id, and the address's (None without
+        one). `order_not_found` when the cart's visitor belongs to another account."""
+        assert body.account_id is not None
+        customer_id = submitting_customer(conn, body.account_id, order.storefront_visitor_id)
+        if customer_id is None:
+            raise LifecycleError("order_not_found", f"no order {order.id}", not_found=True)
+        if body.address is None:
+            return customer_id, None
+        address = AddressInput(**body.address.model_dump())
+        return customer_id, self.store.add_address(conn, customer_id, address).id
 
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the
