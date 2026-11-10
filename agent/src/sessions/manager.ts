@@ -1098,9 +1098,10 @@ export class SessionManager {
       // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
       // The session's own background_tools, not the last turn's `turn_flow` (#5870): an idle
       // process is checked against the shape the session's next own turn has. The trade is meant:
-      // a session a flow keeps sending to loses its flow-shaped process at each resync, and the
-      // next flow turn spawns one again (a cold start), rather than a slot holding a process the
-      // session's own next turn cannot reuse.
+      // a session with background_tools true that a flow keeps sending to loses its flow-shaped
+      // process at each resync, and the next flow turn spawns one again (a cold start), rather
+      // than a slot holding a process the session's own next turn cannot reuse. A session a flow
+      // started or forked (background_tools false) already has the flow's shape, so its process stays.
       const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
         `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
         [entry.sessionId],
