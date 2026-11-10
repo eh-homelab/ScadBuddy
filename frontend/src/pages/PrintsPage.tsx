@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import { LiveJobItem } from '../components/prints/LiveJobItem'
-import { liveJobs, queueTail, type LiveJob } from '../components/prints/liveJobs'
+import { liveJobs, queueTail, startedOn, type LiveJob } from '../components/prints/liveJobs'
 import { PrinterStrip, usePrintersNow } from '../components/prints/NowPrinting'
 import { QueueNotes, usePrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
@@ -35,10 +35,13 @@ export function PrintsPage() {
   const working = useMemo(() => (now.cards === null ? null : liveJobs(now.cards, [])), [now.cards])
   const queue = usePrintQueue(
     bambuddy,
-    useMemo(() => working?.map((job) => job.key) ?? null, [working]),
+    useMemo(
+      () => working?.flatMap((job) => (job.kind === 'working' ? [startedOn(job.card.printer.id, job.key)] : [])) ?? null,
+      [working],
+    ),
   )
   const jobs = useMemo(() => liveJobs(now.cards ?? [], queue.items ?? []), [now.cards, queue.items])
-  // A filtered list shows no queued row (`printRows`), so it names no tail of the queue.
+  // A filtered list shows no queued row (`printRows`), so it says nothing of the queue.
   const [params] = useSearchParams()
   const filtered = isFiltered(parsePrintsQuery(params))
   return (
@@ -55,7 +58,7 @@ export function PrintsPage() {
         {settled &&
           (bambuddy ? (
             <>
-              <QueueNotes queue={queue} tail={filtered ? 0 : queueTail(queue.items ?? [])} />
+              <QueueNotes queue={queue} tail={queueTail(queue.items ?? [])} filtered={filtered} />
               <PrintHistory live={jobs} />
             </>
           ) : (

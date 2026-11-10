@@ -552,6 +552,24 @@ describe('NowPrinting (#977)', () => {
       expect(screen.queryByTestId('printer-now-plate-1')).toBeNull()
     })
 
+    it("says on a working job's row that the printers' read is stale, as its card does (#5940)", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      renderPage(<NowPrinting />)
+      const row = await screen.findByTestId('printer-job-2')
+      expect(within(row).queryByTestId('printer-job-stale-2')).toBeNull()
+
+      server.use(
+        http.get('/api/v1/print/printers/now', () => HttpResponse.json({ detail: 'no Bambuddy' }, { status: 502 })),
+      )
+      await poll()
+      const stale = await within(screen.getByTestId('printer-job-2')).findByTestId('printer-job-stale-2')
+      expect(stale).toHaveTextContent(/^Last seen at .+ · no Bambuddy$/)
+      // The same words as the printer's card.
+      expect(screen.getByTestId('printer-now-stale-2')).toHaveTextContent(stale.textContent!)
+      // The last state read is still there, under its age.
+      expect(screen.getByTestId('printer-job-2')).toHaveTextContent('Printing 66% · 54m left')
+    })
+
     it('keeps the last card through an empty read, a failed status read and a failed request', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       setPrintersNow(finished)
