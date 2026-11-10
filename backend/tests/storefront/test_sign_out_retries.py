@@ -88,12 +88,14 @@ async def test_an_unexpected_failure_ends_the_retries_with_a_log_line(
 async def test_the_queue_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
     crud = Crud(fails=99)
     retries = SignOutRetries(crud.account_sign_out, delays=(60,), limit=2)
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.storefront.sign_out"):
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.storefront.sign_out"):
         assert retries.add(visitor_id="v", client="c", session="a" * 43)
         assert retries.add(visitor_id="v", client="c", session="b" * 43)
         assert not retries.add(visitor_id="v", client="c", session="c" * 43)
     assert retries.pending == 2
-    assert any("full" in record.getMessage() for record in caplog.records)
+    # The caller logs the warning (review of #5957); `add` only notes it at debug.
+    (full,) = [record for record in caplog.records if "full" in record.getMessage()]
+    assert full.levelno == logging.DEBUG
     await retries.aclose()
     assert retries.pending == 0
     assert crud.calls == []
