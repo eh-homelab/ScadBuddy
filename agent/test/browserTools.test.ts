@@ -525,7 +525,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     }
     const hub = new TabHub({ sessionTabs: store, relay, statusProbeMs: 50, log: () => {} })
     let back: boolean | undefined
-    await runTool(tool('browser_snapshot'), {}, {
+    const result = await runTool(tool('browser_snapshot'), {}, {
       ...ctx(hub.forSession('s1'), browser),
       waitForTab: async ({ isBack }) => {
         back = await isBack(new AbortController().signal)
@@ -535,6 +535,8 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect(back).toBe(true)
     // The read ran once more after the wait.
     expect(calls).toEqual(['snapshot', 'snapshot'])
+    expect(text(result)).toMatch(/The session's tab may be connected.*did not reach it: take a snapshot, then call again\.$/s)
+    expect(text(result)).not.toMatch(/reconnected/)
   })
 
   it('a write call whose wait ended reconnected, on a slow owner, says to snapshot and call again', async () => {

@@ -170,7 +170,9 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
         }
         outcome = await call()
         if (!outcome.ok && outcome.error.code === 'no_browser') {
-          throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
+          // A wait a slow owner ended is no reconnect (#5974 review): say the tab may be connected.
+          const slow = waited.why === 'reconnected' && (await statusHere(ctx).then((h) => h?.attached === false && h.slow === true))
+          throw new ToolError(`${outcome.error.message} ${slow ? WHY_SLOW_READ : WHY_STILL_GONE[waited.why]}`)
         }
       }
       if (outcome.ok) return spec.answer ? spec.answer(outcome.result, ctx) : json(outcome.result ?? null)
@@ -221,6 +223,10 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
  */
 const WHY_SLOW =
   "The session's tab may be connected (its agent replica was slow to answer), and the call was not run: take a snapshot to see the page, then call again."
+
+/** A read retried after a wait a slow owner ended, that still found no tab (#5974). */
+const WHY_SLOW_READ =
+  "The session's tab may be connected (its agent replica was slow to answer), but the call did not reach it: take a snapshot, then call again."
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
