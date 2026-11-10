@@ -498,6 +498,27 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Agent `get_print_sources` and `import_print`; frontend: the Prints page's "Import
   print" (`components/prints/ImportPrintDialog.tsx`, the unlinked archives through
   `PastPrintsPicker` `unlinkedOnly`), mocks `src/mocks/features/printImports.ts`.
+- The print watcher (#4699, phase 1; the design and the later phases are comments on
+  the issue): `print_watch/` imports the prints ScadBuddy did not start, with no user
+  step. `sweep.py` is one pass, the housekeeping sweep `housekeeping_auto_import_prints`
+  (both Schedules, behind `AUTO_IMPORT_PATCH`, history `auto_import.json`), run in the
+  API's `library` worker. It obeys its own stored setting, `print_auto_import` (off by
+  default; off, it calls nothing and forgets its floor), and takes only the Bambuddy
+  archives made since it was switched on (`print_auto_import_watch`), at most `LOOKBACK`
+  back, that have a printer not in `print_auto_import_skip_printers`, no link and no row.
+  Under `import_lock` it runs `link_archive` (ScadBuddy's own print is left alone),
+  takes the first allowed source in a fixed order (archive, slicer project, a library
+  file by hash only; then, only when `print_auto_import_sources` names `printer`, the
+  printer's file over FTP, kept in the library inbox folder), and links a model only
+  when an earlier import of the same hash names one model (`earlier_import`) or the job's
+  name has exactly one slug's words (`print_import.exact_slugs`, `job_name`). Anything
+  else goes to the inbox with `reason` and `suggested`. `store.py` `AutoImportStore`
+  writes the `print_auto_imports` row, its link (`print_links.import_in`, the body of
+  `record_import`) and its `print_auto_import` activity row (`activity.py`) in one
+  transaction; a re-archived job (same printer, hash and start) is never taken twice.
+  The three settings are a person's only (`api/settings.py` `PRINT_WATCH`, 403
+  `person_only`). `GET /print-imports/auto` lists the rows (`state` `linked` or `inbox`;
+  an inbox row a link names since is left out).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through

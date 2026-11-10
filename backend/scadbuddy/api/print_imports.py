@@ -21,7 +21,6 @@ assistant's tools pin both to a person's approval (`agent/src/tools/pinnedOutwar
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Self
@@ -50,6 +49,8 @@ from scadbuddy.bambuddy.print_import import (
     SourceFile,
     chosen,
     find_sources,
+    forget_copy,
+    keep_printer_file,
     read_source,
     suggested_slugs,
 )
@@ -66,8 +67,8 @@ from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
-
-logger = logging.getLogger(__name__)
+from scadbuddy.print_watch.component import AutoImportsDep
+from scadbuddy.print_watch.store import AutoImport, AutoImportState
 
 router = APIRouter(prefix="/print-imports", tags=["prints"])
 
@@ -265,6 +266,28 @@ async def _one_import(links: PrintLinkStore, archive_id: int) -> AsyncIterator[N
         ) from None
 
 
+@router.get(
+    "/auto",
+    response_model=list[AutoImport],
+    summary="The prints the print watcher imported",
+    description=(
+        "What the print watcher (#4699) took, newest archive first: each print it linked "
+        "to a model (`linked`, with `matched_by`: an earlier import of the same file, or "
+        "the job's name), and each it put in the inbox, Unsorted imports (`inbox`, with "
+        "`reason` and the models the job's name suggests). An inbox print that a link "
+        "names since (a person imported it, or ScadBuddy found it was its own print) is "
+        "left out. Page with `before`, the last `archive_id` read."
+    ),
+)
+async def list_auto_imports(
+    store: AutoImportsDep,
+    state: Annotated[AutoImportState | None, Query(description="Only linked or inbox")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[int | None, Query(ge=1)] = None,
+) -> list[AutoImport]:
+    return await store.page(state=state, limit=limit, before=before)
+
+
 @router.post(
     "/{archive_id}",
     response_model=ImportedPrint,
@@ -355,7 +378,7 @@ async def import_print(
         kept: int | None = None
         if source.kind == "printer":
             assert read is not None and settings.library_folder_id is not None
-            library_file_id, uploaded = await _keep_printer_file(
+            library_file_id, uploaded = await keep_printer_file(
                 client, read, settings.library_folder_id
             )
             kept = library_file_id if uploaded else None
@@ -381,21 +404,6 @@ async def import_print(
     return await _answer(links, response, target, archive_id, new=True)
 
 
-async def _keep_printer_file(
-    client: BambuddyClient, read: SourceFile, folder_id: int
-) -> tuple[int, bool]:
-    """The library copy of a printer file in the inbox folder, and whether this call
-    uploaded it. A copy with the same name and SHA-256 there already (an earlier try of
-    this import that was not recorded) is used again, so a retry uploads nothing."""
-    for row in await client.library_files(folder_id):
-        if row.filename != read.name or row.file_size not in (None, len(read.data)):
-            continue
-        if (await client.library_file(row.id)).file_hash == read.sha256:
-            return row.id, False
-    uploaded = await client.upload_library_file(read.name, read.data, folder_id=folder_id)
-    return uploaded.id, True
-
-
 async def _record(
     links: PrintLinkStore,
     client: BambuddyClient,
@@ -411,21 +419,11 @@ async def _record(
         )
     except BaseException:
         if kept is not None:
-            await _forget_copy(client, kept)
+            await forget_copy(client, kept)
         raise
     if owner is not None and kept is not None:
-        await _forget_copy(client, kept)
+        await forget_copy(client, kept)
     return owner
-
-
-async def _forget_copy(client: BambuddyClient, file_id: int) -> None:
-    try:
-        await client.delete_library_file(file_id)
-    except ApiError:
-        # It stays in the inbox; a retry finds it by its hash and uses it.
-        logger.warning(
-            "could not delete a printer file's library copy", extra={"library_file_id": file_id}
-        )
 
 
 def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:

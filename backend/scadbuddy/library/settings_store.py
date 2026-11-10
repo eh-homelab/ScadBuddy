@@ -75,6 +75,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
+from scadbuddy.bambuddy.print_links import ImportSource
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -108,6 +109,10 @@ DestinationSort = Literal["touched", "modified", "name"]
 #: ``activity_ttl_seconds``): ten years. Each prune computes ``now() - retention`` in
 #: Postgres, which raises "timestamp out of range" for a value a few thousand years long.
 RETENTION_MAX_SECONDS = 3650 * 86400.0
+
+#: Where the print watcher takes a 3MF from by default (#4699): Bambuddy's own copies.
+#: Never the printer's storage, which a person turns on.
+AUTO_IMPORT_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
 
 #: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
 #: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
@@ -451,6 +456,16 @@ class StoredSettings(BambuddyIds):
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
+    #: #4699: the print watcher imports the prints ScadBuddy did not start (`print_watch/`).
+    #: Off by default: on, it reads Bambuddy every `PRUNE_INTERVAL`. Stored only, and only
+    #: a person sets it: no agent tool writes settings.
+    print_auto_import: bool = False
+    #: Where the watcher may take a print's 3MF from (`print_links.ImportSource`).
+    #: ``None`` is :data:`AUTO_IMPORT_SOURCES`, which leaves out ``printer``: reading the
+    #: printer's storage reaches the printer over FTP, so it is a person's choice.
+    print_auto_import_sources: list[ImportSource] | None = None
+    #: The Bambuddy printers whose prints the watcher leaves alone.
+    print_auto_import_skip_printers: list[int] | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -644,6 +659,13 @@ class StoredSettings(BambuddyIds):
                 logger.warning("ignoring a stored asset domain that is not a domain")
         return list(dict.fromkeys(kept))
 
+    def auto_import_sources(self) -> tuple[ImportSource, ...]:
+        """Where the watcher may take a 3MF from (#4699): the stored list, else
+        :data:`AUTO_IMPORT_SOURCES`."""
+        if self.print_auto_import_sources is None:
+            return AUTO_IMPORT_SOURCES
+        return tuple(self.print_auto_import_sources)
+
     def allowed_asset_domains(self) -> tuple[str, ...]:
         if self.asset_fetch_domains is None:
             return DEFAULT_ASSET_FETCH_DOMAINS
@@ -720,6 +742,12 @@ class SettingsPatch(BaseModel):
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets
     #: it: no agent tool writes settings.
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
+
+    #: The print watcher (#4699); ``null`` puts each back to its default (off; the
+    #: archive, its slicer project and the library, no printer; no printer skipped).
+    print_auto_import: bool | None = None
+    print_auto_import_sources: list[ImportSource] | None = Field(default=None, max_length=4)
+    print_auto_import_skip_printers: list[int] | None = Field(default=None, max_length=200)
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.

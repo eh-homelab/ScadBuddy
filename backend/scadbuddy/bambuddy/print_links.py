@@ -343,6 +343,68 @@ def _linked_print(row: dict[str, Any]) -> LinkedPrint:
     )
 
 
+def owner_in(conn: Connection[DictRow], archive_id: int) -> LinkedPrint | None:
+    """``archive_id``'s owner by `_OWNER_ORDER`, read on the caller's connection."""
+    row = conn.execute(
+        f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
+        (archive_id,),
+    ).fetchone()
+    return _linked_print(dict(row)) if row is not None else None
+
+
+def import_in(
+    conn: Connection[DictRow],
+    record: PrintImport,
+    *,
+    printer_id: int | None,
+    plate_id: int | None,
+) -> LinkedPrint | None:
+    """`PrintLinkStore.record_import` in the caller's transaction (the automatic import,
+    #4699, writes its own row in the same one): None once both rows are written, else
+    the link that owns the archive already, and nothing is written. It takes the
+    archive's import lock until that transaction ends."""
+    subject = PrintSubject.model(record.slug)
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(%s, %s)",
+        (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
+    )
+    owner = owner_in(conn, record.archive_id)
+    if owner is not None:
+        return owner
+    # A row left by a link forgotten since (a model deleted while its copy of
+    # this row stayed) is replaced.
+    conn.execute(
+        "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
+        " printer_id, printer_path, filename, size, sha256, created_model)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
+        " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
+        " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
+        " filename = EXCLUDED.filename, size = EXCLUDED.size,"
+        " sha256 = EXCLUDED.sha256, created_model = EXCLUDED.created_model,"
+        " imported_at = now()",
+        (
+            record.archive_id,
+            record.slug,
+            record.source,
+            record.library_file_id,
+            record.printer_id,
+            record.printer_path,
+            record.filename,
+            record.size,
+            record.sha256,
+            record.created_model,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO print_links"
+        " (subject, archive_id, matched_by, plate_id, printer_id, name)"
+        " VALUES (%s, %s, 'import', %s, %s, %s)",
+        (subject.key, record.archive_id, plate_id, printer_id, record.filename),
+    )
+    return None
+
+
 class PrintLinkStore:
     """``print_links`` and ``print_sends``, on the process's pool (the render queue's).
 
@@ -609,50 +671,8 @@ class PrintLinkStore:
     def _record_import(
         self, record: PrintImport, printer_id: int | None, plate_id: int | None
     ) -> LinkedPrint | None:
-        subject = PrintSubject.model(record.slug)
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(%s, %s)",
-                (IMPORT_LOCK_CLASS, record.archive_id % (2**31)),
-            )
-            owner = conn.execute(
-                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
-                (record.archive_id,),
-            ).fetchone()
-            if owner is not None:
-                return _linked_print(dict(owner))
-            # A row left by a link forgotten since (a model deleted while its copy of
-            # this row stayed) is replaced.
-            conn.execute(
-                "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
-                " printer_id, printer_path, filename, size, sha256, created_model)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
-                " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
-                " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
-                " filename = EXCLUDED.filename, size = EXCLUDED.size,"
-                " sha256 = EXCLUDED.sha256, created_model = EXCLUDED.created_model,"
-                " imported_at = now()",
-                (
-                    record.archive_id,
-                    record.slug,
-                    record.source,
-                    record.library_file_id,
-                    record.printer_id,
-                    record.printer_path,
-                    record.filename,
-                    record.size,
-                    record.sha256,
-                    record.created_model,
-                ),
-            )
-            conn.execute(
-                "INSERT INTO print_links"
-                " (subject, archive_id, matched_by, plate_id, printer_id, name)"
-                " VALUES (%s, %s, 'import', %s, %s, %s)",
-                (subject.key, record.archive_id, plate_id, printer_id, record.filename),
-            )
-        return None
+            return import_in(conn, record, printer_id=printer_id, plate_id=plate_id)
 
     def _import_of(self, archive_id: int) -> PrintImport | None:
         with self._pool.connection() as conn:

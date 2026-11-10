@@ -210,6 +210,12 @@ STOREFRONT_DRAFTS_PATCH = "housekeeping-sweep-storefront-drafts"
 #: sends nothing.
 STOREFRONT_MAIL_SWEEP = "housekeeping_send_storefront_mail"
 STOREFRONT_MAIL_PATCH = "housekeeping-send-storefront-mail"
+#: #4699: the print watcher (`print_watch/sweep.py`): import the prints ScadBuddy did not
+#: start from Bambuddy's new archives. Last, behind its own patch; on the prune Schedule
+#: too, so a print shows within `PRUNE_INTERVAL`, with the sweeps off as well. It obeys
+#: its own switch (`print_auto_import`, off by default): off, it calls nothing.
+AUTO_IMPORT_SWEEP = "housekeeping_auto_import_prints"
+AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -240,6 +246,7 @@ SWEEPS = (
     BANK_DEPOSITS_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
+    AUTO_IMPORT_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -266,7 +273,9 @@ SWEEPS = (
 #: close failed (#5700), behind `PAYMENT_CLOSES_PATCH`. And the PayPal captures whose
 #: outcome was never told (#4959), behind `PAYMENT_CAPTURES_PATCH`. And the idle
 #: storefront carts (#5282), behind `STOREFRONT_DRAFTS_PATCH`. And the storefront mail
-#: left unsent (#5283), behind `STOREFRONT_MAIL_PATCH`.
+#: left unsent (#5283), behind `STOREFRONT_MAIL_PATCH`. And the print watcher (#4699),
+#: behind `AUTO_IMPORT_PATCH`: a print ScadBuddy did not start shows within the
+#: interval; with ``print_auto_import`` off it calls nothing.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -283,6 +292,7 @@ PRUNE_SWEEPS = (
     PAYMENT_CAPTURES_SWEEP,
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
+    AUTO_IMPORT_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -354,6 +364,11 @@ STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
 #: flight then has at most a few 20 s steps (`mail.SMTP_TIMEOUT`) left.
 #: A server that does not answer stops the pass at its first row.
 STOREFRONT_MAIL_TIMEOUT = timedelta(minutes=10)
+#: Up to `print_watch.sweep.MAX_PAGES` (5) archive pages, then up to `MAX_IMPORTS` (20)
+#: archives, each a lock wait of at most 30 s (`IMPORT_LOCK_WAIT_S`), the link passes
+#: and a few Bambuddy reads, and with the printer allowed an FTP listing and a read:
+#: most passes take none or one. Not imported, as `GIT_TIMEOUT`'s is not.
+AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -402,6 +417,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return STOREFRONT_DRAFTS_TIMEOUT
     if sweep == STOREFRONT_MAIL_SWEEP:
         return STOREFRONT_MAIL_TIMEOUT
+    if sweep == AUTO_IMPORT_SWEEP:
+        return AUTO_IMPORT_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -462,6 +479,8 @@ class Housekeeping:
             if sweep == STOREFRONT_DRAFTS_SWEEP and not workflow.patched(STOREFRONT_DRAFTS_PATCH):
                 continue
             if sweep == STOREFRONT_MAIL_SWEEP and not workflow.patched(STOREFRONT_MAIL_PATCH):
+                continue
+            if sweep == AUTO_IMPORT_SWEEP and not workflow.patched(AUTO_IMPORT_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

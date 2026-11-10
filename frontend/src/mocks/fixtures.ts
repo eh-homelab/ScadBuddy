@@ -1142,6 +1142,10 @@ export const settings: Settings = {
   job_ttl: 3600,
   activity_follow: null,
   asset_fetch_domains: [...DEFAULT_ASSET_FETCH_DOMAINS],
+  // #4699: the print watcher, off by default; the printer's storage is not a default source.
+  print_auto_import: false,
+  print_auto_import_sources: ['archive', 'archive_source', 'library'],
+  print_auto_import_skip_printers: [],
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
