@@ -112,6 +112,51 @@ describe('QueueItemPage (#3744)', () => {
     expect(slots.map((slot) => slot.textContent)).toEqual([expect.stringContaining('AMS Lite · slot 3')])
   })
 
+  it("names an A2L's trays by its AMS Lite from the assigned printer's model when the item names none (#5908)", async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json([
+          { id: 'p-h2c', serial: 'S1', name: 'H2C', model: 'H2C', bambuddy_printer_id: 1 },
+          { id: 'p-a2l', serial: 'S7', name: 'Lite', model: 'A2L', bambuddy_printer_id: 7 },
+        ])
+      }),
+    )
+    render(265)
+
+    const region = await screen.findByRole('region', { name: 'Filament slots' })
+    expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
+    expect(read).toBe(1)
+  })
+
+  it('reads no printers when the item names its model', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, sliced_for_model: 'H2C', ams_mapping: [2] })
+    let read = 0
+    server.use(
+      http.get('/api/v1/printers', () => {
+        read += 1
+        return HttpResponse.json([])
+      }),
+    )
+    render(265)
+
+    await screen.findByRole('region', { name: 'Filament slots' })
+    expect(read).toBe(0)
+  })
+
+  it('says a finished item waited for no manual start any more (#5908)', async () => {
+    const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
+    serve({ ...reagan, status: 'completed', manual_start: true })
+    render(265)
+
+    const queue = await screen.findByRole('region', { name: "In Bambuddy's queue" })
+    expect(queue).not.toHaveTextContent('Waits for a manual start')
+  })
+
   it('names the same id on any other printer by its AMS', async () => {
     const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
     serve({ ...reagan, sliced_for_model: 'H2C', ams_mapping: [2] })
