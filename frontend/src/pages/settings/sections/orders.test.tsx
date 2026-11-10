@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
 import { mockSettings } from '../../../mocks/handlers'
 import { choose } from '../../../test/select'
@@ -159,5 +159,26 @@ describe('Orders, money rules (#5281)', () => {
     await user.click(within(policy).getByRole('button', { name: 'Save deposit policy' }))
     expect(await within(policy).findByRole('alert')).toHaveTextContent('Rule 1: enter a fixed amount, such as 20.00.')
     expect(mockSettings().orders_deposit_policy).toEqual([])
+  })
+})
+
+describe('the storefront bot check (#5283)', () => {
+  it('saves the site key and a write-only secret, and never shows the secret', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const orders = region('Orders')
+    await user.type(within(orders).getByLabelText('Storefront bot check: Turnstile site key'), '0x4AAA-site')
+    await user.type(within(orders).getByLabelText('Storefront bot check: Turnstile secret key'), '0x4AAA-secret')
+    await user.click(within(orders).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toEqual({
+      storefront_turnstile_site_key: '0x4AAA-site',
+      storefront_turnstile_secret: '0x4AAA-secret',
+    })
+    // The server reports only that a secret is set.
+    await waitFor(() => expect(mockSettings().has_storefront_turnstile_secret).toBe(true))
+    expect(mockSettings()).not.toHaveProperty('storefront_turnstile_secret')
+    put.mockRestore()
   })
 })

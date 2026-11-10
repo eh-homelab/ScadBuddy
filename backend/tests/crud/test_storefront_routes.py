@@ -119,7 +119,7 @@ def test_a_storefront_route_needs_the_storefront_credential(
     assert client.get(url, headers=bearer(render_token)).status_code == 403
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
-    assert r.json() == {"areas": ["listings", "renders", "drafts", "requests", "pay"]}
+    assert r.json() == {"areas": ["listings", "renders", "drafts", "requests", "pay", "turnstile"]}
 
 
 def test_the_storefront_routes_are_not_in_the_schema() -> None:
@@ -193,7 +193,7 @@ def test_the_other_callers_keep_their_paths(client: TestClient, render_token: st
 def test_the_edge_waits_for_every_area_it_calls() -> None:
     """The edge serves only once the API lists each area it calls, and the API lists
     only areas it serves whole."""
-    assert {"listings", "renders", "drafts", "requests", "pay"} == EDGE_AREAS
+    assert {"listings", "renders", "drafts", "requests", "pay", "turnstile"} == EDGE_AREAS
     assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
 
 

@@ -12,6 +12,7 @@ export const SECRETS = [
   'google_fonts_api_key',
   'store_s3_secret_access_key',
   'git_remote_token',
+  'storefront_turnstile_secret',
 ] as const
 export type Secret = (typeof SECRETS)[number]
 
@@ -26,6 +27,7 @@ const SECRET_FLAGS: Record<Secret, keyof Settings> = {
   google_fonts_api_key: 'has_google_fonts_api_key',
   store_s3_secret_access_key: 'has_store_s3_secret_access_key',
   git_remote_token: 'has_git_remote_token',
+  storefront_turnstile_secret: 'has_storefront_turnstile_secret',
 }
 
 /**
