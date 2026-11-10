@@ -1,5 +1,5 @@
 """A visitor submits its cart as an order (#5283, spec 2026-11-02 §5.5, plan Task 3):
-``POST …/storefront/draft/submit`` links or makes the customer, takes the number, sets
+``POST …/storefront/draft/submit`` makes a new customer, takes the number, sets
 the shipping option, the tax and the deposit, stamps ``submitted_at``, makes the order
 link and queues its mail, in one transaction."""
 
@@ -17,9 +17,10 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError
 from scadbuddy.orders.models import AddressInput, ContactInput, Customer
 from scadbuddy.orders.money import DepositRule, OrderRules, ShippingOption
+from scadbuddy.orders.storefront.submit import _refusal
 from scadbuddy.orders.storefront.wire import Listing, ListingInput
 from scadbuddy.payments import store as payments
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
@@ -162,26 +163,47 @@ def test_a_new_customer_is_made_with_the_name_and_the_email(
     ]
 
 
-def test_an_existing_single_contact_is_linked(
-    api: TestClient, crud: CrudCaller, listing: Listing
-) -> None:
-    known = customer_with(api, "Ada@Example.com")
-    customer_with(api, "someone@example.com")
-    draft = draft_of(crud, listing)
-    assert crud.post("/draft/submit", json=submit_body(draft), key="s1").status_code == 200
-    order = _orders(api).store.order(draft["id"])
-    assert order is not None and order.customer_id == known.id
+def _unchanged(api: TestClient, customer: Customer) -> None:
+    """``customer`` exactly as it was made: no order, no address, no other change."""
+    now = _orders(api).store.customer(customer.id)
+    assert now == customer
+    assert rows(api, "SELECT id FROM orders WHERE customer_id = %s", customer.id) == []
 
 
-def test_two_customers_with_that_email_give_a_new_customer(
-    api: TestClient, crud: CrudCaller, listing: Listing
+@pytest.mark.parametrize("matching", [1, 2])
+def test_a_customer_with_the_same_email_is_never_linked_or_changed(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing, matching: int
 ) -> None:
-    one = customer_with(api, "ada@example.com")
-    two = customer_with(api, "ada@example.com", name="Ada too")
+    """Spec §5.2: a typed email proves nothing; only a verified account links a customer."""
+    owner_lifecycle.rules = rules(options=(POST,))
+    known = [
+        _orders(api).store.insert_customer(
+            display_name=f"Known {n}",
+            company=None,
+            notes="",
+            tags=[],
+            contacts=[ContactInput(kind="email", value="Ada@Example.com")],
+            addresses=[AddressInput(recipient="Old", default_shipping=True)],
+        )
+        for n in range(matching)
+    ]
     draft = draft_of(crud, listing)
-    assert crud.post("/draft/submit", json=submit_body(draft), key="s1").status_code == 200
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
+        key="s1",
+    )
+    assert r.status_code == 200, r.text
     order = _orders(api).store.order(draft["id"])
-    assert order is not None and order.customer_id not in (None, one.id, two.id)
+    assert order is not None and order.customer_id not in [None, *(k.id for k in known)]
+    for customer in known:
+        _unchanged(api, customer)
+    # The new customer holds the address, as its default shipping address.
+    assert order.customer_id is not None
+    made = _orders(api).store.customer(order.customer_id)
+    assert made is not None
+    assert [(a.recipient, a.default_shipping) for a in made.addresses] == [("Ada Lovelace", True)]
+    assert order.shipping_address_id == made.addresses[0].id
 
 
 def test_an_option_that_ships_needs_an_address(
@@ -264,6 +286,26 @@ def test_the_deposit_policy_applies(
     ]
 
 
+def test_a_first_order_deposit_applies_even_when_the_email_has_ordered_before(
+    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
+) -> None:
+    """An anonymous submit makes a new customer, so ``first_order`` is true for it, even
+    when a customer with that email has an accepted order: the shop merges them by hand."""
+    owner_lifecycle.rules = rules(deposit=(DepositRule(criterion="first_order", amount_minor=500),))
+    known = customer_with(api, "ada@example.com")
+    with _state(api).projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO orders (number, customer_id, currency, created_by, accepted_at)"
+            " VALUES ('ORD-1999-1', %s, 'USD', '{\"kind\": \"browser\"}', now())",
+            (known.id,),
+        )
+    draft = draft_of(crud, listing)
+    assert crud.post("/draft/submit", json=submit_body(draft), key="s1").status_code == 200
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.customer_id != known.id
+    assert order.deposit_minor == 500
+
+
 def test_another_visitors_submit_sees_no_draft(
     api: TestClient, crud: CrudCaller, listing: Listing
 ) -> None:
@@ -314,10 +356,21 @@ def test_an_email_that_is_not_one_address_is_422(
     assert order is not None and order.unsubmitted
 
 
+def test_a_body_that_names_an_account_is_422(
+    api: TestClient, crud: CrudCaller, listing: Listing
+) -> None:
+    """Spec §6.4: the account comes from the CRUD side's session, never from a body."""
+    draft = draft_of(crud, listing)
+    r = crud.post("/draft/submit", json=submit_body(draft, account_id="acct-1"), key="s1")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}submit_body_invalid"
+    order = _orders(api).store.order(draft["id"])
+    assert order is not None and order.unsubmitted
+
+
 @pytest.mark.parametrize(
     "extra",
     [
-        {"account_id": "acct-1"},
         {"name": ""},
         {"name": "   "},
         {"name": "x" * 201},
@@ -351,30 +404,7 @@ def test_the_submit_is_the_customers_on_the_audit_line(
     assert submitted.by.principal == f"customer:{order.customer_id}"
 
 
-def test_an_address_given_to_a_linked_customer_is_added_to_it(
-    api: TestClient, crud: CrudCaller, owner_lifecycle: Lifecycle, listing: Listing
-) -> None:
-    owner_lifecycle.rules = rules(options=(POST,))
-    known = _orders(api).store.insert_customer(
-        display_name="Ada",
-        company=None,
-        notes="",
-        tags=[],
-        contacts=[ContactInput(kind="email", value="ada@example.com")],
-        addresses=[AddressInput(recipient="Old", default_shipping=True)],
-    )
-    draft = draft_of(crud, listing)
-    r = crud.post(
-        "/draft/submit",
-        json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
-        key="s1",
-    )
-    assert r.status_code == 200, r.text
-    customer = _orders(api).store.customer(known.id)
-    assert customer is not None
-    assert [(a.recipient, a.default_shipping) for a in customer.addresses] == [
-        ("Old", True),
-        ("Ada Lovelace", False),
-    ]
-    order = _orders(api).store.order(draft["id"])
-    assert order is not None and order.shipping_address_id == customer.addresses[1].id
+@pytest.mark.parametrize("slug", ["shipping_option_id", "amount_minor"])
+def test_a_422_refusal_keeps_its_own_slug(slug: str) -> None:
+    error = _refusal(LifecycleError(slug, f"{slug}: no", unprocessable=True))
+    assert (error.status, error.type) == (422, f"{STOREFRONT_PROBLEMS}{slug}")

@@ -539,9 +539,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   503 and never counts as a failed check. While the edge's `SiteKey` read no key within
   `SITE_KEY_TTL` (30 s), the check passes with no call, so a newly set key takes effect
   within 30 s. A form route awaits it
-  before it reads its body. Today only design requests (`request`) take it; the actions
-  `submit`, `sign_up` and `sign_in` are kept for the submit, code request and sign-in
-  routes still to come. The edge's page CSP (`storefront/static.py`) names
+  before it reads its body. Design requests (`request`) and submit (`submit`) take it;
+  the actions `sign_up` and `sign_in` are kept for the code request and sign-in routes
+  still to come. The edge's page CSP (`storefront/static.py`) names
   `challenges.cloudflare.com` in `script-src` and `frame-src` only while a site key is set.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).

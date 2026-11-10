@@ -12,7 +12,7 @@
  * `type` and `detail` (`https://scadbuddy.dev/problems/storefront/*`) and, on a 429, the
  * seconds the edge says to wait.
  */
-import type { components } from './schema'
+import type { components, paths } from './schema'
 
 type Schemas = components['schemas']
 export type Listing = Schemas['PublicListing']
@@ -116,24 +116,8 @@ export interface RenderInput {
   colours: Record<string, string>
 }
 
-/** The address an option that ships needs (backend `orders/models.py` `SubmitAddress`). */
-export interface SubmitAddress {
-  recipient: string
-  lines: string[]
-  locality?: string
-  region?: string
-  postal_code?: string
-  country?: string
-}
-
-/** A submit of the cart the page shows (backend `orders/storefront/wire.py` `SubmitBody`). */
-export interface SubmitInput {
-  draft_id: string
-  name: string
-  email: string
-  shipping_option_id?: string
-  address?: SubmitAddress
-}
+/** A submit of the cart the page shows: the edge's request body, from its spec. */
+export type SubmitInput = paths['/api/store/v1/draft/submit']['post']['requestBody']['content']['application/json']
 
 export const store = {
   listings: () => call<Listings>('/listings'),

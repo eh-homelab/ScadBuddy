@@ -842,18 +842,24 @@ class Lifecycle:
         under the order's lock (``conn``'s, as a savepoint, when given; the caller tells
         the bus then): it
 
-        1. links the customer that is the only one (not archived) with ``body.email`` as a
-           contact, or makes one with the name and that email; an address given is added
-           to that customer and is the order's shipping address (a linked customer's own
-           addresses are never used: an email alone proves no address);
+        1. makes a new customer (`_new_customer`) with the name, ``body.email`` as its
+           primary contact and the address given as its default shipping address, which is
+           the order's. It never links or writes an existing customer, whatever its
+           contacts: a typed email proves nothing (spec §5.2; only a verified account
+           links a customer, and the shop merges customers by hand). Once the storefront's
+           accounts set ``body.account_id`` (from the CRUD side's session, never a body),
+           this step takes the account's customer instead;
         2. takes the year's number (`OrderStore.claim_draft`);
         3. sets the shipping option (`_shipping_option`: `shipping_address_required` for
            one that ships with no address), which
         4. recomputes the auto tax;
         5. applies the deposit policy (`_deposit_policy`; a deposit request opened here
            queues no `payment_requested` mail, since no link exists yet: the order link's
-           mail leads to the page that shows it). A policy that applies only in another
-           currency sets none, and `deposit.policy_skipped` tells the shop;
+           mail leads to the page that shows it). The customer is new, so a ``first_order``
+           rule always applies to an anonymous submit, even when the email has ordered
+           before; the shop can change the deposit before it accepts (§8). A policy that
+           applies only in another currency sets none, and `deposit.policy_skipped` tells
+           the shop;
         6. stamps ``submitted_at``;
         7. makes the order link (`create_order_link`);
         8. queues the `order_link` mail to ``body.email``.
@@ -888,29 +894,12 @@ class Lifecycle:
                     f"shipping_option_id: no shipping option {option_id}",
                     unprocessable=True,
                 )
-            found = self.store.customers_with_email(tx, email)
-            linked = len(found) == 1
-            if linked:
-                customer_id = found[0]
-            else:
-                customer_id = self.store.insert_customer(
-                    display_name=body.name,
-                    company=None,
-                    notes="",
-                    tags=[],
-                    contacts=[ContactInput(kind="email", value=email, primary=True)],
-                    addresses=[],
-                    conn=tx,
-                ).id
-            address_id = None
-            if body.address is not None:
-                address = body.address.as_input(default_shipping=not linked)
-                address_id = self.store.add_address(tx, customer_id, address).id
+            customer_id, address_id = self._new_customer(tx, body, email)
             customer = customer_actor(customer_id, order.storefront_visitor_id or "")
             order = self.store.claim_draft(
                 tx, order.id, customer_id=customer_id, shipping_address_id=address_id
             )
-            self._event(tx, order, customer, "order.customer_set", linked=linked)
+            self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)
             try:
                 self._deposit_policy(tx, order, customer, rules)
@@ -928,6 +917,21 @@ class Lifecycle:
         if conn is None:
             self._told(_Change(order))
         return order, token
+
+    def _new_customer(self, conn: Conn, body: SubmitInput, email: str) -> tuple[str, str | None]:
+        """`submit_order`'s step 1 for an anonymous submit: a new customer with the name,
+        ``email`` as its primary contact and the given address as its default shipping
+        address. Its id, and the address's (None without one)."""
+        made = self.store.insert_customer(
+            display_name=body.name,
+            company=None,
+            notes="",
+            tags=[],
+            contacts=[ContactInput(kind="email", value=email, primary=True)],
+            addresses=[] if body.address is None else [body.address.as_input()],
+            conn=conn,
+        )
+        return made.id, made.addresses[0].id if made.addresses else None
 
     def sweep_drafts(self, before: datetime, *, limit: int = 200) -> list[str]:
         """Delete up to ``limit`` storefront carts idle since ``before`` (#5282: the

@@ -51,11 +51,12 @@ def _refusal(error: LifecycleError) -> ApiError:
     if error.not_found:
         return draft_not_found()
     if error.unprocessable:
-        return problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "shipping_option_id",
-            "Choose how your order reaches you.",
+        detail = (
+            "Choose how your order reaches you."
+            if error.slug == "shipping_option_id"
+            else "Your order could not be sent as it is. Load it again."
         )
+        return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, error.slug, detail)
     texts = {
         "order_submitted": "This order is sent already.",
         "draft_empty": "Your order is empty. Add something to it first.",

@@ -205,8 +205,9 @@ class SubmitAddress(BaseModel):
     country: Country | None = None
     phone: Annotated[str, Field(max_length=40)] | None = None
 
-    def as_input(self, *, default_shipping: bool) -> AddressInput:
-        return AddressInput(**self.model_dump(), default_shipping=default_shipping)
+    def as_input(self) -> AddressInput:
+        """The address as a new customer's default shipping address."""
+        return AddressInput(**self.model_dump(), default_shipping=True)
 
 
 class AddressSnapshot(AddressInput):
