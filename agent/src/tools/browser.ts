@@ -144,10 +144,6 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       // changed while the tab was away, and an outward call's approval was given
       // for the page as it was. The model re-checks the page and calls again.
       if (!outcome.ok && outcome.error.code === 'no_browser' && ctx.waitForTab) {
-        // A tab whose replica is only slow to answer opens no wait (#5974 review): the wait would end
-        // at once, show the user no card, and still use up the turn's and the user's tab waits.
-        const before = await statusHere(ctx, 'before')
-        if (before?.attached === false && before.slow === true) throw new ToolError(`${outcome.error.message} ${WHY_SLOW_NO_WAIT}`)
         // Whether a check during the wait found the owner slow: then no reconnect happened, and the
         // checks below need not ask the same slow replica again. Only the call that opened the wait
         // runs its isBack (sessions/manager.ts keeps the opener's), so a call that joined it checks
@@ -160,6 +156,13 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           // A slow owner counts as back (#5962 review): the tab may still be connected; a read's
           // retry below finds out, and a write says to snapshot and call again. Read as gone, it
           // would end the turn's tab waits.
+          // A tab whose replica is only slow to answer opens no wait (#5974 review): the wait would end
+          // at once, show the user no card, and still use up the turn's and the user's tab waits. The
+          // manager asks only when the turn may still wait (#5981 review).
+          slow: async (signal) => {
+            const status = await statusHere(ctx, 'before', signal)
+            return status?.attached === false && status.slow === true ? WHY_SLOW_NO_WAIT : undefined
+          },
           isBack: async (signal) => {
             // The manager asks again after a `reconnected` verdict (sessions/manager.ts): a slow
             // owner already seen is not probed a second time (#5981 review).
@@ -210,11 +213,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
  * turn the not-run guidance into an unexpected error: the caller then words it
  * as if the tab might be here, and the model re-checks with browser_status.
  */
-async function statusHere(ctx: ToolContext, when: 'before' | 'after' = 'after'): Promise<BrowserStatus | undefined> {
+async function statusHere(ctx: ToolContext, when: 'before' | 'after' = 'after', signal: AbortSignal = ctx.signal): Promise<BrowserStatus | undefined> {
   try {
-    return await tabs(ctx).status(target(ctx), { signal: ctx.signal })
+    return await tabs(ctx).status(target(ctx), { signal })
   } catch (err) {
-    if (ctx.signal.aborted) throw err
+    if (signal.aborted) throw err
     // #1814: a pool that keeps failing re-checks shows in the logs. Only the error's
     // name: its message can quote a connection string or a query (telemetry/scrub.ts).
     console.warn(`browser tools: ${when === 'before' ? 'checking the tab before its wait' : 're-checking the tab after its wait'} failed (${errorName(err)})`)

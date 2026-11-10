@@ -245,8 +245,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   its status read, it fails with "… take a snapshot to see the page, then call again."
   (`WHY_SLOW`, #5974). A turn waits for its tab at most 3 times (`TAB_WAITS_PER_TURN`), and
   after "Carry on without the tab", a typed reply, a timeout, or a reconnect to a replica
-  that cannot be reached it does not ask again that turn. Before it opens a wait, the call
-  checks the tab's status once: when the tab's replica is only slow to answer, no wait is
+  that cannot be reached it does not ask again that turn. Before it opens a new wait, and
+  only when the turn may still wait (no latch, waits left), the call checks the tab's status
+  once (`WaitForTab`'s `slow`, #5981): when the tab's replica is only slow to answer, no wait is
   opened (it would show no card and still use up the turn's and the user's tab waits), and
   the call fails with "… so the user was not asked to reopen it: take a snapshot, then call
   again." (`WHY_SLOW_NO_WAIT`, #5974 review). A replica that turns slow during the wait
