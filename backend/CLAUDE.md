@@ -495,6 +495,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `archive_run_plates`) orders as `_OWNER_ORDER` does.
   Only a source the listing finds is read. A printer file is kept as a Bambuddy library
   file in the inbox folder. A model's delete forgets its imports (`delete_models`).
+  Agent `get_print_sources` and `import_print`; frontend: the Prints page's "Import
+  print" (`components/prints/ImportPrintDialog.tsx`, the unlinked archives through
+  `PastPrintsPicker` `unlinkedOnly`), mocks `src/mocks/features/printImports.ts`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -837,9 +840,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `option_id`, an option that ships needs the shipping address
   (`shipping_address_required`), a pickup does not (gap 15), and `PATCH` does not clear
   the address while such an option stays (`_no_option_ships`, the same slug). An order
-  not in the shop's currency (`orders_currency`) takes no option, in the back office and
-  in a storefront submit alike: 409 `shipping_currency_mismatch` (`_shipping_in_currency`;
-  null still removes), and its draft view lists none. A payment
+  not in the shop's currency (`orders_currency`) takes no option: 409
+  `shipping_currency_mismatch` (`_shipping_in_currency`; null still removes). A storefront
+  cart holds no amount, so its submit takes the shop's currency first
+  (`OrderStore.claim_draft`), and its draft view shows that currency and its options. A payment
   that reaches the deposit pays the open and failed `deposit` requests (#4959: a failed
   page can be approved again), a provider's as a manual one
   (`_close_deposit`), and their pages are closed after the commit. Routes in
