@@ -443,8 +443,9 @@ export type ClaimedSession = SessionRecord & {
   agentEffort: EffortLevel | null
   agentType: string | null
   /**
-   * Whether its turns are offered the session's background built-ins (`ai_sessions.background_tools`,
-   * #5870): false for a session a flow run started and a Workflow agent's chat; a fork keeps its parent's.
+   * Whether its running turn is offered the session's background built-ins (#5870): false for a
+   * session a flow run started or forked, a Workflow agent's chat and a fork of one
+   * (`ai_sessions.background_tools`), and for any turn a flow run sent (`turn_flow`).
    */
   backgroundTools: boolean
   /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
@@ -459,6 +460,12 @@ export type ClaimedSession = SessionRecord & {
  * on since `turn_started_at` came gives its `updated_at`.
  */
 export const CLAIMED_AT = `to_char(coalesce(turn_started_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
+
+/**
+ * Whether the running turn is offered the background built-ins (#5870): the session keeps them
+ * (`background_tools`) and its turn was not sent by a flow run (`turn_flow`, durable.ts `send`).
+ */
+const BACKGROUND_TOOLS = '(background_tools AND NOT turn_flow) AS background_tools'
 
 type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null; background_tools: boolean }
 
@@ -485,7 +492,7 @@ export async function runningDurableTurn(
   if (!isUuid(id)) return undefined
   // A claim's shape, so a Workflow agent's model, effort and type assemble as its classic turns do.
   const [row] = await sql.unsafe<(ClaimRow & { turn_tiers: { tiers?: Tier[] } | null })[]>(
-    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
+    `SELECT ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${BACKGROUND_TOOLS}, ${CLAIMED_AT}, turn_tiers FROM ai_sessions
      WHERE id = $1 AND durable_turn_id = $2 AND status IN ('running', 'waiting_approval', 'waiting_input')`,
     [id, turnId],
   )
@@ -519,8 +526,11 @@ export type StartOptions = {
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
   flow?: FlowTurn
-  /** A flow run starts it (#5870): its turns are not offered the background built-ins (ClaimedSession.backgroundTools). */
-  startedByFlow?: boolean
+  /**
+   * A flow run, or a session that keeps no background tasks, starts it (#5870): its turns are
+   * not offered the background built-ins (ClaimedSession.backgroundTools).
+   */
+  withoutBackground?: boolean
   /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode?: SessionMode
 }
@@ -549,9 +559,12 @@ export type SendOptions = {
   /**
    * The flow run and step that send this turn (#2481), set only by the sessions tools
    * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
-   * it, so the run's grant may cover its calls. A classic turn ignores it.
+   * it, so the run's grant may cover its calls. A classic turn ignores it. Such a turn is offered
+   * no background built-in (#5870, `turn_flow`).
    */
   flow?: FlowTurn
+  /** Sent from a session that keeps no background tasks (#5870): this turn is offered none either (`turn_flow`). */
+  withoutBackground?: boolean
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -1084,7 +1097,7 @@ export class SessionManager {
     return this.warm.revalidate(async (entry) => {
       // A claim's shape, so a Workflow agent's model, effort and type assemble as its turns do.
       const [row] = await this.deps.sql.unsafe<ClaimRow[]>(
-        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, background_tools, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
+        `SELECT ${COLUMNS}, 0::float8 AS unpriced_cost_usd, agent_model, agent_effort, agent_type, ${BACKGROUND_TOOLS}, ${CLAIMED_AT} FROM ai_sessions WHERE id = $1`,
         [entry.sessionId],
       )
       if (!row) return undefined
@@ -1294,7 +1307,7 @@ export class SessionManager {
       scope: options.scope ?? {},
       parentId: null,
       runtime: 'unified',
-      ...(options.startedByFlow ? { backgroundTools: false as const } : {}),
+      ...(options.withoutBackground ? { backgroundTools: false as const } : {}),
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -1316,6 +1329,16 @@ export class SessionManager {
       ...(options.flow ? { flow: options.flow } : {}),
     })
     return { session: await this.get(id, principal), turn }
+  }
+
+  /**
+   * Whether session `id`'s running turn is offered the background built-ins (#5870,
+   * BACKGROUND_TOOLS): what a session it starts, forks or sends a turn to inherits
+   * (tools/sessions.ts). False for a session that is gone.
+   */
+  async keepsBackgroundTools(id: string): Promise<boolean> {
+    const [row] = await this.deps.sql.unsafe<{ background_tools: boolean }[]>(`SELECT ${BACKGROUND_TOOLS} FROM ai_sessions WHERE id = $1`, [id])
+    return row?.background_tools ?? false
   }
 
   /**
@@ -1375,6 +1398,7 @@ export class SessionManager {
       systemAppend: systemAppend(),
       ...(options.tiers ? { tiers: options.tiers } : {}),
       ...(options.flow ? { flow: options.flow } : {}),
+      ...(options.withoutBackground ? { withoutBackground: true } : {}),
     })
     if (!turn) throw await this.whyNotClaimed(id, principal, before)
     return turn
@@ -1640,6 +1664,8 @@ export class SessionManager {
       freshBudget?: boolean
       upTo?: string
       audit?: Omit<AuditContext, 'actor'>
+      /** A flow run, or a session that keeps none, forks it (#5870): the fork keeps no background tasks, whatever its parent's. */
+      withoutBackground?: boolean
     } = {},
   ): Promise<SessionRecord> {
     const startedAt = new Date()
@@ -1681,7 +1707,15 @@ export class SessionManager {
     // review). Checked first too, so a refused fork leaves nothing behind; the
     // insert's check under the lock is the one that holds.
     await this.withinNewSessionLimit(principal, this.deps.sql)
-    const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
+    // A fork keeps its parent's background_tools (insert), and a flow's fork none (#5870).
+    const fields = {
+      origin: options.origin ?? parent.origin,
+      title,
+      tags: parent.tags,
+      scope: parent.scope,
+      parentId: parent.id,
+      ...(options.withoutBackground ? { backgroundTools: false as const } : {}),
+    }
     const insertOptions = { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) }
     // The parent's transcript, read through the cut: the child is an AgentSession, as every new
     // session is (plan Step 6.3). Forks made before Step 6.5 hold a copy.

@@ -97,6 +97,17 @@ function manager(ctx: ToolContext): SessionManager {
   return ctx.sessions
 }
 
+/**
+ * Whether a session this call starts or forks, or a turn it sends, goes without the background
+ * built-ins (#5870): a flow run's call, or a call from a session whose turn has none (a flow's
+ * session, a Workflow agent's chat), so neither reaches CronCreate, ScheduleWakeup, Workflow or
+ * Monitor through another session.
+ */
+async function withoutBackground(ctx: ToolContext, sessions: SessionManager): Promise<boolean> {
+  if (ctx.flowTurn) return true
+  return ctx.session !== undefined && !(await sessions.keepsBackgroundTools(ctx.session))
+}
+
 /** Runs a manager or approval call, turning its refusals into the tool error the caller reads. */
 async function refusals<T>(run: () => Promise<T>): Promise<T> {
   try {
@@ -407,6 +418,7 @@ export const sessionTools: Tool[] = [
       const owner = ownerOf(ctx.principal)
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
       const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
+      const bare = await withoutBackground(ctx, sessions)
       const { session, turn } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
           origin: originOf(ctx.principal),
@@ -417,8 +429,8 @@ export const sessionTools: Tool[] = [
           ...(resolved ? { images: resolved.images } : {}),
           // A flow run's call (#2481): its turn is the run's, so the run's grant may cover it.
           ...(prompt !== undefined && ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
-          // Started by a flow run (#5870): its turns get no background built-in.
-          ...(ctx.flowTurn ? { startedByFlow: true } : {}),
+          // Started by a flow run, or a session with none (#5870): its turns get no background built-in.
+          ...(bare ? { withoutBackground: true } : {}),
         }),
       )
       if (resolved?.attached.length) {
@@ -473,11 +485,14 @@ export const sessionTools: Tool[] = [
       // An `attachment` resolves only for the principal that uploaded it (#1941).
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
       const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
+      const bare = await withoutBackground(ctx, sessions)
       const turn = await refusals(() =>
         sessions.send(session_id, owner, text, {
           tiers: ctx.principal.tiers,
           ...(resolved ? { images: resolved.images } : {}),
           ...(ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
+          // From a flow run, or a session with none (#5870): this turn gets no background built-in.
+          ...(bare ? { withoutBackground: true } : {}),
         }),
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
@@ -605,13 +620,17 @@ export const sessionTools: Tool[] = [
     routes: [],
     summarize: ({ session_id, up_to }) => `fork session ${session_id}${up_to === undefined ? '' : ` up to ${up_to}`}`,
     handler: async ({ session_id, title, up_to }, ctx) => {
+      const sessions = manager(ctx)
+      const bare = await withoutBackground(ctx, sessions)
       const child = await refusals(() =>
-        manager(ctx).fork(session_id, ownerOf(ctx.principal), {
+        sessions.fork(session_id, ownerOf(ctx.principal), {
           ...(title === undefined ? {} : { title }),
           ...(up_to === undefined ? {} : { upTo: up_to }),
           // Recorded like the HTTP route's fork (#2159): a harness call (in-process or a
           // durable activity) as `harness`, anything else as `mcp`.
           audit: { surface: ctx.gate === undefined ? 'mcp' : 'harness', clientIp: ctx.principal.clientIp },
+          // Forked by a flow run, or a session with none (#5870): its turns get no background built-in.
+          ...(bare ? { withoutBackground: true } : {}),
         }),
       )
       return json(sessionView(child, viewerOf(ctx)))

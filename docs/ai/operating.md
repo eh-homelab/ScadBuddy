@@ -1080,11 +1080,14 @@ The last three rows are the session's own built-ins (`SESSION_BUILTINS`), served
 Claude Code's (below) and listed in the same source, so an admin sees and sets them there.
 Every turn offers each one that is not `off`, whether or not a plugin package names it (#2726
 R2; before, only a turn with an allowed package that named one got it). A session a flow run
-started (`sessions_start` with the run's call) and a Workflow agent's chat
-(`SessionManager.startChild`) keep no background tasks, nor does a fork of one
+started or forked (`sessions_start`, `sessions_fork` in the run's call) and a Workflow agent's
+chat (`SessionManager.startChild`) keep no background tasks, nor does a session one of them
+starts or forks through the `sessions_*` tools, nor a fork of any of them
 (`ai_sessions.background_tools`), so their turns are offered `WebFetch` and `WebSearch` only,
-whatever a package names; so is every turn on an agent without Temporal or a database. A
-session a flow only sends to (`ask_session`) keeps its own. The tiers:
+whatever a package names. A turn a flow run sends (`ask_session`), or such a session sends,
+to any other session gets only those two as well (`ai_sessions.turn_flow`); that session's
+next turn from anyone else gets its own again. So does every turn on an agent without
+Temporal or a database. The tiers:
 `WebFetch` and `WebSearch` reach the internet, so each call asks first. `CronCreate`,
 `ScheduleWakeup` and `Workflow` start turns or agents that spend after this one, and
 `CronDelete` and `TaskStop` end them: each changes what the session keeps, so `write`.

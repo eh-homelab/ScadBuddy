@@ -394,9 +394,11 @@ opens every one and seals it again byte for byte).
     `builtin` server, `mcp__builtin__<Name>`), in every turn, not only one whose package names
     them (#2726 R2): each is an item of `builtin:claude-code` too (`nativeBuiltins.ts`
     `SESSION_BUILTINS`, `turnBuiltins`), `WebFetch` and `WebSearch` at `outward`, `CronList` at
-    `read`, the rest at `write`; a flow-started session, a Workflow agent's chat and their forks
-    (`ai_sessions.background_tools` false, `ClaimedSession.backgroundTools`) get no background one,
-    nor does any turn on an agent with no `deps.background`. A
+    `read`, the rest at `write`; a session a flow run started or forked, a Workflow agent's chat,
+    a session one of those started or forked through `sessions_*`, and a fork of any of them
+    (`ai_sessions.background_tools` false, `ClaimedSession.backgroundTools`) get no background one;
+    nor does a turn a flow run, or such a session, sent (`ai_sessions.turn_flow`), nor any turn
+    on an agent with no `deps.background`. A
     `Monitor`'s `ws` source is `outward`, and its `command` source runs a shell where Bash runs,
     so a turn gives it a command queue only while `Bash` is on, at Bash's tier if stricter
     (`monitorAccess`, `sessionTierOf`). `CronCreate`, `CronDelete`,

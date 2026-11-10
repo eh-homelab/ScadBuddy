@@ -505,7 +505,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
       return names
     }
     const flowRun = { run_id: '00000000-0000-4000-8000-000000000001', call_id: 'toolu_flow' }
-    const { session: byFlow, turn } = await classic.start(browser, { origin: 'chat', prompt: 'from a flow', flow: flowRun, startedByFlow: true })
+    const { session: byFlow, turn } = await classic.start(browser, { origin: 'chat', prompt: 'from a flow', flow: flowRun, withoutBackground: true })
     await turn!.done
     expect(await served(byFlow.id, 'again')).toEqual(['WebFetch', 'WebSearch'])
     // A Workflow agent's chat, under a session that keeps background tasks.
@@ -517,6 +517,38 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.store.append({ projectKey: 'p', sessionId: byFlow.id }, [{ type: 'user', uuid: 'u1', message: {} }])
     const fork = await classic.fork(byFlow.id, browser, {})
     expect(await served(fork.id, 'go on')).toEqual(['WebFetch', 'WebSearch'])
+    // A flow run's fork of an ordinary session keeps none; the person's own fork of it keeps them.
+    await classic.store.append({ projectKey: 'p', sessionId: parent.id }, [{ type: 'user', uuid: 'u2', message: {} }])
+    const flowFork = await classic.fork(parent.id, browser, { withoutBackground: true })
+    expect(await served(flowFork.id, 'go on')).toEqual(['WebFetch', 'WebSearch'])
+    const ownFork = await classic.fork(parent.id, browser, {})
+    expect(await served(ownFork.id, 'go on')).toContain('Workflow')
+    classic.abortAll()
+  })
+
+  it("gives a turn a flow run sends to an ordinary session no background built-in, and the person's next turn them all (#5870)", async () => {
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      background: { tasks, tz: 'UTC', commandQueue: 'agent-tools.pod-b' },
+    })
+    const listed = async (sessionId: string) => {
+      const run = scripted.runs.filter((r) => (r.sessionId ?? r.resume) === sessionId).at(-1)!
+      const turnClient = await connectInProcess(() => (run.mcpServers!.builtin as McpSdkServerConfigWithInstance).instance)
+      const names = (await turnClient.listTools()).tools.map((t) => t.name).sort()
+      await turnClient.close()
+      return names
+    }
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await (await classic.send(session.id, browser, 'mine')).done
+    expect(await listed(session.id)).toContain('ScheduleWakeup')
+    const flowRun = { run_id: '00000000-0000-4000-8000-000000000002', call_id: 'toolu_ask' }
+    await (await classic.send(session.id, browser, 'from the flow', { flow: flowRun })).done
+    expect(await listed(session.id)).toEqual(['WebFetch', 'WebSearch'])
+    await (await classic.send(session.id, browser, 'mine again')).done
+    expect(await listed(session.id)).toContain('ScheduleWakeup')
     classic.abortAll()
   })
 

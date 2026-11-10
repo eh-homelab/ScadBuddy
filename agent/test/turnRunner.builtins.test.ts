@@ -110,7 +110,7 @@ describe("the session's own built-ins in every turn", () => {
   })
 
   it("a flow-started session's turn, or a Workflow agent's chat's, offers WebFetch and WebSearch only", async () => {
-    // ClaimedSession.backgroundTools is false for both (SessionManager.start startedByFlow, startChild).
+    // ClaimedSession.backgroundTools is false for both (SessionManager.start or fork withoutBackground, startChild).
     const turn = await assemble({ backgroundTools: false })
     expect(turn.fingerprintParts.servedBuiltins).toEqual(['WebFetch', 'WebSearch'])
     expect(turn.run.systemPromptAppend).not.toContain('The session keeps the jobs')
