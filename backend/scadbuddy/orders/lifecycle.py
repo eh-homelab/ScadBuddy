@@ -921,12 +921,7 @@ class Lifecycle:
             )
             self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)
-            try:
-                self._deposit_policy(tx, order, customer, rules)
-            except LifecycleError as error:
-                if error.slug != "deposit_policy_currency":
-                    raise
-                self._event(tx, order, customer, "deposit.policy_skipped", reason=str(error))
+            self._deposit_policy(tx, order, customer, rules)
             order = self.store.stamp_submitted(tx, order.id)
             self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
             link_id, token = create_order_link(tx, self.kek, order.id, email)
