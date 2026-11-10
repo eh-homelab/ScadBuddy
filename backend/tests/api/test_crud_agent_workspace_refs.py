@@ -125,6 +125,23 @@ def test_only_a_workspace_key_and_holder_are_taken(client: TestClient) -> None:
     assert _rows(client) == []
 
 
+def test_an_age_past_a_year_is_refused_not_an_overflow(client: TestClient) -> None:
+    """Review of 610034b0b: ``older_than_seconds`` past ``timedelta``'s range raised
+    ``OverflowError``, a 500; it is bounded at a year, so a larger value is a 422."""
+    agent = token(client)
+    client.post(BASE, json={"key": KEY, "holder_id": HOLDER}, headers=agent)
+    year = 31_536_000
+    for seconds in (year + 1, 10**14):
+        body = {"key": KEY, "holder_id": HOLDER, "older_than_seconds": seconds}
+        assert client.post(f"{BASE}/release", json=body, headers=agent).status_code == 422
+        listed = client.get(BASE, params={"older_than_seconds": seconds}, headers=agent)
+        assert listed.status_code == 422
+    body = {"key": KEY, "holder_id": HOLDER, "older_than_seconds": year}
+    assert client.post(f"{BASE}/release", json=body, headers=agent).json() == {"released": False}
+    assert client.get(BASE, params={"older_than_seconds": year}, headers=agent).status_code == 200
+    assert _rows(client) == [(KEY, "ai_session_file", HOLDER)]
+
+
 def test_only_the_agent_credential_reaches_them(client: TestClient) -> None:
     body = {"key": KEY, "holder_id": HOLDER}
     # The browser's own session (the test client) and another service are refused.

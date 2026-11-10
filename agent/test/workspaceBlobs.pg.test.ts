@@ -596,4 +596,34 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       expect(backend.refCalls).toEqual([])
     })
   })
+  describe('review of 610034b0b', () => {
+    it('reconciles on one replica at a time: a second caller skips while the lock is held', async () => {
+      const orphan = `workspace-${'4'.repeat(64)}`
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      const replica = (store = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })) =>
+        new SessionFiles(db.sql, { locks: db.locks, blobs: { store, sealing } })
+      // The first replica's reconcile holds the lock while it lists the holds.
+      let listing!: () => void
+      const listed = new Promise<void>((resolve) => (listing = resolve))
+      let finish!: () => void
+      const finished = new Promise<void>((resolve) => (finish = resolve))
+      const slow = new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 })
+      const list = slow.listHolds.bind(slow)
+      slow.listHolds = async (olderThanSeconds) => {
+        listing()
+        await finished
+        return list(olderThanSeconds)
+      }
+      const first = replica(slow).reconcile(0)
+      await listed
+      const second = replica()
+      expect(await second.reconcile(0)).toEqual({ released: 0, held: 0, skipped: true })
+      expect(backend.holds.size).toBe(1)
+      finish()
+      expect(await first).toEqual({ released: 1, held: 0 })
+      // Once the lock is free again the next caller runs.
+      backend.holds.set(`${orphan} session:${sessionId}/gone.txt`, 0)
+      expect(await second.reconcile(0)).toEqual({ released: 1, held: 0 })
+    })
+  })
 })
