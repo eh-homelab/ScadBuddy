@@ -179,21 +179,30 @@ describe('CustomizePage', () => {
   })
 
   it('backs off between polls, and stops with a plain message after the time limit', async () => {
-    const at: number[] = []
+    // The page's clock moves only when it waits, so a slow host cannot change what it
+    // asks for (#5902): a poll that took longer than the limit once left no gaps to measure.
+    let clock = 0
+    const asked: number[] = []
+    const wait = async (ms: number) => {
+      asked.push(ms)
+      clock += ms
+    }
+    let polls = 0
     server.use(
       http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),
       http.get('/api/store/v1/renders/:id', () => {
-        at.push(performance.now())
+        polls += 1
         return HttpResponse.json(RUNNING)
       }),
     )
-    const { user } = show('l1', { firstMs: 20, maxMs: 80, limitMs: 600 })
+    const { user } = renderPage(
+      <CustomizePage id="l1" timing={{ firstMs: 20, maxMs: 80, limitMs: 600 }} wait={wait} now={() => clock} />,
+    )
     await user.click(await screen.findByRole('button', { name: 'Render' }))
     expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
-    const gaps = at.slice(1).map((t, i) => t - at[i]!)
-    // Doubling from 20 ms to at most 80 ms: far fewer reads than one every 20 ms.
-    expect(at.length).toBeLessThan(15)
-    expect(Math.max(...gaps)).toBeGreaterThanOrEqual(70)
+    // Doubling from 20 ms to at most 80 ms, then only the 60 ms left before the limit.
+    expect(asked).toEqual([20, 40, 80, 80, 80, 80, 80, 80, 60])
+    expect(polls).toBe(8)
     expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
   })
 
