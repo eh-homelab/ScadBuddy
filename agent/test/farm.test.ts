@@ -32,6 +32,7 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
 
 const FARM_TOOLS = {
   list_print_queue: 'GET /api/v1/farm/queue',
+  get_print_queue_item: 'GET /api/v1/farm/queue/{item_id}',
   get_print_stats: 'GET /api/v1/farm/stats',
   get_printers_now: 'GET /api/v1/print/printers/now',
   list_print_archives: 'GET /api/v1/farm/archives',
@@ -68,6 +69,28 @@ describe('farm-context tools (#1912)', () => {
     expect(result.isError).toBeFalsy()
     expect(Object.fromEntries(seen[0]!)).toEqual({ printer_id: '1', status: 'pending' })
     expect(firstText(result)).toEqual({ items: [{ id: 257, status: 'printing' }], next_cursor: null, total: 1 })
+  })
+
+  it('reads one queue item by its id (#3744)', async () => {
+    const item = { id: 205, status: 'completed', scadbuddy: { output_id: 'o', archive_id: 107 } }
+    const seen = capture('/api/v1/farm/queue/205', item)
+    const result = await runTool(tool('get_print_queue_item'), { item_id: 205 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toHaveLength(1)
+    expect(firstText(result)).toEqual(item)
+  })
+
+  it('says a queue item Bambuddy no longer has is gone (#3744)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/farm/queue/999`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/bambuddy-not-found', title: 'Not Found', status: 404, detail: 'Bambuddy has no such resource' },
+          { status: 404 },
+        ),
+      ),
+    )
+    const result = await runTool(tool('get_print_queue_item'), { item_id: 999 }, ctx())
+    expect(result.isError).toBe(true)
   })
 
   it('follows next_cursor through a long queue', async () => {

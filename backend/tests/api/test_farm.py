@@ -563,3 +563,118 @@ def test_an_unknown_spool_is_a_404(client: TestClient) -> None:
 
 def test_grams_cannot_be_negative(client: TestClient) -> None:
     assert client.get("/api/v1/farm/spools/1/summary", params={"grams": -1}).status_code == 422
+
+
+def _item(item_id: int, **changes: Any) -> dict[str, Any]:
+    """One item of the recorded queue as ``GET /queue/{id}`` answers it: the same
+    schema as a row of the list (maziggy/bambuddy f9080d1,
+    ``backend/app/api/routes/print_queue.py`` line 1854, ``PrintQueueItemResponse``)."""
+    row: dict[str, Any] = next(row for row in recording("queue.json") if row["id"] == item_id)
+    return {**row, **changes}
+
+
+@respx.mock
+def test_one_queue_item_is_one_bambuddy_read_and_carries_its_scadbuddy_job(
+    client: TestClient,
+) -> None:
+    """#3744: the item page reads the item alone, never the whole queue, and a job
+    ScadBuddy queued carries ``scadbuddy`` in any state, so a finished one still
+    names its output and the archive its print page is at."""
+    configure(client)
+    one = respx.get(f"{API}/queue/205").mock(
+        return_value=httpx.Response(200, json=_item(205, ams_mapping=[4, -1]))
+    )
+    every = respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=[]))
+    output = PrintSubject.output("o" * 32)
+    asyncio.run(
+        _state(client).print_links.record(
+            output, PrintLink(archive_id=107, matched_by="queue_item", queue_item_id=205)
+        )
+    )
+
+    response = client.get("/api/v1/farm/queue/205")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == 205
+    assert body["status"] == "completed"
+    assert body["ams_mapping"] == [4, -1]
+    assert body["scadbuddy"]["output_id"] == "o" * 32
+    assert body["scadbuddy"]["archive_id"] == 107
+    # #3742's picture, as the list gives it: ScadBuddy's own for its job.
+    assert body["picture"] == f"/api/v1/outputs/{'o' * 32}/thumbnail"
+    assert one.call_count == 1
+    assert not every.called
+
+
+@respx.mock
+def test_a_queue_item_bambuddy_queued_has_no_scadbuddy_job(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/queue/257").mock(return_value=httpx.Response(200, json=_item(257)))
+
+    response = client.get("/api/v1/farm/queue/257")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["scadbuddy"] is None
+    assert response.json()["printer_name"] == _item(257)["printer_name"]
+    assert response.json()["picture"] == "/api/v1/farm/library/1615/thumbnail"
+
+
+@respx.mock
+def test_a_gone_queue_item_is_a_404(client: TestClient) -> None:
+    """Bambuddy answers 404 "Queue item not found" for an item it no longer has
+    (``print_queue.py`` line 1882 at f9080d1); the page says the item is gone."""
+    configure(client)
+    respx.get(f"{API}/queue/999").mock(
+        return_value=httpx.Response(404, json={"detail": "Queue item not found"})
+    )
+
+    response = client.get("/api/v1/farm/queue/999")
+
+    assert response.status_code == 404
+    assert response.json()["type"].endswith("/bambuddy-not-found")
+
+
+@respx.mock
+def test_a_queue_item_id_below_one_is_refused_before_bambuddy(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/queue/0").mock(return_value=httpx.Response(200, json=_item(205)))
+
+    response = client.get("/api/v1/farm/queue/0")
+
+    assert response.status_code == 422
+    assert not route.called
+
+
+@respx.mock
+def test_reading_one_queue_item_needs_read_status(client: TestClient) -> None:
+    """``GET /queue/{id}`` needs ``queue:read_all`` or ``queue:read_own``
+    (``print_queue.py`` lines 1858-1862 at f9080d1), which an API key holds with
+    ``can_read_status`` (``backend/app/core/auth.py`` lines 89-91), not ``can_queue``."""
+    configure(client)
+    respx.get(f"{API}/queue/205").mock(
+        return_value=httpx.Response(403, json={"detail": "Missing permission"})
+    )
+
+    response = client.get("/api/v1/farm/queue/205")
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Read Status"
+
+
+@respx.mock
+def test_one_queue_item_has_no_mark_when_the_records_are_unreadable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure(client)
+    respx.get(f"{API}/queue/259").mock(return_value=httpx.Response(200, json=_item(259)))
+
+    async def broken(**_: object) -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(_state(client).print_links, "jobs", broken)
+
+    response = client.get("/api/v1/farm/queue/259")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["scadbuddy"] is None

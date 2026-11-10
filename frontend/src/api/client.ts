@@ -2344,6 +2344,9 @@ export const api = {
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
     request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
 
+  /** #3744 — one queue item, in any state; 404 once Bambuddy no longer has it. */
+  getQueueItem: (id: number) => request<QueueItem>(`/farm/queue/${id}`),
+
   /** #2351 — the farm's totals over every Bambuddy archive. */
   getFarmStats: () => request<ArchiveStats>('/farm/stats'),
 

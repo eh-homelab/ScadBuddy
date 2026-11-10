@@ -57,10 +57,11 @@ class FarmQueueItem(QueueItem):
 
     #: The output or library file ScadBuddy queued this item for, found only by a record
     #: of this item: the send a run or ScadBuddy's reprint recorded, or a link that names
-    #: the item. Set only on a pending or printing item (`MARKED_STATUSES`).
-    #: ``None`` for a finished item, for an item queued from Bambuddy (its reprint of an
-    #: archive ScadBuddy linked too), or when ScadBuddy's records cannot be read. Never
-    #: taken from Bambuddy's answer.
+    #: the item. In the list, set only on a pending or printing item (`MARKED_STATUSES`);
+    #: the one item's read (`get_queue_item`, #3744) looks it up in any state.
+    #: ``None`` for a finished item in the list, for an item queued from Bambuddy (its
+    #: reprint of an archive ScadBuddy linked too), or when ScadBuddy's records cannot be
+    #: read. Never taken from Bambuddy's answer.
     scadbuddy: ScadBuddyJob | None = None
     #: The item's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's for its
     #: own item (`scadbuddy`), else Bambuddy's thumbnail of the item's library file or
@@ -181,6 +182,27 @@ async def get_printer_cover(
         what="show the cover of the printer's job",
         cache_control=PICTURE_CACHE_CONTROL if archive is not None else "no-store",
     )
+
+
+@router.get(
+    "/queue/{item_id}",
+    response_model=FarmQueueItem,
+    summary="One item of Bambuddy's print queue",
+    responses={404: {"description": "Bambuddy has no such queue item (any more)"}},
+)
+async def get_queue_item(
+    item_id: Annotated[int, Path(ge=1)], store: SettingsStoreDep, links: PrintLinksDep
+) -> FarmQueueItem:
+    """One queue item, whoever queued it, in any state (#3744): Bambuddy's own
+    ``GET /queue/{id}``, one call. A job ScadBuddy queued carries ``scadbuddy`` even
+    once it has finished, so its page can go on to the print. A 404 is an item Bambuddy
+    no longer has: deleted, or gone with its archive. Its ``picture`` (#3742) is the
+    list's."""
+    async with client_for(store.load()) as client:
+        item = await client.queue_item(item_id)
+    job = (await _jobs(links, [item])).queue_items.get(item.id)
+    picture = queue_item_picture(item, job)
+    return FarmQueueItem(**item.model_dump(), scadbuddy=job, picture=picture)
 
 
 async def _jobs(links: PrintLinkStore, items: list[QueueItem]) -> JobMatches:
