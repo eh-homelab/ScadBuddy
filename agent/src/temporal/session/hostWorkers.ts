@@ -89,7 +89,8 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
     taskQueue: `${TASK_QUEUE}.${options.identity}`,
     activities: options.pinned,
     shutdownGraceMs: options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS,
-    shutdownForceMs: Math.max(options.shutdownGraceMs ?? 0, PINNED_SHUTDOWN_FORCE_MS),
+    // Force keeps its margin after any grace, so a cancelled activity always has a window to end.
+    shutdownForceMs: (options.shutdownGraceMs ?? PINNED_SHUTDOWN_GRACE_MS) + (PINNED_SHUTDOWN_FORCE_MS - PINNED_SHUTDOWN_GRACE_MS),
     ...(options.pinnedWorkflows ? { workflows: options.pinnedWorkflows, maxCachedWorkflows: BRIDGE_CACHED_WORKFLOWS } : {}),
   })
   const sessions = options.sessions

@@ -1449,8 +1449,8 @@ with the forwarder).
 
 - **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
-  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
-  logged.
+  10 s (`RECALL_TIMEOUT_MS`; prod's bank answered in 4.2 to 8.8 s on 2026-11-09, #5866);
+  on a timeout or error nothing is added and the failure is logged.
 - **The recall query's length** (#2655). Only the start of the redacted query is sent:
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
@@ -1660,7 +1660,10 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   before the backend container answers (#5868): a refused connection reads "the backend is
   not up yet", and the start-up check waits for the backend's `/healthz`, logged once as
   "waiting for the backend", trying again after 1 s doubling to 30 s
-  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)); then it logs where
+  ([`agent/src/api/backendUp.ts`](../../agent/src/api/backendUp.ts)). Any other transport
+  error (a host that does not resolve, a timeout: a backend URL that may never answer) is
+  tried again the same way but logged as an error, once per kind (`ENOTFOUND`, ...), so a
+  bad `SCADBUDDY_BACKEND_URL` shows (#5889). Once the backend answers, it logs where
   the files go and moves them. A write or read asks the backend each time, so it works
   as soon as the backend answers, with no restart.
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through

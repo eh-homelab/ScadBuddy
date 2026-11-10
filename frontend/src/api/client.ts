@@ -261,6 +261,7 @@ import type {
   BankStatus,
   BankUnlinked,
   DepositSuggestion,
+  OrderMessage,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2344,6 +2345,9 @@ export const api = {
   getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
     request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
 
+  /** #3744 — one queue item, in any state; 404 once Bambuddy no longer has it. */
+  getQueueItem: (id: number) => request<QueueItem>(`/farm/queue/${id}`),
+
   /** #2351 — the farm's totals over every Bambuddy archive. */
   getFarmStats: () => request<ArchiveStats>('/farm/stats'),
 
@@ -2420,7 +2424,8 @@ export const api = {
   /** #4251 §6.4 — the accepted quotes beside the attempts. */
   orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
   /** #5326 — time on the order or (with `order_item_id`) one of its items, at today's
-   * labour rate, which the entry keeps. Allowed in every order status. */
+   * labour rate, which the entry keeps. Allowed in every order status, except a storefront
+   * cart not yet submitted (409 `order_not_submitted`). */
   addTimeEntry: (orderId: string, body: TimeEntryCreate) =>
     request<TimeEntry>(`/orders/${seg(orderId)}/time-entries`, { method: 'POST', body: JSON.stringify(body) }),
   removeTimeEntry: (orderId: string, id: string) =>
@@ -2462,6 +2467,11 @@ export const api = {
     request<Payment>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/record`, { method: 'POST' }),
   dismissOrderBankDeposit: (orderId: string, transactionId: string) =>
     request<void>(`/orders/${seg(orderId)}/bank-deposits/${seg(transactionId)}/dismiss`, { method: 'POST' }),
+  /** #5660 — the order's customer messages, newest first; a stale `sending` one reads `unknown`. */
+  orderMessages: (orderId: string) => request<OrderMessage[]>(`/orders/${seg(orderId)}/messages`),
+  /** #5660 — a person's word that an `unknown` message reached the customer. */
+  markOrderMessageSent: (orderId: string, messageId: string) =>
+    request<OrderMessage>(`/orders/${seg(orderId)}/messages/${seg(messageId)}/mark-sent`, { method: 'POST' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

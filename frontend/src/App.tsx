@@ -25,6 +25,7 @@ const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/Orde
 const ProfitPage = lazyRetry(async () => ({ default: (await import('./pages/ProfitPage')).ProfitPage }))
 const PartsPage = lazyRetry(async () => ({ default: (await import('./pages/PartsPage')).PartsPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
+const QueueItemPage = lazyRetry(async () => ({ default: (await import('./pages/QueueItemPage')).QueueItemPage }))
 // Two pages of one module, so one chunk.
 const loadPrints = () => import('./pages/PrintsPage')
 const PrintsPage = lazyRetry(async () => ({ default: (await loadPrints()).PrintsPage }))
@@ -105,6 +106,7 @@ export function App() {
         <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
+        <Route path="prints/queue/:itemId" element={<QueueItemPage />} />
         <Route path="library/*" element={<LibraryPage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />

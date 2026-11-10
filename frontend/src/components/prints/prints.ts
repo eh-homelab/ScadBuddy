@@ -7,13 +7,20 @@ export function printPath(archiveId: number): string {
   return `/prints/${archiveId}`
 }
 
+/** #3744 — the page of one Bambuddy queue item. */
+export function queueItemPath(itemId: number): string {
+  return `/prints/queue/${itemId}`
+}
+
 /**
  * #3743 — the ScadBuddy page of a job ScadBuddy queued or started: its print once
- * Bambuddy archived it, else its subject's page (the output's, or the library file's
- * in the Library). A queue item page of its own is #3744.
+ * ScadBuddy linked its archive; else, for a queue item, the item's page (#3744); else
+ * (a printer's job with no queue item, a LAN start) its subject's page: the output's,
+ * or the library file's in the Library.
  */
-export function scadbuddyJobPath(job: ScadBuddyJob): string {
+export function scadbuddyJobPath(job: ScadBuddyJob, queueItemId?: number): string {
   if (job.archive_id != null) return printPath(job.archive_id)
+  if (queueItemId != null) return queueItemPath(queueItemId)
   if (job.output_id != null) return editPath(job.output_id)
   if (job.library_file_id != null) return `/library?file=${job.library_file_id}`
   // A subject names an output or a library file; this is for a key of neither.

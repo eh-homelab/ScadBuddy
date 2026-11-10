@@ -1,0 +1,58 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { api } from '../../api/client'
+import { resetMockState } from '../../mocks/handlers'
+import { mockMessageChange, mockOrderMessage } from '../../mocks/features/orders/messages'
+import { ORDER_ACCEPTED } from '../../mocks/features/orders/state'
+import { renderPage } from '../../test/utils'
+import { OrderMessages } from './OrderMessages'
+
+describe('OrderMessages (#5660)', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows nothing when the order has no messages', async () => {
+    renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Customer messages' })).not.toBeInTheDocument())
+  })
+
+  it('marks an unknown message sent only on a person’s word', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { status: 'unknown', reason: 'no_answer', finished_at: null })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    expect(within(list).getByText(/Unknown: check the inbox \(no answer came\)/)).toBeInTheDocument()
+    await user.click(within(list).getByRole('button', { name: 'Mark sent' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Marked as sent.')
+    await waitFor(() => expect(within(list).queryByRole('button', { name: 'Mark sent' })).not.toBeInTheDocument())
+    const [message] = await api.orderMessages(ORDER_ACCEPTED)
+    expect(message?.status).toBe('sent')
+  })
+
+  it('shows the message composed now, then sends it again as the person approved it', async () => {
+    const first = mockOrderMessage(ORDER_ACCEPTED, { status: 'failed', reason: 'transport' })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    expect(within(shown).getByText(/To ada@example.com through remote:mail/)).toBeInTheDocument()
+    // The line breaks of the text are kept.
+    expect(within(shown).getByText(/Hello Ada,/).textContent).toContain('\n\n')
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    const messages = await api.orderMessages(ORDER_ACCEPTED)
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toMatchObject({ status: 'sent', resend_of: first.id })
+  })
+
+  it('sends nothing when the message changed since it was shown', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { status: 'unknown', reason: 'no_answer' })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    mockMessageChange()
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The message changed since you saw it')
+    expect(screen.queryByRole('region', { name: 'Message to send' })).not.toBeInTheDocument()
+    expect(await api.orderMessages(ORDER_ACCEPTED)).toHaveLength(1)
+  })
+})

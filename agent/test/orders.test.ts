@@ -77,6 +77,7 @@ describe('order tools (#4249)', () => {
       'order_shipping_option_set',
       'order_notify_customer',
       'order_notify_customer_send',
+      'order_messages_list',
     ]
     expect(Object.fromEntries(names.map((n) => [n, tool(n).risk]))).toEqual({
       customer_list: 'read',
@@ -112,6 +113,7 @@ describe('order tools (#4249)', () => {
       order_shipping_option_set: 'write',
       order_notify_customer: 'read',
       order_notify_customer_send: 'outward',
+      order_messages_list: 'read',
     })
   })
 

@@ -5,6 +5,7 @@ import { HttpResponse, http } from 'msw'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
@@ -49,6 +50,15 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it('shows a swept cart as not found once its deleted frame arrives (#5282)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    state.orders = state.orders.filter((o) => o.id !== ORDER_DRAFT)
+    emitRealtime('order.changed', [`order:${ORDER_DRAFT}`], { order_id: ORDER_DRAFT, status: 'draft', cart: true, deleted: true })
+    expect(await screen.findByText(/This order was not found/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'ORD-2026-3' })).toBeNull()
   })
 
   it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {

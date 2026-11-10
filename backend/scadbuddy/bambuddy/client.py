@@ -1559,10 +1559,14 @@ class BambuddyClient:
         return [QueueItem.model_validate(row) for row in self._rows(response, what=what)]
 
     async def queue_item(self, item_id: int) -> QueueItem:
+        """``GET /api/v1/queue/{id}``. It needs ``queue:read_all`` or ``queue:read_own``
+        (``backend/app/api/routes/print_queue.py`` lines 1854-1863 at maziggy/bambuddy
+        f9080d1), which an API key holds with ``can_read_status`` (``auth.py`` lines
+        89-91), as the list does; 404 "Queue item not found" for an item it lacks."""
         response = await self._send(
             "GET",
             f"/queue/{item_id}",
-            scope=Scope.MANAGE_QUEUE,
+            scope=Scope.READ_STATUS,
             operation="queue.read",
             what=f"read queue item {item_id}",
         )
