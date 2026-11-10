@@ -320,6 +320,8 @@ export class TemporalTabRelay implements TabRelay {
     const { queue } = owner
     const input: BridgeCallInput = { queue, tabId, request, ackTimeoutMs: this.#ackTimeoutMs }
     const workflowId = bridgeWorkflowId()
+    // Before the start: its first workflow task may start before the start's answer comes back.
+    const startedAt = this.#now()
     const handle = await client.workflow.start(BRIDGE_CALL_WORKFLOW, {
       // This replica's own queue: its own host worker runs the workflow tasks, at once (#5862).
       taskQueue: this.hostQueue,
@@ -331,7 +333,6 @@ export class TemporalTabRelay implements TabRelay {
     const span = tracer().startSpan('agent.bridge.call', {
       attributes: { 'scadbuddy.bridge.op': request.op, 'scadbuddy.bridge.owner_queue': queue, 'scadbuddy.task_queue': this.hostQueue },
     })
-    const startedAt = this.#now()
     const answering = new Promise<BridgeCallAnswer | 'failed'>((resolve, reject) => {
       const onAbort = () => {
         // The tab is not told, as for a local call; the workflow stops waiting for it. Its
@@ -365,10 +366,13 @@ export class TemporalTabRelay implements TabRelay {
       )
     })
     let answer: BridgeCallAnswer | 'failed'
+    // Only an abort rejects `answering`, and the workflow then runs on (its cancellation task).
+    let closed = false
     try {
       answer = await answering
+      closed = true
     } finally {
-      this.#traceTaskTimeouts(client, workflowId, span, startedAt, tabId)
+      this.#traceTaskTimeouts(client, workflowId, span, { startedAt, closed }, tabId)
     }
     // The workflow is closed and its answer read: nobody needs its payloads again.
     dropKey(workflowId).catch((err: unknown) => this.#failed(err))
@@ -385,18 +389,19 @@ export class TemporalTabRelay implements TabRelay {
   /**
    * How many of the call's workflow tasks timed out (#5939): `scadbuddy.bridge.task_timeouts` on
    * its `agent.bridge.call` span, and a log line when any did. A task times out only after
-   * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, so a call answered sooner had none and its history is not
-   * read. A longer one's is, once the workflow has closed (a cancelled call's runs its last task
-   * after the caller gave up), off the caller's path. The span ends when the caller had its answer.
+   * BRIDGE_WORKFLOW_TASK_TIMEOUT_MS, so a workflow that `closed` sooner (the call answered) had
+   * none and its history is not read. Any other call's is, once the workflow has closed, off the
+   * caller's path: a longer one's, and an aborted one's at any length, whose workflow runs its
+   * cancellation task after the caller gave up. The span ends when the caller had its answer.
    */
-  #traceTaskTimeouts(client: Client, workflowId: string, span: Span, startedAt: number, tabId: string): void {
+  #traceTaskTimeouts(client: Client, workflowId: string, span: Span, call: { startedAt: number; closed: boolean }, tabId: string): void {
     const endedAt = this.#now()
     const answeredAt = new Date()
     const end = (timeouts: number | undefined) => {
       if (timeouts !== undefined) span.setAttribute('scadbuddy.bridge.task_timeouts', timeouts)
       span.end(answeredAt)
     }
-    if (endedAt - startedAt < BRIDGE_WORKFLOW_TASK_TIMEOUT_MS) return end(0)
+    if (call.closed && endedAt - call.startedAt < BRIDGE_WORKFLOW_TASK_TIMEOUT_MS) return end(0)
     void (async () => {
       const handle = client.workflow.getHandle(workflowId)
       // Only that it closed: its payloads may be past reading (the key is dropped once answered).

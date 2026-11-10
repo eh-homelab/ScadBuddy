@@ -447,7 +447,7 @@
       "id": 23,
       "type": "timeseries",
       "title": "Browser calls that waited out a workflow task timeout",
-      "description": "agent.bridge.call spans (a browser_* call to a tab on another replica, agent/src/bridge/relay.ts) whose BridgeCall workflow had a workflow task time out, per second, by the caller's queue (scadbuddy.task_queue). Temporal started each such task and never delivered it (ScadBuddy#5939, eh-homelab/clusters#3418), and it cost the call BRIDGE_WORKFLOW_TASK_TIMEOUT_MS (3 s). scadbuddy.bridge.task_timeouts is read from the call's history only for a call that took at least that long. A TraceQL metrics query, as above.",
+      "description": "agent.bridge.call spans (a browser_* call to a tab on another replica, agent/src/bridge/relay.ts) whose BridgeCall workflow had a workflow task time out, per second, by the caller's queue (scadbuddy.task_queue). Temporal started each such task and never delivered it (ScadBuddy#5939, eh-homelab/clusters#3418), and it cost the call BRIDGE_WORKFLOW_TASK_TIMEOUT_MS (3 s). scadbuddy.bridge.task_timeouts is read from the call's history, once its workflow closes, for an aborted call and for one that took at least that long. A TraceQL metrics query, as above.",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 0, "y": 74, "w": 12, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },

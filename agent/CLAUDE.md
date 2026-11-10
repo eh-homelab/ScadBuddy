@@ -156,8 +156,9 @@ opens every one and seals it again byte for byte).
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
   charts; and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
   whose `scadbuddy.bridge.task_timeouts` counts its BridgeCall's workflow tasks that timed out
-  (Temporal started them and never delivered them, #5939), read from the history only for a call
-  that took at least `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS`, and logged when above 0.
+  (Temporal started them and never delivered them, #5939), read from the history (once the workflow
+  closes) for an aborted call and for one that took at least `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS`,
+  and logged when above 0.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
   an edit to `app.ts`: among them `credentials.ts` (`/api/v1/ai/credentials`),

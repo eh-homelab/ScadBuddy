@@ -55,14 +55,18 @@ const spans = testTracing()
  * A sealing client whose call answers `status`, with `timedOutTasks` workflow-task timeouts in its
  * history; `historyReads` counts the reads.
  */
-function answeringClient(timedOutTasks: number): { sealing: SealingClient; historyReads: () => number } {
+function answeringClient(
+  timedOutTasks: number,
+  options: { result?: () => Promise<unknown>; historyFails?: boolean } = {},
+): { sealing: SealingClient; historyReads: () => number } {
   let reads = 0
   const handle = {
     workflowId: 'bridge-x',
-    result: async () => ({ op: 'status', route: '/m/box', live: [] }),
+    result: options.result ?? (async () => ({ op: 'status', route: '/m/box', live: [] })),
     cancel: async () => {},
     fetchHistory: async () => {
       reads++
+      if (options.historyFails) throw new Error('14 UNAVAILABLE: no connection')
       return {
         events: [
           { workflowTaskStartedEventAttributes: {} },
@@ -281,6 +285,47 @@ describe('TemporalTabRelay', () => {
       })
       expect(historyReads()).toBe(1)
       expect(logged.join('\n')).toMatch(/waited out 2 workflow task timeout/)
+    })
+
+    it("reads an aborted call's history at any length: its workflow runs its cancellation task after the caller left", async () => {
+      const owners = memoryOwners()
+      owners.rows.set('tab-1', 'agent-tools.b')
+      const logged: string[] = []
+      // The workflow answers only once cancelled, as a BridgeCall whose caller gave up does.
+      let cancelled!: () => void
+      const closed = new Promise<void>((r) => (cancelled = r))
+      const { sealing, historyReads } = answeringClient(1, { result: () => closed.then(() => Promise.reject(new Error('cancelled'))) })
+      const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: sealing, log: (m) => logged.push(m), now: clock(1_000, 1_500) })
+      const abort = new AbortController()
+      const call = relay.forward('tab-1', { op: 'status' }, { signal: abort.signal, timeoutMs: 1_000 })
+      await settle()
+      abort.abort()
+      await expect(call).rejects.toThrow()
+      expect(historyReads()).toBe(0)
+      cancelled()
+      await vi.waitFor(() => expect(spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')).toBeDefined())
+      expect(spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')!.attributes['scadbuddy.bridge.task_timeouts']).toBe(1)
+      expect(historyReads()).toBe(1)
+      expect(logged.join('\n')).toMatch(/waited out 1 workflow task timeout/)
+    })
+
+    it('ends the span without a count, and logs, when the history cannot be read', async () => {
+      const owners = memoryOwners()
+      owners.rows.set('tab-1', 'agent-tools.b')
+      const logged: string[] = []
+      const { sealing, historyReads } = answeringClient(0, { historyFails: true })
+      const relay = new TemporalTabRelay({
+        owners,
+        hostQueue: 'agent-tools.a',
+        client: sealing,
+        log: (m) => logged.push(m),
+        now: clock(1_000, 1_000 + BRIDGE_WORKFLOW_TASK_TIMEOUT_MS + 500),
+      })
+      expect(await relay.forward('tab-1', { op: 'status' }, options())).toEqual({ op: 'status', route: '/m/box', live: [] })
+      await vi.waitFor(() => expect(spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')).toBeDefined())
+      expect(spans.getFinishedSpans().find((s) => s.name === 'agent.bridge.call')!.attributes).not.toHaveProperty('scadbuddy.bridge.task_timeouts')
+      expect(historyReads()).toBe(1)
+      expect(logged.join('\n')).toMatch(/could not read .*history.*UNAVAILABLE/)
     })
 
     it('reads no history for a call answered within one task timeout: it cannot have had one', async () => {
