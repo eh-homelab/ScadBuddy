@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as embed from '../lib/embed'
 import { openExternal } from '../lib/embed'
 import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
+import { api } from '../api/client'
 import type { QueueItem } from '../api/types'
 import { outputs } from '../mocks/fixtures'
 import { QUEUE_ITEM_ONLY } from '../mocks/features/printQueue'
@@ -161,15 +162,11 @@ describe('QueueItemPage (#3744)', () => {
     const reagan = QUEUE_ITEM_ONLY.find((item) => item.id === 265)!
     serve({ ...reagan, printer_id: 7, sliced_for_model: null, target_model: null, ams_mapping: [2] })
     let failing = false
-    // Settles when the registry first answers 500: the failed read's answer is on its way.
-    let answeredFailure: () => void = () => {}
-    const failureAnswered = new Promise<void>((resolve) => (answeredFailure = resolve))
     server.use(
       http.get('/api/v1/printers', () => {
         if (!failing) {
           return HttpResponse.json([{ id: 'p-7', serial: 'S7', name: 'Seven', model: 'A2L', bambuddy_printer_id: 7 }])
         }
-        answeredFailure()
         return HttpResponse.json(
           { title: 'Internal Server Error', status: 500, detail: 'The registry did not answer' },
           { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
@@ -181,14 +178,24 @@ describe('QueueItemPage (#3744)', () => {
     const region = await screen.findByRole('region', { name: 'Filament slots' })
     expect(await within(region).findByText('AMS Lite · slot 3')).toBeInTheDocument()
 
-    // The registry changes, and the read that follows fails: what is shown stays.
-    failing = true
-    act(() => emitRealtime('printer.changed', ['printers', 'printer:p-7'], {}))
-    await failureAnswered
-    // Let the failed read settle into the hook's state before looking.
-    await act(async () => {})
-    expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
-    expect(within(region).queryByText('AMS-A · slot 3')).toBeNull()
+    // The registry changes, and the read that follows fails: what is shown stays. The
+    // spy keeps the real call and hands the test that read's own promise.
+    const reads = vi.spyOn(api, 'listPrinters')
+    try {
+      failing = true
+      act(() => emitRealtime('printer.changed', ['printers', 'printer:p-7'], {}))
+      await waitFor(() => expect(reads).toHaveBeenCalled())
+      const read = reads.mock.results[0]!.value as Promise<unknown>
+      // The read is known to have failed; one more flush lets the hook commit that.
+      await act(async () => {
+        await expect(read).rejects.toThrow('The registry did not answer')
+      })
+      await act(async () => {})
+      expect(within(region).getByText('AMS Lite · slot 3')).toBeInTheDocument()
+      expect(within(region).queryByText('AMS-A · slot 3')).toBeNull()
+    } finally {
+      reads.mockRestore()
+    }
   })
 
   it('takes no A2L from a registry that cannot be read (#5914)', async () => {
