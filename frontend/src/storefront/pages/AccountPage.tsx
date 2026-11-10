@@ -9,11 +9,12 @@ function day(iso: string): string {
 }
 
 /**
- * What a customer reads for each order status (backend `orders/models.py` `OrderStatus`).
- * A submitted order not yet quoted is still `draft`. A status this map lacks reads
- * "In progress", never the internal name.
+ * What a customer reads for each order status. The keys are the spec's enum (backend
+ * `orders/models.py` `OrderStatus`), so tsc names a status the map lacks. A submitted
+ * order not yet quoted is still `draft`. A value outside the enum reads "In progress",
+ * never the internal name.
  */
-const STATUS_LABELS: Record<string, string> = {
+const STATUS_LABELS: Record<AccountOrder['status'], string> = {
   draft: 'Received',
   quoted: 'Quote ready',
   accepted: 'Accepted',
@@ -25,7 +26,8 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 function statusLabel(status: string): string {
-  return (Object.hasOwn(STATUS_LABELS, status) && STATUS_LABELS[status]) || 'In progress'
+  // The type names every status, but an edge newer than this page may send one more.
+  return Object.hasOwn(STATUS_LABELS, status) ? STATUS_LABELS[status as AccountOrder['status']] : 'In progress'
 }
 
 function OrderRow({ order }: { order: AccountOrder }) {
