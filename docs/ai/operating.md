@@ -1105,8 +1105,10 @@ session's Claude Code process offers its own built-ins, each an item of the acce
 - A fork's working directory is its own, so its first turn resumes a transcript that names
   the parent's directory. When the transcript's newest entry ran in another directory than
   this turn's (a fork's first turn, or a moved `SCADBUDDY_SESSION_DIR`), the turn's prompt
-  starts with a note that names the new directory, says the old one is gone, and asks for the
-  same relative paths there (#5867, `agent/src/sessions/turnRunner.ts` `directoryNote`).
+  starts with a note that names the new directory, says the old one is not this session's and
+  calls to it are refused, and asks for the same relative paths there (#5867,
+  `agent/src/sessions/directoryNote.ts`). Hindsight's retain strips the note, so it is never
+  kept as the user's words.
   Claude Code itself says only "Primary working directory: <new> (was <old>)", and with that
   alone the model read the parent's path first and the seam refused it. One path for every
   session, such as `/workspace`, cannot be made: the pod's sessions share one filesystem, a

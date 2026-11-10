@@ -57,7 +57,7 @@ export function credentialFallbackEvent(
 }
 
 /**
- * The prompt with `note` before the user's text (turnRunner.ts `directoryNote`, #5867): a string
+ * The prompt with `note` before the user's text (directoryNote.ts, #5867): a string
  * gets it as its first paragraph, a message stream (images, images.ts `userPrompt`) as a text
  * block before its first message's own. Each iteration starts afresh, as fallback.ts needs.
  */

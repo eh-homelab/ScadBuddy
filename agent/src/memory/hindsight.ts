@@ -12,6 +12,7 @@ import { pinnedFetch } from '../http/pinned.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
+import { DIRECTORY_NOTE_RE } from '../sessions/directoryNote.js'
 import { SpanStatusCode } from '@opentelemetry/api'
 import { withSpan } from '../telemetry/trace.js'
 
@@ -333,14 +334,15 @@ export const TURN_MAX_CHARS = 8_000
 /**
  * Blocks the harness adds to a user turn that are not the user's words: the
  * memories injected here, and the panel's page context (clientProtocol.ts
- * `renderPageContext`, with the sentence after it). The coding-agents plugin
- * strips its own injected blocks the same way (`stripInjectedMemory`).
+ * `renderPageContext`, with the sentence after it), and the note on a turn whose
+ * transcript ran in another directory (sessions/directoryNote.ts, #5867). The
+ * coding-agents plugin strips its own injected blocks the same way (`stripInjectedMemory`).
  */
 const INJECTED_RE =
   /<hindsight_memories>[\s\S]*?<\/hindsight_memories>|<page_context>[\s\S]*?<\/page_context>(?:\nThe block above describes the ScadBuddy page[^\n]*)?/g
 
 function clean(text: string): string {
-  const out = text.replace(INJECTED_RE, '').trim()
+  const out = text.replace(INJECTED_RE, '').replace(DIRECTORY_NOTE_RE, '').trim()
   return out.length > TURN_MAX_CHARS ? `${out.slice(0, TURN_MAX_CHARS)}… (truncated)` : out
 }
 
