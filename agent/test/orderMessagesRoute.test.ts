@@ -32,6 +32,10 @@ function fakeBackend() {
   /** What the backend answers the claim with instead of a claim (a rival claim won: 409). */
   const race: { refusal: { status: number; body: object } | null } = { refusal: null }
   const claims: { body: Record<string, unknown>; key: string | null; author: string | null }[] = []
+  /** The check's `storefront_mail`: the storefront mails this news to the order itself. */
+  const check = { storefront_mail: false }
+  /** The claims by their Idempotency-Key, as the backend keeps them. */
+  const byKey = new Map<string, Record<string, unknown>>()
   const backend = createBackendClient(BACKEND, async (input) => {
     const request = input as Request
     const path = new URL(request.url).pathname
@@ -45,19 +49,31 @@ function fakeBackend() {
       return Response.json({ display_name: customer.name, contacts: [{ kind: 'email', value: 'ada@example.com', primary: true }] })
     }
     if (request.method === 'GET' && path === '/api/v1/settings') return Response.json({ orders_customer_messaging: BINDING })
-    if (request.method === 'GET' && path.endsWith('/messages/check')) return Response.json({ already_notified: null })
+    if (request.method === 'GET' && path.endsWith('/messages/check')) {
+      // As the backend's: a key that already claimed answers its row and no refusal.
+      const claimed = byKey.get(request.headers.get('idempotency-key') ?? '')
+      if (claimed) return Response.json({ already_notified: null, storefront_mail: false, claimed })
+      return Response.json({ already_notified: null, ...check, claimed: null })
+    }
     if (request.method === 'POST' && path === `/api/v1/orders/${ORDER}/messages`) {
       const body = (await request.json()) as Record<string, unknown>
-      claims.push({ body, key: request.headers.get('idempotency-key'), author: request.headers.get('x-scadbuddy-agent-author') })
+      const key = request.headers.get('idempotency-key')
+      claims.push({ body, key, author: request.headers.get('x-scadbuddy-agent-author') })
       if (race.refusal) return Response.json(race.refusal.body, { status: race.refusal.status })
-      return Response.json({ id: 'm2', status: 'sending', ...body }, { status: 201 })
+      const seen = byKey.get(key ?? '')
+      if (seen) return Response.json(seen, { status: 200 })
+      const row = { id: 'm2', status: 'sending', ...body }
+      byKey.set(key ?? '', row)
+      return Response.json(row, { status: 201 })
     }
     if (request.method === 'POST' && path.endsWith('/outcome')) {
-      return Response.json({ id: 'm2', ...((await request.json()) as object) })
+      const outcome = (await request.json()) as object
+      for (const row of byKey.values()) Object.assign(row, outcome)
+      return Response.json({ id: 'm2', ...outcome })
     }
     return Response.json({ detail: `unexpected ${request.method} ${path}` }, { status: 500 })
   })
-  return { backend, customer, race, claims }
+  return { backend, customer, race, claims, check }
 }
 
 /** The plugin tool's inputSchema as BINDING expects it. */
@@ -83,7 +99,7 @@ function fakeMessaging() {
 }
 
 function app(sessions?: BrowserSessions) {
-  const { backend, customer, race, claims } = fakeBackend()
+  const { backend, customer, race, claims, check } = fakeBackend()
   const { messaging, sends } = fakeMessaging()
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, 'off'))
@@ -92,7 +108,7 @@ function app(sessions?: BrowserSessions) {
     origins: ORIGINS,
     remoteAddress: () => LOOPBACK,
   } as never)
-  return { hono, customer, race, claims, sends }
+  return { hono, customer, race, claims, sends, check }
 }
 
 const post = (hono: Hono, path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -162,6 +178,42 @@ describe('the order page’s Send again (#5660)', () => {
     expect(await lost.json()).toMatchObject({ type: 'already_notified' })
     expect(claims).toHaveLength(1)
     expect(sends).toEqual([])
+  })
+
+  it('answers storefront_mail as 409 on the preview and the send, and sends with the person’s yes', async () => {
+    const { hono, claims, sends, check } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    check.storefront_mail = true
+    const previewed = await post(hono, 'preview', AGAIN, COOKIE)
+    expect(previewed.status).toBe(409)
+    expect(await previewed.json()).toMatchObject({ type: 'storefront_mail' })
+    const refused = await post(hono, 'send', { ...AGAIN, digest }, { ...COOKIE, 'idempotency-key': 'click-0010' })
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ type: 'storefront_mail' })
+    expect(claims).toEqual([])
+    expect(sends).toEqual([])
+
+    const also = { ...AGAIN, also_when_storefront_mails: true }
+    const again = await post(hono, 'preview', also, COOKIE)
+    expect(again.status).toBe(200)
+    const sent = await post(hono, 'send', { ...also, digest }, { ...COOKIE, 'idempotency-key': 'click-0011' })
+    expect(sent.status).toBe(200)
+    expect(claims[0]!.body).toMatchObject({ also_when_storefront_mails: true })
+    expect(sends).toHaveLength(1)
+  })
+
+  it('serves a replay under the same key from its first claim, after the storefront began to mail it', async () => {
+    const { hono, claims, sends, check } = app(signedIn())
+    const { digest } = (await (await post(hono, 'preview', AGAIN, COOKIE)).json()) as { digest: string }
+    const headers = { ...COOKIE, 'idempotency-key': 'click-0020' }
+    expect((await post(hono, 'send', { ...AGAIN, digest }, headers)).status).toBe(200)
+    expect(sends).toHaveLength(1)
+    check.storefront_mail = true
+    const replay = await post(hono, 'send', { ...AGAIN, digest }, headers)
+    expect(replay.status).toBe(200)
+    expect(await replay.json()).toMatchObject({ sent: true, message: { id: 'm2', status: 'sent' } })
+    expect(sends).toHaveLength(1)
+    expect(claims.map((c) => c.key)).toEqual([claims[0]!.key, claims[0]!.key])
   })
 
   it('forwards the backend’s 404 as it is', async () => {

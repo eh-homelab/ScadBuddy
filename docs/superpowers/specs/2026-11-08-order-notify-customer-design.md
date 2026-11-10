@@ -408,7 +408,12 @@ answers it with its digest; nothing is sent or recorded. The send names the temp
 under the open preview's `Idempotency-Key`. The browser makes one key per preview and keeps it
 for every click on its Send until a send is answered, so a retry after a lost answer is served
 from the first claim. A backend 404, 409 or 422 keeps its status and slug: a claim that lost a
-race after the preview is 409 `already_notified`. Any other backend status is logged and answered
+race after the preview is 409 `already_notified`. A template the storefront already emails
+(§8) is refused 409 `storefront_mail` by the preview and the send; the page asks "The
+storefront already emails this update to the customer. Send it here too?" and on yes previews
+it again with `also_when_storefront_mails`, which that preview's send carries under its own
+key. A row skipped for that reason offers "Send here too" (the owner's decision on #5660: a
+person who presses it means it). Any other backend status is logged and answered
 502 `upstream_error`: a 401 or 403 there is the agent's service credential, not the person. The
 person's click on the shown message is the approval.
 
@@ -470,8 +475,9 @@ def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | No
   comes back `skipped` (the storefront began to mail between the check and the claim)
   sends nothing and says so in its answer's `warning`.
 - `also_when_storefront_mails: true` sends anyway. The approval summary says "the
-  storefront mail also sends this". It exists for a second channel (an SMS nudge); a flow
-  never sets it.
+  storefront mail also sends this". It exists for a second channel (an SMS nudge), and for
+  a person on the order page who answers yes to "Send it here too?" or presses "Send here
+  too" on a skipped row (§7.2); a flow never sets it.
 - A skip is a `skipped` row with `reason: storefront_mail` and an audit row, so the order
   shows why no plugin message went.
 

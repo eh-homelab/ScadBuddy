@@ -215,14 +215,20 @@ async function sendPlan(ctx: SendContext, args: SendArgs): Promise<SendPlan> {
 /**
  * What the backend's read-only check refuses before anything parks (§5.2): `already_notified`
  * (unless `resend_of` names the message), and `storefront_mail` (§8: the storefront mails this
- * template's news to the order's customer itself) unless `also_when_storefront_mails`.
+ * template's news to the order's customer itself) unless `also_when_storefront_mails`. With
+ * `key`, a key that already claimed a message refuses nothing: its claim answers that row (a
+ * retry after a lost answer is served from the first claim, never refused).
  */
-async function refuseIfTold(ctx: SendContext, args: SendArgs): Promise<void> {
+async function refuseIfTold(ctx: SendContext, args: SendArgs, key?: string): Promise<void> {
   const { order_id, template } = args
+  const header = key === undefined ? {} : { header: { 'Idempotency-Key': key } }
   const check = await ok(
-    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', { params: { path: { order_id }, query: { template } } }),
+    ctx.backend.GET('/api/v1/orders/{order_id}/messages/check', {
+      params: { path: { order_id }, query: { template }, ...header },
+    }),
     `check order ${order_id}'s messages`,
   )
+  if (check.claimed) return
   const told = check.already_notified
   if (told && args.resend_of === undefined) {
     throw new ToolError(
@@ -348,8 +354,16 @@ export function messageDigest(message: ApprovedMessage): string {
   return createHash('sha256').update(JSON.stringify(message)).digest('hex')
 }
 
-/** A person's own send from the order page (#5660 PR 3): the template, and the message it sends again. */
-export type PersonSend = { order_id: string; template: NotifyTemplate; resend_of?: string | undefined }
+/**
+ * A person's own send from the order page (#5660 PR 3): the template, the message it sends again,
+ * and `also_when_storefront_mails` once the person said yes to sending what the storefront emails.
+ */
+export type PersonSend = {
+  order_id: string
+  template: NotifyTemplate
+  resend_of?: string | undefined
+  also_when_storefront_mails?: boolean | undefined
+}
 
 /** The message a person's send would send now, and its digest; nothing is sent or recorded. */
 export async function previewPersonSend(
@@ -373,6 +387,9 @@ export async function personSend(ctx: SendContext, args: PersonSend, digest: str
         'was sent; preview it again',
     )
   }
+  // The preview's refusals stand at the send too: the storefront may have begun to mail it since.
+  // Under the claim's own key: a retry of a send already claimed is answered from that claim.
+  await refuseIfTold(ctx, args, idempotencyKey(ctx))
   return sendMessage(ctx, args, planned)
 }
 

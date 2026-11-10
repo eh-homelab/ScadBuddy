@@ -4,7 +4,13 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
-import { mockLoseNextSendAnswer, mockMessageChange, mockOrderMessage, mockSendKeys } from '../../mocks/features/orders/messages'
+import {
+  mockLoseNextSendAnswer,
+  mockMessageChange,
+  mockOrderMessage,
+  mockSendKeys,
+  mockStorefrontMails,
+} from '../../mocks/features/orders/messages'
 import { ORDER_ACCEPTED, ORDER_DRAFT } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { OrderMessages } from './OrderMessages'
@@ -22,6 +28,82 @@ describe('OrderMessages (#5660)', () => {
     renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
     const list = await screen.findByRole('list', { name: 'Customer messages' })
     expect(within(list).getByText(/Skipped \(the storefront mails it itself\)/)).toBeInTheDocument()
+  })
+
+  it('asks before it sends what the storefront already emails, and sends it here too on yes', async () => {
+    const first = mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'failed', reason: 'transport' })
+    mockStorefrontMails()
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const asked = await screen.findByRole('region', { name: 'Storefront mail' })
+    expect(asked).toHaveTextContent('The storefront already emails this update to the customer. Send it here too?')
+    expect(screen.queryByRole('region', { name: 'Message to send' })).not.toBeInTheDocument()
+    await user.click(within(asked).getByRole('button', { name: 'Yes, send it here too' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    expect(screen.queryByRole('region', { name: 'Storefront mail' })).not.toBeInTheDocument()
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    expect(mockSendKeys()).toHaveLength(1)
+    const messages = await api.orderMessages(ORDER_ACCEPTED)
+    expect(messages[0]).toMatchObject({ status: 'sent', resend_of: first.id })
+  })
+
+  it('serves a retry after a lost answer from its first claim, after the storefront began to mail it', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'failed', reason: 'transport' })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    mockLoseNextSendAnswer()
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    mockStorefrontMails()
+    await user.click(within(screen.getByRole('region', { name: 'Message to send' })).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    expect(screen.queryByRole('region', { name: 'Storefront mail' })).not.toBeInTheDocument()
+    expect(mockSendKeys()).toHaveLength(1)
+    expect(await api.orderMessages(ORDER_ACCEPTED)).toHaveLength(2)
+  })
+
+  it('previews a skipped message with the flag when "Send here too" is pressed', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'skipped', reason: 'storefront_mail' })
+    const bodies: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.endsWith('/messages/preview')) void request.clone().json().then((b) => bodies.push(b))
+    })
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send here too' }))
+    await screen.findByRole('region', { name: 'Message to send' })
+    server.events.removeAllListeners()
+    expect(bodies).toEqual([expect.objectContaining({ also_when_storefront_mails: true })])
+  })
+
+  it('sends nothing when the person says no to the storefront question', async () => {
+    mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'failed', reason: 'transport' })
+    mockStorefrontMails()
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    await user.click(within(list).getByRole('button', { name: 'Send again' }))
+    const asked = await screen.findByRole('region', { name: 'Storefront mail' })
+    await user.click(within(asked).getByRole('button', { name: 'No' }))
+    expect(screen.queryByRole('region', { name: 'Storefront mail' })).not.toBeInTheDocument()
+    expect(mockSendKeys()).toEqual([])
+  })
+
+  it('offers "Send here too" on a message skipped for the storefront, and sends it with the person’s yes', async () => {
+    const skipped = mockOrderMessage(ORDER_ACCEPTED, { template: 'shipped', status: 'skipped', reason: 'storefront_mail' })
+    mockStorefrontMails()
+    const { user } = renderPage(<OrderMessages orderId={ORDER_ACCEPTED} />)
+    const list = await screen.findByRole('list', { name: 'Customer messages' })
+    expect(within(list).queryByRole('button', { name: 'Send again' })).not.toBeInTheDocument()
+    await user.click(within(list).getByRole('button', { name: 'Send here too' }))
+    const shown = await screen.findByRole('region', { name: 'Message to send' })
+    await user.click(within(shown).getByRole('button', { name: 'Send' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Sent.')
+    const messages = await api.orderMessages(ORDER_ACCEPTED)
+    expect(messages[0]).toMatchObject({ status: 'sent', resend_of: skipped.id })
   })
 
   it('marks an unknown message sent only on a person’s word', async () => {
