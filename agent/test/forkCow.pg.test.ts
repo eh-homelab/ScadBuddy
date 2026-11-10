@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
-import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import type { HarnessPaths } from '../src/harness/options.js'
+import { ensureStateDirs, sessionWorkDir } from '../src/harness/stateDirs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
+import { DIRECTORY_NOTE_MARK, directoryNote } from '../src/sessions/turnRunner.js'
 import { SealError } from '../src/secrets.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
@@ -41,6 +43,8 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
   let url: string
   let drop: () => Promise<void>
   const pools: Database[] = []
+  /** Each replica's state dirs: where its sessions' working directories are. */
+  const pathsOf = new Map<SessionManager, HarnessPaths>()
 
   beforeEach(async () => {
     // Every reply names what it answers, so a request's messages say which turns it holds.
@@ -65,12 +69,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
-    return manager({
+    const m = manager({
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-fork-cow-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
     })
+    pathsOf.set(m, paths)
+    return m
   }
 
   async function turn(m: SessionManager, id: string, word: string): Promise<string> {
@@ -113,6 +119,25 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     expect(rows.length).toBeGreaterThan(0)
     expect(rows.filter((r) => r.uuid !== null && parentUuids.has(r.uuid))).toEqual([])
   }, 90_000)
+
+  it("tells a fork's first turn that its working directory moved, and names both (#5867)", async () => {
+    const m = await replica()
+    const parent = await started(m, 'box')
+    const parentDir = sessionWorkDir(pathsOf.get(m)!, parent)
+    // The parent's transcript names its own directory: the path a fork's model would reach for.
+    expect(JSON.stringify(await m.store.load({ projectKey: '', sessionId: parent }))).toContain(parentDir)
+    const child = await m.fork(parent, browser)
+    const childDir = sessionWorkDir(pathsOf.get(m)!, child.id)
+
+    const notes = (sent: string) => sent.split(DIRECTORY_NOTE_MARK).length - 1
+    const sent = await turn(m, child.id, 'left')
+    expect(sent).toContain(directoryNote(parentDir, childDir))
+    expect(notes(sent)).toBe(1)
+    // Said once: the next turn's transcript already names the new directory.
+    expect(notes(await turn(m, child.id, 'right'))).toBe(1)
+    // And never to a session that kept its directory.
+    expect(notes(await turn(m, parent, 'taller'))).toBe(0)
+  }, 120_000)
 
   it("the child's first turn's model request holds the parent's turns through the cut, and nothing after it", async () => {
     const m = await replica()
