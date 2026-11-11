@@ -125,7 +125,8 @@ export const farmTools: Tool[] = [
       "Every print Bambuddy archived, ScadBuddy's or not (list_prints is ScadBuddy's own, with their parameters): " +
       'each with its status, printer, project, times, filament, cost, failure reason and run counts, and ' +
       '`scadbuddy_print` (false: a print ScadBuddy did not start, which get_print_sources and import_print can ' +
-      'import). Filter by ' +
+      'import; the print watcher may have imported it already or put it in Unsorted imports: list_auto_imports). ' +
+      'Filter by ' +
       '`printer_id`, `project_id` and creation day (`from`/`to`, inclusive).' +
       PAGED,
     input: z.object({

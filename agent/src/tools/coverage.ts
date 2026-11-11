@@ -371,7 +371,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'leakage), and the runtime settings (render concurrency and timeouts, queue caps, upload and library ' +
       'limits, retention, log level), which decide how the server runs for everyone and are an operator ' +
       'decision made in Settings, and the asset allowlist fetch_asset is held to (#844), which an agent must ' +
-      'not widen for itself. Reading them all, with their sources, is get_settings.',
+      'not widen for itself, and the print watcher (#4699), which reads Bambuddy and the printers by itself, so ' +
+      'the route refuses a change of it by anyone but a person (403 `person_only`, `api/settings.py` ' +
+      '`PRINT_WATCH`). Reading them all, with their sources, is get_settings.',
   },
   {
     operation: 'DELETE /api/v1/settings/remembered',

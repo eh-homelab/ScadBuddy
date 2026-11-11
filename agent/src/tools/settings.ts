@@ -45,7 +45,9 @@ export const settingsTools: Tool[] = [
     label: 'Read ScadBuddy settings',
     description:
       'ScadBuddy settings: the Bambuddy URL, whether an API key is set (never the key), default printer, ' +
-      'plate and display unit.',
+      'plate and display unit, and the print watcher (#4699): `print_auto_import` (on or off), ' +
+      '`print_auto_import_sources`, `print_auto_import_skip_printers` and `print_auto_import_skip_lan_printers`. ' +
+      'Only a person changes the print watcher, in Settings → Printing.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings'],

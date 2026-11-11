@@ -21,7 +21,9 @@ export const printHistoryTools: Tool[] = [
     description:
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
       'parameters that differ from the template defaults; a Bambuddy library file\'s print names the file ' +
-      '(`library_file_name`); a print imported onto a model (import_print) names that model (`slug`). Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
+      '(`library_file_name`); a print imported onto a model (import_print, or the print watcher: list_auto_imports) ' +
+      'names that model (`slug`). A LAN-only printer\'s print the watcher recorded has no archive and is not here: ' +
+      'list_lan_auto_imports. Filter by template (`slug`) or by one library file (`library_file_id`, not both), ' +
       'Bambuddy `status` (completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day ' +
       '(`from`/`to`, inclusive) and text `q` (output, library file or print name, parameter values). Pass ' +
       '`next_cursor` back as `cursor` for the next page: with a narrow filter a page can be short or empty and ' +
