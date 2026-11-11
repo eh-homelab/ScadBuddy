@@ -408,8 +408,9 @@ acts only on the order whose `customer_id` its principal names; any other order 
 - A request records a payment made outside ScadBuddy: cash, Square, a bank transfer.
   The existing `POST /orders/{id}/payments` gains an optional `payment_request_id`; a
   manual payment that names an open request of that order closes it as `paid`.
-- The storefront shows the request's hosted URL as "Pay"; a provider's return URL lands
-  on the order page, which waits for the webhook, not the redirect, before it says paid.
+- The storefront shows the request's hosted URL as "Pay". A provider's return URL for a
+  storefront order is `/o` with no token, so the payer sees only "Open your order from the
+  link in your mail". The order page says paid only after a fresh read, never from the redirect.
 - The webhook route `POST /api/v1/payments/webhooks/{provider}` stays on the API; it is
   the one back-office route the public reaches, routed by path at the ingress (#4957
   "Deployment").

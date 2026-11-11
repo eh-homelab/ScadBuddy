@@ -420,6 +420,19 @@ def test_a_failed_request_shows_as_not_settled_with_no_link(
     assert [(p["kind"], p["status"], p["pay_url"]) for p in shown] == [("deposit", "failed", None)]
 
 
+def test_a_write_that_finds_no_order_is_the_empty_404_not_order_changed(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = make_order(api, crud)
+
+    def gone(*_args: Any, **_kwargs: Any) -> None:
+        raise LifecycleError("order_not_found", "no such order", not_found=True)
+
+    monkeypatch.setattr(Lifecycle, "cancel_order", gone)
+    r = made.reader.cancel(key="k1")
+    assert (r.status_code, r.content) == (404, b"")
+
+
 def test_an_order_not_found_refusal_reads_nothing() -> None:
     assert order_page._refusal(LifecycleError("order_not_found", "x", not_found=True)) is None
     refused = order_page._refusal(LifecycleError("item_not_found", "x", not_found=True))

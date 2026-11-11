@@ -76,6 +76,7 @@ export function OrderPage() {
 
   useEffect(() => {
     setOrder(undefined)
+    keys.current = new ActionKey()
     if (who) void load()
     else setOrder(null)
   }, [who, load])
