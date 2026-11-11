@@ -336,6 +336,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_deposit_waive: () => [],
   order_balance_waive: () => [],
   order_shipping_option_set: () => [],
+  // The customer link (#5283): the order's audit line records a send and a revoke.
+  order_customer_link_send: () => [],
+  order_customer_link_revoke: () => [],
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],

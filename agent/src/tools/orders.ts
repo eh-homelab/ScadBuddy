@@ -1068,6 +1068,71 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_customer_link_get',
+    label: "Read an order's customer link",
+    description:
+      "The state of the order's newest customer link (#5283): `live`, `created_at`, `sent_to` (where its mail " +
+      'went), `opened_at` (when the customer first opened it) and `revoked_at`; all null with `live: false` when ' +
+      'the order never had one. Never the link itself.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/customer-link'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/customer-link', { params: { path: { order_id } } }),
+          `read the customer link of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_customer_link_send',
+    label: 'Send the customer an order link',
+    description:
+      "Mail the order's customer a link that opens the order on the storefront without an account (#5283, storefront " +
+      'spec §5.2), so they can answer revisions and pay online. Every live link of the order is revoked first: an ' +
+      "old one stops working. The mail goes to `to` (one address), or else to the customer's email contact. This " +
+      'mails the customer, so it is outward: a person must approve it first (it returns a pending action). The ' +
+      'reply is the link state (`live`, `created_at`, `sent_to`, `opened_at`, `revoked_at`), never the link itself. ' +
+      '422 `no_email` with no `to` and no email contact; 422 `email_invalid` for anything but one address; ' +
+      '`order_not_submitted` on a storefront cart.',
+    input: z.object({
+      order_id: orderId,
+      to: z.string().min(1).max(320).optional().describe("One email address; the customer's email contact when left out"),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/customer-link'],
+    summarize: ({ order_id, to }) => `Send a new customer link for order ${order_id}${to ? ` to ${to}` : ''}`,
+    handler: async ({ order_id, to }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/customer-link', {
+            params: { path: { order_id } },
+            body: to === undefined ? {} : { to },
+          }),
+          `send a customer link for order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_customer_link_revoke',
+    label: "Revoke an order's customer link",
+    description:
+      "Revoke the order's live customer links (#5283): each stops opening the order at once. It only removes the " +
+      "customer's access and sends nothing. The reply is the newest link's state.",
+    input: z.object({ order_id: orderId }),
+    risk: 'write',
+    routes: ['DELETE /api/v1/orders/{order_id}/customer-link'],
+    summarize: ({ order_id }) => `Revoke the customer link of order ${order_id}`,
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.DELETE('/api/v1/orders/{order_id}/customer-link', { params: { path: { order_id } } }),
+          `revoke the customer link of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_notify_customer',
     label: 'Write a message to an order’s customer',
     description:

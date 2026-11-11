@@ -17,6 +17,7 @@ import { PaymentRequests } from '../components/orders/PaymentRequests'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { OrderFlowRuns } from '../components/orders/OrderFlowRuns'
 import { OrderMessages } from '../components/orders/OrderMessages'
+import { CustomerLink } from '../components/orders/CustomerLink'
 import { MarginBadge, OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { itemAnchor } from '../components/orders/itemLink'
@@ -545,6 +546,14 @@ export function OrderPage() {
               </CardContent>
             </Card>
           )
+        )}
+
+        {!isCart(order) && (
+          <Card size="sm">
+            <CardContent>
+              <CustomerLink key={order.id} orderId={order.id} onChanged={reload} />
+            </CardContent>
+          </Card>
         )}
 
         <OrderMessages key={order.id} orderId={order.id} />

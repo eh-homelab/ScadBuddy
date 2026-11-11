@@ -13,6 +13,9 @@ import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
+
+from pydantic import BaseModel
 
 from scadbuddy.core.secrets import Envelope, Kek, open_secret, seal_secret
 from scadbuddy.orders.store import Conn
@@ -79,6 +82,30 @@ def live_link(conn: Conn, order_id: str) -> LiveLink | None:
         (order_id,),
     ).fetchone()
     return None if row is None else LiveLink(id=str(row["id"]), sent_to=str(row["sent_to"]))
+
+
+class LinkState(BaseModel):
+    """What the back office sees of the order's newest link (`link_state`): whether it is
+    live, when it was made, where its mail went, when the customer first opened it and when
+    it was revoked. Never its token or the token's hash."""
+
+    live: bool
+    created_at: datetime | None
+    sent_to: str | None
+    opened_at: datetime | None
+    revoked_at: datetime | None
+
+
+def link_state(conn: Conn, order_id: str) -> LinkState:
+    """The state of the order's newest link; all empty when it never had one."""
+    row = conn.execute(
+        "SELECT created_at, sent_to, opened_at, revoked_at FROM storefront_order_links"
+        " WHERE order_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    if row is None:
+        return LinkState(live=False, created_at=None, sent_to=None, opened_at=None, revoked_at=None)
+    return LinkState(live=row["revoked_at"] is None, **row)
 
 
 def sealed_token(conn: Conn, link_id: str) -> Envelope | None:

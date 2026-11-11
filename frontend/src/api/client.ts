@@ -267,6 +267,7 @@ import type {
   BankUnlinked,
   DepositSuggestion,
   OrderMessage,
+  CustomerLinkState,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2511,6 +2512,13 @@ export const api = {
   /** #5660 — a person's word that an `unknown` message reached the customer. */
   markOrderMessageSent: (orderId: string, messageId: string) =>
     request<OrderMessage>(`/orders/${seg(orderId)}/messages/${seg(messageId)}/mark-sent`, { method: 'POST' }),
+  /** #5283 — the state of the order's customer link (whether it is live, where it went,
+   * when it was opened or revoked); never the link itself. */
+  customerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`),
+  /** #5283 — mails a new link to `to`, or the customer's email; the live one stops working. */
+  sendCustomerLink: (orderId: string, to?: string) =>
+    request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, { method: 'POST', body: JSON.stringify(to ? { to } : {}) }),
+  revokeCustomerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
   /** #5281 — the order's deposit (null for none) while draft or quoted; it cancels the

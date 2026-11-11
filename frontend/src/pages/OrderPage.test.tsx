@@ -8,8 +8,9 @@ import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers
 import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { mockOrderMessage } from '../mocks/features/orders/messages'
+import { mockCustomerLink } from '../mocks/features/orders/customerLink'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 
@@ -608,3 +609,81 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
   })
 })
 
+
+// #5283 (storefront spec §5.2 "Order link"): the shop sends, replaces and revokes the order's
+// customer link. The card shows the link's state, never the link itself.
+describe('OrderPage, the customer link (#5283)', () => {
+  beforeEach(() => resetMockState())
+
+  it("sends a link to the customer's email, replaces it after a confirm, and revokes it", async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Revoke' })).toBeNull()
+
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('ada@example.test')
+    expect(within(card).getByText('Not opened yet.')).toBeInTheDocument()
+
+    // A live link: a new one asks first, since the old one stops working.
+    await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send a new link' }))
+    expect(within(card).getByText(/stops working/)).toHaveTextContent('The link sent to ada@example.test stops working.')
+    await user.click(within(card).getByRole('button', { name: 'Yes, send a new link' }))
+    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('grace@example.org')
+
+    await user.click(within(card).getByRole('button', { name: 'Revoke' }))
+    expect(await within(card).findByText(/Revoked/)).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeInTheDocument()
+    expect(card.textContent).not.toMatch(/token|\/o#/)
+  })
+
+  it('says so when the customer has no email address, and sends to an address typed', async () => {
+    const { user } = render(ORDER_CLOSED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByRole('alert')).toHaveTextContent('The customer has no email contact that is one address')
+    await user.type(within(card).getByLabelText('Send to'), 'bob@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('bob@example.org')
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('renders what the link row holds as text', async () => {
+    const odd = '<b>x</b>@example.org'
+    mockCustomerLink(ORDER_ACCEPTED, { sent_to: odd, opened_at: '2026-11-09T10:00:00Z' })
+    render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent(odd)
+    expect(within(card).getByText(/Opened/)).toBeInTheDocument()
+    expect(card.querySelector('b')).toBeNull()
+  })
+
+  it("says when the link's state cannot be read, holds Send until it is, and tries again", async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () =>
+        fail ? HttpResponse.json({ detail: 'database away' }, { status: 500 }) : undefined,
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    expect(await within(card).findByRole('alert')).toHaveTextContent("The link's state could not be read: database away")
+    // A send would revoke a live link with no confirm, so it waits for the state.
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeDisabled()
+    expect(within(card).getByText(/Sending waits until the state is read/)).toBeInTheDocument()
+    fail = false
+    await user.click(within(card).getByRole('button', { name: 'Try again' }))
+    expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('shows no card on a cart', async () => {
+    const cart = seedCart()
+    render(cart.id)
+    await screen.findByText(/A storefront cart the visitor has not submitted/)
+    expect(screen.queryByRole('region', { name: 'Customer link' })).toBeNull()
+  })
+})

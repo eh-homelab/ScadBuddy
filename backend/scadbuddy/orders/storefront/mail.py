@@ -71,7 +71,13 @@ from typing import Any, Literal
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import MAIL_QUEUED, Conn, OrderStore
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
-from scadbuddy.orders.storefront.links import live_link, open_token, sealed_token
+from scadbuddy.orders.storefront.links import (
+    create_order_link,
+    live_link,
+    open_token,
+    revoke_order_links,
+    sealed_token,
+)
 from scadbuddy.orders.storefront.mail_templates import ORDER_EVENTS, MailEvent, render
 from scadbuddy.payments.credentials import KekMissingError
 
@@ -87,6 +93,7 @@ __all__ = [
     "MailStatus",
     "StorefrontMail",
     "check_address",
+    "issue_link",
     "queue_mail",
     "storefront_mail_covers",
 ]
@@ -184,6 +191,18 @@ def queue_mail(
     assert row is not None
     MAIL_QUEUED.set(True)
     return str(row["id"])
+
+
+def issue_link(conn: Conn, kek: Kek | None, order_id: str, label: str, to: str) -> str:
+    """The order's one way to a new link, for a submit and the back office alike: revoke
+    every live link (`revoke_order_links`), make a new one for ``to`` (`create_order_link`)
+    and queue its `order_link` mail, in the caller's transaction. The token, returned once.
+    `EmailInvalidError` unless ``to`` is one address; `KekMissingError` with no KEK."""
+    to = check_address(to)
+    revoke_order_links(conn, order_id)
+    link_id, token = create_order_link(conn, kek, order_id, to)
+    queue_mail(conn, "order_link", to, {"order": label, "link_id": link_id}, order_id)
+    return token
 
 
 def storefront_mail_covers(
