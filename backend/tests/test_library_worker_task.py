@@ -448,7 +448,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return 0
 
     # #4699: the print watcher, off: one read of its floor, and no Bambuddy call.
-    async def slow_floor(enabled: bool) -> None:
+    async def slow_floor() -> None:
         await asyncio.sleep(0.1)
 
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
