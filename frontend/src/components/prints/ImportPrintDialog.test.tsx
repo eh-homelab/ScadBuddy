@@ -1,10 +1,12 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../../api/client'
-import type { ImportedPrint, ModelSummary } from '../../api/types'
+import { HttpResponse, http } from 'msw'
+import { api, printRunPoll } from '../../api/client'
+import type { ArchiveOutcome, ImportedPrint, ModelSummary } from '../../api/types'
 import { addMockModel, mockModels, resetMockState } from '../../mocks/handlers'
 import { archiveImports } from '../../mocks/features/orders/pastPrints'
+import { server } from '../../mocks/server'
 import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { ImportPrintDialog } from './ImportPrintDialog'
@@ -168,5 +170,84 @@ describe('ImportPrintDialog', () => {
     const again = await screen.findByRole('dialog', { name: 'Import print' })
     expect(await within(again).findByRole('list', { name: 'Past prints' })).toBeInTheDocument()
     expect(within(again).queryByTestId('import-done')).not.toBeInTheDocument()
+  })
+
+  it('reads more archives while every listed one is a ScadBuddy print (#5992)', async () => {
+    const archive = (id: number, linked: boolean): ArchiveOutcome =>
+      ({ id, print_name: `Print ${id}`, status: 'completed', created_at: '2026-11-01T00:00:00Z', scadbuddy_print: linked }) as ArchiveOutcome
+    const asked: number[] = []
+    server.use(
+      http.get('/api/v1/farm/archives', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        asked.push(limit)
+        const linked = Array.from({ length: 50 }, (_, i) => archive(1000 + i, true))
+        return HttpResponse.json(limit <= 50 ? linked : [...linked, archive(2000, false)])
+      }),
+    )
+    renderPage(<ImportPrintDialog open onOpenChange={() => {}} />)
+    const list = await screen.findByRole('list', { name: 'Past prints' })
+    expect(await within(list).findByTestId('past-2000')).toHaveTextContent('Print 2000')
+    expect(asked).toEqual([50, 100])
+  })
+
+  it("stops reading at the route's most, 200 archives, when all are ScadBuddy prints (#5994)", async () => {
+    const asked: number[] = []
+    server.use(
+      http.get('/api/v1/farm/archives', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        asked.push(limit)
+        return HttpResponse.json(
+          Array.from({ length: limit }, (_, i) => ({ id: 1000 + i, print_name: `Print ${i}`, status: 'completed', scadbuddy_print: true }) as ArchiveOutcome),
+        )
+      }),
+    )
+    const real = api.listFarmArchives.bind(api)
+    const reads: Promise<ArchiveOutcome[]>[] = []
+    vi.spyOn(api, 'listFarmArchives').mockImplementation((...args) => {
+      const read = real(...args)
+      reads.push(read)
+      return read
+    })
+    renderPage(<ImportPrintDialog open onOpenChange={() => {}} />)
+    await waitFor(() => expect(asked).toEqual([50, 100, 150, 200]))
+    // Once the 200-archive answer is in and React has run its effects, a fifth read
+    // would have started already: no timer decides it (#5999).
+    await act(async () => {
+      await reads[3]
+    })
+    expect(asked).toEqual([50, 100, 150, 200])
+    expect(reads).toHaveLength(4)
+  })
+
+  it('follows a slow new model, then shows the import it made (#5992)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    const made = { id: 'op-3', kind: 'mesh_model_create', subject: 'benchy-hull', status: 'running', created_at: '2026-11-10T00:00:00Z' }
+    server.use(
+      http.post('/api/v1/print-imports/9104', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length < 2
+          ? HttpResponse.json(made, { status: 202 })
+          : HttpResponse.json(
+              { archive_id: 9104, slug: 'benchy-hull', print_url: '/api/v1/prints/9104', created_model: true, made_now: true, imported: { archive_id: 9104, slug: 'benchy-hull', source: 'archive_source', filename: 'benchy.3mf', created_model: true } },
+              { status: 201 },
+            )
+      }),
+      http.get('/api/v1/operations/op-3', () => HttpResponse.json({ ...made, status: 'succeeded', result: { slug: 'benchy-hull', name: 'Benchy hull' } })),
+    )
+    try {
+      const { dialog, user } = await openArchive(9104)
+      const sources = await within(dialog).findByRole('radiogroup', { name: 'Source' })
+      await user.click(within(sources).getByRole('radio', { name: /slicer project/ }))
+      await user.click(within(dialog).getByRole('radio', { name: 'A new model from the 3MF' }))
+      await user.clear(within(dialog).getByLabelText('Name'))
+      await user.type(within(dialog).getByLabelText('Name'), 'Benchy hull')
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('benchy-hull, a new model made from its 3MF')
+      expect(keys).toHaveLength(2)
+      expect(keys[1]).toBe(keys[0])
+    } finally {
+      printRunPoll.intervalMs = 1000
+    }
   })
 })

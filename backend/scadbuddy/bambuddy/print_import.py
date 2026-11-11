@@ -175,6 +175,13 @@ def _archive_sources(archive: ArchiveDetail) -> list[FoundSource]:
     return [sliced, project]
 
 
+def _newest_first(row: LibraryListRow) -> tuple[bool, datetime]:
+    """A library row's sort key with ``reverse=True``: newest first, a row with no
+    ``created_at`` after every dated one (#5979)."""
+    created = row.created_at
+    return (created is not None, created or datetime.min)
+
+
 async def _library_sources(client: BambuddyClient, archive: ArchiveDetail) -> list[FoundSource]:
     try:
         rows = await client.library_listing(folder_id=None, every_folder=True)
@@ -192,7 +199,7 @@ async def _library_sources(client: BambuddyClient, archive: ArchiveDetail) -> li
             for row in rows
             if row.file_type in ("3mf", "gcode.3mf") and _stem(row.filename) in names
         ),
-        key=lambda row: (row.created_at is None, row.created_at),
+        key=_newest_first,
         reverse=True,
     )[:MAX_LIBRARY_CANDIDATES]
     if not candidates:
