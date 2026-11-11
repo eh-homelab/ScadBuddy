@@ -348,12 +348,22 @@ function Payments({ order }: { order: CustomerOrder }) {
                     {payment.kind === 'deposit' ? `Pay deposit ${amount}` : `Pay ${amount}`}
                   </a>
                 ) : (
-                  <span>The shop will tell you how to pay.</span>
+                  <span>
+                    {payment.manual && order.payment_instructions
+                      ? 'Pay the shop as described below.'
+                      : 'The shop will tell you how to pay.'}
+                  </span>
                 ))}
             </li>
           )
         })}
       </ul>
+      {order.payment_instructions && (
+        <>
+          <h3 className="sf-item-title">How to pay</h3>
+          <p style={{ whiteSpace: 'pre-line' }}>{order.payment_instructions}</p>
+        </>
+      )}
     </div>
   )
 }

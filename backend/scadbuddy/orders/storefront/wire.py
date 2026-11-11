@@ -423,6 +423,10 @@ class CustomerPayment(BaseModel):
     currency: str
     status: Literal["open", "pending", "paid", "failed"]
     pay_url: str | None
+    #: No provider takes this request: the customer pays as the shop's
+    #: ``payment_instructions`` say. False for a provider's request, also while its page
+    #: is not made yet.
+    manual: bool
 
 
 class CustomerShipment(BaseModel):
@@ -445,6 +449,9 @@ class CustomerOrderView(BaseModel):
     can_cancel: bool
     items: list[CustomerItem]
     payments: list[CustomerPayment]
+    #: The shop's own words on how to pay (plain text, never markup): set only while an
+    #: open request has no provider, and the shop has saved some.
+    payment_instructions: str | None
     shipments: list[CustomerShipment]
 
 

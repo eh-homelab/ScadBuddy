@@ -170,6 +170,7 @@ function freshOrder(): CustomerOrder {
       },
     ],
     payments: [],
+    payment_instructions: null,
     shipments: [],
   }
 }
@@ -325,7 +326,11 @@ export const handlers = [
         ...found,
         status: 'Accepted: we will start making it soon',
         can_cancel: false,
-        payments: [{ id: 'p1', kind: 'balance', amount_minor: 1250, currency: 'USD', status: 'open', pay_url: '/mock-pay/p1' }],
+        payments: [
+          { id: 'p1', kind: 'balance', amount_minor: 1250, currency: 'USD', status: 'open', pay_url: '/mock-pay/p1', manual: false },
+          { id: 'p2', kind: 'deposit', amount_minor: 500, currency: 'USD', status: 'open', pay_url: null, manual: true },
+        ],
+        payment_instructions: 'Venmo @example-shop\nOr pay cash when you collect it.',
       }
     }
     return HttpResponse.json(order)
