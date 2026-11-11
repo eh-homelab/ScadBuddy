@@ -161,7 +161,8 @@ export const printHistoryTools: Tool[] = [
       'name), and each it put in the Unsorted imports inbox (`state: inbox`, with `reason` and the models the job\'s ' +
       'name suggests), and each a person or the assistant dismissed from it (`state: dismissed`). `state: inbox` is ' +
       'the Unsorted imports list. To link an inbox print, show the user the suggestions, then import_print; to ' +
-      'take one out of the inbox, dismiss_auto_import. Answers `items`, ' +
+      'take one out of the inbox, dismiss_auto_import. The prints on printers with no Bambuddy link have no ' +
+      'archive and are list_lan_auto_imports\'s. Answers `items`, ' +
       'and `next_cursor` when the page was full: pass it back as `cursor` for the next page.',
     input: z.object({
       state: z.enum(['linked', 'inbox', 'dismissed']).optional(),
@@ -203,6 +204,104 @@ export const printHistoryTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/print-imports/auto/{archive_id}/dismiss', { params: { path: { archive_id } } }),
           `dismiss print ${archive_id} from Unsorted imports`,
+        ),
+      ),
+  }),
+
+  // ── #6041: the prints the watcher recorded on LAN-only printers (no Bambuddy archive) ──
+  defineTool({
+    name: 'list_lan_auto_imports',
+    label: "List the LAN-only printers' watched prints",
+    description:
+      'The prints the print watcher (#4699) recorded on printers with no Bambuddy link, newest record first. Such a ' +
+      'print has no Bambuddy archive: each record has an `id` of its own, apart from the archive ids of ' +
+      'list_auto_imports, and names its printer (`printer_id`, `printer_name`) and job (`subtask_name`). `state` ' +
+      'is `linked` (with `slug` and `matched_by`: an earlier import of the same file, the job\'s name, or `import`, ' +
+      'a link), `inbox` (Unsorted imports, with `reason` and the models the job\'s name suggests) or `dismissed`. ' +
+      '`slug` keeps only the records linked to that model; such a print is not in list_prints. To link an inbox ' +
+      'record, show the user the suggestions, then link_lan_auto_import (not import_print: there is no archive); ' +
+      'to take one out of the inbox, dismiss_lan_auto_import. Answers `items`, and `next_cursor` when the page ' +
+      'was full: pass it back as `cursor` for the next page.',
+    input: z.object({
+      state: z.enum(['linked', 'inbox', 'dismissed']).optional(),
+      slug: slug.optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+      cursor: z.string().regex(/^[1-9][0-9]{0,17}$/, 'must be a next_cursor from list_lan_auto_imports').optional(),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/print-imports/auto/lan'],
+    summarize: ({ state }) =>
+      state === 'inbox'
+        ? "List the LAN-only printers' Unsorted imports"
+        : 'List the prints the print watcher recorded on LAN-only printers',
+    handler: async ({ state, slug: model, limit, cursor }, { backend }) => {
+      const size = limit ?? AUTO_IMPORTS_PAGE
+      const items = await ok(
+        backend.GET('/api/v1/print-imports/auto/lan', {
+          params: {
+            query: {
+              ...(state === undefined ? {} : { state }),
+              ...(model === undefined ? {} : { slug: model }),
+              limit: size,
+              ...(cursor === undefined ? {} : { before: Number(cursor) }),
+            },
+          },
+        }),
+        'list the prints the print watcher recorded on LAN-only printers',
+      )
+      // The route pages by the last record read (`before`); a full page may have more after it.
+      const last = items.at(-1)
+      return json({ items, ...(items.length === size && last?.id ? { next_cursor: String(last.id) } : {}) })
+    },
+  }),
+
+  defineTool({
+    name: 'dismiss_lan_auto_import',
+    label: "Dismiss a LAN-only printer's unsorted print",
+    description:
+      "Take a LAN-only printer's print out of the Unsorted imports inbox (list_lan_auto_imports `state: inbox`): " +
+      'its record becomes `dismissed`. It reaches no printer and no Bambuddy; link_lan_auto_import can still link ' +
+      'it later. Dismiss only a print the user said is not worth keeping. A print dismissed before gives the same ' +
+      'answer; a print linked to a model that is there is refused (409), and no such record is 404.',
+    input: z.object({ id: z.number().int().min(1).describe("The record's id, as list_lan_auto_imports returns it") }),
+    risk: 'write',
+    routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/dismiss'],
+    summarize: ({ id }) => `Dismiss LAN print ${id} from Unsorted imports`,
+    handler: async ({ id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print-imports/auto/lan/{record_id}/dismiss', { params: { path: { record_id: id } } }),
+          `dismiss LAN print ${id} from Unsorted imports`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'link_lan_auto_import',
+    label: "Link a LAN-only printer's print to a model",
+    description:
+      "Link a LAN-only printer's print (list_lan_auto_imports) to the model `slug`: its record becomes `linked`, " +
+      'with `matched_by: import`. Its one source is the printer file the print watcher kept in ScadBuddy\'s own ' +
+      'library; nothing is read or copied, and no printer or Bambuddy is reached. An inbox or a dismissed print ' +
+      'can be linked; one linked to `slug` already gives the same answer. Refused (409) when the watcher kept no ' +
+      '3MF for it, or when it is linked to another model that is there; 404 for no such record or model. The ' +
+      "linked print is not on the model's Prints tab (list_prints): it is in Activity and list_lan_auto_imports " +
+      '`slug`. Link only to the model the user chose.',
+    input: z.object({
+      id: z.number().int().min(1).describe("The record's id, as list_lan_auto_imports returns it"),
+      slug,
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/link'],
+    summarize: ({ id, slug: model }) => `Link LAN print ${id} to ${model}`,
+    handler: async ({ id, slug: model }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print-imports/auto/lan/{record_id}/link', {
+            params: { path: { record_id: id } },
+            body: { slug: model },
+          }),
+          `link LAN print ${id} to ${model}`,
         ),
       ),
   }),

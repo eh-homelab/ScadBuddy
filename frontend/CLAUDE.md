@@ -111,8 +111,8 @@ same way, `vite.config.ts`).
   `also_when_storefront_mails`. Mocks `src/mocks/features/orders/messages.ts`.
 
 - The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
-  (`pages/settings/sections/print-watcher.tsx`; the three fields' form values are
-  comma-joined lists, `values.ts` `sourcesValue`, `printerIdsValue`), and the Prints page's
+  (`pages/settings/sections/print-watcher.tsx`; the list fields' form values are
+  comma-joined, `values.ts` `sourcesValue`, `printerIdsValue`, `registryIdsValue`), and the Prints page's
   "Unsorted imports" (`components/prints/UnsortedImports.tsx`). The inbox reads ScadBuddy
   only, so it shows on every backend before Bambuddy's lists are asked for. "Link…" opens
   `ImportPrintDialog` with `start`: that print, and the source the watcher recorded chosen
@@ -123,6 +123,15 @@ same way, `vite.config.ts`).
   every shown print is dismissed, the first page is read again (the functional `setPages`
   update decides it, so dismisses that answer together still read again, #6029). Mocks
   `src/mocks/features/printWatch.ts`.
+  #6041, LAN-only printers (no Bambuddy link): the section's "Leave these LAN-only printers
+  alone" skips them by registry id (`print_auto_import_skip_lan_printers`, the registry's
+  physical printers with no `bambuddy_printer_id`). Unsorted imports lists their inbox
+  records in a second list (`GET /print-imports/auto/lan`), each with its printer's and
+  job's name, paged on its own (`useInbox`: the record ids are not archive ids). "Link to
+  model…" opens a model picker only (`LanLinkDialog`, no source step, no Import print), and
+  its answer says the print is in Activity (`prints.ts` `lanPrintsActivityPath`), as a
+  model's Prints tab does when the model has such a print (`PrintsPage.tsx`
+  `LanPrintsNote`).
 
 ## See also
 

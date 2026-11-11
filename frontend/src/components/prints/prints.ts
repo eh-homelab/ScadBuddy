@@ -32,6 +32,15 @@ export function libraryPrintsPath(fileId: number): string {
   return `/prints?file=${fileId}`
 }
 
+/**
+ * #6041 — the Activity list of a model's prints from LAN-only printers: each is a
+ * `print_auto_import` row with the model as its subject. They have no Bambuddy archive, so
+ * they are not on the model's Prints tab.
+ */
+export function lanPrintsActivityPath(slug: string): string {
+  return `/activity?${new URLSearchParams({ kind: 'print_auto_import', subject: `model:${slug}` }).toString()}`
+}
+
 /** A printer Bambuddy gave no name for. */
 export function printerLabel(id: number): string {
   return `Printer ${id}`

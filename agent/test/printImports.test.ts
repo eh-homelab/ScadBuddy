@@ -253,3 +253,96 @@ describe('dismiss_auto_import (#4699 phase 2)', () => {
     ])
   })
 })
+
+// #6041 — the prints the watcher recorded on LAN-only printers: their ids are their own,
+// apart from the archive ids, so they have tools of their own.
+describe('list_lan_auto_imports, dismiss_lan_auto_import and link_lan_auto_import (#6041)', () => {
+  it('list as a read, and dismiss and link as writes that reach no printer, on the LAN routes', () => {
+    expect(tool('list_lan_auto_imports')).toMatchObject({ risk: 'read', routes: ['GET /api/v1/print-imports/auto/lan'] })
+    expect(tool('dismiss_lan_auto_import')).toMatchObject({
+      risk: 'write',
+      routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/dismiss'],
+    })
+    expect(tool('link_lan_auto_import')).toMatchObject({
+      risk: 'write',
+      routes: ['POST /api/v1/print-imports/auto/lan/{record_id}/link'],
+    })
+    expect(pinnedOutward('dismiss_lan_auto_import', { id: 7 })).toBe(false)
+    expect(pinnedOutward('link_lan_auto_import', { id: 7, slug: 'demo' })).toBe(false)
+  })
+
+  it('pages by the last record id, apart from the archives, and filters by model', async () => {
+    const seen: URLSearchParams[] = []
+    let archives = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, () => {
+        archives += 1
+        return HttpResponse.json([])
+      }),
+      http.get(`${BACKEND}/api/v1/print-imports/auto/lan`, ({ request }) => {
+        const query = new URL(request.url).searchParams
+        seen.push(query)
+        const rows = [
+          { id: 9, subtask_name: 'cube', printer_name: 'Garage', state: 'inbox' },
+          { id: 7, subtask_name: 'vase', printer_name: 'Garage', state: 'inbox' },
+        ]
+        return HttpResponse.json(query.get('before') ? [] : rows)
+      }),
+    )
+    const first = await runTool(tool('list_lan_auto_imports'), { state: 'inbox', limit: 2 }, ctx())
+    expect(first.isError).toBeFalsy()
+    expect(firstText(first)).toMatchObject({ next_cursor: '7' })
+    const next = await runTool(tool('list_lan_auto_imports'), { state: 'inbox', limit: 2, cursor: '7' }, ctx())
+    expect(firstText(next)).toEqual({ items: [] })
+    await runTool(tool('list_lan_auto_imports'), { state: 'linked', slug: 'demo' }, ctx())
+    expect(Object.fromEntries(seen[0]!)).toEqual({ state: 'inbox', limit: '2' })
+    expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', limit: '2', before: '7' })
+    expect(Object.fromEntries(seen[2]!)).toEqual({ state: 'linked', slug: 'demo', limit: '50' })
+    expect(archives).toBe(0)
+  })
+
+  it('dismisses a record by its own id', async () => {
+    const posted: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/lan/:id/dismiss`, ({ params }) => {
+        posted.push(String(params['id']))
+        return HttpResponse.json({ id: 7, subtask_name: 'vase', state: 'dismissed', suggested: [] })
+      }),
+    )
+    const result = await runTool(tool('dismiss_lan_auto_import'), { id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toEqual(['7'])
+    expect(firstText(result)).toMatchObject({ id: 7, state: 'dismissed' })
+  })
+
+  it('links a record to the model, and names a refusal', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/lan/:id/link`, async ({ params, request }) => {
+        bodies.push(await request.json())
+        if (params['id'] === '6')
+          return HttpResponse.json(
+            { type: 'about:blank', title: 'Conflict', status: 409, detail: 'LAN print 6 has no kept 3MF: a model link needs the file' },
+            { status: 409, headers: { 'content-type': 'application/problem+json' } },
+          )
+        return HttpResponse.json({ id: 7, state: 'linked', slug: 'demo', matched_by: 'import', suggested: [] })
+      }),
+    )
+    const linked = await runTool(tool('link_lan_auto_import'), { id: 7, slug: 'demo' }, ctx())
+    expect(linked.isError).toBeFalsy()
+    expect(firstText(linked)).toMatchObject({ state: 'linked', slug: 'demo', matched_by: 'import' })
+    const refused = await runTool(tool('link_lan_auto_import'), { id: 6, slug: 'demo' }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('a model link needs the file')
+    expect(bodies).toEqual([{ slug: 'demo' }, { slug: 'demo' }])
+  })
+
+  it('records the model a link touched, and nothing for a dismiss', () => {
+    const link = EXTRACTORS.link_lan_auto_import as NonNullable<(typeof EXTRACTORS)['link_lan_auto_import']>
+    expect(link({ id: 7, slug: 'demo' }, { id: 7, state: 'linked' })).toEqual([
+      { type: 'model', id: 'demo', action: 'modified', model: 'demo' },
+    ])
+    const dismiss = EXTRACTORS.dismiss_lan_auto_import as NonNullable<(typeof EXTRACTORS)['dismiss_lan_auto_import']>
+    expect(dismiss({ id: 7 }, { id: 7, state: 'dismissed' })).toEqual([])
+  })
+})
