@@ -16,8 +16,8 @@ KIND = "print_auto_import"
 
 
 def row_of(row: AutoImport, *, matched_by: str | None = None) -> ActivityRow:
-    """``row``'s activity row; ``matched_by`` names the match when the row's own does not
-    (Import print's `import`, #6029)."""
+    """``row``'s activity row; ``matched_by``, when given, names the match in place of the
+    row's own (Import print's `import`, #6029)."""
     name = row.print_name or row.filename or f"archive {row.archive_id}"
     if row.state == "dismissed":
         # A dismiss rewrites the row (`AutoImportStore.dismiss`).

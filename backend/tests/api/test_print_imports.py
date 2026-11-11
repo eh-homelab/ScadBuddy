@@ -770,6 +770,7 @@ def test_an_import_rewrites_an_inbox_print_s_activity_row(client: TestClient, mo
     assert response.status_code == 201, response.text
     item = watcher_activity(client).json()["row"]
     assert item["facets"] == {"state": "linked", "source": "archive", "matched_by": "import"}
+    assert item["title"] == f"Imported print demo_elan onto {model}"
     assert item["subject"] == f"model:{model}"
 
 
