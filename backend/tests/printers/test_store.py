@@ -8,12 +8,14 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from psycopg_pool import PoolTimeout
 from pydantic import ValidationError
 
 from scadbuddy.core.secrets import SealError
@@ -57,7 +59,7 @@ def test_create_and_lookup_by_serial(printers: PrinterStore) -> None:
     assert [r.id for r in printers.list()] == [row.id]
 
 
-def test_a_bounded_get_gives_up_on_a_stalled_read(printers: PrinterStore, pg_conninfo: str) -> None:
+def test_a_bounded_get_gives_up_on_a_locked_read(printers: PrinterStore, pg_conninfo: str) -> None:
     """#6037: the print watcher's nudge reads the row with a bound, so a read Postgres
     holds (here behind a table lock) ends with ``QueryCanceled`` and frees its thread."""
     row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
@@ -65,6 +67,20 @@ def test_a_bounded_get_gives_up_on_a_stalled_read(printers: PrinterStore, pg_con
         holder.execute("LOCK TABLE printers IN ACCESS EXCLUSIVE MODE")
         started = time.monotonic()
         with pytest.raises(psycopg.errors.QueryCanceled):
+            printers.get(row.id, timeout=0.2)
+        assert time.monotonic() - started < 5
+    assert printers.get(row.id, timeout=1.0) == row
+
+
+def test_a_bounded_get_gives_up_on_a_full_pool(printers: PrinterStore) -> None:
+    """#6037: when every connection of the store's pool is out, a bounded read ends with
+    ``PoolTimeout`` instead of waiting for one."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    with ExitStack() as held:
+        for _ in range(printers.pool.max_size):
+            held.enter_context(printers.pool.connection())
+        started = time.monotonic()
+        with pytest.raises(PoolTimeout):
             printers.get(row.id, timeout=0.2)
         assert time.monotonic() - started < 5
     assert printers.get(row.id, timeout=1.0) == row

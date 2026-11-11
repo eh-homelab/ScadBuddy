@@ -44,8 +44,10 @@ nudge run per job would only shorten that rare wait, and would need a workflow c
 its timer; the Schedule is the retry.
 
 The settings read is bounded by `SETTINGS_TIMEOUT` (#6034), and the printer row read by
-`PRINTER_TIMEOUT` (#6037: a statement timeout local to that read, on the store's own
-pool; no new pool or client). The watch runs each nudge
+`PRINTER_TIMEOUT` (#6037: one deadline for the pool wait and a statement timeout local
+to that read, on the store's own pool; no new pool or client). Both bound a slow or
+locked read only: a dead server or a dropped TCP link still blocks the read's thread,
+and the watch's cancel then frees the nudge but not that thread. The watch runs each nudge
 as a task of its own, off its report loop, and cancels it past
 `printers.watch.NUDGE_TIMEOUT` or when its attempt ends. A nudge that fails is logged
 and never ends the watch: the Schedule's pass still comes.
@@ -77,9 +79,9 @@ NUDGE_DELAY = timedelta(seconds=30)
 #: The bound of the settings read, retries included (#6034), below the watch's
 #: `NUDGE_TIMEOUT`, so a stalled API never leaves the read's thread running past it.
 SETTINGS_TIMEOUT = 5.0
-#: The bound of the printer row read (#6037): its pool wait and a statement timeout local
-#: to the read. With `SETTINGS_TIMEOUT` it stays below the watch's `NUDGE_TIMEOUT`, so a
-#: stalled Postgres never leaves the read's thread running past it either.
+#: The bound of the printer row read (#6037): one deadline for its pool wait and a
+#: statement timeout local to the read. With `SETTINGS_TIMEOUT` it stays below the watch's
+#: `NUDGE_TIMEOUT`, so a slow or locked read never leaves the read's thread running past it.
 PRINTER_TIMEOUT = 3.0
 #: The ``subtask_name`` of a native run's LAN start (`workflows/printing.py` `_start_lan`).
 NATIVE_SUBTASK = re.compile(r"scadbuddy-[0-9a-f]{8}-p\d+(?:-c\d+)?")
