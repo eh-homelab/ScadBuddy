@@ -490,6 +490,8 @@ export type DepositSuggestion = Schemas['DepositSuggestion']
 export type OrderMessage = Schemas['OrderMessage']
 /** #5283 — the state of an order's newest customer link; never its token. */
 export type CustomerLinkState = Schemas['LinkState']
+/** #5283 — one of an order's customer mail rows (the outbox); never its body, link or token. */
+export type OrderMail = Schemas['OrderMail']
 /** #5660 — the messaging plugin tool bound to customer messages (`orders_customer_messaging`). */
 export type MessagingBinding = Schemas['MessagingBinding']
 export type PaymentRequestCreate = Partial<Omit<Schemas['PaymentRequestCreate'], 'provider'>> & { provider?: string | null }

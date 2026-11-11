@@ -124,7 +124,9 @@ from scadbuddy.orders.storefront.links import (
 )
 from scadbuddy.orders.storefront.mail import (
     MailEvent,
+    OrderMail,
     issue_link,
+    order_mail,
     queue_mail,
     storefront_mail_covers,
 )
@@ -599,9 +601,10 @@ class Lifecycle:
         #: The payment providers offered (#4957, ``payments/registry.py``): a default
         #: provider not among them is no provider. Set by ``OrdersComponent``.
         self.offered_providers: frozenset[str] = frozenset()
-        #: The running ``storefront_mail_host`` (#5283), read when a transition would mail
-        #: the customer; None queues no order mail. Set by ``OrdersComponent``.
-        self.mail_host: Callable[[], str | None] = lambda: None
+        #: Whether the running mail config has a host and a sender (#5283), read when a
+        #: transition would mail the customer; False queues no order mail. Set by
+        #: ``OrdersComponent``.
+        self.mail_ready: Callable[[], bool] = lambda: False
         #: Called after a commit that queued mail (`StorefrontMail.kick`).
         self.on_mail: Callable[[], None] = lambda: None
         #: The CRUD service's KEK, which seals an order link's token (#5283); None makes
@@ -743,11 +746,11 @@ class Lifecycle:
 
     def _mail(self, conn: Conn, order: Order, event: MailEvent, **context: Any) -> None:
         """Queue ``event``'s mail to the customer in the transition's transaction, only
-        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a mail
-        host, #5283); otherwise nothing, and it stays #5660's plugin's job. The mail goes
-        to the link's address and names the link, whose token it carries. Sent after the
-        commit (``on_mail``)."""
-        if not storefront_mail_covers(conn, order.id, event, host=self.mail_host()):
+        when ScadBuddy covers it (`storefront_mail_covers`: a live order link and a ready
+        mail config, a host and a sender, #5283); otherwise nothing, and it stays #5660's
+        plugin's job. The mail goes to the link's address and names the link, whose token it
+        carries. Sent after the commit (``on_mail``)."""
+        if not storefront_mail_covers(conn, order.id, event, ready=self.mail_ready()):
             return
         link = live_link(conn, order.id)
         assert link is not None
@@ -974,6 +977,14 @@ class Lifecycle:
             if self.store.order(order_id, conn=conn) is None:
                 raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
             return link_state(conn, order_id)
+
+    def order_mail(self, order_id: str) -> list[OrderMail]:
+        """The order's customer mail, newest first (spec §5.7). A plain read: it takes no
+        lock, and never the body, the context or a link."""
+        with self.store.transaction() as conn:
+            if self.store.order(order_id, conn=conn) is None:
+                raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+            return order_mail(conn, order_id)
 
     def send_customer_link(self, order_id: str, by: Actor, to: str | None) -> LinkState:
         """The shop sends the order a new customer link (spec §5.2 "Order link"), under the

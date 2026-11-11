@@ -182,7 +182,7 @@ class OrdersComponent:
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )
-            self._lifecycle.mail_host = lambda: self.mail_config().host
+            self._lifecycle.mail_ready = lambda: self.mail_config().ready
             self._lifecycle.on_mail = self.mail.kick
             self._lifecycle.kek = settings_kek(self.core.settings.secret_key_file)
         return self._lifecycle

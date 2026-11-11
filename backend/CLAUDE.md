@@ -881,8 +881,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
   is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
   price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
-  (`shipped`) queue only when `storefront_mail_covers` (a live link and a
-  `storefront_mail_host`), to the link's `sent_to`. The SMTP settings are env-seeded
+  (`shipped`) queue only when `storefront_mail_covers` (a live link and a ready
+  mail config: `storefront_mail_host` and `storefront_mail_sender`), to the link's `sent_to`. The SMTP settings are env-seeded
   `storefront_mail_*` (Settings → Storefront mail), a person's to change
   (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). One setting picks the TLS,
   `storefront_mail_tls`: `starttls` (the server must offer it; without it, a server
@@ -906,6 +906,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
   `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
+  `GET /orders/{id}/mail` (`Lifecycle.order_mail`, `mail.py` `order_mail`, no lock) lists the
+  order's outbox rows, newest first, as `OrderMail`: never the body, context, link or token, and no
+  sign-in code. Agent `order_mail_list` (read).
   The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
   area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
   `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.
@@ -1174,7 +1177,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   storefront overlap (spec §8): a `quoted` or `shipped` claim is recorded `skipped`, reason
   `storefront_mail`, audit row `message.skipped`, when `storefront_mail_covers` says the
   storefront mails that news to the order itself (`STOREFRONT_EVENT`, asked with the
-  lifecycle's `mail_host`), unless the body sets `also_when_storefront_mails`; the check
+  lifecycle's `mail_ready`), unless the body sets `also_when_storefront_mails`; the check
   answers it as `storefront_mail`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
