@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.orders.lifecycle import NewModelItem
 from scadbuddy.orders.storefront.links import open_token, sealed_token
+from scadbuddy.orders.storefront.mail import StorefrontMail
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from tests.api.test_customers import ADA
 from tests.api.test_customers import create as create_customer
@@ -20,6 +21,7 @@ from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import problem
 from tests.conftest import PgPool
 from tests.orders.storefront.test_drafts import _orders, _state
+from tests.orders.storefront.test_mail import HOST, LINK, PUBLIC, FakeSMTP, sends
 from tests.orders.storefront.test_submit import api, rows
 from tests.orders.test_lifecycle import resolved
 
@@ -97,7 +99,7 @@ def test_send_mails_the_customers_email_and_never_answers_the_token(api: TestCli
 def test_a_new_link_revokes_the_old_one(api: TestClient) -> None:
     order = back_office_order(api)
     assert api.post(link_url(order["id"])).status_code == 200
-    again = api.post(link_url(order["id"]), json={"to": " grace@example.org "})
+    again = api.post(link_url(order["id"]), json={"to": " grace@example.org ", "replace": True})
     assert again.status_code == 200, again.text
     assert (again.json()["live"], again.json()["sent_to"]) == (True, "grace@example.org")
     links = rows(
@@ -112,6 +114,63 @@ def test_a_new_link_revokes_the_old_one(api: TestClient) -> None:
     mails = rows(api, "SELECT to_address FROM storefront_mail ORDER BY created_at")
     assert [m["to_address"] for m in mails] == ["ada@example.test", "grace@example.org"]
     assert len(events(api, order["id"], "order.customer_link_sent")) == 2
+    assert [e["detail"] for e in events(api, order["id"], "order.customer_link_sent")] == [
+        {"to": "ada@example.test"},
+        {"to": "grace@example.org"},
+    ]
+
+
+def test_a_send_over_a_live_link_needs_replace(api: TestClient) -> None:
+    order = back_office_order(api)
+    first = api.post(link_url(order["id"]))
+    assert first.status_code == 200, first.text
+    for body in ({}, {"to": "grace@example.org"}, {"replace": False}):
+        problem(api.post(link_url(order["id"]), json=body), "link_live")
+    # Nothing changed: the old link is the one live link, with its mail the only one.
+    assert api.get(link_url(order["id"])).json() == first.json()
+    [link] = rows(api, "SELECT id, revoked_at, token_sealed FROM storefront_order_links")
+    assert link["revoked_at"] is None and link["token_sealed"] is not None
+    assert len(rows(api, "SELECT id FROM storefront_mail")) == 1
+    assert len(events(api, order["id"], "order.customer_link_sent")) == 1
+    replaced = api.post(link_url(order["id"]), json={"replace": True})
+    assert replaced.status_code == 200, replaced.text
+    states = rows(api, "SELECT revoked_at FROM storefront_order_links ORDER BY created_at")
+    assert [r["revoked_at"] is None for r in states] == [False, True]
+
+
+def test_the_mail_pass_after_a_replace_sends_only_the_new_link(api: TestClient) -> None:
+    order = back_office_order(api)
+    assert api.post(link_url(order["id"])).status_code == 200
+    assert api.post(link_url(order["id"]), json={"replace": True}).status_code == 200
+    [old, new] = rows(
+        api, "SELECT id, token_sealed FROM storefront_order_links ORDER BY created_at"
+    )
+    assert old["token_sealed"] is None and new["token_sealed"] is not None
+    orders = _orders(api)
+    with orders.store.transaction() as conn:
+        envelope = sealed_token(conn, new["id"])
+    assert envelope is not None and orders.lifecycle.kek is not None
+    token = open_token(orders.lifecycle.kek, new["id"], envelope)
+    log: list[Any] = []
+    mail = StorefrontMail(
+        orders.store,
+        orders.lifecycle.kek,
+        lambda: HOST,
+        lambda: PUBLIC,
+        smtp=FakeSMTP(log, []),
+        smtp_ssl=FakeSMTP(log, []).implicit,
+    )
+    mail.set_password("pw")
+    assert mail.send_queued() == 1
+    [message] = sends(log)
+    assert LINK + token in message.get_content()
+    by_link = {
+        r["context"]["link_id"]: r
+        for r in rows(api, "SELECT context, sent_at, failed_at, last_error FROM storefront_mail")
+    }
+    assert by_link[old["id"]]["sent_at"] is None
+    assert by_link[old["id"]]["last_error"] == "link_revoked"
+    assert by_link[new["id"]]["sent_at"] is not None
 
 
 def test_revoke_ends_the_live_link(api: TestClient) -> None:

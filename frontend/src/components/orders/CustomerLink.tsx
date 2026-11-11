@@ -5,7 +5,7 @@ import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { refusalText } from './refusal'
+import { refusalSlug, refusalText } from './refusal'
 import { When } from './When'
 
 /**
@@ -14,8 +14,10 @@ import { When } from './When'
  * email contact; with a live link the button reads "Send a new link" and asks first, since the
  * old link stops working. "Revoke" ends the live link. The card shows the link's state only:
  * the link itself goes to the customer by mail and never to this page. Everything shown is text.
- * Until the state is read, "Send link" is disabled: a send with a live link unseen would end it
- * with no confirm. A failed read says so and offers "Try again".
+ * The server enforces the confirm: a send replaces a live link only with `replace` true, else it
+ * is 409 `link_live`. "Send link" sends with `replace` false; on `link_live` (this page's state
+ * was stale) the card asks the same question, and "Yes" sends again with `replace` true. Until
+ * the state is read, "Send link" is disabled. A failed read says so and offers "Try again".
  */
 export function CustomerLink({ orderId, onChanged }: { orderId: string; onChanged?: () => void }) {
   const link = useAsync(() => api.customerLink(orderId), [orderId], [`order:${orderId}`])
@@ -34,14 +36,15 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
       setTo('')
       onChanged?.()
     } catch (err) {
-      setError(refusalText(err))
+      if (refusalSlug(err) === 'link_live') setConfirming(true)
+      else setError(refusalText(err))
     } finally {
       link.refresh()
       setBusy(false)
     }
   }
 
-  const send = () => void act(() => api.sendCustomerLink(orderId, to.trim() || undefined))
+  const send = (replace: boolean) => void act(() => api.sendCustomerLink(orderId, to.trim() || undefined, replace))
 
   return (
     <section className="flex flex-col gap-2" aria-label="Customer link">
@@ -105,7 +108,7 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
             Send a new link
           </Button>
         ) : (
-          <Button size="sm" variant="outline" disabled={busy || !state} onClick={send} {...USER_ONLY}>
+          <Button size="sm" variant="outline" disabled={busy || !state} onClick={() => send(false)} {...USER_ONLY}>
             Send link
           </Button>
         )}
@@ -115,13 +118,20 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
           </Button>
         )}
       </div>
-      {confirming && state?.live && (
+      {confirming && (
         <div className="flex flex-col gap-2 rounded-md border p-2 text-[13px]">
           <p>
-            The link sent to <span className="break-all">{state.sent_to}</span> stops working. The customer gets a new one by mail.
+            {state?.live ? (
+              <>
+                The link sent to <span className="break-all">{state.sent_to}</span> stops working.
+              </>
+            ) : (
+              <>The live link stops working.</>
+            )}{' '}
+            The customer gets a new one by mail.
           </p>
           <span className="flex gap-2">
-            <Button size="sm" disabled={busy} onClick={send} {...USER_ONLY}>
+            <Button size="sm" disabled={busy} onClick={() => send(true)} {...USER_ONLY}>
               Yes, send a new link
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>

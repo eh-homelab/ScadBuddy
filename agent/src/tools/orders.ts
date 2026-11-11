@@ -1091,7 +1091,7 @@ export const orderTools: Tool[] = [
     description:
       "Mail the order's customer a link that opens the order on the storefront without an account (#5283, storefront " +
       'spec §5.2), so they can answer revisions and pay online. Every live link of the order is revoked first: an ' +
-      "old one stops working. The mail goes to `to` (one address), or else to the customer's email contact. This " +
+      "old one stops working, and this tool always replaces (`replace: true`). The mail goes to `to` (one address), or else to the customer's email contact. This " +
       'mails the customer, so it is outward: a person must approve it first (it returns a pending action). The ' +
       'reply is the link state (`live`, `created_at`, `sent_to`, `opened_at`, `revoked_at`), never the link itself. ' +
       '422 `no_email` with no `to` and no email contact; 422 `email_invalid` for anything but one address; ' +
@@ -1108,7 +1108,7 @@ export const orderTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/orders/{order_id}/customer-link', {
             params: { path: { order_id } },
-            body: to === undefined ? {} : { to },
+            body: to === undefined ? { replace: true } : { to, replace: true },
           }),
           `send a customer link for order ${order_id}`,
         ),

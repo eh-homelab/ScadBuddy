@@ -420,7 +420,7 @@ describe('order tools (#4249)', () => {
     await tool('order_customer_link_send').execute({ order_id: ORDER, to: 'grace@example.org' }, ctx())
     const revoked = firstText(await tool('order_customer_link_revoke').execute({ order_id: ORDER }, ctx()))
     expect(revoked).toMatchObject({ live: false })
-    expect(calls).toEqual(['READ', 'SEND {}', 'SEND {"to":"grace@example.org"}', 'REVOKE'])
+    expect(calls).toEqual(['READ', 'SEND {"replace":true}', 'SEND {"to":"grace@example.org","replace":true}', 'REVOKE'])
     expect(tool('order_customer_link_send').summarize({ order_id: ORDER, to: 'grace@example.org' })).toContain('grace@example.org')
     expect(() => tool('order_customer_link_send').execute({ order_id: ORDER, to: '' }, ctx())).toThrow('to')
   })

@@ -5,7 +5,8 @@ import { now, PROBLEMS, problem, Refused, state } from './state'
 
 /**
  * #5283 — an order's customer link (backend `api/orders.py` `…/customer-link`): its newest
- * link's state, never the token. A send revokes the live link and makes a new one, to `to` or
+ * link's state, never the token. A send over a live link is 409 `link_live` unless the body has
+ * `replace: true`, as the backend's. It then revokes the live link and makes a new one, to `to` or
  * the customer's first email contact that is one address (the primary one first); with neither it is
  * 422 `no_email`, as the backend's.
  */
@@ -24,7 +25,7 @@ export function mockCustomerLink(orderId: string, link: Partial<CustomerLinkStat
   return made
 }
 
-/** One addr-spec, as `orders/storefront/addresses.py` `check_address` takes it. */
+/** One addr-spec. It approximates `check_address` in `orders/storefront/addresses.py`: no `parseaddr` round-trip and no length cap. */
 const ADDRESS = /^[^@\s,;<>"()]+@[^@\s,;<>"()]+\.[^@\s,;<>"()]+$/
 
 function toProblem(request: Request, slug: string, detail: string) {
@@ -47,7 +48,11 @@ export const handlers = [
         throw new Refused('order_not_submitted', `cart ${order.id} is not yet submitted`)
       }
       const text = await request.text()
-      const asked = text ? (JSON.parse(text) as { to?: string | null }).to : undefined
+      const body = text ? (JSON.parse(text) as { to?: string | null; replace?: boolean }) : {}
+      if (!body.replace && links.get(order.id)?.live) {
+        throw new Refused('link_live', `order ${order.id} has a live customer link: send again with replace`)
+      }
+      const asked = body.to
       const customer = state.customers.find((c) => c.id === order.customer_id)
       const emails = (customer?.contacts ?? []).filter((c) => c.kind === 'email').sort((a, b) => Number(b.primary) - Number(a.primary))
       const to = asked?.trim() ?? emails.map((c) => c.value.trim()).find((v) => ADDRESS.test(v))

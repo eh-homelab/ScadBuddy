@@ -638,6 +638,30 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(card.textContent).not.toMatch(/token|\/o#/)
   })
 
+  it('asks to confirm on a 409 link_live from a stale read, and sends again with replace', async () => {
+    mockCustomerLink(ORDER_ACCEPTED, { sent_to: 'ada@example.test' })
+    let stale = true
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () =>
+        stale ? HttpResponse.json({ live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }) : undefined,
+      ),
+    )
+    const send = vi.spyOn(api, 'sendCustomerLink')
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    stale = false
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/stops working/)).toHaveTextContent('The link sent to ada@example.test stops working.')
+    expect(within(card).queryByRole('alert')).toBeNull()
+    expect(send).toHaveBeenLastCalledWith(ORDER_ACCEPTED, undefined, false)
+    await user.click(within(card).getByRole('button', { name: 'Yes, send a new link' }))
+    await waitFor(() => expect(send).toHaveBeenLastCalledWith(ORDER_ACCEPTED, undefined, true))
+    await waitFor(() => expect(within(card).queryByText(/stops working/)).toBeNull())
+    expect(within(card).queryByRole('alert')).toBeNull()
+    send.mockRestore()
+  })
+
   it('says so when the customer has no email address, and sends to an address typed', async () => {
     const { user } = render(ORDER_CLOSED)
     const card = await screen.findByRole('region', { name: 'Customer link' })

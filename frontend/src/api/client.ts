@@ -2516,8 +2516,11 @@ export const api = {
    * when it was opened or revoked); never the link itself. */
   customerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`),
   /** #5283 — mails a new link to `to`, or the customer's email; the live one stops working. */
-  sendCustomerLink: (orderId: string, to?: string) =>
-    request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, { method: 'POST', body: JSON.stringify(to ? { to } : {}) }),
+  sendCustomerLink: (orderId: string, to?: string, replace = false) =>
+    request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, {
+      method: 'POST',
+      body: JSON.stringify(to ? { to, replace } : { replace }),
+    }),
   revokeCustomerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, { method: 'DELETE' }),
   requestPayment: (orderId: string, body: PaymentRequestCreate) =>
     request<PaymentRequestView>(`/orders/${seg(orderId)}/payment-requests`, { method: 'POST', body: JSON.stringify(body) }),
