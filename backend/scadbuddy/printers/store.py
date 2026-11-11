@@ -191,8 +191,9 @@ def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> N
         " WHERE gone.printer = %(merged)s::uuid AND NOT EXISTS ("
         "  SELECT 1 FROM print_lan_imports AS kept WHERE kept.printer_key = %(into)s"
         "  AND kept.subtask_name = gone.subtask_name AND kept.started_at = gone.started_at)"
-        " ORDER BY subtask_name, started_at, (printer_key = %(merged)s) DESC, id)",
-        {"into": into, "merged": merged},
+        " ORDER BY subtask_name, started_at, (printer_key = %(merged_key)s) DESC, id)",
+        # One parameter per type: the ``::uuid`` cast types ``merged`` for every use.
+        {"into": into, "merged": merged, "merged_key": merged},
     )
     conn.execute("UPDATE print_lan_imports SET printer = %s WHERE printer = %s", (into, merged))
 
