@@ -8,9 +8,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import threading
+import time
 import zipfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -21,8 +25,8 @@ from scadbuddy.bambuddy.print_links import PrintImport, PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.main import _auto_import_prints_logged
 from scadbuddy.print_watch.component import AUTO_IMPORTS
-from scadbuddy.print_watch.store import MODEL_GONE
-from scadbuddy.print_watch.sweep import NO_MATCH
+from scadbuddy.print_watch.store import MODEL_GONE, AutoImportStore
+from scadbuddy.print_watch.sweep import LOOKBACK, NO_MATCH
 from tests.api.test_print_history import archive, state
 from tests.api.test_send import API, configure
 
@@ -246,8 +250,9 @@ def test_a_pass_with_stale_settings_keeps_the_floor(
     """#6011: a pass that loaded the settings before a `PUT /settings` switched the
     watcher on reads the switch with the floor, so it never deletes the write's floor.
 
-    It shows only that the pass ignores the switch it loaded. It does not race a
-    concurrent `PUT /settings` against the pass under `FLOOR_LOCK`."""
+    It shows only that the pass ignores the switch it loaded. The race of a concurrent
+    `PUT /settings` against the pass under `FLOOR_LOCK` is
+    `test_floor_lock_makes_the_last_switch_win` (#6023)."""
     store = state(client).components.get(AUTO_IMPORTS)
     switch_on(client)
     first = asyncio.run(store.floor())
@@ -355,9 +360,12 @@ def test_a_printer_file_that_fails_now_is_tried_again(client: TestClient, model:
     )
     upload = respx.post(f"{API}/library/files")
 
+    store = state(client).components.get(AUTO_IMPORTS)
     download.mock(return_value=httpx.Response(500))
     run_pass(client)
     assert auto(client) == []  # the read failed: no row
+    # #6023: the failure is kept, so the next passes take it after the others.
+    assert set(asyncio.run(store.failures([312]))) == {312}
 
     download.mock(return_value=httpx.Response(200, content=data))
     upload.mock(return_value=httpx.Response(500))
@@ -373,6 +381,103 @@ def test_a_printer_file_that_fails_now_is_tried_again(client: TestClient, model:
         55,
         f"/cache/{name}",
     )
+    assert asyncio.run(store.failures([312])) == {}  # the row's write forgot it
+
+
+def test_a_failure_older_than_the_look_back_is_forgotten(client: TestClient) -> None:
+    """#6023: each recorded failure forgets the ones before ``forget_before``."""
+    store = state(client).components.get(AUTO_IMPORTS)
+    asyncio.run(store.failed(1, forget_before=datetime.now(UTC) - LOOKBACK))
+    first = asyncio.run(store.failures([1, 2]))
+    assert set(first) == {1}
+    asyncio.run(store.failed(1, forget_before=datetime.now(UTC) - LOOKBACK))
+    assert asyncio.run(store.failures([1]))[1] >= first[1]  # failed again: the time moves
+    asyncio.run(store.failed(2, forget_before=datetime.now(UTC) + timedelta(minutes=1)))
+    assert set(asyncio.run(store.failures([1, 2]))) == {2}
+
+
+class _Paused:
+    """A connection that stops after it reads the watcher's switch until ``go`` is set:
+    the floor's transaction then holds `FLOOR_LOCK` and has read the switch."""
+
+    def __init__(self, conn: Any, read: threading.Event, go: threading.Event) -> None:
+        self._conn, self._read, self._go = conn, read, go
+
+    def execute(self, query: str, *args: Any) -> Any:
+        cursor = self._conn.execute(query, *args)
+        if "FROM settings" in query:
+            self._read.set()
+            assert self._go.wait(30)
+        return cursor
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+class _PausingPool:
+    def __init__(self, pool: Any, read: threading.Event, go: threading.Event) -> None:
+        self._pool, self._read, self._go = pool, read, go
+
+    @contextmanager
+    def connection(self) -> Iterator[_Paused]:
+        with self._pool.connection() as conn:
+            yield _Paused(conn, self._read, self._go)
+
+
+def _floor_waiters(pool: Any) -> int:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        ).fetchone()
+    return int(row["n"])
+
+
+def _floor_rows(pool: Any) -> int:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT count(*) AS n FROM print_auto_import_watch").fetchone()
+    return int(row["n"])
+
+
+@pytest.mark.parametrize("switch_to", [False, True])
+def test_floor_lock_makes_the_last_switch_win(client: TestClient, switch_to: bool) -> None:
+    """#6023: a pass's floor read and a `PUT /settings` that flips the switch meanwhile
+    are serialised by `FLOOR_LOCK`. The pass holds the lock and has read the old switch;
+    the route's floor call waits for it, then reads the new switch. So the floor matches
+    the last write: none when it switched the watcher off, one when it switched it on.
+    Without the lock the route's floor would run first and the pass would undo it."""
+    store = state(client).components.get(AUTO_IMPORTS)
+    pool = store._pool
+    configure(client, print_auto_import=not switch_to)
+    assert _floor_rows(pool) == (0 if switch_to else 1)
+    read, go = threading.Event(), threading.Event()
+    paused = AutoImportStore(cast(Any, _PausingPool(pool, read, go)))
+    errors: list[BaseException] = []
+
+    def run(call: Callable[[], object]) -> threading.Thread:
+        def target() -> None:
+            try:
+                call()
+            except BaseException as error:  # reported by the assertion below
+                errors.append(error)
+
+        thread = threading.Thread(target=target)
+        thread.start()
+        return thread
+
+    the_pass = run(paused._floor)
+    assert read.wait(30)
+    the_route = run(lambda: configure(client, print_auto_import=switch_to))
+    deadline = time.monotonic() + 30
+    while the_route.is_alive() and _floor_waiters(pool) == 0:
+        assert time.monotonic() < deadline, "the route's floor call never waited"
+        time.sleep(0.05)
+    go.set()
+    the_pass.join(30)
+    the_route.join(30)
+    assert not the_pass.is_alive() and not the_route.is_alive()
+    assert errors == []
+    assert _floor_rows(pool) == (1 if switch_to else 0)
 
 
 @respx.mock

@@ -1,6 +1,8 @@
 """The watcher's records (#4699): ``print_auto_imports``, one row per archive it took, and
 ``print_auto_import_watch``, when it was switched on. Both are created by
-``20261110T2250Z_print_auto_imports.sql``. Only the API (the CRUD service) reads or
+``20261110T2250Z_print_auto_imports.sql``. ``print_auto_import_failures``
+(``20261111T0616Z_print_auto_import_failures.sql``, #6023) holds when an archive's import
+last raised, so a pass takes it after the others. Only the API (the CRUD service) reads or
 writes them: the pass runs in its ``library`` worker (`workflows/housekeeping.py`).
 
 A row and its link are written in one transaction (`record`), under the archive's import
@@ -131,6 +133,19 @@ class AutoImportStore:
         watcher took it or its job before."""
         return await asyncio.to_thread(self._record, row, plate_id)
 
+    async def failures(self, archive_ids: Sequence[int]) -> dict[int, datetime]:
+        """When the import of each of ``archive_ids`` last raised; an archive with no
+        failure is left out (#6023)."""
+        if not archive_ids:
+            return {}
+        return await asyncio.to_thread(self._failures, list(archive_ids))
+
+    async def failed(self, archive_id: int, *, forget_before: datetime) -> None:
+        """Record now as when the import of ``archive_id`` last raised, so the next passes
+        take it after the archives that did not fail (#6023). It also forgets the failures
+        recorded before ``forget_before``: their archives are past the pass's look-back."""
+        await asyncio.to_thread(self._failed, archive_id, forget_before)
+
     async def page(
         self, *, state: AutoImportState | None, limit: int, before: int | None = None
     ) -> list[AutoImport]:
@@ -191,6 +206,26 @@ class AutoImportStore:
                 }
         return found
 
+    def _failures(self, archive_ids: list[int]) -> dict[int, datetime]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT archive_id, failed_at FROM print_auto_import_failures"
+                " WHERE archive_id = ANY(%s)",
+                (archive_ids,),
+            ).fetchall()
+        return {row["archive_id"]: row["failed_at"] for row in rows}
+
+    def _failed(self, archive_id: int, forget_before: datetime) -> None:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "DELETE FROM print_auto_import_failures WHERE failed_at < %s", (forget_before,)
+            )
+            conn.execute(
+                "INSERT INTO print_auto_import_failures (archive_id) VALUES (%s)"
+                " ON CONFLICT (archive_id) DO UPDATE SET failed_at = now()",
+                (archive_id,),
+            )
+
     def _slugs_by_hash(self, sha256: str) -> set[str]:
         with self._pool.connection() as conn:
             rows = conn.execute(
@@ -228,6 +263,9 @@ class AutoImportStore:
             ).fetchone()
             if inserted is None:
                 return False
+            conn.execute(
+                "DELETE FROM print_auto_import_failures WHERE archive_id = %s", (row.archive_id,)
+            )
             if row.slug is not None:
                 assert row.source is not None and row.filename is not None
                 owner = import_in(

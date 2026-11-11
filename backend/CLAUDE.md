@@ -521,7 +521,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   raises, so the next pass tries it again, until `RETRY_AFTER_END` (3 h) after the print
   ended, or `RETRY_AFTER_START` (24 h) after its archive was made while it has no end
   (`past_retries`); then, and for any other failure (401, 403, 404, 413, 422, a hash
-  that differs), the print is an inbox row with the reason. Under the lock
+  that differs), the print is an inbox row with the reason. A pass takes at most
+  `MAX_IMPORTS` archives: first those whose import never raised, oldest first, then the
+  failed ones, the oldest failure first, so a printer down for hours never holds a pass's
+  slots (#6023; `print_auto_import_failures`, written by `AutoImportStore.failed`,
+  deleted with the archive's row, forgotten past `LOOKBACK`). Under the lock
   the pass checks `known` again, as both Schedules run it (#6011).
   `PUT /settings` writes the floor when it switches the watcher on, and forgets it off.
   `AutoImportStore.floor` reads the switch from `settings` and writes the floor in one
