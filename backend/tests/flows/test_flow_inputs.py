@@ -213,7 +213,9 @@ def test_many_slow_values_share_one_budget() -> None:
     ran = [p for p in problems if f"its pattern took over {PATTERN_TIMEOUT_S}s" in p]
     together = [p for p in problems if f"took over {PATTERNS_BUDGET_S}s to check together" in p]
     assert len(ran) + len(together) == 40
-    assert 1 <= len(ran) <= PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S + 1
+    most = PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S + 1
+    assert 1 <= len(ran) <= most
+    assert len(together) >= 40 - most, "the shared budget refuses most of the values"
 
 
 def test_an_exponential_pattern_within_its_max_length_is_cut_off() -> None:

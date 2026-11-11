@@ -128,8 +128,10 @@ def moto_s3() -> Iterator[S3Settings]:
         # The server stops first, so no request of the test's is still in flight.
         from moto.moto_api._internal.models import moto_api_backend
 
-        server.stop()
-        moto_api_backend.reset()
+        try:
+            server.stop()
+        finally:
+            moto_api_backend.reset()
 
 
 @pytest.fixture(params=["local", "s3", "worker"], ids=["local", "s3", "worker"])
