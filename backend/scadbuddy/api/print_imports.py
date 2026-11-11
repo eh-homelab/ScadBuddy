@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Self
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
@@ -68,6 +68,11 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_watch.component import AutoImportsDep
+from scadbuddy.print_watch.lan_store import (
+    LanImportLinkedError,
+    LanImportNoFileError,
+    LanPrintRecord,
+)
 from scadbuddy.print_watch.store import (
     AutoImport,
     AutoImportLinkedError,
@@ -319,6 +324,107 @@ async def dismiss_auto_import(archive_id: ArchiveIdPath, store: AutoImportsDep) 
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"the print watcher has no print for archive {archive_id}"
         )
+    return row
+
+
+LanImportIdPath = Annotated[int, Path(ge=1, description="The LAN print record's id")]
+
+
+class LanLinkRequest(BaseModel):
+    #: A model that exists.
+    slug: str = Field(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
+
+
+@router.get(
+    "/auto/lan",
+    response_model=list[LanPrintRecord],
+    summary="The prints the print watcher recorded on LAN-only printers",
+    description=(
+        "What the print watcher (#4699) recorded on printers with no Bambuddy link, "
+        "newest record first. Such a print has no Bambuddy archive, so each record has an "
+        "`id` of its own, apart from the archive ids of `GET /print-imports/auto`. Each "
+        "names its printer (`printer_id`, `printer_name`) and job (`subtask_name`): "
+        "linked to a model (`linked`, with `matched_by`: an earlier import of the same "
+        "file, the job's name, or `import`, a person's or the assistant's link), in the "
+        "inbox, Unsorted imports (`inbox`, with `reason` and the models the job's name "
+        "suggests), or `dismissed`. A linked record whose model was deleted since is in "
+        "the inbox, with that as its `reason`. `slug` keeps only the records linked to "
+        "that model. Page with `before`, the last `id` read."
+    ),
+)
+async def list_lan_auto_imports(
+    store: AutoImportsDep,
+    catalogue: CatalogueDep,
+    state: Annotated[AutoImportState | None, Query(description="Only this state")] = None,
+    slug: Annotated[
+        str | None,
+        Query(
+            pattern=MODEL_ID_PATTERN,
+            max_length=MAX_MODEL_ID_LENGTH,
+            description="Only the records linked to this model",
+        ),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: Annotated[int | None, Query(ge=1)] = None,
+) -> list[LanPrintRecord]:
+    slugs = await asyncio.to_thread(catalogue.slugs)
+    return await store.lan.page(state=state, limit=limit, before=before, slugs=slugs, slug=slug)
+
+
+@router.post(
+    "/auto/lan/{record_id}/dismiss",
+    response_model=LanPrintRecord,
+    summary="Dismiss a LAN-only printer's print from Unsorted imports",
+    description=(
+        "Takes a LAN-only printer's inbox print (#4699) out of Unsorted imports: its "
+        "record becomes `dismissed`. It reaches no printer, and the print can still be "
+        "linked to a model (`POST /print-imports/auto/lan/{record_id}/link`). A print "
+        "dismissed before gives the same answer. 404 when there is no such record; 409 "
+        "when the record is linked to a model that is there."
+    ),
+)
+async def dismiss_lan_auto_import(
+    record_id: LanImportIdPath, store: AutoImportsDep, catalogue: CatalogueDep
+) -> LanPrintRecord:
+    try:
+        row = await store.lan.dismiss(record_id, catalogue.exists)
+    except LanImportLinkedError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), slug=error.slug) from None
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the print watcher has no LAN print {record_id}")
+    return row
+
+
+@router.post(
+    "/auto/lan/{record_id}/link",
+    response_model=LanPrintRecord,
+    summary="Link a LAN-only printer's print to a model",
+    description=(
+        "Links a LAN-only printer's print (#4699) to the model `slug`: its record becomes "
+        "`linked`, with `matched_by` `import`. Such a print has no Bambuddy archive, so "
+        "this is not Import print: its one source is the printer file the watcher kept in "
+        "ScadBuddy's own library, and nothing is read or copied. An inbox or a dismissed "
+        "print can be linked; one linked to `slug` already gives the same answer. 404 "
+        "when there is no such record or no such model; 409 when the watcher kept no 3MF "
+        "for it (a model link needs the file), or when it is linked to another model that "
+        "is there."
+    ),
+)
+async def link_lan_auto_import(
+    record_id: LanImportIdPath,
+    body: LanLinkRequest,
+    store: AutoImportsDep,
+    catalogue: CatalogueDep,
+) -> LanPrintRecord:
+    await asyncio.to_thread(require_model_exists, catalogue, body.slug)
+    try:
+        row = await store.lan.link(record_id, body.slug, catalogue.exists)
+    except LanImportLinkedError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), slug=error.slug) from None
+    except LanImportNoFileError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the print watcher has no LAN print {record_id}")
     return row
 
 

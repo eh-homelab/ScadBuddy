@@ -621,8 +621,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   reason whatever they raised, so only a record the API never takes is lost; a 530, a certificate that is not the pinned one or a file past the cap is recorded at
   once. A linked LAN record writes no `print_links` row (that table is keyed by
   archive), so it is not on the model's Prints tab; it is in the activity list.
-  `GET /print-imports/auto`, Unsorted imports and the agent's tools do not list these
-  records yet (#6041). `LanAutoImport` is a new workflow type: a
+  #6041: `GET /print-imports/auto/lan` lists the records (`LanImportStore.page`, response
+  `LanPrintRecord` with the printer's name; `state`, `slug`, `before` the record's own id,
+  never mixed with the archive ids; a linked record whose model is not in the catalogue's
+  slugs is shown as an inbox record, reason `MODEL_GONE`). `POST …/lan/{id}/dismiss` and
+  `POST …/lan/{id}/link` (`{slug}`, `matched_by` `import`; 404 for no record or no model,
+  409 for no kept file or a record linked to another model that is there) lock the row
+  and rewrite its activity row in the same transaction; a person or an agent may call
+  them. There is no Import print for them: their one source is the kept file. Agent
+  `list_lan_auto_imports`, `dismiss_lan_auto_import` and `link_lan_auto_import`; the
+  frontend lists them in Unsorted imports, and a model's Prints tab says (when it has
+  one) that they are in Activity. `LanAutoImport` is a new workflow type: a
   nudge during a roll may reach a print worker build without it, whose workflow task
   then fails until the new build is current (README, "Rolling it").
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
