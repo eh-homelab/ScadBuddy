@@ -1593,18 +1593,43 @@ describe('waitForTab: what each way the wait ends means for the call (#815)', ()
     expect(asked).toHaveLength(0)
   })
 
+  it("returns the latch, not the slow advice, when another call latched the turn while this one's check ran", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const wait = waitForTab((request) => Promise.resolve({ answered: true, answers: { [request.questions[0]!.question]: 'Carry on without the tab' } }), never, noop)
+    // This call's slow check is still out while another call's wait ends "carry on".
+    const pending = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_slow', signal: never, isBack: gone, slow: () => held.then(() => 'slow, try again') })
+    await wait({ tool: 'browser_click', toolUseId: 'toolu_other', signal: never, isBack: gone })
+    release()
+    expect(await pending).toEqual({ back: false, message: expect.stringMatching(/carry on without the tab/) })
+  })
+
+  it('says the call stopped when its own signal aborts while its slow check runs (#5991 review)', async () => {
+    const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
+    const call = new AbortController()
+    const waited = await waitForTab(gate, never, noop)({
+      tool: 'browser_snapshot',
+      toolUseId: 'toolu_1',
+      signal: call.signal,
+      isBack: gone,
+      slow: () => (call.abort(), Promise.resolve('slow, try again')),
+    })
+    expect(waited).toEqual({ back: false, message: 'The call stopped before it waited for the tab.' })
+    expect(asked).toHaveLength(0)
+  })
+
   it('stops asking a slow owner after as many tries as the turn has waits, and latches the turn', async () => {
     const { asked, gate } = gateOf({ answered: false, reconnected: true, message: 'x' })
     let slowAsked = 0
     const slow = () => (slowAsked++, Promise.resolve('slow, try again'))
     const wait = waitForTab(gate, never, noop)
-    for (let i = 0; i < TAB_WAITS_PER_TURN; i++) {
+    for (let i = 0; i < TAB_WAITS_PER_TURN - 1; i++) {
       expect(await wait({ tool: 'browser_snapshot', toolUseId: `toolu_${i}`, signal: never, isBack: gone, slow })).toEqual({ back: false, message: 'slow, try again' })
     }
-    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual({
-      back: false,
-      message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/),
-    })
+    // The call that reaches the cap says the turn carries on, and so does every later one.
+    const latched = { back: false, message: expect.stringMatching(/slow to answer 3 times this turn\. Carry on without the tab/) }
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_cap', signal: never, isBack: gone, slow })).toEqual(latched)
+    expect(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_x', signal: never, isBack: gone, slow })).toEqual(latched)
     expect(slowAsked).toBe(TAB_WAITS_PER_TURN)
     expect(asked).toHaveLength(0)
   })
