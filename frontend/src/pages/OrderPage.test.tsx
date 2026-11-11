@@ -676,6 +676,31 @@ describe('OrderPage, the customer link (#5283)', () => {
     send.mockRestore()
   })
 
+  it('says the state could not be read again when the fresh read after a 409 link_live fails', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => {
+        reads += 1
+        return reads === 1
+          ? HttpResponse.json({ live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null })
+          : HttpResponse.json({ detail: 'down' }, { status: 503 })
+      }),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    expect(await within(card).findByText(/could not be read again/)).toHaveTextContent(
+      'A link is live, but its state could not be read again. That link stops working.',
+    )
+  })
+
   it('asks nothing on a 409 link_live when a fresh read shows no live link', async () => {
     const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
     server.use(

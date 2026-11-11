@@ -25,6 +25,8 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
   const [confirming, setConfirming] = useState(false)
   // The address of the live link a `link_live` refusal's fresh read found.
   const [liveTo, setLiveTo] = useState<string | null>(null)
+  // True when that fresh read failed, so the confirm cannot name the link.
+  const [unread, setUnread] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const state = link.data
@@ -42,6 +44,7 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
         // The page's state was stale. Ask only if a link is still live after a fresh read.
         const fresh = await api.customerLink(orderId).catch(() => null)
         setLiveTo(fresh?.live ? fresh.sent_to : null)
+        setUnread(fresh === null)
         setConfirming(fresh?.live !== false)
       } else setError(refusalText(err))
     } finally {
@@ -109,7 +112,7 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
           />
         </div>
         {state?.live ? (
-          <Button size="sm" variant="outline" disabled={busy || confirming} onClick={() => setConfirming(true)} {...USER_ONLY}>
+          <Button size="sm" variant="outline" disabled={busy || confirming} onClick={() => { setUnread(false); setConfirming(true) }} {...USER_ONLY}>
             Send a new link
           </Button>
         ) : (
@@ -130,6 +133,8 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
               <>
                 The link sent to <span className="break-all">{state?.live ? state.sent_to : liveTo}</span> stops working.
               </>
+            ) : unread ? (
+              <>A link is live, but its state could not be read again. That link stops working.</>
             ) : (
               <>The live link stops working.</>
             )}{' '}
