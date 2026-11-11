@@ -61,10 +61,126 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Delete**: remove a model and its outputs; the source stays in the git history.
 - **Inside Bambuddy**: one click adds ScadBuddy to Bambuddy's sidebar as an External
   Link that opens inside Bambuddy.
+- **Prints ScadBuddy did not start**: the Prints page's **Import print** links such a
+  print to a model by hand (#4698). The **print watcher** does it with no user step
+  (#4699). See [The print watcher](#the-print-watcher-4699).
 
 | | |
 |---|---|
 | ![Catalogue](docs/images/catalogue.png) | ![Print picker](docs/images/print-picker.png) |
+
+## The print watcher (#4699)
+
+The print watcher imports the prints that ScadBuddy did not start. It links each print
+to a model when it is sure. It puts every other print in **Unsorted imports** on the
+Prints page. The code is in `backend/scadbuddy/print_watch/`.
+
+**It is off by default** (`print_auto_import`, `backend/scadbuddy/api/settings.py`).
+Switch it on in Settings → Printing → **Print watcher**
+(`frontend/src/pages/settings/sections/print-watcher.tsx`). Only a person can change
+these settings. The API refuses a change from the assistant with 403 `person_only`
+(`api/settings.py` `PRINT_WATCH`), because the watcher reads Bambuddy, and can read the
+printers, by itself.
+
+### The settings
+
+- **Import the prints ScadBuddy did not start**: the on/off switch. When you switch it
+  on, the watcher records that time. When you switch it off, it reads nothing and
+  forgets that time.
+- **Take a print's 3MF from**: the sources, tried in this order. The watcher takes the
+  first source that has the file (`print_watch/sweep.py`).
+  1. The archive's file (the sliced file that Bambuddy keeps).
+  2. The archive's slicer project.
+  3. A Bambuddy library file with the same hash. A file with only the same name can be
+     another version, so the watcher never takes it.
+  4. The printer's storage. The watcher reads it over FTP, while the print runs. It
+     takes the file only when the file's hash is the archive's hash. It keeps the file
+     in Bambuddy's library inbox folder, because the printer overwrites its cache.
+
+  The default is the first three. The printer source is off until a person checks it,
+  because it reaches the printer (`library/settings_store.py` `AUTO_IMPORT_SOURCES`).
+  With no source checked, every print goes to Unsorted imports.
+- **Leave these printers alone**: the Bambuddy printers the watcher takes no print
+  from.
+- **Leave these LAN-only printers alone**: the LAN-only printers (registry printers
+  with no Bambuddy link) the watcher records no print from.
+
+### What it imports
+
+Every 5 minutes, the watcher reads the Bambuddy archives made since it was switched
+on, and at most `LOOKBACK` (2 days) back (`print_watch/sweep.py`). It takes an archive
+only when the archive has a printer, has no link yet, and its printer is not skipped. It
+never imports a print that ScadBuddy started: it links that print to its run and leaves
+it alone. One pass takes at most 20 archives (`MAX_IMPORTS`); the next pass takes the
+rest. An archive older than `LOOKBACK` that no pass took stays for Import print.
+
+When ScadBuddy watches a Bambuddy printer over the LAN, a job start also starts a pass
+about 30 s later (`print_watch/nudge.py` `NUDGE_DELAY`). Bambuddy makes the archive
+only after it has read the 3MF from the printer.
+
+If a printer read fails for a reason that can pass (no answer, 408, 429 or 5xx), the
+next pass tries again. It tries until 3 hours after the print ended, or 24 hours after
+the archive was made while the print has no end (`RETRY_AFTER_END`,
+`RETRY_AFTER_START`). After that, and for any other failure, the print goes to Unsorted
+imports with the reason.
+
+### How a print is matched
+
+The watcher links a print to a model only when one of these is true
+(`print_watch/sweep.py`, `print_watch/lan.py` `decide`):
+
+1. Earlier imports of the same printed file (the same hash) name one model.
+2. The job's name has the words of exactly one model.
+
+Every other print goes to Unsorted imports, with the reason and the models that the
+job's name suggests. A print that no source had goes there too. A linked print is on
+its model's Prints tab, as an Import print is.
+
+### Unsorted imports
+
+The Prints page shows **Unsorted imports** when it has prints
+(`frontend/src/components/prints/UnsortedImports.tsx`). Each print shows the reason and
+the suggested models ("Maybe: …").
+
+- **Link…** opens Import print on that print. The source the watcher recorded is
+  chosen when Import print lists it and can use it.
+- **Dismiss** takes the print out of the inbox. The watcher never takes that archive
+  again. Import print can still link it later.
+
+### LAN-only printers
+
+A LAN-only printer has no Bambuddy link, so Bambuddy makes no archive of its prints.
+The watcher keeps its own record of each job instead (`print_watch/lan.py`). The
+printer's LAN watch sees the job start, and a workflow records the job while it prints.
+
+- It reads the job's 3MF over the printer's FTPS only when **Take a print's 3MF from**
+  includes the printer's storage and `library_backend` is `native`. It keeps the file in
+  ScadBuddy's own library, in the top-level folder "Unsorted imports". In all other
+  cases it records the print with no file.
+- It matches the print as above. A print with no file always goes to Unsorted imports;
+  a matched model is first in its suggestions.
+
+Unsorted imports lists these prints under "On printers with no Bambuddy link", with the
+printer's name and the job's name.
+
+- **Link to model…** opens a model picker only. There is no Import print for these
+  prints: their one source is the file that the watcher kept. The API refuses the link
+  (409) when the watcher kept no file.
+- **Dismiss** takes the print out of the inbox.
+
+**A linked LAN-only print is not on the model's Prints tab.** That tab lists Bambuddy
+archives, and these prints have none. The print is in **Activity** (kind
+`print_auto_import`, subject `model:<slug>`; `frontend/src/components/prints/prints.ts`
+`lanPrintsActivityPath`). A model's Prints tab says so, with a link, when the model has
+such prints.
+
+### The assistant
+
+The assistant reads the watcher's prints with `list_auto_imports` and
+`list_lan_auto_imports`. It takes a print out of the inbox with `dismiss_auto_import`
+or `dismiss_lan_auto_import`. It links an archive with `import_print`, and a LAN-only
+printer's print with `link_lan_auto_import` (`agent/src/tools/prints.ts`). It cannot
+change the watcher's settings.
 
 ## Running it
 
@@ -1209,6 +1325,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   task on an old replica records the operation `failed` as "may have been done" although
   nothing reached Bambuddy, and a check whose three attempts all land there is refused
   with a 500.
+- **Upgrading to the release with #6044** adds one workflow type, `LanAutoImport` (the
+  print watcher's record of a job on a LAN-only printer,
+  `backend/scadbuddy/workflows/lan_auto_import.py`), to the `bambuddy` queue. "Rolling it"
+  does not cover a new workflow type, so roll `scadbuddy-print` out with `Recreate` (see
+  "A release that needs `Recreate`" below). A job start during the roll can reach an old
+  build that does not register it; that run's workflow task fails until the new build is
+  current.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the

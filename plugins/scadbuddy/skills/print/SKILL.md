@@ -1,6 +1,6 @@
 ---
 name: print
-description: Print a ScadBuddy output through Bambuddy - read the dialog's choices, pick a spool per slot, the nozzle size, quality and plate, options and project, run it with the user's approval, and follow its progress. Use when asked to print, send, queue or slice a generated model, or to explain why a print was refused or failed.
+description: Print a ScadBuddy output through Bambuddy - read the dialog's choices, pick a spool per slot, the nozzle size, quality and plate, options and project, run it with the user's approval, and follow its progress. Use when asked to print, send, queue or slice a generated model, or to explain why a print was refused or failed, and to link or dismiss the prints ScadBuddy did not start (Import print, the print watcher, Unsorted imports).
 ---
 
 # Printing a ScadBuddy output through Bambuddy
@@ -259,3 +259,26 @@ until a PR verifies it. Analyzer sessions can read and propose, but they can't
 send or print (issue #284, "Agent-mode analyzers"). Every proposed value needs a
 source. A value without one is the analyzer's judgement, and is never applied
 automatically (AI spec §2, D10).
+
+## 9. Prints ScadBuddy did not start
+
+Import print (#4698) links such a print to a model by hand, and the print watcher
+(#4699) does it with no user step (`README.md`, section "The print watcher (#4699)").
+The tools are in `agent/src/tools/prints.ts`.
+
+- The watcher is off by default. Only a person switches it on or changes it, in
+  Settings → Printing; the API refuses an agent with 403 `person_only`
+  (`backend/scadbuddy/api/settings.py` `PRINT_WATCH`). `get_settings` reads it.
+- It links a print to a model only when earlier imports of the same file name one
+  model, or the job's name has exactly one model's words. Every other print goes to
+  Unsorted imports, with a `reason` and suggested models
+  (`backend/scadbuddy/print_watch/sweep.py`, module docstring step 3).
+- For a print Bambuddy archived: `list_auto_imports` (`state: inbox` is Unsorted
+  imports). To link one, show the user the suggestions, let them choose, then
+  `get_print_sources` and `import_print`. To take one out of the inbox,
+  `dismiss_auto_import`, only when the user says it is not worth keeping.
+- For a print on a LAN-only printer (no Bambuddy link, so no archive):
+  `list_lan_auto_imports`, `link_lan_auto_import` (never `import_print`) and
+  `dismiss_lan_auto_import`. A linked LAN-only print is not in `list_prints` or on the
+  model's Prints tab; it is in Activity (`backend/CLAUDE.md`, the print watcher's
+  phase 4 paragraph).
