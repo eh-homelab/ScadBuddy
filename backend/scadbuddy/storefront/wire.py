@@ -69,7 +69,9 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
     "items.quote": frozenset(
         {"id", "unit_price_minor", "quantity", "total_minor", "accepted", "can_accept"}
     ),
-    "payments": frozenset({"id", "kind", "amount_minor", "currency", "status", "pay_url"}),
+    "payments": frozenset(
+        {"id", "kind", "amount_minor", "currency", "status", "pay_url", "manual"}
+    ),
     "shipments": frozenset({"carrier", "service", "tracking", "shipped_at"}),
 }
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404

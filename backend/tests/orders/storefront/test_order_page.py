@@ -448,7 +448,36 @@ def test_an_open_request_with_no_provider_shows_the_shops_instructions(
     _manual_request(api, made.order.id)
     view = made.reader.view().json()
     assert view["payment_instructions"] == "Venmo @shop\nor cash <b>on pickup</b>"
-    assert [(p["status"], p["pay_url"]) for p in view["payments"]] == [("open", None)]
+    assert [(p["status"], p["pay_url"], p["manual"]) for p in view["payments"]] == [
+        ("open", None, True)
+    ]
+
+
+def test_a_providers_request_with_no_page_yet_is_not_manual(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """A manual deposit sets the instructions for the order, but the provider's balance
+    request, whose page is not made yet, is not marked manual: the page never sends its
+    customer to the cash text."""
+    made = make_order(api, crud)
+    _instructions(api, "Venmo @shop")
+    _manual_request(api, made.order.id)
+    with _orders(api).store.transaction() as conn:
+        payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="balance",
+            provider="fake",
+            amount_minor=700,
+            currency="USD",
+            created_by=BY,
+        )
+    view = made.reader.view().json()
+    assert view["payment_instructions"] == "Venmo @shop"
+    assert sorted((p["kind"], p["pay_url"], p["manual"]) for p in view["payments"]) == [
+        ("balance", None, False),
+        ("deposit", None, True),
+    ]
 
 
 def test_no_instructions_when_the_request_has_a_pay_link(api: TestClient, crud: CrudCaller) -> None:

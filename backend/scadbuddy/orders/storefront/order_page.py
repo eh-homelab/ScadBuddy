@@ -302,6 +302,8 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
                 pictures.setdefault(attachment.revision_id, []).append(found)
     instructions: str | None = None
     if any(r.provider is None for r in open_requests):
+        # The settings store reads on its own connection, outside ``conn``: the setting
+        # is not order data, and no lock here guards it.
         text = orders.core.settings_store.read(INSTRUCTIONS_SETTING)[
             "storefront_payment_instructions"
         ]
@@ -539,6 +541,7 @@ def _payments(rows: _Rows) -> list[CustomerPayment]:
                 currency=request.currency,
                 status=request.status,
                 pay_url=links.get(request.id) if request.status == "open" else None,
+                manual=request.provider is None,
             )
         )
     return shown

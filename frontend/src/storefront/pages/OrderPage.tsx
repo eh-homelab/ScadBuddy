@@ -349,7 +349,7 @@ function Payments({ order }: { order: CustomerOrder }) {
                   </a>
                 ) : (
                   <span>
-                    {order.payment_instructions
+                    {payment.manual && order.payment_instructions
                       ? 'Pay the shop as described below.'
                       : 'The shop will tell you how to pay.'}
                   </span>
