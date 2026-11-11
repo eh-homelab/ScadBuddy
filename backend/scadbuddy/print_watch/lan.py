@@ -19,8 +19,10 @@ the rest:
    (through the library's existing write: the print worker's `RemoteLibrary`, the API's
    `NativeLibrary`), as the Bambuddy path keeps one in Bambuddy's inbox folder. A copy of
    the same name and hash there already (an earlier attempt that was not recorded) is
-   used again. On ``library_backend=bambuddy`` ScadBuddy's own library does not serve,
-   and the print is recorded with no file.
+   used again. On ``library_backend=bambuddy`` ScadBuddy's own library does not serve:
+   the print is recorded with no file and `NOT_SERVED`, and the printer is never read
+   (the stored setting is checked before the read, as the print worker's library client
+   cannot tell).
 3. It records the print through the API (`LanRecorder`: the print worker's CRUD route,
    `crud/print.py` `RemoteLanImports`, or the API's store in-process), which matches a
    model as the Bambuddy path does (`decide`): an earlier import of the same printed file
@@ -29,10 +31,12 @@ the rest:
 
 A read or a keep that fails for a reason that may pass (no answer, a dropped
 connection, a 5xx) raises, so Temporal tries the attempt again (`LAN_IMPORT_RETRY`); the
-last attempt records the print in the inbox with the reason. A refusal that would only
-come back (a wrong access code, a certificate that is not the pinned one, a file too
-large) is recorded at once. The access code is opened from the row inside the attempt,
-never passed in its input, and goes nowhere but the connection.
+last attempt records the print in the inbox with the reason, whatever the read or the
+keep raised, and its read and keep are bounded by `CAPTURE_TIMEOUT`, so the attempt has
+time left to record. Only a record the API never takes is lost on the last attempt. A
+refusal that would only come back (a wrong access code, a certificate that is not the
+pinned one, a file too large) is recorded at once. The access code is opened from the
+row inside the attempt, never passed in its input, and goes nowhere but the connection.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ import logging
 import re
 import zipfile
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from typing import BinaryIO, Literal, Protocol
 
@@ -66,7 +70,12 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.lan import CertificateMismatchError, FileTooLargeError, LanPrinter
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError
-from scadbuddy.workflows.lan_auto_import import LAN_AUTO_IMPORT_ACTIVITY, MAX_ATTEMPTS, LanJob
+from scadbuddy.workflows.lan_auto_import import (
+    ATTEMPT_TIMEOUT,
+    LAN_AUTO_IMPORT_ACTIVITY,
+    MAX_ATTEMPTS,
+    LanJob,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +89,13 @@ _PLATE_GCODE = re.compile(r"/data/(Metadata/plate_\d+\.gcode)")
 
 NO_MATCH = "no model matched with confidence"
 NOT_ALLOWED = "no source had the 3MF (printer: not allowed in Settings)"
+NOT_SERVED = (
+    "the printer's file is kept in ScadBuddy's own library, which does not serve here"
+    " (library_backend is bambuddy)"
+)
+#: The bound of an attempt's read and keep: the attempt's own, less a minute for the
+#: record, so the last attempt can still record a print whose read hung.
+CAPTURE_TIMEOUT = ATTEMPT_TIMEOUT - timedelta(minutes=1)
 
 LanState = Literal["linked", "inbox", "dismissed"]
 #: How a model was matched: as on the Bambuddy path, or a person's link (``import``).
@@ -290,19 +306,34 @@ class LanImportActivities:
         return row.state
 
     async def capture(self, job: LanJob, *, last: bool) -> LanCapture:
-        """The job's file read and kept, or why not. Raises a failure that may pass,
-        unless ``last``: then the reason is the capture's."""
+        """The job's file read and kept, or why not, within `CAPTURE_TIMEOUT`. Raises a
+        failure, unless ``last``: then whatever failed (a read that may pass, one past the
+        bound, any other error) is the capture's reason, so the print is still recorded."""
         try:
-            return await self._capture(job)
+            return await asyncio.wait_for(self._capture(job), CAPTURE_TIMEOUT.total_seconds())
         except _Retry as failure:
             if not last:
                 raise
             return LanCapture(job=job, reason=f"no source had the 3MF (printer: {failure})")
+        except Exception as error:
+            if not last:
+                raise
+            logger.warning(
+                "the last attempt could not read or keep a LAN-only printer's file",
+                extra={"printer_id": job.printer_id},
+                exc_info=True,
+            )
+            return LanCapture(
+                job=job,
+                reason=f"the printer's file could not be read or kept ({type(error).__name__})",
+            )
 
     async def _capture(self, job: LanJob) -> LanCapture:
         settings = await asyncio.to_thread(self.load_settings)
         if "printer" not in settings.auto_import_sources():
             return LanCapture(job=job, reason=NOT_ALLOWED)
+        if settings.library_backend != "native":
+            return LanCapture(job=job, reason=NOT_SERVED)
         paths = printer_paths(job.subtask_name)
         if not paths:
             return LanCapture(
@@ -321,6 +352,10 @@ class LanImportActivities:
                 job=job,
                 reason="no source had the 3MF (printer: its access code cannot be opened here)",
             )
+        library = await self.library()
+        if library is None:
+            # The API's own library on `native` before it serves: nothing to keep it in.
+            return LanCapture(job=job, reason=NOT_SERVED)
         lan = self.connect(row.lan_host, row.serial, code, row.lan_cert_sha256)
         found = await self._read(lan, job, paths)
         if isinstance(found, str):
@@ -328,13 +363,6 @@ class LanImportActivities:
         path, data = found
         name = PurePosixPath(path).name
         sha256 = hashlib.sha256(data).hexdigest()
-        library = await self.library()
-        if library is None:
-            return LanCapture(
-                job=job,
-                reason="the printer's file is kept in ScadBuddy's own library, which does not"
-                " serve here (library_backend is bambuddy)",
-            )
         try:
             file_id = await keep(library, name, data, sha256)
         except httpx.TransportError as error:

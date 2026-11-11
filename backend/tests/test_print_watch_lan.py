@@ -5,6 +5,7 @@ printer, the library and the recorder are fakes."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import ftplib
 import hashlib
@@ -12,7 +13,7 @@ import io
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, BinaryIO, cast
 
 import httpx
@@ -25,10 +26,12 @@ from temporalio.worker import Worker
 from scadbuddy.bambuddy.models import LibraryFile, LibraryListRow
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_watch import lan as lan_module
 from scadbuddy.print_watch.lan import (
     INBOX_FOLDER,
     NO_MATCH,
     NOT_ALLOWED,
+    NOT_SERVED,
     LanCapture,
     LanImport,
     LanImportActivities,
@@ -41,6 +44,7 @@ from scadbuddy.print_watch.lan_store import LanImportStore, StoreLanRecorder
 from scadbuddy.printers.lan import CertificateMismatchError, FileTooLargeError, LanPrinter
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.lan_auto_import import (
+    ATTEMPT_TIMEOUT,
     LAN_AUTO_IMPORT_ACTIVITY,
     MAX_ATTEMPTS,
     LanAutoImport,
@@ -64,7 +68,9 @@ ROW = PrinterRow(
     updated_at=NOW,
 )
 WITH_PRINTER = StoredSettings(
-    print_auto_import=True, print_auto_import_sources=["archive", "printer"]
+    print_auto_import=True,
+    print_auto_import_sources=["archive", "printer"],
+    library_backend="native",
 )
 
 
@@ -303,9 +309,9 @@ async def test_a_file_of_the_jobs_name_from_another_job_is_not_kept() -> None:
 async def test_a_printer_that_does_not_answer_is_tried_again_until_the_last_attempt() -> None:
     lan = Lan({}, fails={"/cache/demo_plate.gcode.3mf": TimeoutError()})
     with pytest.raises(Exception, match="could not be read"):
-        await activities(lan).capture(JOB, last=False)
+        await activities(lan, library=Library()).capture(JOB, last=False)
 
-    capture = await activities(lan).capture(JOB, last=True)
+    capture = await activities(lan, library=Library()).capture(JOB, last=True)
     assert capture.source is None
     assert capture.reason == (
         "no source had the 3MF (printer: /cache/demo_plate.gcode.3mf could not be read:"
@@ -324,16 +330,64 @@ async def test_a_refusal_that_would_only_come_back_is_recorded_at_once(
     error: BaseException, reason: str
 ) -> None:
     lan = Lan({}, fails={"/cache/demo_plate.gcode.3mf": error})
-    capture = await activities(lan).capture(JOB, last=False)
+    capture = await activities(lan, library=Library()).capture(JOB, last=False)
     assert capture.reason is not None and reason in capture.reason
     assert lan.read == ["/cache/demo_plate.gcode.3mf"]
 
 
-async def test_on_bambuddys_library_the_print_is_recorded_without_its_file() -> None:
+async def test_on_bambuddys_library_the_printer_is_not_read() -> None:
+    """The print worker's library client cannot tell which library serves: the stored
+    setting is read before the printer, so no file is read only to be refused."""
+    lan = Lan({"/cache/demo_plate.gcode.3mf": PRINTED})
+    library = Library()
+    bambuddy = WITH_PRINTER.model_copy(update={"library_backend": "bambuddy"})
+    capture = await activities(lan, settings=bambuddy, library=library).capture(JOB, last=False)
+    assert (capture.source, capture.reason, lan.read, library.uploads) == (
+        None,
+        NOT_SERVED,
+        [],
+        [],
+    )
+
+
+async def test_a_library_that_does_not_serve_yet_reads_no_printer() -> None:
     lan = Lan({"/cache/demo_plate.gcode.3mf": PRINTED})
     capture = await activities(lan, library=None).capture(JOB, last=False)
+    assert (capture.source, capture.reason, lan.read) == (None, NOT_SERVED, [])
+
+
+async def test_the_last_attempt_records_whatever_the_keep_raised() -> None:
+    """An error no rule names (a bug, a malformed answer) is retried, and on the last
+    attempt is the record's reason: the print is never left unrecorded."""
+    lan = Lan({"/cache/demo_plate.gcode.3mf": PRINTED})
+    act = activities(lan, library=Library(fails=RuntimeError("bad answer")))
+    with pytest.raises(RuntimeError):
+        await act.capture(JOB, last=False)
+    capture = await act.capture(JOB, last=True)
     assert capture.source is None
-    assert capture.reason is not None and "does not serve" in capture.reason
+    assert capture.reason == "the printer's file could not be read or kept (RuntimeError)"
+
+
+class Hangs(Lan):
+    """A printer whose read never ends."""
+
+    async def download(self, remote_name: str, *, max_bytes: int | None = None) -> bytes:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+
+async def test_a_read_past_its_bound_is_recorded_on_the_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read and keep end before the attempt's timeout, so the last attempt still has
+    time to record the print."""
+    monkeypatch.setattr(lan_module, "CAPTURE_TIMEOUT", timedelta(seconds=0.05))
+    assert lan_module.CAPTURE_TIMEOUT < ATTEMPT_TIMEOUT
+    act = activities(Hangs({}), library=Library())
+    with pytest.raises(TimeoutError):
+        await act.capture(JOB, last=False)
+    capture = await act.capture(JOB, last=True)
+    assert capture.reason == "the printer's file could not be read or kept (TimeoutError)"
 
 
 @pytest.mark.parametrize(
