@@ -76,9 +76,7 @@ def owner_lifecycle(api: TestClient) -> Lifecycle:
     return _orders(api).lifecycle
 
 
-@pytest.fixture
-def listing(api: TestClient) -> Listing:
-    """A published listing whose width a visitor picks (as `test_drafts.py`'s)."""
+def _published_listing(api: TestClient) -> Listing:
     store = _orders(api).listings
     made = store.create(
         ListingInput(
@@ -91,6 +89,12 @@ def listing(api: TestClient) -> Listing:
     return store.mark_published(
         made.id, snapshot=_snapshot(), media=[], expected_updated_at=made.updated_at
     )
+
+
+@pytest.fixture
+def listing(api: TestClient) -> Listing:
+    """A published listing whose width a visitor picks (as `test_drafts.py`'s)."""
+    return _published_listing(api)
 
 
 def rules(
@@ -428,6 +432,7 @@ def test_a_body_that_names_an_account_is_422(
         {"name": "x" * 201},
         {"email": "a" * 250 + "@example.com"},
         {"address": {"recipient": ""}},
+        {"address": {"recipient": "Ada", "lines": ["1 Road"], "country": "gb"}},
     ],
 )
 def test_a_body_outside_its_bounds_is_422(
@@ -437,6 +442,21 @@ def test_a_body_outside_its_bounds_is_422(
     r = crud.post("/draft/submit", json=submit_body(draft, **extra), key="s1")
     assert r.status_code == 422, r.text
     assert r.json()["type"].startswith(STOREFRONT_PROBLEMS)
+
+
+def test_a_shop_with_no_kek_cannot_take_an_order(settings: Settings) -> None:
+    app = create_app(settings.model_copy(update={"secret_key_file": None}))
+    with TestClient(app) as api:
+        crud = CrudCaller(api)
+        draft = draft_of(crud, _published_listing(api))
+        customers = rows(api, "SELECT id FROM customers")
+        r = crud.post("/draft/submit", json=submit_body(draft), key="s1")
+        assert r.status_code == 503, r.text
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}submit_unavailable"
+        order = _orders(api).store.order(draft["id"])
+        assert order is not None and order.unsubmitted
+        # The whole submit rolled back: the customer it made first is gone too.
+        assert rows(api, "SELECT id FROM customers") == customers
 
 
 def test_a_submit_needs_an_idempotency_key(crud: CrudCaller, listing: Listing) -> None:

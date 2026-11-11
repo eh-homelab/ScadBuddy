@@ -342,10 +342,10 @@ class _Covers:
 
     def __init__(self, covers: bool) -> None:
         self.covers = covers
-        self.asked: list[tuple[str, str, str | None]] = []
+        self.asked: list[tuple[str, str, bool]] = []
 
-    def __call__(self, conn: Any, order_id: str, event: str, *, host: str | None) -> bool:
-        self.asked.append((order_id, event, host))
+    def __call__(self, conn: Any, order_id: str, event: str, *, ready: bool) -> bool:
+        self.asked.append((order_id, event, ready))
         return self.covers
 
 
@@ -454,14 +454,18 @@ def test_also_when_storefront_mails_sends_anyway(
     assert events(client, order_id) == ["message.sending"]
 
 
-def test_the_skip_asks_with_the_running_mail_host(
+def test_the_skip_asks_whether_the_running_mail_config_is_ready(
     client: TestClient, order_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = _covers(monkeypatch, False)
     claim(client, order_id, "k1", claim_body("quoted"))
+    only_host = {"storefront_mail_host": "smtp.example.com"}
+    assert client.put("/api/v1/settings", json=only_host).status_code == 200
+    client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "shipped"})
     assert client.put("/api/v1/settings", json=CONNECTION).status_code == 200
     client.get(f"/api/v1/orders/{order_id}/messages/check", params={"template": "shipped"})
     assert [(asked[0], asked[2]) for asked in fake.asked] == [
-        (order_id, None),
-        (order_id, "smtp.example.com"),
+        (order_id, False),
+        (order_id, False),
+        (order_id, True),
     ]

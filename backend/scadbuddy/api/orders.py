@@ -155,6 +155,7 @@ from scadbuddy.orders.store import (
 )
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.links import LinkState
+from scadbuddy.orders.storefront.mail import OrderMail
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.credentials import KekMissingError
@@ -612,7 +613,7 @@ async def _run_closing_linked[T](
     """``_run`` for an accept that may accept the order (#5283), with what ``POST …/accept``
     does after its commit: the pages of the requests it cancels are closed, the balance
     request it opens is linked (``Payments.run_closing_linked``), and when it accepted the
-    order its Bambuddy projects are made, best effort (``_ensure_projects``)."""
+    order its Bambuddy projects are made, best effort (``ensure_order_projects``)."""
     before = await asyncio.to_thread(orders.store.order, order_id)
     try:
         result = await payments.service.run_closing_linked(order_id, call)
@@ -621,7 +622,7 @@ async def _run_closing_linked[T](
     if before is not None and before.status != "accepted":
         after = await asyncio.to_thread(orders.store.order, order_id)
         if after is not None and after.status == "accepted":
-            await _ensure_projects(orders, after)
+            await ensure_order_projects(orders, after)
     return result
 
 
@@ -1319,11 +1320,11 @@ async def accept_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -
     except LifecycleError as error:
         raise refused(error) from None
     await service.service.link_pending(accepted.id)
-    await _ensure_projects(orders, accepted)
+    await ensure_order_projects(orders, accepted)
     return accepted
 
 
-async def _ensure_projects(orders: OrdersComponent, accepted: Order) -> None:
+async def ensure_order_projects(orders: OrdersComponent, accepted: Order) -> None:
     """The accepted order's Bambuddy projects, best effort: waited for at most
     `PROJECTS_WAIT_SECONDS`, then left to finish."""
     # Waited for, never cancelled: a create cut off after Bambuddy made the project would
@@ -1433,6 +1434,23 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
     return await _run(lambda: orders.lifecycle.customer_link(order_id))
 
 
+@router.get(
+    "/{order_id}/mail",
+    response_model=list[OrderMail],
+    summary="The customer mail of an order",
+    description=(
+        "The order's rows in the storefront mail outbox, newest first: the event, the "
+        "address, when it was queued, sent or given up, the attempts charged to it (a "
+        "recipient's refusals, and server failures answered to its own mail), the last error "
+        "and when the next try is due. At most the newest 200. Never the body, the "
+        "context, a code, a link or a token. A sign-in code has no order and never shows."
+    ),
+)
+async def get_order_mail(order_id: str, orders: OrdersDep) -> list[OrderMail]:
+    check_path(order_id)
+    return await _run(lambda: orders.lifecycle.order_mail(order_id))
+
+
 @router.post(
     "/{order_id}/customer-link",
     response_model=LinkState,
@@ -1445,9 +1463,10 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
         "or else to the customer's first email contact that is one address, the primary "
         "one first. A back-office order gets one too. Answers the link's state, never its "
         "token. Audit row `order.customer_link_sent`. 422 `email_invalid` for a `to` that "
-        "is not one address, 422 `no_email` with no `to` and no email contact that is one "
-        "address (a malformed contact is skipped), 409 `order_not_submitted` for a cart, "
-        "409 `kek_missing` with no key to seal the link with."
+        "is not one address, 422 `no_customer` for an order with no customer (set one "
+        "first), 422 `no_email` with no `to` and no email contact that is one address (a "
+        "malformed contact is skipped), 409 `order_not_submitted` for a cart, 409 "
+        "`kek_missing` with no key to seal the link with."
     ),
 )
 async def send_customer_link(
@@ -1462,6 +1481,12 @@ async def send_customer_link(
             lambda: orders.lifecycle.send_customer_link(order_id, by, to, replace=replace)
         )
     except LifecycleError as error:
+        if error.slug == "no_customer":
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "This order has no customer. Set its customer before you send a link.",
+                type_=PROBLEMS + "no_customer",
+            ) from None
         if error.slug == "no_email":
             raise _to_problem(
                 "no_email",

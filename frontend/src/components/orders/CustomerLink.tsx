@@ -70,29 +70,28 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
         <div className="flex flex-col gap-0.5 text-[13px]">
           {state.sent_to === null ? (
             <p className="text-muted-foreground">No link sent yet.</p>
-          ) : state.live ? (
+          ) : (
             <>
               <p>
-                Live: sent to <span className="break-all">{state.sent_to}</span>
+                Sent to <span className="break-all">{state.sent_to}</span>
                 {state.created_at && (
                   <>
-                    {' · '}
+                    {' on '}
                     <When at={state.created_at} />
                   </>
                 )}
               </p>
               {state.opened_at ? (
                 <p className="text-muted-foreground">
-                  Opened <When at={state.opened_at} />
+                  Opened on <When at={state.opened_at} />
                 </p>
               ) : (
-                <p className="text-muted-foreground">Not opened yet.</p>
+                <p className="text-muted-foreground">Not opened</p>
+              )}
+              {!state.live && (
+                <p className="text-muted-foreground">Revoked {state.revoked_at && <When at={state.revoked_at} />}: the link no longer works.</p>
               )}
             </>
-          ) : (
-            <p className="text-muted-foreground">
-              Revoked {state.revoked_at && <When at={state.revoked_at} />} (last sent to <span className="break-all">{state.sent_to}</span>)
-            </p>
           )}
         </div>
       )}

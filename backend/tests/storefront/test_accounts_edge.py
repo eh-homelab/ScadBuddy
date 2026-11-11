@@ -298,7 +298,7 @@ def test_sign_out_with_no_visitor_cookie_sets_one_visitor(
     "cookie",
     [
         f"s1.{TOKEN}.{'A' * 43}",  # a mac the edge did not make
-        f"v1.{TOKEN}.{'A' * 43}",
+        f"v1.{TOKEN}.{'A' * 43}",  # a version the edge does not make
         "not-a-cookie",
     ],
 )
@@ -370,6 +370,41 @@ def test_a_sign_in_answer_without_a_session_is_the_edges_fault(
     r = sign_in(edge)
     assert r.status_code == 502  # type: ignore[attr-defined]
     assert not [c for c in set_cookies(r) if c.startswith(f"{SESSION_COOKIE}=")]
+
+
+def test_the_order_page_sends_the_session_on_and_an_anonymous_one_sends_none(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """``/o?order=<id>`` (#5283 Task 5): the signed-in reader's ``order_id`` goes in the
+    body, and the store session in its header, so the CRUD side checks the account."""
+    route = crud_mock.post("/api/v1/internal/crud/storefront/order/view").respond(
+        200, json={}, headers=CRUD
+    )
+    body = {"order_id": "0d0c0b0a-5d0c-4d43-9d33-6c1f9d0f6a11"}
+    edge.post("/api/store/v1/order/view", json=body, headers={"Origin": PUBLIC_URL})
+    assert SESSION_HEADER not in route.calls.last.request.headers
+    sign_in(edge)
+    edge.post("/api/store/v1/order/view", json=body, headers={"Origin": PUBLIC_URL})
+    sent = route.calls.last.request
+    assert sent.headers[SESSION_HEADER] == TOKEN
+    assert json.loads(sent.content) == body
+
+
+def test_a_forged_session_cookie_is_not_sent_on_with_the_order_page(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post("/api/v1/internal/crud/storefront/order/view").respond(
+        200, json={}, headers=CRUD
+    )
+    edge.cookies.set(SESSION_COOKIE, f"s1.{TOKEN}.{'m' * 43}")
+    edge.post(
+        "/api/store/v1/order/view",
+        json={"order_id": "0d0c0b0a-5d0c-4d43-9d33-6c1f9d0f6a11"},
+        headers={"Origin": PUBLIC_URL},
+    )
+    assert SESSION_HEADER not in route.calls.last.request.headers
 
 
 def ask_code(edge: TestClient) -> Any:

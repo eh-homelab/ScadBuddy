@@ -12,8 +12,8 @@ second claim is ``already_notified`` unless it names the message it sends again
 outcome or a person's "Mark sent" is written.
 
 The storefront overlap (spec §8): a template the storefront mails itself for this order
-(`STOREFRONT_EVENT`, asked of ``storefront_mail_covers`` with the running mail host) is
-not sent through the plugin too. Its claim writes a ``skipped`` row, reason
+(`STOREFRONT_EVENT`, asked of ``storefront_mail_covers`` with whether the running mail
+config is ready) is not sent through the plugin too. Its claim writes a ``skipped`` row, reason
 ``storefront_mail``, unless the body says ``also_when_storefront_mails``."""
 
 from __future__ import annotations
@@ -58,14 +58,12 @@ _COLUMNS = (
 
 
 class OrderMessages:
-    """The record over the orders store's pool. ``mail_host`` is the running
-    ``storefront_mail_host`` (the lifecycle's), read at each skip check."""
+    """The record over the orders store's pool. ``mail_ready`` is whether the running
+    mail config has a host and a sender (the lifecycle's), read at each skip check."""
 
-    def __init__(
-        self, store: OrderStore, mail_host: Callable[[], str | None] = lambda: None
-    ) -> None:
+    def __init__(self, store: OrderStore, mail_ready: Callable[[], bool] = lambda: False) -> None:
         self.store = store
-        self.mail_host = mail_host
+        self.mail_ready = mail_ready
 
     # -- reads -------------------------------------------------------------------------
 
@@ -253,12 +251,12 @@ class OrderMessages:
         return None if row is None else row["id"]
 
     def _skipped_for_storefront(self, conn: Conn, order_id: str, template: NotifyTemplate) -> bool:
-        """§8: the storefront mails this template's news for the order itself (a mail host
-        is set and the order has a live order link). A template with no storefront event
+        """§8: the storefront mails this template's news for the order itself (the mail host
+        and sender are set and the order has a live order link). A template with no storefront event
         never asks."""
         event = STOREFRONT_EVENT.get(template)
         return event is not None and storefront_mail_covers(
-            conn, order_id, event, host=self.mail_host()
+            conn, order_id, event, ready=self.mail_ready()
         )
 
     @staticmethod

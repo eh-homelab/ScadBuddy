@@ -1086,6 +1086,26 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_mail_list',
+    label: "List an order's customer mail",
+    description:
+      "The storefront mail of an order (#5283), newest first: each `event` (`order_link`, `revision_ready`, " +
+      '`price_ready`, `payment_requested`, `shipped`), `to`, `created_at`, `sent_at`, `failed_at`, `attempts`, ' +
+      '`last_error` and `next_attempt_at`. A row with no `sent_at` and no `failed_at` is queued or waiting for its next ' +
+      'try. Never the body, a link or a token. A sign-in code is not listed. Not the messaging plugin: see order_messages_list.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    source: "the mail server's error text, which a recipient's server writes",
+    routes: ['GET /api/v1/orders/{order_id}/mail'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/mail', { params: { path: { order_id } } }),
+          `list the customer mail of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_customer_link_send',
     label: 'Send the customer an order link',
     description:
@@ -1094,7 +1114,8 @@ export const orderTools: Tool[] = [
       "old one stops working, and this tool always replaces (`replace: true`). The mail goes to `to` (one address), or else to the customer's email contact. This " +
       'mails the customer, so it is outward: a person must approve it first (it returns a pending action). The ' +
       'reply is the link state (`live`, `created_at`, `sent_to`, `opened_at`, `revoked_at`), never the link itself. ' +
-      '422 `no_email` with no `to` and no email contact; 422 `email_invalid` for anything but one address; ' +
+      '422 `no_customer` for an order with no customer (set one first); 422 `no_email` with no `to` and no ' +
+      'email contact; 422 `email_invalid` for anything but one address; ' +
       '`order_not_submitted` on a storefront cart.',
     input: z.object({
       order_id: orderId,

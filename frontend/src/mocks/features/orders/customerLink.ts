@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
-import type { CustomerLinkState } from '../../../api/types'
+import type { CustomerLinkState, OrderMail } from '../../../api/types'
+import { mockSettings } from '../../handlers'
 import { event, lock, refused } from './orders'
 import { now, PROBLEMS, problem, Refused, state } from './state'
 
@@ -8,14 +9,16 @@ import { now, PROBLEMS, problem, Refused, state } from './state'
  * link's state, never the token. A send over a live link is 409 `link_live` unless the body has
  * `replace: true`, as the backend's. It then revokes the live link and makes a new one, to `to` or
  * the customer's first email contact that is one address (the primary one first); with neither it is
- * 422 `no_email`, as the backend's.
+ * 422 `no_email`, and an order with no customer is 422 `no_customer`, as the backend's.
  */
 
 const NONE: CustomerLinkState = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
 const links = new Map<string, CustomerLinkState>()
+const mail = new Map<string, OrderMail[]>()
 
 export function reset(): void {
   links.clear()
+  mail.clear()
 }
 
 /** A live link on `orderId`, for a test's setup. */
@@ -23,6 +26,11 @@ export function mockCustomerLink(orderId: string, link: Partial<CustomerLinkStat
   const made: CustomerLinkState = { live: true, created_at: now(), sent_to: 'ada@example.test', opened_at: null, revoked_at: null, ...link }
   links.set(orderId, made)
   return made
+}
+
+/** The mail rows of `orderId`, newest first, for a test's setup. */
+export function mockOrderMail(orderId: string, rows: OrderMail[]): void {
+  mail.set(orderId, rows)
 }
 
 /** One addr-spec. It approximates `check_address` in `orders/storefront/addresses.py`: no `parseaddr` round-trip and no length cap. */
@@ -33,6 +41,14 @@ function toProblem(request: Request, slug: string, detail: string) {
 }
 
 export const handlers = [
+  http.get('/api/v1/orders/:id/mail', ({ request, params }) => {
+    try {
+      const order = lock(String(params.id))
+      return HttpResponse.json(mail.get(order.id) ?? [])
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
   http.get('/api/v1/orders/:id/customer-link', ({ request, params }) => {
     try {
       const order = lock(String(params.id))
@@ -47,6 +63,9 @@ export const handlers = [
       if (order.source === 'storefront' && order.submitted_at == null) {
         throw new Refused('order_not_submitted', `cart ${order.id} is not yet submitted`)
       }
+      if (!order.customer_id) {
+        return problem(request, 422, 'This order has no customer. Set its customer before you send a link.', PROBLEMS + 'no_customer')
+      }
       const text = await request.text()
       const body = text ? (JSON.parse(text) as { to?: string | null; replace?: boolean }) : {}
       if (!body.replace && links.get(order.id)?.live) {
@@ -60,6 +79,13 @@ export const handlers = [
       if (!ADDRESS.test(to)) return toProblem(request, 'email_invalid', 'Give one email address, such as ada@example.com.')
       const made = { live: true, created_at: now(), sent_to: to, opened_at: null, revoked_at: null }
       links.set(order.id, made)
+      // The outbox row of the link's mail: sent at once when a host and a sender are set, else it waits.
+      const configured = mockSettings()
+      const sent = configured.storefront_mail_host && configured.storefront_mail_sender ? now() : null
+      mail.set(order.id, [
+        { event: 'order_link', to, created_at: now(), sent_at: sent, failed_at: null, attempts: 0, last_error: null, next_attempt_at: now() },
+        ...(mail.get(order.id) ?? []),
+      ])
       event(order, 'order.customer_link_sent', { to })
       return HttpResponse.json(made)
     } catch (error) {

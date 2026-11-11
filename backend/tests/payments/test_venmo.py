@@ -1,7 +1,7 @@
-"""Venmo through PayPal (#4960): once the storefront's pay page exists (`PAY_PAGE_READY`), a
+"""Venmo through PayPal (#4960): once the pay page is switched on (`PAY_PAGE_READY`), a
 USD PayPal request from a shop with Venmo on gets a pay token, its link is that page, and
 ``venmo_checkout`` reads what the page needs by the token only while the request can still
-be paid. Until then no link is rewritten and Venmo cannot be turned on; the tests of the
+be paid. Until it is on, no link is rewritten and Venmo cannot be turned on; the tests of the
 rewrite turn the flag on (`page_ready`)."""
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def connect_paypal(rows: OrderStore, settings: Mapping[str, str] = SETTINGS) -> 
 
 @pytest.fixture
 def page_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The storefront's pay page exists (#5283 phase 4)."""
+    """The pay page is switched on (`PAY_PAGE_READY`)."""
     monkeypatch.setattr(venmo, "PAY_PAGE_READY", True)
 
 
@@ -80,7 +80,7 @@ def tokened(shop: PayShop) -> tuple[Order, PaymentRequestView, str]:
     shop.lifecycle.set_request_link(
         req.id,
         hosted=HostedRequest.model_validate(
-            {"provider_ref": PAYPAL_ORDER, "hosted_url": f"{STOREFRONT}/pay/{token}"}
+            {"provider_ref": PAYPAL_ORDER, "hosted_url": f"{STOREFRONT}/pay#{token}"}
         ),
         error=None,
         pay_token_hash=digest,
@@ -120,7 +120,7 @@ def test_the_request_stores_the_hash_never_the_token(shop: PayShop) -> None:
             "SELECT row_to_json(r)::text AS whole FROM payment_requests r WHERE id = %s",
             (req.id,),
         ).fetchone()
-    assert row is not None and token not in row["whole"].replace(f"/pay/{token}", "")
+    assert row is not None and token not in row["whole"].replace(f"/pay#{token}", "")
 
 
 # -- venmo_checkout --------------------------------------------------------------------------
@@ -134,9 +134,19 @@ def test_an_open_request_reads_what_the_pay_page_needs(shop: PayShop) -> None:
         currency="USD",
         order_number=order.number,
         client_id=SETTINGS["client_id"],
-        environment="sandbox",
         paypal_order_id=PAYPAL_ORDER,
+        minor_exponent=2,
     )
+
+
+def test_the_checkout_carries_the_currency_s_own_minor_exponent(shop: PayShop) -> None:
+    """A yen request has no decimals (`orders/currency.py`); the page shows it so."""
+    _, req, token = tokened(shop)
+    with shop.rows.transaction() as conn:
+        conn.execute("UPDATE payment_requests SET currency = 'JPY' WHERE id = %s", (req.id,))
+    found = checkout(shop, token)
+    assert found is not None
+    assert (found.currency, found.minor_exponent) == ("JPY", 0)
 
 
 @pytest.mark.parametrize("token", ["", "x" * 43, "not a token", "a" * 5000])
@@ -147,8 +157,8 @@ def test_an_unknown_token_reads_nothing(shop: PayShop, token: str) -> None:
 
 @pytest.mark.parametrize("status", ["paid", "cancelled", "expired"])
 def test_a_request_that_ends_reads_nothing_and_drops_its_token(shop: PayShop, status: Any) -> None:
-    """A token is spent once its request ends: the storefront's ``/pay/{token}`` answers
-    404 for it, whatever the request does next."""
+    """A token is spent once its request ends: the storefront's ``/pay#<token>`` page gets
+    a 404 for it, whatever the request does next."""
     _, req, token = tokened(shop)
     with shop.rows.transaction() as conn:
         payments_store.set_request_status(conn, req.id, status)
@@ -246,11 +256,11 @@ def test_venmo_needs_paypal_usd_the_toggle_and_the_storefront(
     assert venmo_eligible(provider, settings, currency, storefront) is eligible
 
 
-def test_nothing_is_eligible_until_the_pay_page_exists() -> None:
+def test_nothing_is_eligible_until_the_pay_page_is_switched_on() -> None:
     assert not venmo_eligible("paypal", SETTINGS, "USD", STOREFRONT)
 
 
-def test_the_toggle_is_refused_until_the_pay_page_exists() -> None:
+def test_the_toggle_is_refused_until_the_pay_page_is_switched_on() -> None:
     with pytest.raises(VenmoPageMissingError):
         venmo_setting_error("paypal", SETTINGS, STOREFRONT)
     assert venmo_setting_error("paypal", SETTINGS | {"venmo": "off"}, STOREFRONT) is None
@@ -308,7 +318,7 @@ def service(
     )
 
 
-async def test_until_the_pay_page_exists_paypal_s_link_stays(shop: PayShop) -> None:
+async def test_until_the_pay_page_is_switched_on_paypal_s_link_stays(shop: PayShop) -> None:
     """#5769 review: no request links to a page nothing serves."""
     order, _ = shop.accepted()
     req = shop.lifecycle.open_payment_request(order.id, BY, provider="paypal")
@@ -325,8 +335,8 @@ async def test_an_eligible_request_links_to_the_storefront_pay_page(
     linked = await service(shop).link(req.id)
     assert linked.provider_ref == PAYPAL_ORDER
     assert linked.hosted_url is not None
-    assert linked.hosted_url.startswith(f"{STOREFRONT}/pay/")
-    token = linked.hosted_url.removeprefix(f"{STOREFRONT}/pay/")
+    assert linked.hosted_url.startswith(f"{STOREFRONT}/pay#")
+    token = linked.hosted_url.removeprefix(f"{STOREFRONT}/pay#")
     assert stored_hash(shop, req.id) == token_hash(token)
     found = checkout(shop, token)
     assert found is not None and found.paypal_order_id == PAYPAL_ORDER
@@ -346,7 +356,7 @@ async def test_any_other_request_keeps_paypal_s_link(
     assert stored_hash(shop, req.id) is None
 
 
-async def test_connect_refuses_venmo_on_until_the_pay_page_exists(shop: PayShop) -> None:
+async def test_connect_refuses_venmo_on_until_the_pay_page_is_switched_on(shop: PayShop) -> None:
     payments = service(shop)
     body = ProviderConnect(settings=dict(SETTINGS), secrets={"client_secret": "s"})
     with pytest.raises(VenmoPageMissingError):

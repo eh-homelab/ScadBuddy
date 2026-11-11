@@ -49,8 +49,8 @@ class MessageCheck(BaseModel):
 
 
 def _messages(orders: OrdersComponent) -> OrderMessages:
-    """The record, asking the storefront overlap with the lifecycle's running mail host."""
-    return OrderMessages(orders.store, orders.lifecycle.mail_host)
+    """The record, asking the storefront overlap with the lifecycle's mail readiness."""
+    return OrderMessages(orders.store, orders.lifecycle.mail_ready)
 
 
 async def _run[T](call: Callable[[], T]) -> T:
@@ -85,8 +85,9 @@ async def list_order_messages(order_id: str, orders: OrdersDep) -> list[OrderMes
         "this template since the order's last status change (`sent`, `sending` or "
         "`unknown`), which a claim without `resend_of` is refused for. `storefront_mail` is "
         "true when the storefront mails this template's news to the order's customer itself "
-        "(`quoted` and `shipped`, on an order with a live order link while a mail host is "
-        "set), so a claim without `also_when_storefront_mails` would be recorded `skipped`. "
+        "(`quoted` and `shipped`, on an order with a live order link while a mail host and a "
+        "sender are set), so a claim without `also_when_storefront_mails` would be recorded "
+        "`skipped`. "
         "With an `Idempotency-Key` that already claimed a message, `claimed` is that "
         "message and neither refusal is answered, as the claim under that key would answer "
         "its row; a key of another order is 409 `idempotency_key_reused`. 409 "

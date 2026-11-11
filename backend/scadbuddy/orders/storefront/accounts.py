@@ -461,6 +461,9 @@ _OWNED: Final = (
     " JOIN storefront_visitors v ON v.id = o.storefront_visitor_id WHERE v.account_id = %(a)s"
     " UNION SELECT o.id, o.created_at FROM orders o"
     " JOIN storefront_account_orders ao ON ao.order_id = o.id WHERE ao.account_id = %(a)s"
+    # A link-made attachment counts only while its link is live (`attach_order`).
+    " AND (ao.link_id IS NULL OR EXISTS (SELECT 1 FROM storefront_order_links l"
+    " WHERE l.id = ao.link_id AND l.revoked_at IS NULL))"
 )
 
 
@@ -483,14 +486,42 @@ def account_owns_order(conn: Conn, account_id: str, order_id: str) -> bool:
     return bool(row and row["owns"])
 
 
-def attach_order(conn: Conn, account_id: str, order_id: str) -> None:
-    """The order joins the account: its link was opened while signed in (§5.2), or it was
-    submitted while signed in. The caller checked the link or the cart. A second attach
-    does nothing."""
+def submitted(conn: Conn, order_id: str) -> bool:
+    """Whether the order was submitted (a cart was not): only that has an order page."""
+    row = conn.execute(
+        "SELECT submitted_at IS NOT NULL AS done FROM orders WHERE id = %s", (order_id,)
+    ).fetchone()
+    return bool(row and row["done"])
+
+
+def attach_order(conn: Conn, account_id: str, order_id: str, link_id: str | None = None) -> None:
+    """The order joins the account: its link was opened while signed in (§5.2, pass the
+    link's id as ``link_id``), or it was submitted while signed in (no ``link_id``). The
+    caller checked the link or the cart.
+
+    A row that exists is never changed, so ``link_id`` is never set or replaced: a submit's
+    row (``link_id`` NULL) always wins over a later link's, and a link-made row stays bound
+    to the link that made it. A link-made row goes only with its link: revoking link A
+    removes A's row (`links.revoke_order_links`), and a later view through a live link B
+    attaches the order again. An expiry removes nothing; only a revoke does.
+
+    A link-made attach inserts only while the link is live, and takes the link's row
+    ``FOR SHARE`` to check it: a revoke running at the same time locks the row first
+    (`links.revoke_order_links`), so this waits for it, then sees the link revoked and
+    inserts nothing. ``account_owns_order`` also ignores a row whose link is revoked."""
+    if link_id is None:
+        conn.execute(
+            "INSERT INTO storefront_account_orders (account_id, order_id, link_id)"
+            " VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING",
+            (account_id, order_id),
+        )
+        return
     conn.execute(
-        "INSERT INTO storefront_account_orders (account_id, order_id) VALUES (%s, %s)"
+        "INSERT INTO storefront_account_orders (account_id, order_id, link_id)"
+        " SELECT %s, %s, l.id FROM storefront_order_links l"
+        " WHERE l.id = %s AND l.revoked_at IS NULL FOR SHARE OF l"
         " ON CONFLICT DO NOTHING",
-        (account_id, order_id),
+        (account_id, order_id, link_id),
     )
 
 
@@ -499,13 +530,13 @@ def submitting_customer(conn: Conn, account_id: str, visitor_row: str | None) ->
     cart's visitor (``visitor_row``, `storefront_visitors.id`) belongs to another account,
     whose cart this session may not submit, and when the account no longer exists.
 
-    The account's row is locked (``FOR UPDATE OF a``) and ``customer_id`` read under that
+    The account's row is locked (``FOR NO KEY UPDATE OF a``) and ``customer_id`` read under that
     lock, so two submits of one account at once run one after the other, and the second
     sees the link the first made (`relink_account`). The lock order is the account, then
     its customer (the caller locks that): no transaction takes them the other way."""
     row = conn.execute(
         "SELECT a.customer_id, v.account_id AS visitor_account FROM storefront_accounts a"
-        " LEFT JOIN storefront_visitors v ON v.id = %s WHERE a.id = %s FOR UPDATE OF a",
+        " LEFT JOIN storefront_visitors v ON v.id = %s WHERE a.id = %s FOR NO KEY UPDATE OF a",
         (visitor_row, account_id),
     ).fetchone()
     if row is None or row["visitor_account"] not in (None, account_id):

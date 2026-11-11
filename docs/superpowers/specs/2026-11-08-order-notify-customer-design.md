@@ -78,9 +78,9 @@ messaging plugin keeps the compose-only tool as it is.
   - Storefront mail goes to **every order with a live (unrevoked) order link**,
     `back_office` orders included ("Send customer link", spec §5.2). A revoked link stops
     it. It does not depend on `orders.source` or `orders.storefront_visitor_id`.
-  - The seam is `storefront_mail_covers(conn, order_id, event, *, host) -> bool`
+  - The seam is `storefront_mail_covers(conn, order_id, event, *, ready) -> bool`
     (`orders/storefront/mail.py`): true when the order has a live order link and a mail
-    host is set. Its events are
+    host and a sender are set. Its events are
     `order_link`, `revision_ready`, `price_ready`, `payment_requested`, `shipped`. It lands
     in scadify's branch `feat/storefront-follow` (PR 1 of #5283).
 
@@ -441,7 +441,7 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 
 1. **Mail not set up.** An order on a shop with no storefront mail gets none. Skipping
    there tells the customer nothing. So the rule asks whether storefront mail *will send*
-   this notice: the seam is true only when a mail host is set.
+   this notice: the seam is true only when a mail host and a sender are set.
 2. **Who gets storefront mail.** Not "a storefront visitor": every order with a live
    order link, `back_office` orders included. A revoked link stops it. A rule keyed on the
    visitor would send twice to a `back_office` order with a link, and skip wrongly for a
@@ -457,25 +457,25 @@ storefront visitor." It is right in intent. It had four gaps, which scadify's an
 ### 8.2 The rule
 
 scadify's seam (#5283, `orders/storefront/mail.py`, on main since #5923) is
-`storefront_mail_covers(conn, order_id, event, *, host) -> bool`: true when the order has
-a live order link and a mail host is set. It does not read `source` or the visitor. This
-design only consumes it (PR 5), in the CRUD service, passing the settings snapshot's
-mail host:
+`storefront_mail_covers(conn, order_id, event, *, ready) -> bool`: true when the order has
+a live order link and ``ready`` (a mail host and a sender are set). It does not read
+`source` or the visitor. This design only consumes it (PR 5), in the CRUD service, passing
+whether the settings snapshot's mail config is ready:
 
 ```python
 STOREFRONT_EVENT = {"quoted": "price_ready", "shipped": "shipped"}
 
-def skipped_for_storefront(conn, order_id: str, template: str, *, host: str | None) -> bool:
+def skipped_for_storefront(conn, order_id: str, template: str, *, ready: bool) -> bool:
     event = STOREFRONT_EVENT.get(template)
-    return event is not None and storefront_mail_covers(conn, order_id, event, host=host)
+    return event is not None and storefront_mail_covers(conn, order_id, event, ready=ready)
 ```
 
 - The claim route (§7.1 step 2) calls it under the order's row lock. `prepareApproval`
   (§5.2) reads the same answer through the read-only `GET …/messages/check`; the agent
   never decides it.
 - As built (PR 5): `orders/messages.py` `STOREFRONT_EVENT` and `_skipped_for_storefront`,
-  with the lifecycle's `mail_host` (the running `storefront_mail_host`; None or empty
-  covers nothing). The seam ignores the event today; the real event is always passed. The
+  with the lifecycle's `mail_ready` (the running mail config has both a host and a
+  sender; otherwise it covers nothing, #5969). The seam ignores the event today; the real event is always passed. The
   agent's `refuseIfTold` refuses `storefront_mail` before anything parks, and a claim that
   comes back `skipped` (the storefront began to mail between the check and the claim)
   sends nothing and says so in its answer's `warning`.
@@ -569,7 +569,7 @@ The owner approved this design on 2026-11-09 with these calls:
    `order_notify_customer_send` is the `outward` send (§5.1).
 2. **Storefront mail** is the CRUD service's, sent after the causing transaction commits;
    it goes to every order with a live order link, `back_office` orders included; the seam
-   is scadify's `storefront_mail_covers(conn, order_id, event, *, host)` (§2, §8). The plugin skips
+   is scadify's `storefront_mail_covers(conn, order_id, event, *, ready)` (§2, §8). The plugin skips
    `quoted` and `shipped` when the seam says the storefront mail sends them, whatever the
    plugin's channel; `also_when_storefront_mails` sends both on purpose.
 3. **The built-in flow** sends only with a new opt-in input `send` (default false). `notify`

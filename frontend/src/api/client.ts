@@ -268,6 +268,7 @@ import type {
   DepositSuggestion,
   OrderMessage,
   CustomerLinkState,
+  OrderMail,
   PolicyUpdate,
   PriceBook,
   StorefrontListing,
@@ -2512,6 +2513,8 @@ export const api = {
   /** #5660 — a person's word that an `unknown` message reached the customer. */
   markOrderMessageSent: (orderId: string, messageId: string) =>
     request<OrderMessage>(`/orders/${seg(orderId)}/messages/${seg(messageId)}/mark-sent`, { method: 'POST' }),
+  /** #5283 — the order's customer mail (the outbox): event, address and state; never a body, link or token. */
+  orderMail: (orderId: string) => request<OrderMail[]>(`/orders/${seg(orderId)}/mail`),
   /** #5283 — the state of the order's customer link (whether it is live, where it went,
    * when it was opened or revoked); never the link itself. */
   customerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`),

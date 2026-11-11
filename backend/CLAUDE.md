@@ -881,8 +881,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `housekeeping_send_storefront_mail` sweep (both Schedules, behind its patch) sends what
   is left. `send_revision` (`revision_ready`), a recorded quote or an unaccepted custom
   price (`price_ready`), `open_payment_request` (`payment_requested`) and `add_shipment`
-  (`shipped`) queue only when `storefront_mail_covers` (a live link and a
-  `storefront_mail_host`), to the link's `sent_to`. The SMTP settings are env-seeded
+  (`shipped`) queue only when `storefront_mail_covers` (a live link and a ready
+  mail config: `storefront_mail_host` and `storefront_mail_sender`), to the link's `sent_to`. The SMTP settings are env-seeded
   `storefront_mail_*` (Settings → Storefront mail), a person's to change
   (`api/settings.py` `MAIL_CONNECTION`, 403 `person_only`). One setting picks the TLS,
   `storefront_mail_tls`: `starttls` (the server must offer it; without it, a server
@@ -900,13 +900,38 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `Lifecycle.submit_order` and the back office's `POST /orders/{id}/customer-link`
   (`send_customer_link`: `to`, or the customer's first email contact that is one address,
   primary first, a malformed one skipped; 422
-  `no_email`, `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`). A
-  live link is replaced only when the body says `replace: true`: without it the route
-  answers 409 `link_live` and changes nothing, so a stale page cannot revoke a live link.
+  `no_customer` (an order with no customer: every customer write runs as it), `no_email`,
+  `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`). A live link is
+  replaced only when the body says `replace: true`: without it the route answers 409
+  `link_live` and changes nothing, so a stale page cannot revoke a live link.
   `DELETE` revokes (`order.customer_link_revoked`, only when one was live); `GET` and
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),
   `order_customer_link_send` (outward), `order_customer_link_revoke` (write).
+  `GET /orders/{id}/mail` (`Lifecycle.order_mail`, `mail.py` `order_mail`, no lock) lists the
+  order's outbox rows, newest first, as `OrderMail`: never the body, context, link or token, and no
+  sign-in code. Agent `order_mail_list` (read).
+  The customer's order page (#5283, spec §5.6): `orders/storefront/order_page.py`, CRUD
+  area `order` (`POST …/storefront/order/view`, `…/revisions/{id}/answer`,
+  `…/quotes/{id}/accept`, `…/cancel`), the edge's `/api/store/v1/order/*`, the page `/o#<token>`.
+  The reader travels in the body only. `resolve` takes a `ByLink` (the token: the live link
+  by its sha256, `links.link_by_token`) or a `ByAccount` (`/o?order=<id>`: the signed-in
+  account must own the submitted order, `accounts.account_owns_order`), and any reader that
+  reads nothing is a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
+  view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
+  `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
+  `test_order_page.py` pins. A revision's pictures (its `render` and `test_print` files and
+  the customer's `reference` files, never another role) are copied once from the packed
+  blob to `customer-file-<sha256>` on S3, held by every attachment that shows them, and
+  presigned; one that cannot be shown (a failed copy, past `MAX_PICTURE_COPY_BYTES`, a store
+  that is not S3) is listed with no URL, never a 500. Its caption is the shop's caption or
+  "Design N, picture K", never the file name. Each revision lists its colour slots with
+  the price book's names. Writes take an `Idempotency-Key` and run as `customer_actor`
+  (session `link:<link id>`, or `account:<account id>` for a signed-in reader) inside the ledger's transaction (`Lifecycle` `InTransaction`,
+  told by `Lifecycle.tell` after commit; the pre-lock checks and `ensure_revision` run on
+  that connection too). The customer's cancel is refused 409 `order_approved` once anything
+  is approved (`Lifecycle.approved_anything`) and 409 `order_paid` once a payment is
+  recorded, a deposit included (`payments.store.has_payment`).
   An item added after acceptance (#5349, spec §3.5 "As built"): `POST
   …/items/after-acceptance` (`Lifecycle.add_item`/`add_request_item`/`add_custom_item`
   with `after_acceptance`, checked by `_takes_item`) on an `accepted`, `in_production` or
@@ -1154,7 +1179,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   storefront overlap (spec §8): a `quoted` or `shipped` claim is recorded `skipped`, reason
   `storefront_mail`, audit row `message.skipped`, when `storefront_mail_covers` says the
   storefront mails that news to the order itself (`STOREFRONT_EVENT`, asked with the
-  lifecycle's `mail_host`), unless the body sets `also_when_storefront_mails`; the check
+  lifecycle's `mail_ready`), unless the body sets `also_when_storefront_mails`; the check
   answers it as `storefront_mail`.
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
@@ -1197,7 +1222,13 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     token's sha256.
   - What an account sees is `orders_of_account`: its visitors' orders plus `attach_order`'s.
     The order page attaches an order whose link was opened while signed in, in its own
-    transaction.
+    transaction, and only for an explicit view (never the view that answers a write). A
+    link-made `storefront_account_orders` row holds its link's id (`link_id`, FK with
+    ON DELETE CASCADE); a submit's row has none. `attach_order` is INSERT … ON CONFLICT
+    DO NOTHING, so a row is never changed: a submit row always wins. `revoke_order_links`
+    deletes the link-made rows of the links it revokes, in its transaction; a later view
+    through another live link attaches again. Only a revoke removes such a row, never an
+    expiry. `/o?order=<id>` also needs a submitted order: a cart is the same empty 404.
   - Old code and failure rows are pruned as new rows are written, and every expired
     session at each sign-in. There is no sweep. The visitor sweep keeps a visitor that
     joined an account.
@@ -1210,7 +1241,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
     customer: then it makes a new one and the account links to it; the account's row is
     locked first, then the customer's, so two submits at once make one), and is
     attached to the account (`attach_order`); a cart whose visitor joined another account
-    is 404 `draft_not_found`. The order page is to take it too (a later PR).
+    is 404 `draft_not_found`. The order page takes it too (`/o?order=<id>`, `order_page.ByAccount`).
     `POST …/account/verify` (Turnstile `sign_in` at the edge, sent once with no retry)
     answers the new token in that header only, never in a body. `POST …/account/sign-out`
     deletes the session, and the edge also gives the browser a new visitor. When the CRUD
@@ -1274,9 +1305,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and `FAILED` move the request, a declined card leaves it open, and a payment or refund
   with no order is `other`; `verify` gives back the location's currency; the facts, each with its Square
   link, are its docstring),
-  `venmo.py` (#4960: once the storefront's `/pay/<token>` page ships (#5283 phase 4,
-  `PAY_PAGE_READY`, false until then), a USD PayPal request from a shop with the `venmo`
-  setting on will link to it; until then no link is rewritten and a connect with `venmo`
+  `venmo.py` (#4960: once `PAY_PAGE_READY` flips (#5283 phase 4 built the storefront's `/pay#<token>`
+  page; the flag stays false until its PayPal sandbox measurement is made), a USD PayPal request from a shop with the `venmo`
+  setting on will link to it; until it is on no link is rewritten and a connect with `venmo`
   `on` is `VenmoPageMissingError`, 409 `venmo_page_missing`, while a connect that leaves
   it out takes `off` (`ProviderField.default`; `ProviderField.unavailable` makes the form
   show `on` disabled, with why). Only the token's sha256 is kept, in

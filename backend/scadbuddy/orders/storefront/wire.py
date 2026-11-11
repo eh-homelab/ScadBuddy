@@ -345,6 +345,126 @@ class SubmittedOrder(BaseModel):
     email: str
 
 
+# -- the customer's order page (#5283, spec §5.6) ------------------------------------------
+#
+# Every field here is in `storefront/wire.py` `ORDER_VIEW_FIELDS` too: the edge sends on
+# nothing else. Never a cost, a margin, an internal note, a shop event or a staff name.
+
+
+class CustomerPicture(BaseModel):
+    """A picture, a video or a 3D preview of a design revision, as a presigned GET of an
+    hour; ``url`` is null when the picture cannot be shown now (its copy failed, or it is
+    too large to copy). ``caption`` is the shop's caption, else "Design N, picture K": never the
+    file's own name, which may be the shop's internal one."""
+
+    url: str | None
+    #: ``model`` is a render's 3D preview (``model/gltf-binary``) for the 3D viewer.
+    kind: Literal["image", "video", "model"]
+    caption: str
+
+
+class CustomerColour(BaseModel):
+    """One colour slot of a design: what the customer accepts with it (spec §4.3).
+    ``name`` is the price book filament's colour name, when it has one."""
+
+    slot: int
+    colour: str
+    name: str | None
+
+
+class CustomerRevision(BaseModel):
+    """A design the shop sent: its note to the customer, and the customer's answer."""
+
+    id: str
+    number: int
+    note: str
+    sent_at: datetime
+    answer: Literal["accepted", "changes_requested", "superseded"] | None
+    answer_note: str | None
+    #: Whether "Accept" and "Ask for changes" are offered: the item's newest sent design,
+    #: not answered yet, on an order that is still open.
+    can_answer: bool
+    pictures: list[CustomerPicture]
+    colours: list[CustomerColour]
+
+
+class CustomerQuote(BaseModel):
+    """The item's price."""
+
+    id: str
+    unit_price_minor: int
+    quantity: int
+    total_minor: int
+    accepted: bool
+    #: Whether "Accept price" is offered. A ``together`` item's price is accepted with
+    #: its design, so only a ``design_first`` item's (once its design is accepted), or an
+    #: item with no design, offers it.
+    can_accept: bool
+
+
+class CustomerItem(BaseModel):
+    id: str
+    title: str
+    quantity: int
+    #: The item's state in the customer's words (`order_page.py` `ITEM_WORDS`).
+    status: str
+    revisions: list[CustomerRevision]
+    quote: CustomerQuote | None
+
+
+class CustomerPayment(BaseModel):
+    """A payment the shop asked for. ``pay_url`` is the request's pay link while it is
+    open; ``paid`` comes only from the provider's settled payment (spec §7). ``failed``
+    shows no link: the shop follows it up."""
+
+    id: str
+    kind: Literal["deposit", "balance"]
+    amount_minor: int
+    currency: str
+    status: Literal["open", "pending", "paid", "failed"]
+    pay_url: str | None
+
+
+class CustomerShipment(BaseModel):
+    carrier: str | None
+    service: str | None
+    tracking: str | None
+    shipped_at: datetime | None
+
+
+class CustomerOrderView(BaseModel):
+    """The customer's order page (`order_page.py` `view`)."""
+
+    number: str
+    #: The order's state in the customer's words (`order_page.py` `ORDER_WORDS`).
+    status: str
+    currency: str
+    minor_exponent: int
+    #: Whether "Cancel order" is offered: nothing is approved and nothing paid yet
+    #: (spec §5.5).
+    can_cancel: bool
+    items: list[CustomerItem]
+    payments: list[CustomerPayment]
+    shipments: list[CustomerShipment]
+
+
+class RevisionAnswerBody(BaseModel):
+    """``POST …/order/revisions/{id}/answer``, past its token."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    answer: Literal["accepted", "changes_requested"]
+    note: str = Field(default="", max_length=4000)
+
+
+class CancelBody(BaseModel):
+    """``POST …/order/cancel``, past its token."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    reason: str = Field(default="", max_length=1000)
+
+
 class SignInBody(BaseModel):
     """A sign-in: the address and the code mailed to it (`orders/storefront/accounts.py`)."""
 

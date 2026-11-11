@@ -76,6 +76,7 @@ describe('order tools (#4249)', () => {
       'order_balance_waive',
       'order_shipping_option_set',
       'order_customer_link_get',
+      'order_mail_list',
       'order_customer_link_send',
       'order_customer_link_revoke',
       'order_notify_customer',
@@ -115,6 +116,7 @@ describe('order tools (#4249)', () => {
       order_balance_waive: 'outward',
       order_shipping_option_set: 'write',
       order_customer_link_get: 'read',
+      order_mail_list: 'read',
       order_customer_link_send: 'outward',
       order_customer_link_revoke: 'write',
       order_notify_customer: 'read',
@@ -392,6 +394,24 @@ describe('order tools (#4249)', () => {
     expect(firstText(await tool('order_payment_requests').execute({ order_id: ORDER }, ctx()))).toEqual([REQUEST])
     await tool('order_request_payment').execute({ order_id: ORDER, provider: null }, ctx())
     expect(sent).toEqual({ provider: null })
+  })
+
+  it("lists an order's customer mail with no lock and no approval (#5283)", async () => {
+    const MAIL = [
+      {
+        event: 'order_link',
+        to: 'ada@example.com',
+        created_at: '2026-11-10T00:00:00Z',
+        sent_at: null,
+        failed_at: null,
+        attempts: 1,
+        last_error: 'try later',
+        next_attempt_at: '2026-11-10T01:00:00Z',
+      },
+    ]
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}/mail`, () => HttpResponse.json(MAIL)))
+    expect(tool('order_mail_list').gated).toBe(false)
+    expect(firstText(await tool('order_mail_list').execute({ order_id: ORDER }, ctx()))).toEqual(MAIL)
   })
 
   it('reads, sends and revokes the customer link; only the send waits for a person (#5283)', async () => {

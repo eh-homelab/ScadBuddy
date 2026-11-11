@@ -8,7 +8,8 @@ import { mockSettings, resetMockState, setMockSettings } from '../mocks/handlers
 import { emitRealtime } from '../mocks/realtime'
 import { mockConnectProvider, mockPaymentEvent } from '../mocks/features/payments'
 import { mockOrderMessage } from '../mocks/features/orders/messages'
-import { mockCustomerLink } from '../mocks/features/orders/customerLink'
+import { mockCustomerLink, mockOrderMail } from '../mocks/features/orders/customerLink'
+import { setMockMailServerError } from '../mocks/features/storefrontMail'
 import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
@@ -614,6 +615,7 @@ describe('OrderPage, the shipping option and the charges (#5281)', () => {
 // customer link. The card shows the link's state, never the link itself.
 describe('OrderPage, the customer link (#5283)', () => {
   beforeEach(() => resetMockState())
+  afterEach(() => vi.useRealTimers())
 
   it("sends a link to the customer's email, replaces it after a confirm, and revokes it", async () => {
     const { user } = render(ORDER_ACCEPTED)
@@ -622,15 +624,15 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(within(card).queryByRole('button', { name: 'Revoke' })).toBeNull()
 
     await user.click(within(card).getByRole('button', { name: 'Send link' }))
-    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('ada@example.test')
-    expect(within(card).getByText('Not opened yet.')).toBeInTheDocument()
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('ada@example.test')
+    expect(within(card).getByText('Not opened')).toBeInTheDocument()
 
     // A live link: a new one asks first, since the old one stops working.
     await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
     await user.click(within(card).getByRole('button', { name: 'Send a new link' }))
     expect(within(card).getByText(/stops working/)).toHaveTextContent('The link sent to ada@example.test stops working.')
     await user.click(within(card).getByRole('button', { name: 'Yes, send a new link' }))
-    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('grace@example.org')
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('grace@example.org')
 
     await user.click(within(card).getByRole('button', { name: 'Revoke' }))
     expect(await within(card).findByText(/Revoked/)).toBeInTheDocument()
@@ -690,7 +692,7 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(await within(card).findByRole('alert')).toHaveTextContent('The customer has no email contact that is one address')
     await user.type(within(card).getByLabelText('Send to'), 'bob@example.org')
     await user.click(within(card).getByRole('button', { name: 'Send link' }))
-    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent('bob@example.org')
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent('bob@example.org')
     expect(within(card).queryByRole('alert')).toBeNull()
   })
 
@@ -699,8 +701,8 @@ describe('OrderPage, the customer link (#5283)', () => {
     mockCustomerLink(ORDER_ACCEPTED, { sent_to: odd, opened_at: '2026-11-09T10:00:00Z' })
     render(ORDER_ACCEPTED)
     const card = await screen.findByRole('region', { name: 'Customer link' })
-    expect(await within(card).findByText(/Live: sent to/)).toHaveTextContent(odd)
-    expect(within(card).getByText(/Opened/)).toBeInTheDocument()
+    expect(await within(card).findByText(/Sent to/)).toHaveTextContent(odd)
+    expect(within(card).getByText(/Opened on/)).toBeInTheDocument()
     expect(card.querySelector('b')).toBeNull()
   })
 
@@ -722,6 +724,156 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(await within(card).findByText('No link sent yet.')).toBeInTheDocument()
     expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
     expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
+  it('shows each mail with its event, address and state, and says the mail server is not set up', async () => {
+    const row = { to: 'ada@example.test', attempts: 0, last_error: null, sent_at: null, failed_at: null }
+    mockOrderMail(ORDER_ACCEPTED, [
+      { ...row, event: 'shipped', created_at: '2026-11-04T10:00:00Z', next_attempt_at: '2026-11-04T10:00:00Z' },
+      { ...row, event: 'price_ready', created_at: '2026-11-03T10:00:00Z', next_attempt_at: '2026-11-03T10:00:00Z', failed_at: '2026-11-03T10:05:00Z', attempts: 5, last_error: 'mailbox full' },
+      { ...row, event: 'revision_ready', created_at: '2026-11-02T10:00:00Z', next_attempt_at: '2026-11-09T11:00:00Z', attempts: 1, last_error: 'try later' },
+      { ...row, event: 'order_link', created_at: '2026-11-01T10:00:00Z', next_attempt_at: '2026-11-01T10:00:00Z', sent_at: '2026-11-01T10:01:00Z' },
+    ])
+    // Only Date is faked, so the page's timers and requests run as usual.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T10:00:00Z'))
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    const items = await within(list).findAllByRole('listitem')
+    expect(items).toHaveLength(4)
+    expect(items[0]).toHaveTextContent('Order shipped')
+    expect(items[0]).toHaveTextContent('ada@example.test')
+    expect(items[0]).toHaveTextContent('Queued')
+    expect(items[1]).toHaveTextContent('Price ready')
+    expect(items[1]).toHaveTextContent('Failed: mailbox full')
+    expect(items[2]).toHaveTextContent('Revision ready')
+    expect(items[2]).toHaveTextContent('Waiting until')
+    expect(items[2]).toHaveTextContent('try later')
+    expect(items[3]).toHaveTextContent('Order link')
+    expect(items[3]).toHaveTextContent('Sent')
+    // The default settings name no SMTP host.
+    expect(within(list).getByText(/mail server is not set up/)).toBeInTheDocument()
+  })
+
+  it('reads a backed-off mail as queued once its next try has passed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-09T12:00:00Z'))
+    mockOrderMail(ORDER_ACCEPTED, [
+      { event: 'revision_ready', to: 'ada@example.test', created_at: '2026-11-02T10:00:00Z', sent_at: null, failed_at: null, attempts: 1, last_error: 'try later', next_attempt_at: '2026-11-09T11:00:00Z' },
+    ])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    const [item] = await within(list).findAllByRole('listitem')
+    expect(item).toHaveTextContent('Queued')
+    expect(item).not.toHaveTextContent('Waiting until')
+    expect(item).toHaveTextContent('try later')
+  })
+
+  it("shows the mail server's last error, and no note once a host and a sender are set", async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+    setMockMailServerError('login refused')
+    mockOrderMail(ORDER_ACCEPTED, [])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
+    expect(within(list).queryByText(/mail server is not set up/)).toBeNull()
+    expect(await within(list).findByText('No mail yet.')).toBeInTheDocument()
+  })
+
+  it('says the mail server is not set up when a host is set and the sender is not', async () => {
+    setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: null })
+    mockOrderMail(ORDER_ACCEPTED, [])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+  })
+
+  describe('mail refresh', () => {
+    const WAITING = {
+      event: 'shipped' as const,
+      to: 'ada@example.test',
+      created_at: '2026-11-04T10:00:00Z',
+      next_attempt_at: '2026-11-04T10:00:00Z',
+      attempts: 0,
+      last_error: null,
+      sent_at: null,
+      failed_at: null,
+    }
+
+    function countMailReads() {
+      const reads = { count: 0 }
+      server.use(
+        http.get('/api/v1/orders/:id/mail', () => {
+          reads.count += 1
+          return HttpResponse.json([WAITING])
+        }),
+      )
+      return reads
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('does not poll the mail while the mail server is not set up', async () => {
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      await within(list).findAllByRole('listitem')
+      const before = reads.count
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(reads.count).toBe(before)
+    })
+
+    it('reads the settings and the server error again on the poll', async () => {
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      const reads = countMailReads()
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      await within(list).findAllByRole('listitem')
+      expect(within(list).queryByRole('alert')).toBeNull()
+      const before = reads.count
+      setMockMailServerError('login refused')
+      await vi.advanceTimersByTimeAsync(16_000)
+      await waitFor(() => expect(reads.count).toBeGreaterThan(before))
+      expect(await within(list).findByRole('alert')).toHaveTextContent('login refused')
+    })
+
+    it('reads the settings again when a link send changes the page', async () => {
+      const { user } = render(ORDER_ACCEPTED)
+      const card = await screen.findByRole('region', { name: 'Customer link' })
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      await within(card).findByText('No link sent yet.')
+      await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+      await user.click(within(card).getByRole('button', { name: 'Send link' }))
+      await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
+    })
+  })
+
+  it('lists the mail a link send queues', async () => {
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.type(within(card).getByLabelText('Send to'), 'grace@example.org')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText('Order link')).toBeInTheDocument()
+    expect(within(list).getByText('grace@example.org')).toBeInTheDocument()
+  })
+
+  it('renders a mail row as text', async () => {
+    mockOrderMail(ORDER_ACCEPTED, [
+      { event: 'order_link', to: '<b>x</b>@example.org', created_at: '2026-11-01T10:00:00Z', sent_at: null, failed_at: '2026-11-01T10:05:00Z', attempts: 5, last_error: '<i>bad</i>', next_attempt_at: '2026-11-01T10:00:00Z' },
+    ])
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText(/bad/)).toBeInTheDocument()
+    expect(list.querySelector('b, i')).toBeNull()
   })
 
   it('shows no card on a cart', async () => {

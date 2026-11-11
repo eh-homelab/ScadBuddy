@@ -49,20 +49,32 @@ edge's checks.
 
 Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
 token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
-reads into the request's account; submit takes the account from there, never from a
-body, and the order page is to (a later PR). ``POST …/account/verify`` signs in by a mailed code
-and sends the new session's token back in `SESSION_HEADER` (never in the body, so no
-logged or relayed JSON holds it), ending the session the browser held; one refusal, 400
-``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``. ``POST
-…/account/sign-out`` deletes the session's row. ``GET …/account`` is the account's email
-or ``null``, and ``GET …/account/orders`` its submitted orders (401 ``sign_in_required``
-with no live session).
-
+reads into the request's account; submit takes the account from there, never from a body,
+and so does the order page (``/o?order=<id>``). ``POST …/account/verify`` signs in by a
+mailed code and sends the new session's token back in `SESSION_HEADER` (never in the body,
+so no logged or relayed JSON holds it), ending the session the browser held; one refusal,
+400 ``sign_in_failed``, for any code that reads nothing, and 429 ``sign_in_limited``.
+``POST …/account/sign-out`` deletes the session's row. ``GET …/account`` is the account's
+email or ``null``, and ``GET …/account/orders`` its submitted orders (401
+``sign_in_required`` with no live session).
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
-edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
+edge's ``/pay#<token>`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
-The token travels in the body, never the path, so no access log holds it. The token is
+The page reads the token from the URL fragment, which the browser never sends, and posts it
+in a body, which the edge forwards. No path or access log holds it. The token is
 the secret here, so it takes no visitor or client header.
+
+Area ``order`` (`orders/storefront/order_page.py`, #5283 Task 5): the customer's order
+page. ``POST …/order/view`` answers the `CustomerOrderView` the body's ``token`` (the
+order link's) opens; ``POST …/order/revisions/{id}/answer``, ``…/order/quotes/{id}/accept``
+and ``…/order/cancel`` (each with an ``Idempotency-Key``, 428 without) are the customer's
+writes, each answering the view after it. Any token that reads nothing (unknown, revoked,
+or not a token) is a 404 with no body, as ``pay/checkout``'s, and the token travels in the
+body only. Signed in, the body may name an ``order_id`` in place of a token: the
+store session's account must own it (`accounts.account_owns_order`), and any failure,
+no session included, is the same 404 with no body. They take no visitor or client
+header: the token, or the session, is the secret; the customer actor's session is the
+link's or the account's.
 """
 
 from __future__ import annotations
@@ -72,20 +84,23 @@ import ipaddress
 import json
 import logging
 import re
+from functools import partial
 from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from scadbuddy.api.deps import PathsDep, ReadBudgetDep, StateDep
+from scadbuddy.api.deps import AppState, PathsDep, ReadBudgetDep, StateDep
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, get_job_preview
+from scadbuddy.api.orders import ensure_order_projects
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, required_key
-from scadbuddy.orders.component import OrdersComponent, OrdersDep
+from scadbuddy.orders.component import ORDERS, OrdersComponent, OrdersDep
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament
+from scadbuddy.orders.storefront import order_page
 from scadbuddy.orders.storefront.accounts import (
     Account,
     AccountOrderRow,
@@ -134,10 +149,13 @@ from scadbuddy.orders.storefront.wire import (
     AccountOrders,
     AccountView,
     AddListingItem,
+    CancelBody,
+    CustomerOrderView,
     DraftView,
     PublicListing,
     PublicListings,
     RenderBody,
+    RevisionAnswerBody,
     SignInBody,
     StoreRender,
     SubmitBody,
@@ -205,7 +223,7 @@ StoreSession = Annotated[str | None, Depends(store_session)]
 
 async def store_account(orders: OrdersDep, session: StoreSession) -> Account | None:
     """The account of the request's session, or None. Submit takes the account from here,
-    never from a body, and so is the order page to (a later PR)."""
+    never from a body, and so does the order page (``order/*``, a `ByAccount` reader)."""
     if session is None:
         return None
 
@@ -508,7 +526,7 @@ async def draft_request(
 
 
 class PayCheckoutRead(BaseModel):
-    """The pay page's token, as the edge took it from ``/pay/{token}``."""
+    """The pay page's token, as the page posted it from the ``/pay#<token>`` fragment."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -580,6 +598,127 @@ async def turnstile_verify(
     config = await asyncio.to_thread(_turnstile_config, state)
     verdict = await verify(config, token=body.token, action=body.action, remoteip=client)
     return TurnstileVerdict(verdict=verdict)
+
+
+#: The body of every order route: the order link's ``token``, or, signed in, the
+#: ``order_id`` the session's account owns; and the write's own fields.
+_ORDER_TOKEN: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "token": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS},
+        "order_id": {"type": "string", "maxLength": order_page.MAX_TOKEN_CHARS},
+    },
+}
+_UNREAD: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {"description": "The reader reads nothing (an empty body)"}
+}
+
+
+def _order_body(model: type[BaseModel] | None = None) -> dict[str, Any]:
+    schema = dict(_ORDER_TOKEN)
+    if model is not None:
+        own = _inlined(model)
+        schema = {
+            **schema,
+            "properties": {**own.get("properties", {}), **schema["properties"]},
+            "required": own.get("required", []),
+        }
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
+
+
+def _account_id(account: Account | None) -> str | None:
+    return None if account is None else account.id
+
+
+def _answered(found: CustomerOrderView | None) -> CustomerOrderView | Response:
+    """The view, or a 404 with no body for a token that reads nothing."""
+    return Response(status_code=status.HTTP_404_NOT_FOUND) if found is None else found
+
+
+@router.post(
+    "/order/view",
+    name="crud_storefront_order_view",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(),
+)
+async def order_view(
+    request: Request, state: StateDep, account: StoreAccount
+) -> CustomerOrderView | Response:
+    """The order the body's token opens, or the signed-in account's ``order_id``, as its
+    customer reads it. The first view stamps the link's ``opened_at``; a link opened while
+    signed in attaches the order to the account."""
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
+    return _answered(await order_page.view(state, reader))
+
+
+def _projects(state: AppState) -> order_page.AfterAccept:
+    """After a customer's write accepted the order: its Bambuddy projects, as
+    `POST /orders/{id}/accept` makes them (best effort)."""
+    orders: OrdersComponent = state.components.get(ORDERS)
+    return partial(ensure_order_projects, orders)
+
+
+@router.post(
+    "/order/revisions/{revision_id}/answer",
+    name="crud_storefront_order_answer",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(RevisionAnswerBody),
+)
+async def order_answer(
+    revision_id: str,
+    request: Request,
+    state: StateDep,
+    account: StoreAccount,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer's answer to a design (`order_page.answer`)."""
+    key = required_key(idempotency_key)
+    reader, body = order_page.read_body(await request.body(), _account_id(account))
+    return _answered(
+        await order_page.answer(state, reader, key, revision_id, body, _projects(state))
+    )
+
+
+@router.post(
+    "/order/quotes/{quote_id}/accept",
+    name="crud_storefront_order_accept",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(),
+)
+async def order_accept(
+    quote_id: str,
+    request: Request,
+    state: StateDep,
+    account: StoreAccount,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer accepts a price (`order_page.accept`)."""
+    key = required_key(idempotency_key)
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
+    return _answered(await order_page.accept(state, reader, key, quote_id, _projects(state)))
+
+
+@router.post(
+    "/order/cancel",
+    name="crud_storefront_order_cancel",
+    response_model=CustomerOrderView,
+    responses=_UNREAD,
+    openapi_extra=_order_body(CancelBody),
+)
+async def order_cancel(
+    request: Request,
+    state: StateDep,
+    account: StoreAccount,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> CustomerOrderView | Response:
+    """The customer cancels the order while nothing is approved and nothing is paid
+    (`order_page.cancel`: 409 ``order_approved``, 409 ``order_paid``)."""
+    key = required_key(idempotency_key)
+    reader, body = order_page.read_body(await request.body(), _account_id(account))
+    return _answered(await order_page.cancel(state, reader, key, body))
 
 
 @router.post(

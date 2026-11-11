@@ -45,10 +45,11 @@ from scadbuddy.storefront.wire import (
 
 #: The CRUD areas the edge calls (`api/crud_areas.py` `CRUD_AREAS["storefront"]`): each
 #: task that adds an area to both sides adds it here. ``pay`` (#4960) is read by the
-#: ``/pay/{token}`` page that #5283 phase 4 builds; the API serves it whole already.
-#: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`).
+#: ``/pay#<token>`` page (#5283 phase 4).
+#: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
+#: customer's order page (#5283).
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
-    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"}
+    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts", "order"}
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
@@ -276,6 +277,33 @@ class StorefrontCrud:
                 _multipart(boundary, text, files),
             ),
         )
+        return response.json()
+
+    async def order(
+        self, path: str, body: bytes, *, key: str | None = None, session: str | None = None
+    ) -> Any:
+        """``POST …/storefront/order/<path>`` (the customer's order page): the page's JSON
+        body as it came, unread, since it holds the order link's token, which never
+        leaves a body; a write's ``Idempotency-Key``; the store session's token
+        (`SESSION_HEADER`), when the browser has one, for a signed-in reader. No visitor
+        or client header: the token or the session is the secret. ``path`` is the edge's
+        own (`storefront/routes.py` checks each id in it), so it cannot leave ``order/``.
+        A reader that reads nothing raises `CrudRefusedError` 404 with no problem."""
+        response = await self._crud.request(
+            "POST",
+            f"{BASE}/order/{path}",
+            content=body,
+            idempotency_key=key,
+            headers=None if session is None else {SESSION_HEADER: session},
+        )
+        return response.json()
+
+    async def pay_checkout(self, body: bytes) -> Any:
+        """``POST …/storefront/pay/checkout``: what the pay page needs to render PayPal's
+        buttons for the request the body's token names. The body goes on as it came,
+        unread: the token is in it only, never a path. A token that reads nothing raises
+        `CrudRefusedError` 404 with no problem."""
+        response = await self._crud.request("POST", f"{BASE}/pay/checkout", content=body)
         return response.json()
 
     async def turnstile_site_key(self) -> str | None:

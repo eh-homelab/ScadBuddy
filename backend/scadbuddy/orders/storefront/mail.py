@@ -68,6 +68,8 @@ from datetime import datetime
 from email.message import EmailMessage
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from scadbuddy.core.secrets import Envelope, Kek, SealError, open_secret, seal_secret
 from scadbuddy.orders.store import MAIL_QUEUED, Conn, OrderStore
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
@@ -91,6 +93,7 @@ __all__ = [
     "MailConnectionUnsetError",
     "MailEvent",
     "MailStatus",
+    "OrderMail",
     "StorefrontMail",
     "check_address",
     "issue_link",
@@ -176,6 +179,48 @@ def secret_aad(row_id: str, host: str, port: int, user: str, tls: MailTls) -> st
     return f"storefront_mail_secret:{row_id}:{host}:{port}:{user}:{tls}"
 
 
+class OrderMail(BaseModel):
+    """One outbox row as the shop sees it (`order_mail`): the event, the address and the
+    state. Never the body, the context, a code, a link, a token or a link id."""
+
+    event: MailEvent
+    to: str
+    created_at: datetime
+    sent_at: datetime | None
+    failed_at: datetime | None
+    attempts: int
+    last_error: str | None
+    next_attempt_at: datetime
+
+
+#: The most rows `order_mail` returns: the newest.
+ORDER_MAIL_MAX = 200
+
+
+def order_mail(conn: Conn, order_id: str) -> list[OrderMail]:
+    """The order's newest outbox rows (at most ``ORDER_MAIL_MAX``), newest first. A sign-in
+    code has no order, so none shows."""
+    found = conn.execute(
+        "SELECT template, to_address, created_at, sent_at, failed_at, attempts, last_error,"
+        " next_attempt_at FROM storefront_mail WHERE order_id = %s"
+        " ORDER BY created_at DESC, id DESC LIMIT %s",
+        (order_id, ORDER_MAIL_MAX),
+    ).fetchall()
+    return [
+        OrderMail(
+            event=r["template"],
+            to=r["to_address"],
+            created_at=r["created_at"],
+            sent_at=r["sent_at"],
+            failed_at=r["failed_at"],
+            attempts=r["attempts"],
+            last_error=r["last_error"],
+            next_attempt_at=r["next_attempt_at"],
+        )
+        for r in found
+    ]
+
+
 def queue_mail(
     conn: Conn, event: MailEvent, to: str, context: dict[str, Any], order_id: str | None
 ) -> str:
@@ -205,14 +250,13 @@ def issue_link(conn: Conn, kek: Kek | None, order_id: str, label: str, to: str) 
     return token
 
 
-def storefront_mail_covers(
-    conn: Conn, order_id: str, event: MailEvent, *, host: str | None
-) -> bool:
-    """Whether ScadBuddy mails ``event`` for the order itself: a mail host is set
-    (``host``, the running ``storefront_mail_host``) and the order has a live order link.
+def storefront_mail_covers(conn: Conn, order_id: str, event: MailEvent, *, ready: bool) -> bool:
+    """Whether ScadBuddy mails ``event`` for the order itself: the mail config is ready
+    (``ready``, the running `MailConfig.ready`: a host and a sender) and the order has a
+    live order link.
     When false the event leaves no row, and stays #5660's plugin's job."""
     del event  # Every event is covered alike today; the plugin asks per event.
-    return bool(host) and live_link(conn, order_id) is not None
+    return ready and live_link(conn, order_id) is not None
 
 
 def _text(error: BaseException) -> str:
