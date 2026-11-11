@@ -1316,11 +1316,14 @@ async def _send_storefront_mail_logged(state: AppState) -> None:
 
 async def _auto_import_prints_logged(state: AppState) -> None:
     """#4699: the print watcher's pass. With ``print_auto_import`` off it reads nothing
-    from Bambuddy and no printer, and forgets when it was switched on."""
+    from Bambuddy and no printer, and forgets when it was switched on. The switch is
+    read with the floor, in one transaction (`AutoImportStore.floor`), not from
+    ``settings``: a ``PUT /settings`` that commits between the two reads never loses its
+    floor (#6011)."""
     store = state.components.get(AUTO_IMPORTS)
     settings = await asyncio.to_thread(state.settings_store.load)
     try:
-        since = await store.floor(settings.print_auto_import)
+        since = await store.floor()
     except Exception:
         logger.exception("could not read when the print watcher was switched on")
         raise

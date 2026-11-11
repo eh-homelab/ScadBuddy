@@ -32,6 +32,12 @@ from scadbuddy.bambuddy.print_links import (
 )
 from scadbuddy.print_watch.activity import row_of
 
+#: `pg_advisory_xact_lock` key (hashed) under which `AutoImportStore.floor` reads the
+#: switch and writes the floor.
+FLOOR_LOCK = "scadbuddy:print-watch:floor"
+#: Why a linked row is shown in the inbox: a model delete removed its link.
+MODEL_GONE = "its model was deleted"
+
 AutoImportState = Literal["linked", "inbox"]
 #: How the watcher matched a model: an earlier import of the same printed file, or the
 #: job's name, word for word.
@@ -95,11 +101,15 @@ class AutoImportStore:
         self._pool = pool
         self.activity = activity
 
-    async def floor(self, enabled: bool) -> datetime | None:
-        """When the watcher was switched on, or None when it is off. The first call that
-        finds it on records now; a call that finds it off forgets that, so switching it
-        on again never imports the time it was off."""
-        return await asyncio.to_thread(self._floor, enabled)
+    async def floor(self) -> datetime | None:
+        """When the watcher was switched on, or None when it is off. It reads the switch
+        (``print_auto_import`` in ``settings``) and writes the floor in one transaction,
+        under `FLOOR_LOCK`, which every caller takes (review of #6002, #6011): a pass that
+        read the settings before a ``PUT /settings`` committed never deletes the floor the
+        write recorded. The first call that finds the switch on records now; a call that
+        finds it off forgets that, so switching it on again never imports the time it
+        was off."""
+        return await asyncio.to_thread(self._floor)
 
     async def known(self, archives: Sequence[Archive]) -> set[int]:
         """Which of ``archives`` the watcher took already: by id, or as the same job (the
@@ -126,12 +136,19 @@ class AutoImportStore:
     ) -> list[AutoImport]:
         """Up to ``limit`` rows below archive ``before``, newest archive first. An inbox
         row whose archive a link names now (a person imported it, or a run's link was
-        found since) is left out."""
+        found since) is left out. A linked row whose model link a model delete removed
+        is shown as an inbox row, with `MODEL_GONE` as its reason (#6011)."""
         return await asyncio.to_thread(self._page, state, limit, before)
 
-    def _floor(self, enabled: bool) -> datetime | None:
-        with self._pool.connection() as conn:
-            if not enabled:
+    def _floor(self) -> datetime | None:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (FLOOR_LOCK,))
+            # Read after the lock: each statement sees what committed before it began.
+            switch = conn.execute(
+                "SELECT value FROM settings WHERE name = 'print_auto_import'"
+            ).fetchone()
+            # Stored as JSON `true` when on; no row (the default) or `false` is off.
+            if switch is None or switch["value"] is not True:
                 conn.execute("DELETE FROM print_auto_import_watch")
                 return None
             row = conn.execute(
@@ -240,15 +257,33 @@ class AutoImportStore:
     def _page(
         self, state: AutoImportState | None, limit: int, before: int | None
     ) -> list[AutoImport]:
+        # A linked row whose model link is gone (a model delete removed it,
+        # `PrintLinkStore.delete_models`) is shown as an inbox row (#6011): the print is
+        # a person's to sort again, and `known` still keeps the watcher from taking it
+        # twice. Like any inbox row, it leaves the inbox once a link names its archive.
+        plain = ", ".join(
+            f"r.{c}" for c in _COLUMNS if c not in ("state", "slug", "matched_by", "reason")
+        )
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {', '.join(_COLUMNS)}, seen_at FROM print_auto_imports a"
-                " WHERE (%(state)s::text IS NULL OR a.state = %(state)s)"
-                " AND (%(before)s::bigint IS NULL OR a.archive_id < %(before)s)"
-                " AND (a.state = 'linked' OR NOT EXISTS"
-                "  (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id))"
-                " ORDER BY a.archive_id DESC LIMIT %(limit)s",
-                {"state": state, "before": before, "limit": limit},
+                f"SELECT {plain}, r.shown AS state,"
+                " CASE WHEN r.gone THEN NULL ELSE r.slug END AS slug,"
+                " CASE WHEN r.gone THEN NULL ELSE r.matched_by END AS matched_by,"
+                " CASE WHEN r.gone THEN %(gone)s ELSE r.reason END AS reason,"
+                " r.seen_at"
+                " FROM (SELECT g.*, CASE WHEN g.gone THEN 'inbox' ELSE g.state END AS shown"
+                "  FROM (SELECT a.*,"
+                "   a.state = 'linked' AND NOT EXISTS (SELECT 1 FROM print_links l"
+                "    WHERE l.archive_id = a.archive_id AND l.subject = 'model:' || a.slug)"
+                "   AS gone,"
+                "   EXISTS (SELECT 1 FROM print_links l WHERE l.archive_id = a.archive_id)"
+                "   AS any_link"
+                "   FROM print_auto_imports a"
+                "   WHERE (%(before)s::bigint IS NULL OR a.archive_id < %(before)s)) g) r"
+                " WHERE (%(state)s::text IS NULL OR r.shown = %(state)s)"
+                " AND (r.shown = 'linked' OR NOT r.any_link)"
+                " ORDER BY r.archive_id DESC LIMIT %(limit)s",
+                {"state": state, "before": before, "limit": limit, "gone": MODEL_GONE},
             ).fetchall()
         return [AutoImport.model_validate(dict(row)) for row in rows]
 
