@@ -414,13 +414,14 @@ class CustomerItem(BaseModel):
 
 class CustomerPayment(BaseModel):
     """A payment the shop asked for. ``pay_url`` is the request's pay link while it is
-    open; ``paid`` comes only from the provider's settled payment (spec §7)."""
+    open; ``paid`` comes only from the provider's settled payment (spec §7). ``failed``
+    shows no link: the shop follows it up."""
 
     id: str
     kind: Literal["deposit", "balance"]
     amount_minor: int
     currency: str
-    status: Literal["open", "pending", "paid"]
+    status: Literal["open", "pending", "paid", "failed"]
     pay_url: str | None
 
 
