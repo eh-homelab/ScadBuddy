@@ -2696,6 +2696,18 @@ class OrderStore:
             (key, ATTACHMENT_HOLDER, attachment_id),
         )
 
+    def held_by_attachment(self, key: str, attachment_id: str, *, conn: Conn | None = None) -> bool:
+        """Whether the attachment already holds ``key`` (`hold_with_attachment`)."""
+        with self._read(conn) as c:
+            return (
+                c.execute(
+                    "SELECT 1 FROM blob_refs WHERE key = %s AND holder_kind = %s"
+                    " AND holder_id = %s",
+                    (key, ATTACHMENT_HOLDER, attachment_id),
+                ).fetchone()
+                is not None
+            )
+
     def delete_attachment(self, conn: Conn, attachment_id: str) -> None:
         """The row and its hold on the file, together; the blob sweep takes the bytes
         once nothing else holds them. The one way an attachment goes: nothing cascades

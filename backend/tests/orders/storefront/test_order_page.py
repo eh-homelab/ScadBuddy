@@ -25,7 +25,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.orders.attachments import keep_file
-from scadbuddy.orders.lifecycle import Lifecycle, ManualQuoteInput, NewModelItem
+from scadbuddy.orders.lifecycle import Lifecycle, LifecycleError, ManualQuoteInput, NewModelItem
 from scadbuddy.orders.models import Actor, Order, OrderItem, Revision
 from scadbuddy.orders.numbers import next_number
 from scadbuddy.orders.storefront import order_page
@@ -398,6 +398,36 @@ def test_the_view_shows_pay_links_and_paid_requests(api: TestClient, crud: CrudC
     ]
 
 
+def test_a_failed_request_shows_as_not_settled_with_no_link(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    with _orders(api).store.transaction() as conn:
+        request = payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="deposit",
+            provider="fake",
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        payments.set_request_link(
+            conn, request.id, provider_ref="r1", hosted_url="https://pay.example/1", link_error=None
+        )
+        payments.set_request_status(conn, request.id, "failed")
+    shown = made.reader.view().json()["payments"]
+    assert [(p["kind"], p["status"], p["pay_url"]) for p in shown] == [("deposit", "failed", None)]
+
+
+def test_an_order_not_found_refusal_reads_nothing() -> None:
+    assert order_page._refusal(LifecycleError("order_not_found", "x", not_found=True)) is None
+    refused = order_page._refusal(LifecycleError("item_not_found", "x", not_found=True))
+    assert refused is not None and refused.status == 404
+    other = order_page._refusal(LifecycleError("something_else", "x"))
+    assert other is not None and other.status == 409
+
+
 # -- answers -----------------------------------------------------------------------------
 
 
@@ -757,6 +787,25 @@ def test_a_revisions_pictures_are_presigned_once(
     again = made.reader.view().json()["items"][0]["revisions"][0]["pictures"]
     assert len(again) == 1 and again[0]["url"]
     assert puts == [customer_file_key(sha256(PNG).hexdigest())]
+
+
+def test_a_held_copy_opens_no_hold_transaction(
+    s3_api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    crud = CrudCaller(s3_api)
+    made = make_order(s3_api, crud)
+    made.reader.view()
+    holds: list[str] = []
+    store_cls = type(_orders(s3_api).store)
+    real = store_cls.hold_with_attachment
+
+    def spy(self: Any, conn: Any, key: str, attachment_id: str) -> None:
+        holds.append(attachment_id)
+        real(self, conn, key, attachment_id)
+
+    monkeypatch.setattr(store_cls, "hold_with_attachment", spy)
+    [picture] = made.reader.view().json()["items"][0]["revisions"][0]["pictures"]
+    assert picture["url"] and holds == []
 
 
 def test_a_shared_picture_is_held_by_every_attachment_that_shows_it(s3_api: TestClient) -> None:

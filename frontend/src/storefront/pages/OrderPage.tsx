@@ -72,6 +72,7 @@ export function OrderPage() {
   }, [who])
 
   useEffect(() => {
+    setOrder(undefined)
     if (who) void load()
     else setOrder(null)
   }, [who, load])
@@ -317,6 +318,9 @@ function Payments({ order }: { order: CustomerOrder }) {
               {`${what(payment)} of ${amount}: `}
               {payment.status === 'paid' && <strong>Paid</strong>}
               {payment.status === 'pending' && <span>We are confirming your payment.</span>}
+              {payment.status === 'failed' && (
+                <span>This payment did not go through. The shop will be in touch.</span>
+              )}
               {payment.status === 'open' &&
                 (payment.pay_url ? (
                   <a className="sf-button" href={payment.pay_url} rel="noreferrer">

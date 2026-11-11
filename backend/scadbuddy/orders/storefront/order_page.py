@@ -315,6 +315,8 @@ async def _hold(state: AppState, key: str, attachment_id: str) -> None:
     orders = _orders(state)
 
     def hold() -> None:
+        if orders.store.held_by_attachment(key, attachment_id):
+            return
         with orders.store.transaction() as conn:
             orders.store.hold_with_attachment(conn, key, attachment_id)
 
@@ -508,11 +510,11 @@ async def _item(
 
 def _payments(rows: _Rows) -> list[CustomerPayment]:
     """Each request the customer can act on or has paid: an open one with its pay link,
-    a pending one (the provider is settling it) and a paid one."""
+    a pending one (the provider is settling it), a paid one and a failed one (no link)."""
     links = {r.id: r.hosted_url for r in rows.open_requests}
     shown: list[CustomerPayment] = []
     for request in rows.requests:
-        if request.status not in ("open", "pending", "paid"):
+        if request.status not in ("open", "pending", "paid", "failed"):
             continue
         shown.append(
             CustomerPayment(
@@ -602,10 +604,13 @@ _REFUSALS: Final[dict[str, str]] = {
 _NOT_FOUND: Final = frozenset({"revision_not_found", "quote_not_found", "item_not_found"})
 
 
-def _refusal(error: LifecycleError) -> ApiError:
+def _refusal(error: LifecycleError) -> ApiError | None:
     """What the customer reads for the lifecycle's refusal: never its own text, which
-    names the shop's ids."""
-    if error.slug in _NOT_FOUND or (error.not_found and error.slug != "order_not_found"):
+    names the shop's ids. None for ``order_not_found``: the order is gone, which the
+    page's reads answer with an empty 404."""
+    if error.slug == "order_not_found":
+        return None
+    if error.slug in _NOT_FOUND or error.not_found:
         return problem(status.HTTP_404_NOT_FOUND, error.slug, "There is no such item.")
     if error.slug == "note":
         return problem(
@@ -699,7 +704,10 @@ async def _write(
     except _UnreadError:
         return None
     except LifecycleError as error:
-        raise _refusal(error) from None
+        refused = _refusal(error)
+        if refused is None:
+            return None
+        raise refused from None
     if accepted is not None and before is not None and before.status != "accepted":
         after = await asyncio.to_thread(orders.store.order, access.order_id)
         if after is not None and after.status == "accepted":

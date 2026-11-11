@@ -1,5 +1,6 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
 import type { CustomerOrder } from '../api/client'
@@ -243,6 +244,51 @@ describe('OrderPage', () => {
     const answer = sent.find((s) => s.path.endsWith('/answer'))!
     expect(answer.body).toEqual({ token: TOKEN, answer: 'accepted', note: '' })
     expect(answer.key).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it('shows a failed payment as not settled, with no pay link', async () => {
+    serve({ ...ORDER, payments: [{ ...OPEN, status: 'failed', pay_url: null }] })
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByText('This payment did not go through. The shop will be in touch.')).toBeInTheDocument()
+    expect(screen.queryByText('Paid')).toBeNull()
+    expect(screen.queryByRole('link', { name: /Pay/ })).toBeNull()
+  })
+
+  it('drops the order shown when the reader changes in place', async () => {
+    const other = { ...ORDER, number: '2026-8' } satisfies CustomerOrder
+    const first = { ...ORDER, number: '2026-7' } satisfies CustomerOrder
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/store/v1/order/view', async ({ request }) => {
+        const body = (await request.json()) as { token?: string }
+        if (body.token === 'other') {
+          await gate
+          return HttpResponse.json(other)
+        }
+        return HttpResponse.json(first)
+      }),
+    )
+    let go: (to: string) => void = () => {}
+    function Jump() {
+      const navigate = useNavigate()
+      go = (to) => navigate(to)
+      return null
+    }
+    renderPage(
+      <>
+        <Jump />
+        <OrderPage />
+      </>,
+      { route: `/o#${TOKEN}` },
+    )
+    expect(await screen.findByRole('heading', { name: 'Order 2026-7' })).toBeInTheDocument()
+    act(() => go('/o#other'))
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Order 2026-7' })).toBeNull())
+    release()
+    expect(await screen.findByRole('heading', { name: 'Order 2026-8' })).toBeInTheDocument()
   })
 
   it('shows Paid only after a fresh read, never from the redirect', async () => {
