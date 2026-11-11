@@ -10,6 +10,7 @@ control connection, passive data connections, ``STOR`` only."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import logging
@@ -17,6 +18,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -218,3 +220,45 @@ def test_a_download_stops_past_its_cap(monkeypatch: pytest.MonkeyPatch) -> None:
         printer._download("10.0.0.9", "/cache/x.3mf", 2500)
     assert session.closed
     assert printer._download("10.0.0.9", "/cache/x.3mf", 10_000) == b"x" * 10_000
+
+
+class _Endless:
+    """An FTPS session whose ``RETR`` sends a 1-byte block every 10 ms, for about 5 s."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.closed = threading.Event()
+        self.blocks = 0
+
+    def retrbinary(self, command: str, callback: Callable[[bytes], object]) -> str:
+        self.started.set()
+        for _ in range(500):
+            callback(b"x")
+            self.blocks += 1
+            time.sleep(0.01)
+        return "226 done"
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+async def test_a_cancelled_download_closes_its_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6045: a caller's bound that runs out (the print watcher's ``CAPTURE_TIMEOUT``)
+    stops the FTPS thread at its next block, not when the file ends."""
+    printer = LanPrinter("10.0.0.9", "01P00A000000001", CODE, "ab" * 32)
+    session = _Endless()
+    monkeypatch.setattr(printer, "_ftps", lambda address: session)
+
+    async def address(host: str) -> str:
+        return host
+
+    monkeypatch.setattr(lan_module, "lan_address", address)
+    task = asyncio.create_task(printer.download("/cache/x.3mf"))
+    assert await asyncio.to_thread(session.started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(session.closed.wait, 2)
+    assert session.blocks < 500

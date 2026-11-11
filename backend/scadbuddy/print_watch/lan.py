@@ -308,7 +308,8 @@ class LanImportActivities:
     async def capture(self, job: LanJob, *, last: bool) -> LanCapture:
         """The job's file read and kept, or why not, within `CAPTURE_TIMEOUT`. Raises a
         failure, unless ``last``: then whatever failed (a read that may pass, one past the
-        bound, any other error) is the capture's reason, so the print is still recorded."""
+        bound, any other error) is the capture's reason, so the print is still recorded.
+        A read past the bound stops its FTPS thread too (`LanPrinter.download`)."""
         try:
             return await asyncio.wait_for(self._capture(job), CAPTURE_TIMEOUT.total_seconds())
         except _Retry as failure:
