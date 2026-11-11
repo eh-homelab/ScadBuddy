@@ -317,6 +317,27 @@ async def test_a_failing_archive_waits_behind_the_others(monkeypatch: pytest.Mon
     assert seen == [2, 1]
 
 
+async def test_a_failure_that_cannot_be_recorded_does_not_end_the_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6024 review: the failure's bookkeeping write failing too still lets the pass go
+    on to the archives after it."""
+
+    class Failing(Store):
+        async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
+            if row.archive_id == 1:
+                raise RuntimeError("the printer did not answer")
+            return await super().record(row, plate_id=plate_id)
+
+        async def failed(self, archive_id: int, *, forget_before: datetime) -> None:
+            raise RuntimeError("the database blinked")
+
+    store = Failing()
+    sources = [found("archive", name="demo.gcode.3mf")]
+    await _pass(monkeypatch, [detail(1), detail(2)], sources=sources, store=store)
+    assert [row.archive_id for row in store.rows] == [2]
+
+
 # --- the printer's storage ----------------------------------------------------------
 
 PRINTER: Any = ("archive", "archive_source", "library", "printer")

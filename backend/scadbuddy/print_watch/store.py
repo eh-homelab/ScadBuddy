@@ -143,7 +143,9 @@ class AutoImportStore:
     async def failed(self, archive_id: int, *, forget_before: datetime) -> None:
         """Record now as when the import of ``archive_id`` last raised, so the next passes
         take it after the archives that did not fail (#6023). It also forgets the failures
-        recorded before ``forget_before``: their archives are past the pass's look-back."""
+        recorded before ``forget_before``: their archives are past the pass's look-back.
+        Until the next failure such rows stay, which is harmless: `failures` is asked only
+        about archives inside the look-back."""
         await asyncio.to_thread(self._failed, archive_id, forget_before)
 
     async def page(

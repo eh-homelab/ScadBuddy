@@ -262,8 +262,18 @@ class AutoImporter:
                     "could not import a print ScadBuddy did not start",
                     extra={"archive_id": archive.id},
                 )
-                # Taken after the others on the next passes (#6023).
-                await self.store.failed(archive.id, forget_before=datetime.now(UTC) - LOOKBACK)
+                # Taken after the others on the next passes (#6023). Written outside
+                # `import_lock`: if the other Schedule's pass takes the archive meanwhile,
+                # the row left is harmless, because a known archive is never sorted and
+                # the row is forgotten once it is past `LOOKBACK`.
+                try:
+                    await self.store.failed(archive.id, forget_before=datetime.now(UTC) - LOOKBACK)
+                except Exception:
+                    # The order is bookkeeping: a failed write must not end the pass.
+                    logger.exception(
+                        "could not record a failed print import",
+                        extra={"archive_id": archive.id},
+                    )
                 state = None
             if state == "linked":
                 result.linked += 1

@@ -25,7 +25,7 @@ from scadbuddy.bambuddy.print_links import PrintImport, PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.main import _auto_import_prints_logged
 from scadbuddy.print_watch.component import AUTO_IMPORTS
-from scadbuddy.print_watch.store import MODEL_GONE, AutoImportStore
+from scadbuddy.print_watch.store import FLOOR_LOCK, MODEL_GONE, AutoImportStore
 from scadbuddy.print_watch.sweep import LOOKBACK, NO_MATCH
 from tests.api.test_print_history import archive, state
 from tests.api.test_send import API, configure
@@ -427,8 +427,14 @@ class _PausingPool:
 def _floor_waiters(pool: Any) -> int:
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            # Only `FLOOR_LOCK`'s waiters: a bigint advisory key is split into `classid`
+            # (its high 32 bits) and `objid` (its low 32 bits), with `objsubid` 1.
+            "WITH k AS (SELECT hashtextextended(%s, 0) AS key)"
+            " SELECT count(*) AS n FROM pg_locks, k WHERE locktype = 'advisory' AND NOT granted"
             " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            " AND classid = ((k.key >> 32) & 4294967295)::oid"
+            " AND objid = (k.key & 4294967295)::oid AND objsubid = 1",
+            (FLOOR_LOCK,),
         ).fetchone()
     return int(row["n"])
 
