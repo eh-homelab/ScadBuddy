@@ -198,6 +198,8 @@ describe('Settings → Payments, paying by hand (#5281)', () => {
   it('saves the payment instructions as plain text', async () => {
     const { user } = renderSettingsSection(<Payments />, { route })
     const box = await screen.findByLabelText('Payment instructions')
+    // The box is disabled until the settings load: keys typed before that are lost.
+    await waitFor(() => expect(box).toBeEnabled())
     await user.type(box, 'Bank transfer to <b>12-34</b>, with the order number.')
     await user.click(screen.getByRole('button', { name: 'Save instructions' }))
     await waitFor(() => expect(mockSettings().storefront_payment_instructions).toBe('Bank transfer to <b>12-34</b>, with the order number.'))
