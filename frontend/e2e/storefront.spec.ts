@@ -57,6 +57,9 @@ test.describe('the public storefront', () => {
     await expect(page.getByText('You accepted this design.')).toBeVisible()
     await expect(page.getByText('Price: $12.50')).toBeVisible()
     await expect(page.getByRole('link', { name: 'Pay $12.50' })).toBeVisible()
+    // The mock's manual deposit, beside the balance's link: the shop's own words.
+    await expect(page.getByRole('heading', { name: 'How to pay' })).toBeVisible()
+    await expect(page.getByText(/Venmo @example-shop/)).toBeVisible()
     expect(paths.filter((url) => /[/=?&]tok([/?&#]|$)/.test(url))).toEqual([])
     const width = Number(await page.evaluate('document.documentElement.scrollWidth'))
     expect(width).toBeLessThanOrEqual(390)

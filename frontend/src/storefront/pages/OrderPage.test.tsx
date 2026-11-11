@@ -275,6 +275,22 @@ describe('OrderPage', () => {
     expect(screen.queryByRole('link', { name: /Pay/ })).toBeNull()
   })
 
+  it('shows a Pay link and the instructions on one order', async () => {
+    serve({
+      ...ORDER,
+      payments: [
+        { ...OPEN, id: 'p1', kind: 'balance' },
+        { ...OPEN, id: 'p2', kind: 'deposit', amount_minor: 500, pay_url: null, manual: true },
+      ],
+      payment_instructions: 'Venmo @shop',
+    })
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByRole('link', { name: 'Pay $12.50' })).toHaveAttribute('href', 'https://pay.example/1')
+    expect(screen.getByText('Pay the shop as described below.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'How to pay' })).toBeInTheDocument()
+    expect(screen.getByText('Venmo @shop')).toBeInTheDocument()
+  })
+
   it("sends only a manual request's customer to the instructions", async () => {
     serve({
       ...ORDER,
