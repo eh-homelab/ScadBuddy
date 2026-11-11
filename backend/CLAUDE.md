@@ -574,8 +574,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   Schedule's next pass takes it. The watch runs in the print worker (or the API
   in-process), so the nudge is a Temporal start: no new SQL, grant or route; it reads
   the settings over the CRUD route and the row through the watch's own
-  `PrinterStore.get`, the read each watch attempt already makes. A nudge that fails or
-  passes `watch.NUDGE_TIMEOUT` (10 s) is logged and never ends the watch.
+  `PrinterStore.get`, the read each watch attempt already makes. The settings read is
+  bounded by `SETTINGS_TIMEOUT` (5 s, #6034). Each nudge is a task of its own, off the
+  watch's loop (its heartbeat, next report and rack settle never wait for it), cancelled
+  past `watch.NUDGE_TIMEOUT` (10 s) or when its attempt ends. A nudge that fails is
+  logged and never ends the watch.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through

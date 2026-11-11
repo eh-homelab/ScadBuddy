@@ -43,9 +43,10 @@ no row, so the prune Schedule's next pass takes it, as it did before this nudge.
 nudge run per job would only shorten that rare wait, and would need a workflow change for
 its timer; the Schedule is the retry.
 
-A nudge that fails (Temporal or the API not answering), or takes longer than
-`printers.watch.NUDGE_TIMEOUT`, is logged and never ends the watch: the Schedule's pass
-still comes.
+The settings read is bounded by `SETTINGS_TIMEOUT` (#6034). The watch runs each nudge
+as a task of its own, off its report loop, and cancels it past
+`printers.watch.NUDGE_TIMEOUT` or when its attempt ends. A nudge that fails is logged
+and never ends the watch: the Schedule's pass still comes.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from temporalio import activity
 from temporalio.client import Client, WorkflowHandle
@@ -71,6 +72,9 @@ from scadbuddy.workflows.housekeeping import (
 #: How long a nudge run waits before its pass: Bambuddy reads the 3MF from the printer
 #: before it makes the archive.
 NUDGE_DELAY = timedelta(seconds=30)
+#: The bound of the settings read, retries included (#6034), below the watch's
+#: `NUDGE_TIMEOUT`, so a stalled API never leaves the read's thread running past it.
+SETTINGS_TIMEOUT = 5.0
 #: The ``subtask_name`` of a native run's LAN start (`workflows/printing.py` `_start_lan`).
 NATIVE_SUBTASK = re.compile(r"scadbuddy-[0-9a-f]{8}-p\d+(?:-c\d+)?")
 
@@ -114,13 +118,19 @@ async def start_pass(
 Start = Callable[[str], Awaitable[object]]
 
 
+class SettingsLoader(Protocol):
+    """`SettingsReader.load`: ``timeout`` bounds the whole read, retries included."""
+
+    def __call__(self, timeout: float | None = None) -> StoredSettings: ...
+
+
 class Nudger:
     """The watch's nudge. ``load_settings`` and ``get_printer`` are blocking (run in a
     thread); ``start`` defaults to `start_pass` on the activity's own client."""
 
     def __init__(
         self,
-        load_settings: Callable[[], StoredSettings],
+        load_settings: SettingsLoader,
         get_printer: Callable[[str], PrinterRow | None],
         task_queue: str,
         *,
@@ -136,7 +146,7 @@ class Nudger:
         watcher would take it (`wanted`). True when it asked for one."""
         if claimed(subtask):
             return False
-        settings = await asyncio.to_thread(self.load_settings)
+        settings = await asyncio.to_thread(self.load_settings, timeout=SETTINGS_TIMEOUT)
         if not settings.print_auto_import:
             return False
         row = await asyncio.to_thread(self.get_printer, printer_id)
