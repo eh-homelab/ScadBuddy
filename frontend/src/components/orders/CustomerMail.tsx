@@ -7,6 +7,13 @@ import { When } from './When'
 /** How often the list is read again while a mail waits to be sent. */
 const WAITING_REFRESH_MS = 15_000
 
+/** How often the settings are read again while mail is queued and the server is not set up. */
+const UNSET_REFRESH_MS = 60_000
+
+/** The most rows the API returns (backend `ORDER_MAIL_MAX`): the newest. A test checks it
+ * against the route's `maxItems` in the exported spec. */
+const MAIL_MAX = 200
+
 const EVENT: Record<OrderMail['event'], string> = {
   sign_in_code: 'Sign-in code',
   order_link: 'Order link',
@@ -27,6 +34,8 @@ function State({ mail, now }: { mail: OrderMail; now: number }) {
   if (mail.failed_at) return <span className="text-warn">Failed: {mail.last_error ?? 'no reason was given'}</span>
   // Waiting only while its next try is still ahead; after that the sender owes it, so it reads queued.
   // Either way the refusal stays visible.
+  // A row held back by the process-wide server backoff has no attempts of its own, so it reads
+  // "Queued", not "Waiting". The server-error alert above the list explains it.
   const refusal = mail.last_error && <span className="text-muted-foreground"> ({mail.last_error})</span>
   if (mail.attempts > 0 && Date.parse(mail.next_attempt_at) > now) {
     return (
@@ -64,6 +73,9 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
   // A row the sender stamps publishes nothing, so read again while a row waits.
   // With no mail server set up, nothing is sent, so there is nothing to wait for.
   const waiting = !unset && (mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false)
+  // Queued rows with no server set up: settings changed in another tab clear the note, so
+  // read the settings slowly. When they show a server, `waiting` turns on and the poll resumes.
+  const queuedUnset = unset && (mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false)
   const refreshMail = mail.refresh
   const refreshSettings = settings.refresh
   const refreshServer = server.refresh
@@ -76,6 +88,11 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
     }, WAITING_REFRESH_MS)
     return () => clearInterval(timer)
   }, [waiting, refreshMail, refreshSettings, refreshServer])
+  useEffect(() => {
+    if (!queuedUnset) return
+    const timer = setInterval(refreshSettings, UNSET_REFRESH_MS)
+    return () => clearInterval(timer)
+  }, [queuedUnset, refreshSettings])
   // The settings and the server's error are read again when the page changes the link.
   const firstVersion = useRef(version)
   useEffect(() => {
@@ -122,6 +139,9 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
             </li>
           ))}
         </ul>
+      )}
+      {mail.data && mail.data.length >= MAIL_MAX && (
+        <p className="text-[13px] text-muted-foreground">The list shows at most the newest {MAIL_MAX}.</p>
       )}
     </section>
   )

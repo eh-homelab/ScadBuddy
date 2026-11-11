@@ -155,7 +155,7 @@ from scadbuddy.orders.store import (
 )
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.links import LinkState
-from scadbuddy.orders.storefront.mail import OrderMail
+from scadbuddy.orders.storefront.mail import ORDER_MAIL_MAX, OrderMail
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.credentials import KekMissingError
@@ -1436,13 +1436,13 @@ async def get_customer_link(order_id: str, orders: OrdersDep) -> LinkState:
 
 @router.get(
     "/{order_id}/mail",
-    response_model=list[OrderMail],
+    response_model=Annotated[list[OrderMail], Field(max_length=ORDER_MAIL_MAX)],
     summary="The customer mail of an order",
     description=(
         "The order's rows in the storefront mail outbox, newest first: the event, the "
         "address, when it was queued, sent or given up, the attempts charged to it (a "
         "recipient's refusals, and server failures answered to its own mail), the last error "
-        "and when the next try is due. At most the newest 200. Never the body, the "
+        f"and when the next try is due. At most the newest {ORDER_MAIL_MAX}. Never the body, the "
         "context, a code, a link or a token. A sign-in code has no order and never shows."
     ),
 )
