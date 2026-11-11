@@ -11,8 +11,12 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from psycopg.errors import QueryCanceled
+from psycopg_pool import PoolTimeout
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.print_watch.nudge import Nudger
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.reports import (
@@ -135,3 +139,39 @@ async def test_a_nudge_in_flight_ends_with_its_attempt() -> None:
     await asyncio.sleep(0)
 
     assert nudges.cancelled == ["x"]
+
+
+@pytest.mark.parametrize("error", [PoolTimeout("no connection"), QueryCanceled("timed out")])
+async def test_a_bounded_read_that_gives_up_is_logged_and_the_watch_goes_on(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#6038 review: the nudge's printer read gives up with `PoolTimeout` (the pool wait)
+    or `QueryCanceled` (the statement). Either is logged, and the reports go on."""
+
+    def get(printer_id: str, timeout: float | None = None) -> Any:
+        raise error
+
+    async def start(task_queue: str) -> None:
+        raise AssertionError("no pass starts when the printer read fails")
+
+    nudger = Nudger(
+        lambda timeout=None: StoredSettings(print_auto_import=True), get, "library", start=start
+    )
+    lan = Lan(subscribes=True, deltas=[RUNNING_X, FINISH_X, RUNNING_Y])
+    reports, rack = Reports(), Settles()
+    watches = WatchActivities(
+        cast(PrinterStore, Printers()),
+        cast(PrinterReportStore, reports),
+        None,
+        connect=lambda *a: cast(LanPrinter, lan),
+        write_every=0,
+        rack=cast(LanUsage, rack),
+        nudge=nudger.nudge,
+    )
+    with caplog.at_level(logging.WARNING, logger=watch_module.__name__):
+        await _run_for(watches, 0.4)
+
+    assert reports.written == [RUNNING_X, FINISH_X, RUNNING_Y]
+    failed = [r for r in caplog.records if "nudge failed" in r.getMessage()]
+    assert len(failed) == 2
+    assert all(r.exc_info and isinstance(r.exc_info[1], type(error)) for r in failed)
