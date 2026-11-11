@@ -69,6 +69,7 @@ function serveOrder(): void {
       { id: 'p1', kind: 'balance', amount_minor: 1250, currency: 'USD', status: 'open', pay_url: `/pay#${TOKEN}` },
     ],
     shipments: [],
+    payment_instructions: null,
   }
   server.use(http.post('/api/store/v1/order/view', () => HttpResponse.json(order)))
 }
