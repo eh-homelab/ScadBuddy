@@ -165,6 +165,50 @@ describe('Submitting the order', () => {
     expect(screen.queryByText('Name keychain')).toBeNull()
   })
 
+  it('sends a country typed in lower case as the two capital letters the server takes', async () => {
+    let body: { address?: { country?: string } } | null = null
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)),
+      http.post('/api/store/v1/draft/submit', async ({ request }) => {
+        body = (await request.json()) as typeof body
+        return HttpResponse.json({ id: 'd1', number: 'ORD-2026-7', email: 'ada@example.com' })
+      }),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('radio', { name: /Post/ }))
+    await user.type(screen.getByLabelText('Recipient'), 'Ada Lovelace')
+    await user.type(screen.getByLabelText('Street address'), '1 Analytical Way')
+    await user.type(screen.getByLabelText('Town or city'), 'London')
+    await user.type(screen.getByLabelText(/Country code/), 'gb')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText(/We have your order/)).toBeInTheDocument()
+    expect(body!.address!.country).toBe('GB')
+  })
+
+  it('refuses a country that is not two letters before it sends anything', async () => {
+    let sent = false
+    server.use(
+      http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)),
+      http.post('/api/store/v1/draft/submit', () => {
+        sent = true
+        return HttpResponse.json({})
+      }),
+    )
+    const { user } = renderPage(<DraftPage />)
+    await user.type(await screen.findByLabelText('Your name'), 'Ada')
+    await user.type(screen.getByLabelText('Email'), 'ada@example.com')
+    await user.click(screen.getByRole('radio', { name: /Post/ }))
+    await user.type(screen.getByLabelText('Recipient'), 'Ada Lovelace')
+    await user.type(screen.getByLabelText('Street address'), '1 Analytical Way')
+    await user.type(screen.getByLabelText('Town or city'), 'London')
+    await user.type(screen.getByLabelText(/Country code/), '1a')
+    await user.click(screen.getByRole('button', { name: 'Send my order' }))
+    expect(await screen.findByText('Give the country as two letters, such as US.')).toBeInTheDocument()
+    expect(sent).toBe(false)
+  })
+
   it('sends no address for an option that does not ship', async () => {
     let body: unknown = null
     server.use(
