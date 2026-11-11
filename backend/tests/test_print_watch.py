@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_import import FoundSource, SourceFile, exact_slugs
 from scadbuddy.bambuddy.print_links import ImportBusyError
@@ -333,6 +334,18 @@ class Printer:
         monkeypatch.setattr(sweep, "forget_copy", forget)
 
 
+def unanswered(code: int | None = None) -> ApiError:
+    """Bambuddy did not answer (``code`` None), or answered ``code``, as `errors.py` maps
+    a transport failure or a 408, 429 or 5xx."""
+    extra: dict[str, Any] = {} if code is None else {"bambuddy_status": code}
+    return ApiError(502, "could not reach Bambuddy", type_=UNAVAILABLE_PROBLEM, **extra)
+
+
+def refused() -> ApiError:
+    """Bambuddy's 403 for a key without the scope, as `errors.py` maps it."""
+    return ApiError(409, "the key needs Manage Library", type_=SCOPE_PROBLEM, bambuddy_status=403)
+
+
 NO_BAMBUDDY_SOURCE = [FoundSource(kind="archive", available=False, reason="gone")]
 
 
@@ -483,7 +496,7 @@ async def test_a_printer_read_that_fails_writes_no_row(monkeypatch: pytest.Monke
     """#6011: the printer's file is readable only while the job runs; a read that failed
     now is tried again on the next pass, never recorded for good."""
     path = "/cache/demo.gcode.3mf"
-    printer = Printer({path: PRINTED}, read_fails={path: ApiError(502, "FTP timed out")})
+    printer = Printer({path: PRINTED}, read_fails={path: unanswered()})
     result, store = await _pass(
         monkeypatch,
         [detail(1, content_hash=PRINTED_HASH)],
@@ -500,7 +513,7 @@ async def test_a_failed_read_does_not_hide_another_file_that_matches(
 ) -> None:
     printer = Printer(
         {"/demo.gcode.3mf": b"PK other", "/cache/demo.gcode.3mf": PRINTED},
-        read_fails={"/demo.gcode.3mf": ApiError(502, "FTP timed out")},
+        read_fails={"/demo.gcode.3mf": unanswered()},
     )
     _, store = await _pass(
         monkeypatch,
@@ -534,9 +547,7 @@ async def test_a_printer_file_whose_upload_fails_writes_no_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#6011: a failed upload to the library inbox folder is tried again next pass."""
-    printer = Printer(
-        {"/cache/demo.gcode.3mf": PRINTED}, keep_fails=ApiError(502, "Bambuddy did not answer")
-    )
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED}, keep_fails=unanswered())
     result, store = await _pass(
         monkeypatch,
         [detail(1, content_hash=PRINTED_HASH)],
@@ -545,6 +556,86 @@ async def test_a_printer_file_whose_upload_fails_writes_no_row(
         printer=printer,
     )
     assert store.rows == [] and result.skipped == 1
+
+
+async def test_a_503_on_the_read_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    path = "/cache/demo.gcode.3mf"
+    printer = Printer({path: PRINTED}, read_fails={path: unanswered(503)})
+    result, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    assert store.rows == [] and result.skipped == 1
+
+
+async def test_a_403_on_the_read_goes_to_the_inbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #6014: a refusal comes back every pass, so it is recorded at once."""
+    path = "/cache/demo.gcode.3mf"
+    printer = Printer({path: PRINTED}, read_fails={path: refused()})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert (row.state, row.source) == ("inbox", None)
+    assert row.reason is not None and "could not be read: the key needs" in row.reason
+
+
+async def test_a_403_on_the_upload_goes_to_the_inbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #6014: a key that reads the printer but may not manage the library is
+    refused on every upload; the print goes to the inbox with why."""
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED}, keep_fails=refused())
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert (row.state, row.source) == ("inbox", None)
+    assert row.reason == "the printer's file could not be kept: the key needs Manage Library"
+
+
+@pytest.mark.parametrize("fails", ["read", "keep"])
+async def test_an_old_print_with_a_transient_failure_goes_to_the_inbox(
+    monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """Review of #6014: past `RETRY_AFTER_END` after the print ended, a failure that may
+    pass is recorded with its reason, so an unreachable printer never retries until the
+    archive leaves `LOOKBACK`."""
+    path = "/cache/demo.gcode.3mf"
+    printer = Printer(
+        {path: PRINTED},
+        read_fails={path: unanswered(503)} if fails == "read" else None,
+        keep_fails=unanswered(503) if fails == "keep" else None,
+    )
+    ended = (NOW - sweep.RETRY_AFTER_END - timedelta(minutes=1)).replace(tzinfo=None)
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH, completed_at=ended)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert (row.state, row.source) == ("inbox", None)
+    assert row.reason is not None and "could not reach Bambuddy" in row.reason
+
+
+def test_the_retry_window() -> None:
+    ended = detail(1, completed_at=(NOW - timedelta(hours=2)).replace(tzinfo=None))
+    assert not sweep.past_retries(ended, NOW)
+    assert sweep.past_retries(ended, NOW + timedelta(hours=1, minutes=1))
+    running = detail(2, created_at=NOW - timedelta(hours=23))
+    assert not sweep.past_retries(running, NOW)
+    assert sweep.past_retries(running, NOW + timedelta(hours=1, minutes=1))
 
 
 async def test_an_archive_taken_while_the_pass_waited_reads_no_source(

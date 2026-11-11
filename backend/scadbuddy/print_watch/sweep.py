@@ -20,9 +20,10 @@ A pass reads the archives Bambuddy made since the watcher was switched on (at mo
    only when its bytes hash to the archive's ``content_hash`` (the printed file's), so a
    newer file of the same name is never taken; it is then kept as a Bambuddy library file
    in the inbox folder, as the printer overwrites its cache. An archive with no hash
-   takes no printer file. A printer read or upload that fails raises, so no row is
-   written and the next pass tries again; a file whose hash differs, or that is too
-   large or not a 3MF (`PERMANENT_READ_FAILURES`), sends the print to the inbox.
+   takes no printer file. A printer read or upload that fails for a reason that may pass
+   (`retryable`: no answer, 408, 429, 5xx) raises, so no row is written and the next
+   pass tries again, until `past_retries`; then, and for any other failure (401, 403,
+   404, 413, 422, a hash that differs), the print goes to the inbox with the reason.
 3. It links a model only with confidence: an earlier import of the same printed file
    (its hash) names one model, or the job's name has exactly one model's words. Anything
    else, and a print no source had, goes to the inbox ("Unsorted imports") with why.
@@ -44,6 +45,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.linking import link_archive, link_library_prints
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_import import (
@@ -81,11 +83,40 @@ MAX_PRINTER_READS = 3
 BAMBUDDY_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
 
 NO_MATCH = "no model matched with confidence"
-#: What `read_source` answers for a file it read that cannot be taken (too large, not a
-#: 3MF): no retry changes that. Any other read failure is tried again on the next pass.
-PERMANENT_READ_FAILURES = frozenset(
-    {status.HTTP_413_CONTENT_TOO_LARGE, status.HTTP_422_UNPROCESSABLE_CONTENT}
-)
+#: Bambuddy answers a later pass may not meet: a timeout, a rate limit, a server error.
+RETRY_STATUSES = frozenset({status.HTTP_408_REQUEST_TIMEOUT, status.HTTP_429_TOO_MANY_REQUESTS})
+#: How long after a print ends a failed printer read or upload is tried again. Each
+#: Schedule runs a pass every `PRUNE_INTERVAL` (300 s), so 3 h is about 70 tries: enough
+#: to outlast a printer or Bambuddy restart, and far inside `LOOKBACK`. The printer keeps
+#: the file in its cache until a later job overwrites it, so the file is still there.
+RETRY_AFTER_END = timedelta(hours=3)
+#: The same bound for a print Bambuddy gives no end for yet, from its archive's making:
+#: longer than most prints, so a running print is not sent to the inbox early.
+RETRY_AFTER_START = timedelta(hours=24)
+
+
+def retryable(error: ApiError) -> bool:
+    """Whether a failed printer read or upload may work on the next pass: Bambuddy (or
+    the printer behind it) did not answer, or answered 408, 429 or 5xx. Any other answer
+    (401, 403, 404, 413, 422, another 4xx) and ScadBuddy's own refusals (a file too large
+    or not a 3MF) would only come back."""
+    if error.type != UNAVAILABLE_PROBLEM:
+        return False
+    upstream = error.extensions.get("bambuddy_status")
+    return upstream is None or upstream in RETRY_STATUSES or upstream >= 500
+
+
+def past_retries(archive: ArchiveDetail, now: datetime | None = None) -> bool:
+    """Whether a transient failure for ``archive`` is recorded in the inbox, not tried
+    again: past `RETRY_AFTER_END` after its end, or `RETRY_AFTER_START` after its archive
+    was made while it has no end. Without the bound, a printer that never answers would
+    be read again every pass until the archive left `LOOKBACK`, holding a pass's slots."""
+    now = now or datetime.now(UTC)
+    ended = _utc(archive.completed_at)
+    if ended is not None:
+        return now >= ended + RETRY_AFTER_END
+    made = _utc(archive.created_at or archive.started_at)
+    return made is not None and now >= made + RETRY_AFTER_START
 
 
 @dataclass
@@ -346,9 +377,8 @@ class AutoImporter:
             try:
                 data = await read_source(self.client, archive, candidate)
             except ApiError as error:
-                if error.status in PERMANENT_READ_FAILURES:
-                    problems.append(f"{candidate.path} could not be read: {error.detail}")
-                else:
+                problems.append(f"{candidate.path} could not be read: {error.detail}")
+                if retryable(error):
                     failed = error
                 continue
             if data.sha256 == archive.content_hash:
@@ -356,14 +386,19 @@ class AutoImporter:
                 break
             problems.append(f"{candidate.path} is not the printed file (its hash differs)")
         if source is None or read is None:
-            if failed is not None:
-                # A read that failed may work on the next pass, while the job runs: write
-                # no row, which `known` would never retry (#6011).
+            if failed is not None and not past_retries(archive):
+                # A read that failed now may work on the next pass: write no row, which
+                # `known` would never retry (#6011).
                 raise failed
             row.reason = "no source had the 3MF (printer: " + "; ".join(problems) + ")"
             return row, None
-        # A failed upload raises too, for the next pass to try again (#6011).
-        file_id, uploaded = await keep_printer_file(self.client, read, folder)
+        try:
+            file_id, uploaded = await keep_printer_file(self.client, read, folder)
+        except ApiError as error:
+            if retryable(error) and not past_retries(archive):
+                raise  # for the next pass to try again (#6011)
+            row.reason = f"the printer's file could not be kept: {error.detail}"
+            return row, None
         row.source = "printer"
         row.library_file_id = file_id
         row.printer_path = source.path

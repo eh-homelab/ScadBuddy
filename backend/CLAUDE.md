@@ -517,8 +517,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   row from before it) name one model (`earlier_import`) or the job's name has exactly one
   slug's words (`print_import.exact_slugs`, `job_name`). Anything else goes to the inbox
   with `reason` and `suggested`. An archive whose import raises is logged and skipped;
-  a printer read or upload that fails raises, so the next pass tries it again (only a
-  hash that differs, or a file too large or not a 3MF, is an inbox row). Under the lock
+  a printer read or upload that fails with no answer, 408, 429 or 5xx (`sweep.retryable`)
+  raises, so the next pass tries it again, until `RETRY_AFTER_END` (3 h) after the print
+  ended, or `RETRY_AFTER_START` (24 h) after its archive was made while it has no end
+  (`past_retries`); then, and for any other failure (401, 403, 404, 413, 422, a hash
+  that differs), the print is an inbox row with the reason. Under the lock
   the pass checks `known` again, as both Schedules run it (#6011).
   `PUT /settings` writes the floor when it switches the watcher on, and forgets it off.
   `AutoImportStore.floor` reads the switch from `settings` and writes the floor in one

@@ -240,7 +240,10 @@ def test_a_pass_with_stale_settings_keeps_the_floor(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6011: a pass that loaded the settings before a `PUT /settings` switched the
-    watcher on reads the switch with the floor, so it never deletes the write's floor."""
+    watcher on reads the switch with the floor, so it never deletes the write's floor.
+
+    It shows only that the pass ignores the switch it loaded. It does not race a
+    concurrent `PUT /settings` against the pass under `FLOOR_LOCK`."""
     store = state(client).components.get(AUTO_IMPORTS)
     switch_on(client)
     first = asyncio.run(store.floor())
@@ -280,6 +283,30 @@ def test_a_print_whose_model_was_deleted_goes_to_the_inbox(client: TestClient, m
             PrintImport(archive_id=311, slug=model, source="archive", filename="demo.3mf")
         )
     )
+    assert auto(client, state="inbox") == []
+
+
+@respx.mock
+def test_a_deleted_model_s_print_a_run_owns_leaves_both_lists(
+    client: TestClient, model: str
+) -> None:
+    """Review of #6014: once a link that is not a `model:` link (a run's, found later)
+    names the archive of a row whose model was deleted, the row is in neither list: the
+    run owns the print, as for any inbox row a link names."""
+    switch_on(client)
+    bambuddy(a_print(314))
+    run_pass(client)
+    asyncio.run(state(client).print_links.delete_models([model]))
+    assert [row["archive_id"] for row in auto(client, state="inbox")] == [314]
+
+    asyncio.run(
+        state(client).print_links.record(
+            PrintSubject.output("b" * 32), PrintLink(archive_id=314, matched_by="queue_item")
+        )
+    )
+
+    assert auto(client) == []
+    assert auto(client, state="linked") == []
     assert auto(client, state="inbox") == []
 
 
