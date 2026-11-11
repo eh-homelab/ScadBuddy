@@ -195,6 +195,7 @@ def _settings(pg_pool: PgPool) -> dict[str, object]:
                     "printer_rack_algorithms",
                     "printer_rack_algorithm_versions",
                     "printer_print_options",
+                    "print_auto_import_skip_lan_printers",
                 ],
             ),
         ).fetchall()
@@ -260,3 +261,21 @@ def test_deleting_a_printer_forgets_it_as_the_default_and_in_the_maps(
         "printer_rack_algorithms": {other.id: "x"},
         "printer_print_options": {},
     }
+
+
+def test_the_watchers_skip_list_follows_a_merge_and_forgets_a_delete(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#4699 phase 4: `print_auto_import_skip_lan_printers` holds registry ids, so a
+    merged row's id becomes the kept row's (listed once), and a deleted row's goes."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial="0938AB000000029", name="Mine"))
+    other = printers.create(PrinterCreate(serial="0938AB000000030", name="Other"))
+    _put(pg_pool, {"print_auto_import_skip_lan_printers": [synthetic.id, other.id]})
+
+    printers.ensure_bambuddy(4, serial="0938AB000000029", name="H2C", model="H2C")
+    assert _settings(pg_pool) == {"print_auto_import_skip_lan_printers": [other.id, mine.id]}
+
+    _put(pg_pool, {"print_auto_import_skip_lan_printers": [mine.id, other.id]})
+    printers.delete(other.id)
+    assert _settings(pg_pool) == {"print_auto_import_skip_lan_printers": [mine.id]}

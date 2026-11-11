@@ -204,6 +204,11 @@ PRINTER_KEYED_SETTINGS = (
 )
 
 
+#: The settings lists that may hold a registry id (#4699 phase 4): the LAN-only printers
+#: the print watcher skips. A JSON array of ids, not a map.
+PRINTER_LISTED_SETTINGS = ("print_auto_import_skip_lan_printers",)
+
+
 def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
     # The default printer and the registry-keyed map entries are JSON values in
     # `settings` (#4971), so no foreign key keeps them. A map entry ``into`` has of its
@@ -219,6 +224,13 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
         " END, updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_KEYED_SETTINGS)},
     )
+    # A listed id follows its row; listed once when ``into`` was listed too.
+    conn.execute(
+        "UPDATE settings SET value = CASE WHEN value ? %(into)s THEN value - %(merged)s"
+        " ELSE (value - %(merged)s) || jsonb_build_array(%(into)s::text) END,"
+        " updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
+        {"into": into, "merged": merged, "names": list(PRINTER_LISTED_SETTINGS)},
+    )
 
 
 def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
@@ -231,7 +243,7 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
     conn.execute(
         "UPDATE settings SET value = value - %s, updated_at = now()"
         " WHERE name = ANY(%s) AND value ? %s",
-        (printer_id, list(PRINTER_KEYED_SETTINGS), printer_id),
+        (printer_id, [*PRINTER_KEYED_SETTINGS, *PRINTER_LISTED_SETTINGS], printer_id),
     )
 
 
@@ -259,7 +271,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on.
     PrinterReference("print_lan_imports", "printer"),
     _repoint_run_activity,
-    # #4971: the default printer and the registry-keyed settings map entries.
+    # #4971: the default printer and the registry-keyed settings map entries; #4699: the
+    # registry ids in the print watcher's skip list.
     _repoint_settings,
 )
 
