@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from scadbuddy.api import internal
 from scadbuddy.auth.check import auth_check, refusal
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.models import Service
@@ -76,6 +77,7 @@ def _client(mode: str = "off") -> TestClient:
         raise _KnownError("not installed")
 
     app.include_router(router, prefix="/api/v1")
+    app.include_router(internal.router, prefix="/api/v1")
     install_problem_handlers(app)
 
     @app.exception_handler(_KnownError)
@@ -120,6 +122,24 @@ def test_the_guard_refuses_in_every_mode(mode: str) -> None:
     for response in (none, dead, ok, _get(client, "sbsvc_print"), _get(client, "sbsvc_render")):
         assert response.headers["X-ScadBuddy-Crud"] == "1"
         assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_enforce_answers_an_internal_route_as_a_crud_one() -> None:
+    """#5514: a live credential without the class is a 403, not a 401 that would make the
+    client exchange again and loop; only no live credential is a 401."""
+    client = _client("enforce")
+    url = "/api/v1/internal/outputs/nope/model.3mf"
+    for token in (None, "sbsvc_dead"):
+        headers = {"authorization": f"Bearer {token}"} if token else {}
+        signed_out = client.get(url, headers=headers)
+        assert signed_out.status_code == 401, token
+        assert signed_out.json()["reason"] == "no_credential", token
+    for token in ("sbsvc_projects", "sbsvc_agent"):
+        refused = client.get(url, headers={"authorization": f"Bearer {token}"})
+        assert refused.status_code == 403, token
+        assert refused.json()["type"].endswith("/auth/forbidden"), token
+        assert refused.json()["reason"] == "out_of_scope", token
+        assert "WWW-Authenticate" not in refused.headers, token
 
 
 def test_a_validation_error_carries_the_header() -> None:
