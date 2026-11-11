@@ -137,8 +137,8 @@ export const handlers = [
     const listed = lan
       .filter((row) => state === null || row.state === state)
       .filter((row) => slug === null || (row.state === 'linked' && row.slug === slug))
-      .filter((row) => !before || (row.id ?? 0) < before)
-      .sort((a, b) => (b.id ?? 0) - (a.id ?? 0))
+      .filter((row) => !before || row.id < before)
+      .sort((a, b) => b.id - a.id)
       .slice(0, limit)
     return HttpResponse.json(listed satisfies LanPrintRecord[])
   }),

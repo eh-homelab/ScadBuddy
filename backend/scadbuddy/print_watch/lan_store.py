@@ -11,8 +11,9 @@ finds the row and answers it as it is, so a retried attempt or a resend after a 
 answer writes nothing more. The job's printer is ``printer_key``, the registry id it was
 recorded for, never null: a printer deleted before the first send or between two sends
 leaves ``printer`` null, and the resend still finds its row. A printer's merge moves the
-key to the kept printer, unless the kept printer has a record of the same job
-(`printers/store.py` `_repoint_lan_imports`, #6045).
+key to the kept printer, unless the kept printer has a record of the same job. When the
+gone printer has two records of one job (one keyed by an older id), only the one keyed
+by the gone printer moves (`printers/store.py` `_repoint_lan_imports`, #6045).
 """
 
 from __future__ import annotations
@@ -57,6 +58,9 @@ _BY_JOB = (
 #: archive row's (`store.MODEL_GONE`; `store` imports this module, so it is not imported
 #: here).
 MODEL_GONE = "its model was deleted"
+#: Whether a record ``l`` is linked to a model not in ``%(slugs)s``: true, never null,
+#: for a linked record with no slug (#6048), so it is shown as gone, not as linked.
+_GONE = "l.state = 'linked' AND NOT COALESCE(l.slug = ANY(%(slugs)s::text[]), false)"
 #: `link`'s and `dismiss`'s read of one record, with its printer's name, locked.
 _ONE = (
     "SELECT l.id, l.printer::text AS printer_id, "
@@ -69,8 +73,9 @@ _ONE = (
 
 class LanPrintRecord(LanImport):
     """A record as the routes answer it (#6041), with its printer's name: None once the
-    printer was deleted."""
+    printer was deleted. Its ``id`` is always set: it is a stored row (#6048)."""
 
+    id: int
     printer_name: str | None = None
 
 
@@ -187,7 +192,7 @@ class LanImportStore:
                 " r.seen_at, r.dismissed_at, r.printer_name"
                 " FROM (SELECT g.*, CASE WHEN g.gone THEN 'inbox' ELSE g.state END AS shown"
                 "  FROM (SELECT l.*, l.printer::text AS printer_id, p.name AS printer_name,"
-                "   l.state = 'linked' AND NOT (l.slug = ANY(%(slugs)s::text[])) AS gone"
+                f"   {_GONE} AS gone"
                 "   FROM print_lan_imports l LEFT JOIN printers p ON p.id = l.printer"
                 "   WHERE (%(before)s::bigint IS NULL OR l.id < %(before)s)) g) r"
                 " WHERE (%(state)s::text IS NULL OR r.shown = %(state)s)"

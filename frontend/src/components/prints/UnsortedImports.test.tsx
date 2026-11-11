@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { AutoImport, LanPrintRecord, ModelSummary } from '../../api/types'
 import { addMockModel, mockModels, resetMockState } from '../../mocks/handlers'
-import { LAN_PRINTER, NO_FILE, NO_MODEL_MATCHED, NO_SOURCE, lanRecords } from '../../mocks/features/printWatch'
+import { LAN_PRINTER, NO_FILE, NO_MODEL_MATCHED, NO_SOURCE, addLanRecord, lanRecords } from '../../mocks/features/printWatch'
 import { archiveImports } from '../../mocks/features/orders/pastPrints'
 import { server } from '../../mocks/server'
 import { selectOption } from '../../test/select'
@@ -96,6 +96,39 @@ describe('UnsortedImports', () => {
     expect(getSources).not.toHaveBeenCalled()
     await waitFor(() => expect(screen.queryByTestId('unsorted-lan-7')).toBeNull())
     expect(lanRecords().find((r) => r.id === 7)).toMatchObject({ state: 'linked', matched_by: 'import' })
+  })
+
+  it('links a LAN-only printer’s print to a model from the full list when its name suggests none (#6048)', async () => {
+    addLanRecord({
+      id: 8,
+      printer_id: LAN_PRINTER.id,
+      printer_name: LAN_PRINTER.name,
+      subtask_name: 'gizmo',
+      started_at: '2026-11-11T13:00:00Z',
+      state: 'inbox',
+      source: 'printer',
+      library_file_id: 1_000_000_042,
+      filename: 'gizmo.gcode.3mf',
+      reason: NO_MODEL_MATCHED,
+      suggested: [],
+    })
+    const link = vi.spyOn(api, 'linkLanAutoImport')
+    const models = vi.spyOn(api, 'listModels')
+    const { user } = renderPage(<UnsortedImports />)
+    const row = await screen.findByTestId('unsorted-lan-8')
+    await user.click(within(row).getByRole('button', { name: 'Link gizmo' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Link to model' })
+    await waitFor(() => expect(models).toHaveBeenCalled())
+    await models.mock.results[0]?.value
+    // Nothing is suggested, so nothing is chosen and Link waits for a pick.
+    expect(within(dialog).queryByLabelText('Suggested models')).toBeNull()
+    expect(within(dialog).getByRole('button', { name: 'Link' })).toBeDisabled()
+    const model = mockModels()[0] as ModelSummary
+    await selectOption(user, within(dialog).getByRole('combobox', { name: 'Model to link' }), model.name)
+    await user.click(within(dialog).getByRole('button', { name: 'Link' }))
+    expect(await within(dialog).findByTestId('lan-link-done')).toHaveTextContent(`gizmo is now a print of ${model.slug}`)
+    expect(link).toHaveBeenCalledWith(8, model.slug)
+    expect(lanRecords().find((r) => r.id === 8)).toMatchObject({ state: 'linked', slug: model.slug })
   })
 
   it('says why a LAN-only printer’s print with no kept file cannot be linked', async () => {
