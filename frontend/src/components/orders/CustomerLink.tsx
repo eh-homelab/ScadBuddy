@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
 import { useAsync } from '../../lib/useAsync'
@@ -30,6 +30,8 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const state = link.data
+  // A later read that lands tells more than the failed re-read did.
+  useEffect(() => setUnread(false), [state])
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true)
