@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import Any
 
+import psycopg
 import pytest
 
 from scadbuddy.print_library import store as store_module
@@ -54,6 +55,22 @@ def rows(pg_pool: PgPool) -> NativeLibraryStore:
 def stored(rows: NativeLibraryStore, **over: object) -> NativeFile:
     row = file_row(**over)
     return rows.insert_file(row.model_copy(update={"id": rows.next_file_id()}))
+
+
+def test_a_folder_and_name_lookup_has_an_index(rows: NativeLibraryStore, pg_conninfo: str) -> None:
+    """#6049: `files` with a ``filename`` (the print watcher's look in the inbox folder)
+    is served by an index on the live rows' folder and name, not a scan of the folder."""
+    with psycopg.connect(pg_conninfo) as conn:
+        definitions = [
+            row[0]
+            for row in conn.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema()"
+                " AND tablename = 'library_files'"
+            )
+        ]
+    assert any("(folder_id, name) WHERE (deleted_at IS NULL)" in d for d in definitions), (
+        definitions
+    )
 
 
 def test_ids_start_at_the_native_base(rows: NativeLibraryStore) -> None:

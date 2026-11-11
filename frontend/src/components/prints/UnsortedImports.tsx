@@ -131,7 +131,7 @@ export function UnsortedImports({
   )
   const lan = useInbox<LanPrintRecord>(
     (before) => api.listLanAutoImports({ state: 'inbox', limit: PAGE, ...(before === undefined ? {} : { before }) }),
-    (row) => row.id ?? 0,
+    (row) => row.id,
     [version],
   )
   const [start, setStart] = useState<ImportStart | null>(null)
@@ -180,7 +180,7 @@ export function UnsortedImports({
                     key={row.id}
                     row={row}
                     onLink={() => setLinking(row)}
-                    onDismissed={() => lan.drop(row.id ?? 0)}
+                    onDismissed={() => lan.drop(row.id)}
                   />
                 ))}
               </ul>
@@ -203,7 +203,7 @@ export function UnsortedImports({
         onOpenChange={(next) => {
           if (!next) setLinking(null)
         }}
-        onLinked={(row) => lan.drop(row.id ?? 0)}
+        onLinked={(row) => lan.drop(row.id)}
       />
     </>
   )
@@ -290,7 +290,7 @@ function InboxRow({ row, onLink, onDismissed }: { row: AutoImport; onLink: () =>
 
 function LanInboxRow({ row, onLink, onDismissed }: { row: LanPrintRecord; onLink: () => void; onDismissed: () => void }) {
   const name = row.subtask_name
-  const dismiss = useDismiss(() => api.dismissLanAutoImport(row.id ?? 0), onDismissed)
+  const dismiss = useDismiss(() => api.dismissLanAutoImport(row.id), onDismissed)
   return (
     <li
       className="flex flex-col gap-1 rounded-md border border-border px-3 py-2 sm:flex-row sm:items-start sm:justify-between"
@@ -378,7 +378,7 @@ function LanLinkForm({
     setBusy(true)
     setError(null)
     try {
-      const linked = await api.linkLanAutoImport(row.id ?? 0, slug)
+      const linked = await api.linkLanAutoImport(row.id, slug)
       setDone(linked)
       onLinked(linked)
     } catch (caught) {

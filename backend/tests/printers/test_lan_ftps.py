@@ -6,7 +6,8 @@ at TLS 1.2, as a printer's FTPS does (Bambuddy
 ``0d427510``, read 2026-10-18).
 
 The server here is the test's own: stdlib sockets, TLS 1.3 allowed, implicit TLS on the
-control connection, passive data connections, ``STOR`` only."""
+control connection, passive data connections, ``STOR``, and a ``RETR`` that never
+sends (``stall``)."""
 
 from __future__ import annotations
 
@@ -43,11 +44,20 @@ class Received:
 class FtpsServer:
     """``close`` is how the data connection ends once the client's bytes are in:
     ``clean`` answers the client's ``close_notify``; ``tcp`` drops the connection with
-    none; ``silent`` keeps it open and never answers (#4186 review I5)."""
+    none; ``silent`` keeps it open and never answers (#4186 review I5).
 
-    def __init__(self, context: ssl.SSLContext, close: str = "clean") -> None:
+    ``stall`` is where a session stops answering: ``login`` never answers ``PASS``;
+    ``retr`` opens a ``RETR``'s data connection and never sends on it. ``stalled`` is set
+    there, and ``ended`` once the client has closed the control connection (#6049)."""
+
+    def __init__(
+        self, context: ssl.SSLContext, close: str = "clean", stall: str | None = None
+    ) -> None:
         self.context = context
         self.close_mode = close
+        self.stall = stall
+        self.stalled = threading.Event()
+        self.ended = threading.Event()
         self.held: list[ssl.SSLSocket] = []
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
@@ -66,6 +76,8 @@ class FtpsServer:
                 self._session(tls)
         except BaseException as error:
             self.received.errors.append(error)
+        finally:
+            self.ended.set()
 
     def _session(self, tls: ssl.SSLSocket) -> None:
         reader = tls.makefile("rb")
@@ -81,6 +93,9 @@ class FtpsServer:
                 case "USER":
                     reply("331 password")
                 case "PASS":
+                    if self.stall == "login":
+                        self.stalled.set()
+                        continue  # never answered
                     reply("230 in" if argument == CODE else "530 no")
                 case "PBSZ" | "TYPE":
                     reply("200 ok")
@@ -110,6 +125,13 @@ class FtpsServer:
                     else:
                         self.held.append(data)  # never answered, never closed
                     reply("226 done")
+                case "RETR" if self.stall == "retr":
+                    assert data_listener is not None
+                    reply("150 sending")
+                    conn, _ = data_listener.accept()
+                    data_listener.close()
+                    self.held.append(self.context.wrap_socket(conn, server_side=True))
+                    self.stalled.set()  # and never a byte on it
                 case "QUIT":
                     reply("221 bye")
                     for held in self.held:
@@ -117,18 +139,22 @@ class FtpsServer:
                     return
                 case _:
                     reply("502 no")
+        for held in self.held:
+            held.close()
 
     def close(self) -> None:
         self.listener.close()
         self.thread.join(timeout=10)
 
 
-def _serving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str) -> tuple[FtpsServer, str]:
+def _serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close: str, stall: str | None = None
+) -> tuple[FtpsServer, str]:
     cert, key, sha = _certificate(tmp_path, "printer")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
     context.maximum_version = ssl.TLSVersion.TLSv1_3  # what the client must not rely on
-    server = FtpsServer(context, close)
+    server = FtpsServer(context, close, stall)
     monkeypatch.setattr(lan_module, "FTPS_PORT", server.port)
     monkeypatch.setattr(lan_module, "UNWRAP_TIMEOUT", 0.5)
 
@@ -200,6 +226,7 @@ class _Retr:
 
     def __init__(self) -> None:
         self.closed = False
+        self.is_cut = False
 
     def retrbinary(self, command: str, callback: Callable[[bytes], object]) -> str:
         for _ in range(10):
@@ -215,7 +242,7 @@ def test_a_download_stops_past_its_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     cap, never a file of any size into memory."""
     printer = LanPrinter("10.0.0.9", "01P00A000000001", CODE, "ab" * 32)
     session = _Retr()
-    monkeypatch.setattr(printer, "_ftps", lambda address: session)
+    monkeypatch.setattr(printer, "_ftps", lambda address, ftp=None: session)
     with pytest.raises(FileTooLargeError):
         printer._download("10.0.0.9", "/cache/x.3mf", 2500)
     assert session.closed
@@ -229,6 +256,10 @@ class _Endless:
         self.started = threading.Event()
         self.closed = threading.Event()
         self.blocks = 0
+        self.is_cut = False
+
+    def cut(self) -> None:
+        self.is_cut = True  # it ignores the cut sockets, as a printer's late block would
 
     def retrbinary(self, command: str, callback: Callable[[bytes], object]) -> str:
         self.started.set()
@@ -249,7 +280,8 @@ async def test_a_cancelled_download_closes_its_connection(
     stops the FTPS thread at its next block, not when the file ends."""
     printer = LanPrinter("10.0.0.9", "01P00A000000001", CODE, "ab" * 32)
     session = _Endless()
-    monkeypatch.setattr(printer, "_ftps", lambda address: session)
+    monkeypatch.setattr(printer, "_session", lambda: session)
+    monkeypatch.setattr(printer, "_ftps", lambda address, ftp=None: ftp)
 
     async def address(host: str) -> str:
         return host
@@ -262,3 +294,37 @@ async def test_a_cancelled_download_closes_its_connection(
         await task
     assert await asyncio.to_thread(session.closed.wait, 2)
     assert session.blocks < 500
+
+
+@pytest.mark.parametrize("stall", ["login", "retr"])
+async def test_a_cancel_ends_a_stalled_download_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stall: str
+) -> None:
+    """#6049: a printer that stops answering mid-login or mid-``RETR`` does not hold the
+    thread and its sockets for `FTP_TIMEOUT` after a cancel: the cancel cuts the
+    session, and the thread ends and closes the connection at once."""
+    assert lan_module.FTP_TIMEOUT >= 30  # the bound the cancel must not wait for
+    server, sha = _serving(tmp_path, monkeypatch, "clean", stall)
+    printer = LanPrinter("127.0.0.1", "01P00A000000001", CODE, sha)
+    ended = threading.Event()
+    download = printer._download
+
+    def spy(*args: object) -> bytes:
+        try:
+            return download(*args)  # type: ignore[arg-type]
+        finally:
+            ended.set()
+
+    monkeypatch.setattr(printer, "_download", spy)
+    try:
+        task = asyncio.create_task(printer.download("/cache/x.3mf"))
+        assert await asyncio.to_thread(server.stalled.wait, 5)
+        started = time.monotonic()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(ended.wait, 5)
+        assert await asyncio.to_thread(server.ended.wait, 5)
+        assert time.monotonic() - started < 5
+    finally:
+        server.close()

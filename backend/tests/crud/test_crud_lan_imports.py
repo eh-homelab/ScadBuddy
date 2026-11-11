@@ -20,7 +20,7 @@ from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.crud.print import RemoteLanImports
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_watch.lan import NO_MATCH, LanCapture, decide
-from scadbuddy.print_watch.lan_store import LanImportStore
+from scadbuddy.print_watch.lan_store import _GONE, LanImportStore
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.worker import PRINT_CRUD_AREAS
@@ -167,3 +167,27 @@ async def test_a_resend_after_the_printer_was_deleted_finds_the_first_record(
     again = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
     assert again.id == first.id and again.printer_id is None
     assert _counts(store) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("state", "slug", "gone"),
+    [
+        ("linked", None, True),
+        ("linked", "lost", True),
+        ("linked", "demo", False),
+        ("inbox", None, False),
+    ],
+)
+def test_a_linked_record_with_no_model_reads_as_gone(
+    store: SettingsStore, state: str, slug: str | None, gone: bool
+) -> None:
+    """#6048: the list's test is true, never null, for a linked record with no slug, so
+    such a record reads as gone (`MODEL_GONE`), not as linked. The table's check keeps
+    such a row out, so the test is run on a row of values."""
+    with store.pool.connection() as conn:
+        row = conn.execute(
+            f"SELECT {_GONE} AS gone"
+            " FROM (VALUES (%(state)s::text, %(slug)s::text)) AS l (state, slug)",
+            {"state": state, "slug": slug, "slugs": ["demo"]},
+        ).fetchone()
+    assert row is not None and row["gone"] is gone

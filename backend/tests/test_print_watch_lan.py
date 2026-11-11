@@ -40,7 +40,7 @@ from scadbuddy.print_watch.lan import (
     printed_file,
     printer_paths,
 )
-from scadbuddy.print_watch.lan_store import LanImportStore, StoreLanRecorder
+from scadbuddy.print_watch.lan_store import LanImportStore, LanPrintRecord, StoreLanRecorder
 from scadbuddy.printers.lan import CertificateMismatchError, FileTooLargeError, LanPrinter
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.workflows.lan_auto_import import (
@@ -525,3 +525,11 @@ async def test_a_job_nudged_twice_is_recorded_by_one_run(client: Client) -> None
         assert seen == [JOB]
     finally:
         await terminate_open_workflows(client, queue)
+
+
+def test_a_listed_record_always_names_its_id() -> None:
+    """#6048: the routes answer stored rows, so the spec says ``id`` is required, and the
+    browser never needs a sentinel id for a record."""
+    schema = LanPrintRecord.model_json_schema(mode="serialization")
+    assert "id" in schema["required"]
+    assert schema["properties"]["id"] == {"title": "Id", "type": "integer"}

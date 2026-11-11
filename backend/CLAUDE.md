@@ -590,8 +590,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   received time of the report that showed the start; the FK `printer` is `ON DELETE SET
   NULL` and in `PRINTER_REFERENCES`, so a resend for a printer deleted before or between
   sends still finds its row by the key; a merge moves `printer` and also `printer_key`,
-  except where the kept printer has a row of the same job, `_repoint_lan_imports`,
-  #6045). The nudge gets
+  except where the kept printer has a row of the same job; and where the gone printer
+  has two rows of one job (one keyed by an older id), only the one keyed by the gone
+  printer moves, `_repoint_lan_imports`, #6045). The nudge gets
   a `reports.JobStart` (name, time, `gcode_file`); for a LAN-only row not in
   `print_auto_import_skip_lan_printers` (registry ids, person-only like the other three,
   `api/settings.py` `PRINT_WATCH`; a printer's merge moves its id there and its delete
@@ -620,8 +621,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the table) are one transaction; a record sent again answers the first. A read or a
   keep that may pass (no answer, a 5xx) raises for `LAN_IMPORT_RETRY` (6 attempts over
   about 15 minutes); the read and keep are bounded by `CAPTURE_TIMEOUT` (the attempt's
-  timeout less a minute; a cancelled `LanPrinter.download` stops its FTPS thread at the
-  next block, within about `FTP_TIMEOUT`), and the last attempt records the print in the inbox with the
+  timeout less a minute; a cancelled `LanPrinter.download` cuts its FTPS session, so a
+  stalled login or `RETR` ends at once and only a TCP connect still in progress waits,
+  at most `FTP_TIMEOUT`, #6049), and the last attempt records the print in the inbox with the
   reason whatever they raised, so only a record the API never takes is lost; a 530, a certificate that is not the pinned one or a file past the cap is recorded at
   once. A linked LAN record writes no `print_links` row (that table is keyed by
   archive), so it is not on the model's Prints tab; it is in the activity list.
