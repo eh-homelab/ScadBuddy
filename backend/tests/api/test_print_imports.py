@@ -22,6 +22,8 @@ from scadbuddy.bambuddy import print_links
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
+from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.store import AutoImport
 from tests.api.test_print_history import NATIVE_HASH, link, mock_archive, native_slice, state
 from tests.api.test_send import API, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -718,3 +720,49 @@ def test_a_retry_whose_source_changed_names_the_model_and_links_nothing(
     assert "that request made the model 'trophy', which was deleted since" in gone.json()["detail"]
     assert gone.json()["operation_id"] == made.json()["operation_id"]
     assert asyncio.run(state(client).print_links.linked(ARCHIVE)) is None
+
+
+# --- the print watcher's activity row (#6029) -----------------------------------------
+
+
+def watcher_activity(client: TestClient) -> httpx.Response:
+    response: httpx.Response = client.get(
+        f"/api/v1/activity/print_auto_import:{ARCHIVE}", params={"advanced": 1}
+    )
+    return response
+
+
+@respx.mock
+def test_an_import_rewrites_the_print_watcher_s_activity_row(
+    client: TestClient, model: str
+) -> None:
+    """#6029: Import print of an archive the watcher dismissed rewrites its activity row
+    in the link's transaction, so the "Where" facet says the print is on its model."""
+    configure(client)
+    bambuddy()
+    store = state(client).components.get(AUTO_IMPORTS)
+    row = AutoImport(archive_id=ARCHIVE, printer_id=1, print_name="demo_elan", state="inbox")
+    assert asyncio.run(store.record(row))
+    assert asyncio.run(store.dismiss(ARCHIVE)) is not None
+    assert watcher_activity(client).json()["row"]["facets"]["state"] == "dismissed"
+
+    response = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert response.status_code == 201, response.text
+    item = watcher_activity(client).json()["row"]
+    assert item["facets"] == {"state": "linked", "source": "archive", "matched_by": "import"}
+    assert item["title"] == f"Imported print demo_elan onto {model}"
+    assert item["subject"] == f"model:{model}"
+
+
+@respx.mock
+def test_an_import_writes_no_watcher_row_the_watcher_never_had(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    bambuddy()
+
+    response = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert response.status_code == 201, response.text
+    assert watcher_activity(client).status_code == 404

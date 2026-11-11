@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from scadbuddy.print_watch.activity import row_of
+from scadbuddy.bambuddy.print_links import PrintImport
+from scadbuddy.print_watch.activity import imported_row, row_of
 from scadbuddy.print_watch.store import AutoImport
 
 
@@ -25,3 +26,20 @@ def test_a_dismissed_print_says_so() -> None:
         "dismissed",
         "succeeded",
     )
+
+
+def test_an_import_rewrites_the_row_onto_its_model() -> None:
+    """#6029: Import print of a dismissed (or inbox) archive rewrites its row, so the
+    `state` facet and the title say the print is on its model now."""
+    row = imported_row(
+        AutoImport(archive_id=7, print_name="demo_elan", state="dismissed", reason="r"),
+        PrintImport(archive_id=7, slug="keychain", source="archive", filename="k.3mf"),
+    )
+    assert (row.id, row.title, row.subject, row.status) == (
+        "print_auto_import:7",
+        "Imported print demo_elan onto keychain",
+        "model:keychain",
+        "succeeded",
+    )
+    assert row.facets == {"state": "linked", "source": "archive", "matched_by": "import"}
+    assert (row.detail["filename"], row.detail["reason"]) == ("k.3mf", None)

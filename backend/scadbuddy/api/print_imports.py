@@ -68,7 +68,12 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_watch.component import AutoImportsDep
-from scadbuddy.print_watch.store import AutoImport, AutoImportLinkedError, AutoImportState
+from scadbuddy.print_watch.store import (
+    AutoImport,
+    AutoImportLinkedError,
+    AutoImportState,
+    AutoImportStore,
+)
 
 router = APIRouter(prefix="/print-imports", tags=["prints"])
 
@@ -352,6 +357,7 @@ async def import_print(
     store: SettingsStoreDep,
     catalogue: CatalogueDep,
     ops: OperationsDep,
+    auto_imports: AutoImportsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ImportedPrint | JSONResponse:
     if body.new_model is not None and idempotency_key is None:
@@ -424,7 +430,7 @@ async def import_print(
             content_hash=archive.content_hash,
             created_model=created,
         )
-        owner = await _record(links, client, record, archive, kept)
+        owner = await _record(links, auto_imports, client, record, archive, kept)
     if owner is not None:
         # Only a run's link can come between the check above and the record (imports of
         # one archive wait on `import_lock`), and a run's print is its own.
@@ -436,16 +442,21 @@ async def import_print(
 
 async def _record(
     links: PrintLinkStore,
+    auto_imports: AutoImportStore,
     client: BambuddyClient,
     record: PrintImport,
     archive: ArchiveDetail,
     kept: int | None,
 ) -> LinkedPrint | None:
     """`record_import`; a library copy this request uploaded (``kept``) that no import
-    names after it is deleted, refused or failed alike."""
+    names after it is deleted, refused or failed alike. The print watcher's activity row
+    of the archive, if it has one, is rewritten in the link's transaction (#6029)."""
     try:
         owner = await links.record_import(
-            record, printer_id=archive.printer_id, plate_id=archive.plate_id
+            record,
+            printer_id=archive.printer_id,
+            plate_id=archive.plate_id,
+            also=lambda conn: auto_imports.imported_in(conn, record),
         )
     except BaseException:
         if kept is not None:

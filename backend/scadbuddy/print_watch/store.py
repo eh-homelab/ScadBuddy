@@ -32,7 +32,7 @@ from scadbuddy.bambuddy.print_links import (
     import_in,
     owner_in,
 )
-from scadbuddy.print_watch.activity import row_of
+from scadbuddy.print_watch.activity import imported_row, row_of
 
 #: `pg_advisory_xact_lock` key (hashed) under which `AutoImportStore.floor` reads the
 #: switch and writes the floor.
@@ -347,6 +347,24 @@ class AutoImportStore:
             if self.activity is not None:
                 self.activity.upsert_in(conn, lambda: row_of(updated))
         return updated
+
+    def imported_in(self, conn: Connection[DictRow], record: PrintImport) -> None:
+        """Import print (#4698) linked ``record.archive_id`` to a model: when the watcher
+        took that archive (a dismissed or an inbox row), rewrite its activity row in the
+        import's transaction, so the "Where" facet is not stale (#6029). The
+        ``print_auto_imports`` row stays as it is."""
+        if self.activity is None:
+            return
+        found = conn.execute(
+            f"SELECT {', '.join((*_COLUMNS, 'seen_at', 'dismissed_at'))}"
+            " FROM print_auto_imports WHERE archive_id = %s",
+            (record.archive_id,),
+        ).fetchone()
+        if found is None:
+            return
+        self.activity.upsert_in(
+            conn, lambda: imported_row(AutoImport.model_validate(dict(found)), record)
+        )
 
     def _page(
         self, state: AutoImportState | None, limit: int, before: int | None

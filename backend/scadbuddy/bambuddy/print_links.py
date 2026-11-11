@@ -49,7 +49,7 @@ queue items and printer jobs ScadBuddy queued or started (#3741, `ScadBuddyJob`)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -461,13 +461,19 @@ class PrintLinkStore:
         }
 
     async def record_import(
-        self, record: PrintImport, *, printer_id: int | None = None, plate_id: int | None = None
+        self,
+        record: PrintImport,
+        *,
+        printer_id: int | None = None,
+        plate_id: int | None = None,
+        also: Callable[[Connection[DictRow]], None] | None = None,
     ) -> LinkedPrint | None:
         """Link ``record.archive_id`` to its model (#4698), with ``record``: None once
         both rows are written. When a link names the archive already, nothing is written
         and that link (its owner) is returned. Imports of one archive are serialised, so
-        two at once cannot both win."""
-        return await asyncio.to_thread(self._record_import, record, printer_id, plate_id)
+        two at once cannot both win. ``also`` runs in the same transaction once both rows
+        are written (#6029: the print watcher's activity row)."""
+        return await asyncio.to_thread(self._record_import, record, printer_id, plate_id, also)
 
     @asynccontextmanager
     async def import_lock(self, archive_id: int) -> AsyncIterator[None]:
@@ -674,10 +680,17 @@ class PrintLinkStore:
                 )
 
     def _record_import(
-        self, record: PrintImport, printer_id: int | None, plate_id: int | None
+        self,
+        record: PrintImport,
+        printer_id: int | None,
+        plate_id: int | None,
+        also: Callable[[Connection[DictRow]], None] | None,
     ) -> LinkedPrint | None:
         with self._pool.connection() as conn, conn.transaction():
-            return import_in(conn, record, printer_id=printer_id, plate_id=plate_id)
+            owner = import_in(conn, record, printer_id=printer_id, plate_id=plate_id)
+            if owner is None and also is not None:
+                also(conn)
+            return owner
 
     def _import_of(self, archive_id: int) -> PrintImport | None:
         with self._pool.connection() as conn:
