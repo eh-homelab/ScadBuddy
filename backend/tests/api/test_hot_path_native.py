@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.bambuddy import print_run
+from scadbuddy.bambuddy.catalogue import stop_refreshes
 from scadbuddy.bambuddy.filaments import gather_plate_options
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
@@ -537,6 +538,10 @@ def test_the_first_reads_open_on_the_native_row_with_bambuddy_configured(
     configure(native_app, printer_id=7)
     with pytest.raises(BambuddyCalledError), forbid_bambuddy(spans, BASE):
         failed = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+        # The open answers when the printer read fails, but its first catalogue read is
+        # shielded and goes on in the app's loop (`cached_catalogue`, #2906). Stop it
+        # here, so its preset reads cannot land in the next window (#6035).
+        _call(native_app, stop_refreshes)
     assert failed.status_code == 502, failed.text
     assert failed.json()["lan_printers"] == [row]
     with forbid_bambuddy(spans, BASE):
