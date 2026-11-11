@@ -7,6 +7,7 @@ import { liveJobs, queueTail, startedOn, type LiveJob } from '../components/prin
 import { PrinterStrip, usePrintersNow } from '../components/prints/NowPrinting'
 import { QueueNotes, usePrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
+import { UnsortedImports } from '../components/prints/UnsortedImports'
 import { modelPath } from '../lib/deeplink'
 import { nativeBackends } from '../lib/printerRegistry'
 import { isFiltered, parsePrintsQuery, readStoredPrintsView } from '../lib/printsQuery'
@@ -28,6 +29,10 @@ import { Button } from '@/components/ui/button'
  *
  * "Import print" (#4698) links a Bambuddy archive ScadBuddy did not print to a model
  * (`ImportPrintDialog`); it reads Bambuddy, so it shows with Bambuddy's lists.
+ *
+ * "Unsorted imports" (#4699) is the print watcher's inbox (`UnsortedImports`). It reads
+ * ScadBuddy only, so it shows at once, on every backend; an import from it reads the
+ * history again, as "Import print" does.
  */
 export function PrintsPage() {
   const settings = useAsync(() => api.getSettings(), [])
@@ -70,6 +75,7 @@ export function PrintsPage() {
         </div>
         <ImportPrintDialog open={importing} onOpenChange={setImporting} onImported={() => setImports((n) => n + 1)} />
         <PrinterStrip now={now} />
+        <UnsortedImports version={imports} onImported={() => setImports((n) => n + 1)} />
         {settled &&
           (bambuddy ? (
             <>

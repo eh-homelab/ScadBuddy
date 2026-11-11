@@ -1112,3 +1112,14 @@ describe("Bambuddy's lists on the hot path (#4629)", () => {
     expect(screen.getByTestId('printer-job-2')).toHaveTextContent('Printing 66% · 54m left')
   })
 })
+
+describe('Unsorted imports on the Prints page (#4699)', () => {
+  it("shows the print watcher's inbox, read from ScadBuddy only, before Bambuddy's lists are asked for", async () => {
+    setHotPath(true)
+    render()
+    await screen.findByRole('button', { name: "Show Bambuddy's queue and print history" })
+    const inbox = await screen.findByRole('list', { name: 'Unsorted imports' })
+    expect(within(inbox).getByTestId('unsorted-9104')).toHaveTextContent('Benchy')
+    expect(within(inbox).getByTestId('unsorted-9105')).toHaveTextContent('Vase')
+  })
+})

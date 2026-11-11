@@ -110,6 +110,16 @@ same way, `vite.config.ts`).
   and a row skipped for it offers "Send here too", both sending with
   `also_when_storefront_mails`. Mocks `src/mocks/features/orders/messages.ts`.
 
+- The print watcher (#4699 phase 2): Settings → Printing's "Print watcher"
+  (`pages/settings/sections/print-watcher.tsx`; the three fields' form values are
+  comma-joined lists, `values.ts` `sourcesValue`, `printerIdsValue`), and the Prints page's
+  "Unsorted imports" (`components/prints/UnsortedImports.tsx`). The inbox reads ScadBuddy
+  only, so it shows on every backend before Bambuddy's lists are asked for. "Link…" opens
+  `ImportPrintDialog` with `start`: that print, and the source the watcher recorded chosen
+  when the sources list it and it can be used (a kept printer file is its library file;
+  the printer is never read for it). "Dismiss" calls the dismiss route. Mocks
+  `src/mocks/features/printWatch.ts`.
+
 ## See also
 
 - Real-stack e2e: see `e2e-stack/CLAUDE.md`. Generated API files: see the root `CLAUDE.md`.

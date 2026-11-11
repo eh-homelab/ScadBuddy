@@ -534,6 +534,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   an inbox row a link names since is left out, and a linked row whose model link a model
   delete removed is shown as an inbox row, reason `MODEL_GONE`); the agent reads it with `list_auto_imports`
   (`agent/src/tools/prints.ts`).
+  Phase 2: `POST /print-imports/auto/{archive_id}/dismiss` (`AutoImportStore.dismiss`, under
+  the archive's import lock) sets an inbox row's state to `dismissed` and `dismissed_at`
+  (migration `20261111T0618Z_print_auto_imports_dismissed.sql`). The row stays, so the
+  watcher never takes the archive again. A row a link names is 409 (`AutoImportLinkedError`);
+  no row is 404; a second dismiss gives the same answer. A person or an agent may call it
+  (agent `dismiss_auto_import`, `write`): it reaches no printer and no Bambuddy, and Import
+  print can still link the print. `GET /print-imports/auto` takes `state=dismissed` too.
+  The activity repair restores `print_auto_import` rows from `print_auto_imports`
+  (`activity/index.py` `_RepairSource`, keyed by `archive_id`, timed by `seen_at`). The
+  frontend: Settings → Printing's "Print watcher" (`pages/settings/sections/print-watcher.tsx`)
+  and the Prints page's "Unsorted imports" (`components/prints/UnsortedImports.tsx`, which
+  opens `ImportPrintDialog` with `start`, the watcher's recorded source chosen); mocks
+  `src/mocks/features/printWatch.ts`.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
