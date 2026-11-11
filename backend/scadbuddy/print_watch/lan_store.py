@@ -9,7 +9,9 @@ printer, ``subtask_name`` and ``started_at``) is recorded once: a record sent ag
 finds the row and answers it as it is, so a retried attempt or a resend after a lost
 answer writes nothing more. The job's printer is ``printer_key``, the registry id it was
 recorded for, never null: a printer deleted before the first send or between two sends
-leaves ``printer`` null, and the resend still finds its row.
+leaves ``printer`` null, and the resend still finds its row. A printer's merge moves the
+key to the kept printer, unless the kept printer has a record of the same job
+(`printers/store.py` `_repoint_lan_imports`, #6045).
 """
 
 from __future__ import annotations

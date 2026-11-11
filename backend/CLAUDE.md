@@ -589,7 +589,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   registry id the job was recorded for, never null), `subtask_name` and `started_at`, the
   received time of the report that showed the start; the FK `printer` is `ON DELETE SET
   NULL` and in `PRINTER_REFERENCES`, so a resend for a printer deleted before or between
-  sends still finds its row by the key). The nudge gets
+  sends still finds its row by the key; a merge moves `printer` and also `printer_key`,
+  except where the kept printer has a row of the same job, `_repoint_lan_imports`,
+  #6045). The nudge gets
   a `reports.JobStart` (name, time, `gcode_file`); for a LAN-only row not in
   `print_auto_import_skip_lan_printers` (registry ids, person-only like the other three,
   `api/settings.py` `PRINT_WATCH`; a printer's merge moves its id there and its delete
