@@ -40,7 +40,7 @@ FLOOR_LOCK = "scadbuddy:print-watch:floor"
 #: Why a linked row is shown in the inbox: a model delete removed its link.
 MODEL_GONE = "its model was deleted"
 
-AutoImportState = Literal["linked", "inbox"]
+AutoImportState = Literal["linked", "inbox", "dismissed"]
 #: How the watcher matched a model: an earlier import of the same printed file, or the
 #: job's name, word for word.
 AutoMatchedBy = Literal["earlier_import", "job_name"]
@@ -66,7 +66,7 @@ _COLUMNS = (
 
 
 class AutoImport(BaseModel):
-    """One archive the watcher took: linked to a model, or in the inbox."""
+    """One archive the watcher took: linked to a model, in the inbox, or dismissed from it."""
 
     archive_id: int
     printer_id: int | None = None
@@ -90,6 +90,16 @@ class AutoImport(BaseModel):
     suggested: list[str] = Field(default_factory=list)
     #: Set by the database.
     seen_at: datetime | None = None
+    #: When a person or the assistant dismissed it from the inbox (state ``dismissed``).
+    dismissed_at: datetime | None = None
+
+
+class AutoImportLinkedError(Exception):
+    """A dismiss of a row that is not in the inbox: a link names its archive."""
+
+    def __init__(self, archive_id: int, subject: str) -> None:
+        super().__init__(f"archive {archive_id} is a print of {subject}, not in Unsorted imports")
+        self.subject = subject
 
 
 class AutoImportStore:
@@ -156,6 +166,16 @@ class AutoImportStore:
         found since) is left out. A linked row whose model link a model delete removed
         is shown as an inbox row, with `MODEL_GONE` as its reason (#6011)."""
         return await asyncio.to_thread(self._page, state, limit, before)
+
+    async def dismiss(self, archive_id: int) -> AutoImport | None:
+        """Mark an inbox row ``dismissed``, so it leaves the inbox, and rewrite its activity
+        row in the same transaction. The row stays, so the
+        watcher never takes the archive again (`known`). None when the watcher has no
+        row for the archive. A row dismissed before is answered as it is.
+        `AutoImportLinkedError` when a link names the archive: the print is a model's,
+        an output's or a library file's, not in the inbox. A linked row whose model link
+        a model delete removed is in the inbox (`page`), so it can be dismissed."""
+        return await asyncio.to_thread(self._dismiss, archive_id)
 
     def _floor(self) -> datetime | None:
         with self._pool.connection() as conn, conn.transaction():
@@ -294,6 +314,40 @@ class AutoImportStore:
                 self.activity.upsert_in(conn, lambda: row_of(row))
         return True
 
+    def _dismiss(self, archive_id: int) -> AutoImport | None:
+        returned = ", ".join((*_COLUMNS, "seen_at", "dismissed_at"))
+        with self._pool.connection() as conn, conn.transaction():
+            # The lock an import and the watcher's record take, so the owner read stands.
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (IMPORT_LOCK_CLASS, archive_id % (2**31)),
+            )
+            row = conn.execute(
+                f"SELECT {returned} FROM print_auto_imports WHERE archive_id = %s FOR UPDATE",
+                (archive_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["state"] == "dismissed":
+                return AutoImport.model_validate(dict(row))
+            owner = owner_in(conn, archive_id)
+            if owner is not None:
+                raise AutoImportLinkedError(archive_id, owner.subject)
+            # A linked row is here only when its model link is gone (the owner read
+            # above): it loses its model, as the inbox shows it.
+            dismissed = conn.execute(
+                "UPDATE print_auto_imports SET state = 'dismissed', slug = NULL,"
+                " matched_by = NULL, dismissed_at = now()"
+                f" WHERE archive_id = %s RETURNING {returned}",
+                (archive_id,),
+            ).fetchone()
+            assert dismissed is not None
+            updated = AutoImport.model_validate(dict(dismissed))
+            # The activity row says where the print is now, in the same transaction.
+            if self.activity is not None:
+                self.activity.upsert_in(conn, lambda: row_of(updated))
+        return updated
+
     def _page(
         self, state: AutoImportState | None, limit: int, before: int | None
     ) -> list[AutoImport]:
@@ -310,7 +364,7 @@ class AutoImportStore:
                 " CASE WHEN r.gone THEN NULL ELSE r.slug END AS slug,"
                 " CASE WHEN r.gone THEN NULL ELSE r.matched_by END AS matched_by,"
                 " CASE WHEN r.gone THEN %(gone)s ELSE r.reason END AS reason,"
-                " r.seen_at"
+                " r.seen_at, r.dismissed_at"
                 " FROM (SELECT g.*, CASE WHEN g.gone THEN 'inbox' ELSE g.state END AS shown"
                 "  FROM (SELECT a.*,"
                 "   a.state = 'linked' AND NOT EXISTS (SELECT 1 FROM print_links l"

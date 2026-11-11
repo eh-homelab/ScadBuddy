@@ -516,3 +516,115 @@ def test_only_a_person_changes_the_print_watcher(client: TestClient) -> None:
         refused = client.put("/api/v1/settings", json=body, headers=agent)
         assert refused.status_code == 403, body
     assert client.get("/api/v1/settings").json()["print_auto_import"] is False
+
+
+def dismiss(client: TestClient, archive_id: int, **headers: str) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/print-imports/auto/{archive_id}/dismiss", headers=headers
+    )
+    return response
+
+
+AGENT = {"X-ScadBuddy-Agent-Author": "token:p1", "X-ScadBuddy-Agent-Author-Session": "s1"}
+
+
+@respx.mock
+def test_a_dismissed_print_leaves_the_inbox_and_is_never_taken_again(
+    client: TestClient, model: str
+) -> None:
+    """Phase 2: a dismissed inbox print leaves Unsorted imports. Its row stays, so the
+    next pass does not take the archive again. A second dismiss gives the same answer."""
+    switch_on(client)
+    bambuddy(a_print(320, print_name="demo_elan", filename="demo_elan.gcode.3mf"))
+    run_pass(client)
+    assert [row["archive_id"] for row in auto(client, state="inbox")] == [320]
+
+    first = dismiss(client, 320)
+    assert first.status_code == 200, first.text
+    assert (first.json()["archive_id"], first.json()["state"]) == (320, "dismissed")
+    assert first.json()["dismissed_at"] is not None
+    assert auto(client, state="inbox") == []
+    assert [row["archive_id"] for row in auto(client, state="dismissed")] == [320]
+    # The activity row says so too, in the same transaction (review of #6028).
+    activity = client.get("/api/v1/activity/print_auto_import:320", params={"advanced": 1})
+    assert activity.status_code == 200, activity.text
+    item = activity.json()["row"]
+    assert item["facets"]["state"] == "dismissed"
+    assert item["title"].startswith("Dismissed print")
+
+    run_pass(client)
+    assert [(row["archive_id"], row["state"]) for row in auto(client)] == [(320, "dismissed")]
+    again = dismiss(client, 320)
+    assert (again.status_code, again.json()["state"]) == (200, "dismissed")
+
+
+@respx.mock
+def test_only_an_inbox_print_is_dismissed(client: TestClient, model: str) -> None:
+    """A print linked to a model is not in the inbox: 409, and it stays linked. An
+    archive that the watcher never took is 404."""
+    switch_on(client)
+    bambuddy(a_print(321))
+    run_pass(client)
+
+    refused = dismiss(client, 321)
+    assert refused.status_code == 409, refused.text
+    assert [row["state"] for row in auto(client)] == ["linked"]
+    assert dismiss(client, 9999).status_code == 404
+
+
+@respx.mock
+def test_a_print_whose_model_was_deleted_can_be_dismissed(client: TestClient, model: str) -> None:
+    switch_on(client)
+    bambuddy(a_print(322))
+    run_pass(client)
+    asyncio.run(state(client).print_links.delete_models([model]))
+
+    response = dismiss(client, 322)
+    assert response.status_code == 200, response.text
+    assert (response.json()["state"], response.json()["slug"]) == ("dismissed", None)
+    assert auto(client, state="inbox") == []
+
+
+@respx.mock
+def test_an_inbox_print_a_link_names_since_is_not_dismissed(client: TestClient, model: str) -> None:
+    """A person imported it since: it is not in the inbox any more, so 409."""
+    switch_on(client)
+    bambuddy(a_print(324, print_name="demo_elan", filename="demo_elan.gcode.3mf"))
+    run_pass(client)
+    asyncio.run(
+        state(client).print_links.record_import(
+            PrintImport(archive_id=324, slug=model, source="archive", filename="demo_elan.3mf")
+        )
+    )
+    assert dismiss(client, 324).status_code == 409
+
+
+@respx.mock
+def test_a_dismissed_print_a_link_names_since_leaves_the_dismissed_list(
+    client: TestClient, model: str
+) -> None:
+    """Review of #6028: Import print links a dismissed print later. Like an inbox row, it
+    is then in no list: the link owns the print."""
+    switch_on(client)
+    bambuddy(a_print(325, print_name="demo_elan", filename="demo_elan.gcode.3mf"))
+    run_pass(client)
+    assert dismiss(client, 325).status_code == 200
+    asyncio.run(
+        state(client).print_links.record_import(
+            PrintImport(archive_id=325, slug=model, source="archive", filename="demo_elan.3mf")
+        )
+    )
+    assert auto(client, state="dismissed") == []
+    assert auto(client) == []
+
+
+@respx.mock
+def test_the_assistant_may_dismiss_an_inbox_print(client: TestClient, model: str) -> None:
+    """A dismiss reaches no printer and no Bambuddy, and Import print can still link the
+    print. So an agent's call is not refused here; the tool's tier gates it."""
+    switch_on(client)
+    bambuddy(a_print(323, print_name="demo_elan", filename="demo_elan.gcode.3mf"))
+    run_pass(client)
+
+    response = dismiss(client, 323, **AGENT)
+    assert response.status_code == 200, response.text

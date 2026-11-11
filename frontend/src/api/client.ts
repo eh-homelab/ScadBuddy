@@ -115,6 +115,7 @@ import type {
   PrintDetail,
   PrintSources,
   PrintImportRequest,
+  AutoImport,
   ImportedPrint,
   TimelapseFrames,
   PrintPage,
@@ -1971,6 +1972,23 @@ export const api = {
     if (imported(again)) return again
     throw new Error('The model was made, but the print was not linked to it: import it onto the model again.')
   },
+
+  /**
+   * #4699 — the prints the print watcher took, newest archive first: `inbox` is Unsorted
+   * imports. Page with `before`, the last `archive_id` read.
+   */
+  listAutoImports: ({ state, limit, before }: { state?: AutoImport['state']; limit?: number; before?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (state) query.set('state', state)
+    if (limit !== undefined) query.set('limit', String(limit))
+    if (before !== undefined) query.set('before', String(before))
+    const tail = query.toString()
+    return request<AutoImport[]>(`/print-imports/auto${tail ? `?${tail}` : ''}`)
+  },
+
+  /** #4699 — takes a print out of Unsorted imports; the watcher never takes it again. */
+  dismissAutoImport: (archiveId: number) =>
+    request<AutoImport>(`/print-imports/auto/${archiveId}/dismiss`, { method: 'POST' }),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),

@@ -7,6 +7,7 @@ import type { Settings, SettingsUpdate } from '../../api/types'
 export type SectionId =
   | 'connection'
   | 'printing'
+  | 'print-watcher'
   | 'orders'
   | 'projects'
   | 'uploads'

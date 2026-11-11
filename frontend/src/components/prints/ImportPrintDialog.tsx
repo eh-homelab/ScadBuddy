@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ApiError, api } from '../../api/client'
-import type { ArchiveOutcome, FoundSource, ImportedPrint, PrintImportRequest } from '../../api/types'
+import type { ArchiveOutcome, AutoImport, FoundSource, ImportedPrint, PrintImportRequest } from '../../api/types'
 import { modelPath } from '../../lib/deeplink'
 import { formatBytes, timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
@@ -25,6 +25,25 @@ function sourceKey(source: Pick<FoundSource, 'kind' | 'library_file_id' | 'path'
   return `${source.kind}:${source.library_file_id ?? source.path ?? ''}`
 }
 
+/** The print the form imports: an archive picked from the list, or an inbox print. */
+type PickedPrint = Pick<ArchiveOutcome, 'id' | 'print_name'>
+
+/** #4699 — where the dialog starts: an inbox print, and the source the watcher recorded. */
+export type ImportStart = { archive: PickedPrint; recorded?: Pick<AutoImport, 'source' | 'library_file_id'> }
+
+/**
+ * #4699 — the source the print watcher recorded for an inbox print, as the radio group
+ * names it. A printer file the watcher kept is a library file in the inbox folder, so it
+ * is listed as that library file; the printer itself is never read for it.
+ */
+function recordedSource(row: Pick<AutoImport, 'source' | 'library_file_id'>): string | null {
+  if (row.source === 'archive' || row.source === 'archive_source') return sourceKey({ kind: row.source })
+  if ((row.source === 'library' || row.source === 'printer') && row.library_file_id != null) {
+    return sourceKey({ kind: 'library', library_file_id: row.library_file_id })
+  }
+  return null
+}
+
 function errorText(error: unknown): string {
   if (error instanceof ApiError) {
     const errors = (error.problem as { errors?: { msg?: string }[] }).errors
@@ -40,17 +59,22 @@ function errorText(error: unknown): string {
  * cannot be used says why, and the only usable one is chosen already), then the model: one
  * that exists (the suggested ones first) or a new mesh model made from the 3MF. The
  * printer's storage is read only after "Also look on the printer".
+ *
+ * With `start` (#4699, an Unsorted imports print) the dialog opens on that print, with
+ * the source the watcher recorded chosen when it is listed and can be used.
  */
 export function ImportPrintDialog({
   open,
   onOpenChange,
   onImported,
+  start,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onImported?: (imported: ImportedPrint) => void
+  start?: ImportStart | null
 }) {
-  const [archive, setArchive] = useState<ArchiveOutcome | null>(null)
+  const [archive, setArchive] = useState<PickedPrint | null>(start?.archive ?? null)
   const [done, setDone] = useState<ImportedPrint | null>(null)
   // Each open starts on the picker. An import still running when the dialog closes may
   // answer later: it reloads the history, but shows its "done" only in the open it began
@@ -60,7 +84,7 @@ export function ImportPrintDialog({
   if (open !== wasOpen) {
     setWasOpen(open)
     if (open) {
-      setArchive(null)
+      setArchive(start?.archive ?? null)
       setDone(null)
       setOpens((n) => n + 1)
     }
@@ -102,7 +126,9 @@ export function ImportPrintDialog({
           <ImportForm
             key={archive.id}
             archive={archive}
-            onBack={() => setArchive(null)}
+            preferred={start?.recorded && archive.id === start.archive.id ? recordedSource(start.recorded) : null}
+            // An inbox print (`start`) stays on its own print: no way back to the picker.
+            onBack={start ? undefined : () => setArchive(null)}
             onImported={(imported) => {
               if (live.current === opens) setDone(imported)
               onImported?.(imported)
@@ -124,11 +150,14 @@ const EXISTING = 'existing'
 
 function ImportForm({
   archive,
+  preferred,
   onBack,
   onImported,
 }: {
-  archive: ArchiveOutcome
-  onBack: () => void
+  archive: PickedPrint
+  /** The source to choose first when it is listed and can be used (`recordedSource`). */
+  preferred: string | null
+  onBack?: () => void
   onImported: (imported: ImportedPrint) => void
 }) {
   const [printer, setPrinter] = useState(false)
@@ -141,7 +170,8 @@ function ImportForm({
   const models = useAsync(() => api.listModels(), [])
 
   const [picked, setPicked] = useState<string | null>(null)
-  const preselected = sources?.sources.find((s) => s.preselected)
+  const recorded = preferred === null ? undefined : sources?.sources.find((s) => s.available && sourceKey(s) === preferred)
+  const preselected = recorded ?? sources?.sources.find((s) => s.preselected)
   // The choice made for the person stays theirs when the printer's files arrive and
   // nothing is preselected any more (#4698 review).
   if (picked === null && preselected) setPicked(sourceKey(preselected))
@@ -188,9 +218,11 @@ function ImportForm({
         <p className="text-sm font-medium" data-testid="import-archive">
           {title}
         </p>
-        <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={busy}>
-          Choose another print
-        </Button>
+        {onBack && (
+          <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={busy}>
+            Choose another print
+          </Button>
+        )}
       </div>
       {found.error && !sources ? (
         <p className="text-xs text-warn">Could not read where the print's file is: {errorText(found.error)}</p>

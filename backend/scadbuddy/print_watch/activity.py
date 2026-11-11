@@ -16,11 +16,13 @@ KIND = "print_auto_import"
 
 def row_of(row: AutoImport) -> ActivityRow:
     name = row.print_name or row.filename or f"archive {row.archive_id}"
-    title = (
-        f"Imported print {name} onto {row.slug}"
-        if row.slug is not None
-        else f"Imported print {name} into Unsorted imports"
-    )
+    if row.state == "dismissed":
+        # A dismiss rewrites the row (`AutoImportStore.dismiss`).
+        title = f"Dismissed print {name} from Unsorted imports"
+    elif row.slug is not None:
+        title = f"Imported print {name} onto {row.slug}"
+    else:
+        title = f"Imported print {name} into Unsorted imports"
     return ActivityRow(
         id=f"{KIND}:{row.archive_id}",
         kind=KIND,

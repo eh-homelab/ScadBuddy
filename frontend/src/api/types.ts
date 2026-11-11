@@ -577,6 +577,8 @@ export type PrintSources = Schemas['PrintSources']
 export type FoundSource = Schemas['FoundSource']
 export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']
+/** #4699 — a print the print watcher took: linked to a model, in Unsorted imports, or dismissed. */
+export type AutoImport = Schemas['AutoImport']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
