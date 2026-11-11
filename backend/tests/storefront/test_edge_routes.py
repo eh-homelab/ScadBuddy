@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any
@@ -22,7 +23,7 @@ from starlette.routing import Route
 
 from scadbuddy.core.proxies import parse_cidr_list
 from scadbuddy.crud.client import CrudUnavailableError
-from scadbuddy.storefront import routes, uploads
+from scadbuddy.storefront import ratelimit, routes, uploads
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
     MAX_CLIENTS,
@@ -37,6 +38,7 @@ from scadbuddy.storefront.ratelimit import (
     client_key,
 )
 from scadbuddy.storefront.routes import MAX_RENDER_BODY
+from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 from scadbuddy.storefront.turnstile import bot_check_failed
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
@@ -130,6 +132,58 @@ def test_the_request_limit_answers_429(edge: TestClient) -> None:
     assert 1 <= int(r.headers["retry-after"]) <= 60
     # The health check is not the visitor's to spend.
     assert edge.get("/healthz").status_code == 200
+
+
+def _walk(routes: Any, prefix: str = "") -> Iterator[tuple[str, set[str]]]:
+    """The (path, methods) of each route in ``routes``, through the routers an app
+    includes (newer FastAPI keeps an included router as one entry, with its prefix)."""
+    for route in routes:
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            yield from _walk(inner.routes, prefix + route.include_context.prefix)
+        elif hasattr(route, "path"):
+            yield prefix + route.path, set(getattr(route, "methods", None) or ())
+
+
+def _edge_routes() -> list[tuple[str, str]]:
+    """The (method, path) of every route the edge serves under its prefix, from the app's
+    own route table, so a new route is counted here at once. Path parameters are filled
+    with a plain word."""
+    found: list[tuple[str, str]] = []
+    for path, methods in _walk(create_app(load()).routes):
+        if not path.startswith(STOREFRONT_PREFIX + "/"):
+            continue
+        filled = re.sub(r"\{[^}]+\}", "x", path)
+        found += [(m, filled) for m in sorted(methods) if m not in ("HEAD", "OPTIONS")]
+    return found
+
+
+def test_every_route_has_a_request_limit(
+    edge_env: None,  # noqa: F811
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each route under the prefix answers 429 once its client's limit is spent. The limit
+    is one request, and each route gets an edge of its own, so no route lends its count."""
+    monkeypatch.setattr(ratelimit, "READ_LIMIT", 1)
+    monkeypatch.setattr(ratelimit, "WRITE_LIMIT", 1)
+    found = _edge_routes()
+    assert len(found) >= 10, found
+    assert ("GET", f"{STOREFRONT_PREFIX}/listings") in found
+    assert ("POST", f"{STOREFRONT_PREFIX}/draft/submit") in found
+    for method, path in found:
+        with TestClient(
+            create_app(load()),
+            base_url="https://testserver",
+            client=CLIENT,
+            raise_server_exceptions=False,
+        ) as client:
+            sent = {"Origin": PUBLIC_URL}
+            # The first request spends the limit, whatever the route answers it.
+            client.request(method, path, headers=sent)
+            r = client.request(method, path, headers=sent)
+            assert r.status_code == 429, (method, path, r.status_code)
+            assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}rate_limited", (method, path)
 
 
 class _Down:

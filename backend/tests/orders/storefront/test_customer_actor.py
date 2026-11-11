@@ -25,7 +25,7 @@ from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop, resolved, set_request_status
+from tests.orders.test_lifecycle import BY, Shop, requests_for, resolved, set_request_status
 from tests.orders.test_revisions import attach_render
 
 pytestmark = pytest.mark.requires_postgres
@@ -119,6 +119,25 @@ def test_the_last_customer_acceptance_accepts_a_storefront_order(
     assert last.by.kind == "customer" and last.by.principal == f"customer:{shop.customer.id}"
     told = [e for e in shop.events if isinstance(e, OrderChanged)]
     assert told and told[-1].status == "accepted"
+
+
+def test_the_last_customer_acceptance_opens_the_balance_request(
+    shop: Shop, pool: PgPool, customer: Actor
+) -> None:
+    """Two items at 1000 each, a deposit of 300 paid: the first accept opens no balance
+    request, the last one accepts the order and opens a ``balance`` request for the other 1700."""
+    order = storefront_order(shop, pool, 2)
+    shop.lifecycle.set_deposit(order.id, BY, 300)
+    shop.lifecycle.add_payment(order.id, BY, amount_minor=300, method="cash")
+    a, b = shop.rows.items(order.id)
+    shop.lifecycle.answer_revision(order.id, a.id, revision(shop, a).id, ACCEPTED, customer)
+    assert shop.get(order).status == "draft"
+    assert "balance" not in [r.kind for r in requests_for(shop, order)]
+    shop.lifecycle.answer_revision(order.id, b.id, revision(shop, b).id, ACCEPTED, customer)
+    assert shop.get(order).status == "accepted"
+    found = requests_for(shop, order)
+    assert [(r.kind, r.amount_minor, r.status) for r in found][-1] == ("balance", 1700, "open")
+    assert [r.kind for r in found if r.status == "open"] == ["balance"]
 
 
 def test_the_customers_price_accept_accepts_a_design_first_order(
