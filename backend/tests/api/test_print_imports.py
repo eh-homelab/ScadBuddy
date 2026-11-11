@@ -242,6 +242,7 @@ def test_an_import_onto_a_model_makes_it_a_scadbuddy_print(client: TestClient, m
         "size": 4242,
         "sha256": HASH,
         "created_model": False,
+        "content_hash": HASH,
         "imported_at": None,
     }
     assert not download.called, "Bambuddy keeps the archive's file: nothing is copied"
