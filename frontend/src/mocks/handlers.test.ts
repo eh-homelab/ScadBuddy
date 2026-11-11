@@ -1634,6 +1634,14 @@ describe('mock PUT /print/printers/:id/bed-type, as the backend keys it (#5153)'
     await expect(api.putPrinterBedType('00000000000', null)).resolves.toEqual({ printer_id: 0, printer: null, bed_type: null })
   })
 
+  it('strips leading zeros before the length test: 15 digits can still be the largest id', async () => {
+    await expect(api.putPrinterBedType('000002147483647', null)).resolves.toEqual({
+      printer_id: 2147483647,
+      printer: null,
+      bed_type: null,
+    })
+  })
+
   it('refuses a registry id the registry does not hold, forget or not', async () => {
     await expect(api.putPrinterBedType('no-such-printer', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
     await expect(api.putPrinterBedType('no-such-printer', null)).rejects.toMatchObject({ status: 404 })
