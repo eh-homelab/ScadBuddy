@@ -34,8 +34,9 @@ CREATE INDEX IF NOT EXISTS print_auto_imports_state
     ON print_auto_imports (state, archive_id DESC);
 
 -- When the watcher was last switched on: it takes only the archives Bambuddy made since,
--- so switching it on never imports the whole history. One row, written by the first pass
--- that finds the switch on and deleted by a pass that finds it off.
+-- so switching it on never imports the whole history. One row, written when `PUT /settings`
+-- switches the watcher on (or by the first pass that finds it on without one), and deleted
+-- when it is switched off or by a pass that finds it off.
 CREATE TABLE IF NOT EXISTS print_auto_import_watch (
     only_row boolean PRIMARY KEY DEFAULT true CHECK (only_row),
     since    timestamptz NOT NULL DEFAULT now()
