@@ -15,7 +15,9 @@ if TYPE_CHECKING:
 KIND = "print_auto_import"
 
 
-def row_of(row: AutoImport) -> ActivityRow:
+def row_of(row: AutoImport, *, matched_by: str | None = None) -> ActivityRow:
+    """``row``'s activity row; ``matched_by`` names the match when the row's own does not
+    (Import print's `import`, #6029)."""
     name = row.print_name or row.filename or f"archive {row.archive_id}"
     if row.state == "dismissed":
         # A dismiss rewrites the row (`AutoImportStore.dismiss`).
@@ -35,7 +37,7 @@ def row_of(row: AutoImport) -> ActivityRow:
         facets={
             "state": row.state,
             "source": row.source or "none",
-            "matched_by": row.matched_by or "none",
+            "matched_by": matched_by or row.matched_by or "none",
         },
         detail={
             "archive_id": row.archive_id,
@@ -63,9 +65,7 @@ def imported_row(row: AutoImport, record: PrintImport) -> ActivityRow:
             "suggested": [],
         }
     )
-    activity = row_of(linked)
-    activity.facets["matched_by"] = "import"
-    return activity
+    return row_of(linked, matched_by="import")
 
 
 PRINT_AUTO_IMPORT = ActivityKind(
