@@ -1613,6 +1613,13 @@ describe('mock PUT /print/printers/:id/bed-type, as the backend keys it (#5153)'
     await expect(api.putPrinterBedType(2, null)).resolves.toEqual({ printer_id: 2, printer: null, bed_type: null })
   })
 
+  it('refuses a Bambuddy id past the backend\u2019s integer column, forget or not', async () => {
+    for (const id of ['2147483648', '99999999999999999999']) {
+      await expect(api.putPrinterBedType(id, 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+      await expect(api.putPrinterBedType(id, null)).rejects.toMatchObject({ status: 404 })
+    }
+  })
+
   it('refuses a registry id the registry does not hold, forget or not', async () => {
     await expect(api.putPrinterBedType('no-such-printer', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
     await expect(api.putPrinterBedType('no-such-printer', null)).rejects.toMatchObject({ status: 404 })

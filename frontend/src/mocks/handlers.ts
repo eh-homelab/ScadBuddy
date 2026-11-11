@@ -86,6 +86,9 @@ import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
 
+/** The largest Bambuddy printer id: the backend's `_BAMBUDDY_ID_MAX`, an `integer` column (#6067). */
+const BAMBUDDY_ID_MAX = 2 ** 31 - 1
+
 /** A 1×1 PNG, for the image routes whose pixels no test looks at. */
 const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
 const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
@@ -3403,6 +3406,11 @@ export const handlers = [
     const asked = String(params['id'])
     const body = (await request.json()) as { bed_type: string | null }
     const bambuddyId = /^\d+$/.test(asked) ? Number(asked) : null
+    // As `printer_keys(..., forget=False)`: an id past the backend's integer column is no
+    // printer, forget or not (and past 2^53 `Number` would not keep it exact).
+    if (bambuddyId !== null && (asked.length > 10 || bambuddyId > BAMBUDDY_ID_MAX)) {
+      return problem(404, 'Not Found', `no printer ${asked}`)
+    }
     const row = printersState().find((printer) =>
       bambuddyId === null ? printer.id === asked : printer.bambuddy_printer_id === bambuddyId,
     )
