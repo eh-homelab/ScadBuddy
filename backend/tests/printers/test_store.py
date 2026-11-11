@@ -5,6 +5,7 @@ only its own row opens it."""
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -54,6 +55,19 @@ def test_create_and_lookup_by_serial(printers: PrinterStore) -> None:
     assert printers.get(row.id) == row
     assert printers.get("nope") is None
     assert [r.id for r in printers.list()] == [row.id]
+
+
+def test_a_bounded_get_gives_up_on_a_stalled_read(printers: PrinterStore, pg_conninfo: str) -> None:
+    """#6037: the print watcher's nudge reads the row with a bound, so a read Postgres
+    holds (here behind a table lock) ends with ``QueryCanceled`` and frees its thread."""
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    with psycopg.connect(pg_conninfo) as holder, holder.transaction():
+        holder.execute("LOCK TABLE printers IN ACCESS EXCLUSIVE MODE")
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            printers.get(row.id, timeout=0.2)
+        assert time.monotonic() - started < 5
+    assert printers.get(row.id, timeout=1.0) == row
 
 
 def test_list_is_by_name(printers: PrinterStore) -> None:

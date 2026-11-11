@@ -351,8 +351,15 @@ class PrinterStore:
         data = found.fetchone()
         return None if data is None else _row(data)
 
-    def get(self, printer_id: str) -> PrinterRow | None:
-        with self.pool.connection() as conn:
+    def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
+        """``timeout``, in seconds, bounds the read (#6037): the pool wait (`PoolTimeout`)
+        and the statement (`QueryCanceled`, a ``statement_timeout`` local to this read's
+        transaction), on the store's own pool. None waits as long as it takes."""
+        if timeout is None:
+            with self.pool.connection() as conn:
+                return self._one(conn, "id", printer_id)
+        with self.pool.connection(timeout=timeout) as conn, conn.transaction():
+            conn.execute(f"SET LOCAL statement_timeout = {max(1, int(timeout * 1000))}")
             return self._one(conn, "id", printer_id)
 
     def by_serial(self, serial: str) -> PrinterRow | None:

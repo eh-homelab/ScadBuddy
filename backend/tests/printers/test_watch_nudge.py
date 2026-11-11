@@ -106,6 +106,9 @@ async def test_a_hanging_nudge_never_holds_back_the_next_report_or_its_settle() 
     assert reports.written == [RUNNING_X, FINISH_X, RUNNING_Y]
     assert [(printer, name) for printer, name, _, _ in rack.ended] == [(PID, "x")]
     assert nudges.seen == ["x", "y"]
+    # #6037: both nudges still hung when the attempt ended, and its cleanup ended them
+    # (from a set, so in no set order).
+    assert sorted(nudges.cancelled) == ["x", "y"]
 
 
 async def test_a_nudge_past_its_timeout_is_cancelled_and_logged(
