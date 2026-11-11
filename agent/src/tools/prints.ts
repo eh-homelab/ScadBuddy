@@ -159,10 +159,12 @@ export const printHistoryTools: Tool[] = [
       'The prints the print watcher (#4699) imported, ScadBuddy not having started them, newest archive first: each ' +
       'it linked to a model (`state: linked`, with `matched_by`: an earlier import of the same file, or the job\'s ' +
       'name), and each it put in the Unsorted imports inbox (`state: inbox`, with `reason` and the models the job\'s ' +
-      'name suggests). To link an inbox print, show the user the suggestions, then import_print. Answers `items`, ' +
+      'name suggests), and each a person or the assistant dismissed from it (`state: dismissed`). `state: inbox` is ' +
+      'the Unsorted imports list. To link an inbox print, show the user the suggestions, then import_print; to ' +
+      'take one out of the inbox, dismiss_auto_import. Answers `items`, ' +
       'and `next_cursor` when the page was full: pass it back as `cursor` for the next page.',
     input: z.object({
-      state: z.enum(['linked', 'inbox']).optional(),
+      state: z.enum(['linked', 'inbox', 'dismissed']).optional(),
       limit: z.number().int().min(1).max(200).optional(),
       cursor: z.string().regex(/^[1-9][0-9]{0,17}$/, 'must be a next_cursor from list_auto_imports').optional(),
     }),
@@ -181,6 +183,28 @@ export const printHistoryTools: Tool[] = [
       const last = items.at(-1)
       return json({ items, ...(items.length === size && last ? { next_cursor: String(last.archive_id) } : {}) })
     },
+  }),
+
+  defineTool({
+    name: 'dismiss_auto_import',
+    label: 'Dismiss a print from Unsorted imports',
+    description:
+      'Take a print out of the Unsorted imports inbox (list_auto_imports `state: inbox`): its row becomes ' +
+      '`dismissed`, and the print watcher never takes the archive again. It reaches no printer and no Bambuddy; ' +
+      'import_print can still link the print later. Dismiss only a print the user said is not worth keeping. A ' +
+      'print dismissed before gives the same answer; a print linked to a model, an output or a library file is ' +
+      'refused (409), and an archive the watcher never took is 404.',
+    input: z.object({ archive_id: archiveId.describe("The inbox print's archive id, as list_auto_imports returns it") }),
+    risk: 'write',
+    routes: ['POST /api/v1/print-imports/auto/{archive_id}/dismiss'],
+    summarize: ({ archive_id }) => `Dismiss print ${archive_id} from Unsorted imports`,
+    handler: async ({ archive_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/print-imports/auto/{archive_id}/dismiss', { params: { path: { archive_id } } }),
+          `dismiss print ${archive_id} from Unsorted imports`,
+        ),
+      ),
   }),
 
   defineTool({

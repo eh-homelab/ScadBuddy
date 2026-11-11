@@ -197,4 +197,59 @@ describe('list_auto_imports (#4699)', () => {
     expect(Object.fromEntries(seen[0]!)).toEqual({ state: 'inbox', limit: '2' })
     expect(Object.fromEntries(seen[1]!)).toEqual({ state: 'inbox', limit: '2', before: '250' })
   })
+
+  it('reads the dismissed prints too', async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/print-imports/auto`, ({ request }) => {
+        seen.push(new URL(request.url).searchParams.get('state') ?? '')
+        return HttpResponse.json([])
+      }),
+    )
+    const result = await runTool(tool('list_auto_imports'), { state: 'dismissed' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(seen).toEqual(['dismissed'])
+  })
+})
+
+describe('dismiss_auto_import (#4699 phase 2)', () => {
+  it('is a write that reaches no printer, on the dismiss route', () => {
+    expect(tool('dismiss_auto_import')).toMatchObject({ risk: 'write', routes: ['POST /api/v1/print-imports/auto/{archive_id}/dismiss'] })
+    expect(pinnedOutward('dismiss_auto_import', { archive_id: 320 })).toBe(false)
+  })
+
+  it('dismisses the inbox print and answers its row', async () => {
+    const posted: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/:archiveId/dismiss`, ({ params }) => {
+        posted.push(String(params['archiveId']))
+        return HttpResponse.json({ archive_id: 320, state: 'dismissed', suggested: [] })
+      }),
+    )
+    const result = await runTool(tool('dismiss_auto_import'), { archive_id: 320 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toEqual(['320'])
+    expect(firstText(result)).toMatchObject({ archive_id: 320, state: 'dismissed' })
+  })
+
+  it('names the refusal of a print that is not in the inbox', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print-imports/auto/:archiveId/dismiss`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'archive 321 is a print of model:demo, not in Unsorted imports' },
+          { status: 409, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const result = await runTool(tool('dismiss_auto_import'), { archive_id: 321 }, ctx())
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('not in Unsorted imports')
+  })
+
+  it('records the archive it touched', () => {
+    const extract = EXTRACTORS.dismiss_auto_import as NonNullable<(typeof EXTRACTORS)['dismiss_auto_import']>
+    expect(extract({ archive_id: 320 }, { archive_id: 320, state: 'dismissed' })).toEqual([
+      { type: 'print_archive', id: '320', action: 'modified' },
+    ])
+  })
 })

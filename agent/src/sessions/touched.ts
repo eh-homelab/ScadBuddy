@@ -597,6 +597,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ? [...touched, ...modelCreated(result)]
       : touched
   },
+  // #4699: the inbox print's row is dismissed; the archive itself is unchanged in Bambuddy.
+  dismiss_auto_import: (input) => {
+    const archive = bambuddyId(input.archive_id)
+    return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
+  },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
