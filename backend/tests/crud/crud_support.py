@@ -77,6 +77,8 @@ from scadbuddy.library.settings_store import PrintSettings, RenderStoreSettings,
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.store import AutoImportStore
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.projection import JobProjection
@@ -438,18 +440,22 @@ def print_crud_app(
     kinds: Mapping[str, OperationKind] | None = None,
     printers: PrinterStore | None = None,
     links: PrintLinkStore | None = None,
+    catalogue: Any = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
     through ``operations`` of ``kinds``, printer rows through ``printers``, the print
     links, sends and the queue item a reprint queued through ``links`` (the API's own
     on ``store``'s pool when not given), and the uploads, slices, background slices,
-    project records and outputs' last prints on ``store``'s pool."""
+    project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
+    print records go to the watcher's store on ``store``'s pool, matched against
+    ``catalogue`` (none when not given)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
         PRINTERS: SimpleNamespace(store=printers),
+        AUTO_IMPORTS: AutoImportStore(store.pool),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -460,6 +466,7 @@ def print_crud_app(
         # The API's `OutputStore`, of which the routes read only its last prints.
         outputs=SimpleNamespace(prints=OutputPrintStore(store.pool)),
         events=events,
+        catalogue=catalogue or SimpleNamespace(slugs=list, exists=lambda slug: False),
         components=SimpleNamespace(get=lambda key: parts[key]),
     )
     app.include_router(crud_print.router, prefix="/api/v1")
@@ -537,6 +544,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "previews",
         "copy-leases",
         "links",
+        "lan-imports",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

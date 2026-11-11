@@ -28,7 +28,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``previews`` area also covers ``…/print/project-targets``, ``…/print/folderless`` and
 #: ``…/print/destination-touches`` (#5298 Task 26). Its ``copy-leases`` area is
 #: ``…/print/copy-leases/{key}``, the copy lease (#5298 Task 27). Its ``links`` area is
-#: ``…/print/links``, ``…/print/sends`` and ``…/print/last-prints`` (#5298 Task 28).
+#: ``…/print/links``, ``…/print/sends`` and ``…/print/last-prints`` (#5298 Task 28). Its
+#: ``lan-imports`` area is ``…/print/lan-imports``, a LAN-only printer's print record
+#: (#4699 phase 4).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -43,6 +45,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "previews",
         "copy-leases",
         "links",
+        "lan-imports",
     ],
     "storefront": [
         "listings",

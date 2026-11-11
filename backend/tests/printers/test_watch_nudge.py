@@ -17,6 +17,7 @@ from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.reports import (
     Advance,
+    JobStart,
     PrinterReportStore,
     advance_print,
     started_print,
@@ -64,9 +65,12 @@ class Hangs:
     def __init__(self) -> None:
         self.seen: list[str] = []
         self.cancelled: list[str] = []
+        self.starts: list[JobStart] = []
 
-    async def nudge(self, printer_id: str, subtask: str) -> bool:
+    async def nudge(self, printer_id: str, start: JobStart) -> bool:
+        subtask = start.subtask_name
         self.seen.append(subtask)
+        self.starts.append(start)
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -135,3 +139,17 @@ async def test_a_nudge_in_flight_ends_with_its_attempt() -> None:
     await asyncio.sleep(0)
 
     assert nudges.cancelled == ["x"]
+
+
+async def test_a_start_carries_its_reports_time_and_plate_gcode() -> None:
+    """#4699 phase 4: a LAN-only printer's record is keyed by the job's start, and its
+    file is checked against the plate G-code the printer named."""
+    started = {**RUNNING_X, "gcode_file": "/data/Metadata/plate_2.gcode"}
+    lan = Lan(subscribes=True, deltas=[started])
+    reports, nudges, rack = Reports(), Hangs(), Settles()
+    await _run_for(_watches(lan, reports, nudges, rack), 0.2)
+
+    [start] = nudges.starts
+    assert start.subtask_name == "x"
+    assert start.gcode_file == "/data/Metadata/plate_2.gcode"
+    assert start.started_at.tzinfo is not None

@@ -86,6 +86,14 @@ _MQTT_LOGGER = logging.getLogger("scadbuddy.printers.lan.mqtt")
 _MQTT_LOGGER.setLevel(logging.WARNING)
 
 
+class FileTooLargeError(Exception):
+    """A download past its ``max_bytes``: the read stops there."""
+
+    def __init__(self, max_bytes: int) -> None:
+        super().__init__(f"the file is larger than {max_bytes} bytes")
+        self.max_bytes = max_bytes
+
+
 class CertificateMismatchError(ssl.SSLError):
     """The printer presented a certificate other than the one pinned when it was linked
     (a firmware reset, or another device at that address). Re-link it to pin again."""
@@ -300,10 +308,12 @@ class LanPrinter:
         address = await lan_address(self.host)
         return await asyncio.to_thread(self._upload, address, data, remote_name)
 
-    async def download(self, remote_name: str) -> bytes:
-        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file)."""
+    async def download(self, remote_name: str, *, max_bytes: int | None = None) -> bytes:
+        """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file,
+        and the print watcher's copy of a LAN-only printer's job, #4699). Past
+        ``max_bytes`` the read stops with `FileTooLargeError`."""
         address = await lan_address(self.host)
-        return await asyncio.to_thread(self._download, address, remote_name)
+        return await asyncio.to_thread(self._download, address, remote_name, max_bytes)
 
     def _ftps(self, address: str) -> ImplicitFtpTls:
         """A logged-in, protected FTPS session on ``address``; the caller closes it."""
@@ -317,11 +327,17 @@ class LanPrinter:
             raise
         return ftp
 
-    def _download(self, address: str, remote_name: str) -> bytes:
+    def _download(self, address: str, remote_name: str, max_bytes: int | None = None) -> bytes:
         ftp = self._ftps(address)
         try:
             out = BytesIO()
-            ftp.retrbinary(f"RETR {remote_name}", out.write)
+
+            def write(block: bytes) -> None:
+                out.write(block)
+                if max_bytes is not None and out.tell() > max_bytes:
+                    raise FileTooLargeError(max_bytes)
+
+            ftp.retrbinary(f"RETR {remote_name}", write)
             return out.getvalue()
         finally:
             ftp.close()

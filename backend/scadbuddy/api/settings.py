@@ -203,6 +203,8 @@ class SettingsView(BaseModel):
     print_auto_import: bool = False
     print_auto_import_sources: list[ImportSource] = Field(default_factory=list)
     print_auto_import_skip_printers: list[int] = Field(default_factory=list)
+    #: The LAN-only printers it leaves alone, by registry id (#4699 phase 4).
+    print_auto_import_skip_lan_printers: list[str] = Field(default_factory=list)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -459,6 +461,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         print_auto_import=stored.print_auto_import,
         print_auto_import_sources=list(stored.auto_import_sources()),
         print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
+        print_auto_import_skip_lan_printers=stored.print_auto_import_skip_lan_printers or [],
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
@@ -608,10 +611,16 @@ def _mail_connection_by_a_person(patch: SettingsPatch) -> None:
 
 
 #: The print watcher's settings (#4699): on, it reads Bambuddy on its own, and with the
-#: ``printer`` source it reads the printers' storage over FTP. A person's to change, as
+#: ``printer`` source it reads the printers' storage over FTP (a LAN-only printer's over
+#: its own FTPS, phase 4). A person's to change, as
 #: every other tool that reaches a printer waits for a person's approval.
 PRINT_WATCH = frozenset(
-    {"print_auto_import", "print_auto_import_sources", "print_auto_import_skip_printers"}
+    {
+        "print_auto_import",
+        "print_auto_import_sources",
+        "print_auto_import_skip_printers",
+        "print_auto_import_skip_lan_printers",
+    }
 )
 
 

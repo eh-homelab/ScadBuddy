@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.print_links import (
     owner_in,
 )
 from scadbuddy.print_watch.activity import imported_row, row_of
+from scadbuddy.print_watch.lan_store import LanImportStore
 
 #: `pg_advisory_xact_lock` key (hashed) under which `AutoImportStore.floor` reads the
 #: switch and writes the floor.
@@ -112,6 +113,8 @@ class AutoImportStore:
     ) -> None:
         self._pool = pool
         self.activity = activity
+        #: The records of prints on LAN-only printers (#4699 phase 4), on the same pool.
+        self.lan = LanImportStore(pool, activity)
 
     async def floor(self) -> datetime | None:
         """When the watcher was switched on, or None when it is off. It reads the switch

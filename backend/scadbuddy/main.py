@@ -122,6 +122,8 @@ from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.lan import LanImportActivities
+from scadbuddy.print_watch.lan_store import StoreLanRecorder
 from scadbuddy.print_watch.nudge import Nudger
 from scadbuddy.print_watch.sweep import auto_import
 from scadbuddy.printers.bambuddy_sync import (
@@ -1605,7 +1607,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         settle_failed=state.metrics.rack_watch_settle_failed,
         # A LAN job start starts a print watcher pass on the library queue (#4699).
         nudge=Nudger(
-            state.settings_store.load, registry.store.get, settings.temporal_task_queue_library
+            state.settings_store.load,
+            registry.store.get,
+            settings.temporal_task_queue_library,
+            settings.temporal_task_queue_bambuddy,
         ).nudge,
     )
     content = state.store.content
@@ -1620,10 +1625,19 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         reports=registry.reports,
         native_spools=NativeSpoolStore(state.settings_store.pool),
     )
+    auto_imports = state.components.get(AUTO_IMPORTS)
     activities = [
         *PrintActivities(deps).all(),
         *LanActivities(lan).all(),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "bambuddy")),
+        # A LAN-only printer's job (#4699 phase 4), recorded through this process's own
+        # store, as the CRUD route records the print worker's.
+        LanImportActivities(
+            registry.store,
+            state.settings_store.load,
+            state.components.get(PRINT_LIBRARY).serving_native,
+            StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists),
+        ).lan_auto_import,
     ]
     while not stop.is_set():
         # A worker that fails is said at once and started again: until then every

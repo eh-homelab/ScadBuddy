@@ -256,6 +256,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
+    # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on.
+    PrinterReference("print_lan_imports", "printer"),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries.
     _repoint_settings,

@@ -1146,6 +1146,7 @@ export const settings: Settings = {
   print_auto_import: false,
   print_auto_import_sources: ['archive', 'archive_source', 'library'],
   print_auto_import_skip_printers: [],
+  print_auto_import_skip_lan_printers: [],
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

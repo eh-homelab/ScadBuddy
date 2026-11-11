@@ -21,6 +21,9 @@ the API, which may write every table `PRINTER_REFERENCES` names. `link_bambuddy`
 other method that merges, refuses: it runs on the API only. Its remaining methods stay on
 the worker's SQL until Task 29.
 
+`RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
+4); sent again, the first record answers.
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -103,6 +106,7 @@ from scadbuddy.crud.render import WriteKeys
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PrintSettings
+from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import PrinterStore
@@ -362,6 +366,21 @@ class RemoteReprints:
             timeout=REPRINT_RECORD_BUDGET,
             budget=REPRINT_RECORD_BUDGET,
         )
+
+
+class RemoteLanImports:
+    """`print_watch.lan.LanRecorder` over the API's CRUD route (#4699 phase 4, #5295): the
+    API matches a model and writes the record. Natural on the job, so a resend after a
+    lost answer answers the first record."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def record(self, capture: LanCapture) -> LanImport:
+        answer = await self._client.request(
+            "POST", f"{BASE}/lan-imports", json=capture.model_dump(mode="json")
+        )
+        return LanImport.model_validate(answer.json())
 
 
 class ApiOnlyError(RuntimeError):

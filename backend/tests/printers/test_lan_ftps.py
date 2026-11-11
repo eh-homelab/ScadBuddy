@@ -17,7 +17,7 @@ import os
 import socket
 import ssl
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.printers import lan as lan_module
-from scadbuddy.printers.lan import LanPrinter
+from scadbuddy.printers.lan import FileTooLargeError, LanPrinter
 from tests.printers.test_lan import _certificate
 
 CODE = "12345678"
@@ -191,3 +191,30 @@ async def test_a_printer_that_never_answers_close_notify_still_took_the_file(
     assert server.received.files["scadbuddy-probe.3mf"] == body
     assert md5 == hashlib.md5(body, usedforsecurity=False).hexdigest()
     assert "close_notify" in caplog.text
+
+
+class _Retr:
+    """An FTPS session whose ``RETR`` sends ten blocks of 1,000 bytes."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def retrbinary(self, command: str, callback: Callable[[bytes], object]) -> str:
+        for _ in range(10):
+            callback(b"x" * 1000)
+        return "226 done"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_download_stops_past_its_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4699 phase 4: the print watcher reads a job's file within the library download
+    cap, never a file of any size into memory."""
+    printer = LanPrinter("10.0.0.9", "01P00A000000001", CODE, "ab" * 32)
+    session = _Retr()
+    monkeypatch.setattr(printer, "_ftps", lambda address: session)
+    with pytest.raises(FileTooLargeError):
+        printer._download("10.0.0.9", "/cache/x.3mf", 2500)
+    assert session.closed
+    assert printer._download("10.0.0.9", "/cache/x.3mf", 10_000) == b"x" * 10_000

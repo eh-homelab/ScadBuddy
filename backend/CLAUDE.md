@@ -582,6 +582,44 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   watch's loop (its heartbeat, next report and rack settle never wait for it), cancelled
   past `watch.NUDGE_TIMEOUT` (10 s) or when its attempt ends. A nudge that fails is
   logged and never ends the watch.
+  Phase 4, LAN-only printers (`print_watch/lan.py`, `lan_store.py`,
+  `workflows/lan_auto_import.py`): a physical printer with no Bambuddy link gets no
+  archive, so the watcher keeps its own record, ``print_lan_imports`` (migration
+  `20261111T1313Z_print_lan_imports.sql`; `id` bigserial, unique on the registry
+  `printer`, `subtask_name` and `started_at`, the received time of the report that showed
+  the start; `printer` is `ON DELETE SET NULL` and in `PRINTER_REFERENCES`). The nudge gets
+  a `reports.JobStart` (name, time, `gcode_file`); for a LAN-only row not in
+  `print_auto_import_skip_lan_printers` (registry ids, person-only like the other three,
+  `api/settings.py` `PRINT_WATCH`) it starts `LanAutoImport` on the ``bambuddy`` queue
+  (`wanted_lan`, `start_lan_import`: id `lan_import_id`, a hash of the name and start,
+  `USE_EXISTING` and `REJECT_DUPLICATE`, so one run per job). Its one activity
+  (`LanImportActivities`, registered in the print worker and the API's in-process print
+  worker) reads the job's 3MF over the printer's own FTPS while it prints, only when
+  `print_auto_import_sources` names `printer`: `/cache` then `/`, the job's name with
+  `.gcode.3mf` then `.3mf` (`printer_paths`; a name with a separator or a control
+  character reads nothing, as it goes into an FTP command), at most `MAX_DOWNLOAD_BYTES`
+  (`LanPrinter.download` `max_bytes`). The printer gives no hash, so a file is the job's
+  only when it holds the plate G-code the report named (`printed_file`). It keeps the
+  file in ScadBuddy's own library, top-level folder `INBOX_FOLDER` ("Unsorted imports"),
+  unmarked (`RemoteLibrary.upload` without `print_subject`, so no per-print sweep takes
+  it), reusing a copy of the same name and hash; on `library_backend=bambuddy` the print
+  is recorded with no file. Then it records through `LanRecorder`: in the print worker
+  `crud/print.py` `RemoteLanImports`, the CRUD route `POST /internal/crud/print/lan-imports`
+  (area `lan-imports`, service credential `crud.print`), which runs `StoreLanRecorder` on
+  the API (the same confident match, `decide`: earlier imports of the same SHA-256 in
+  `print_imports` or a linked LAN record, else the job's name word for word); in-process
+  the API calls `StoreLanRecorder` itself. The record and its `print_auto_import`
+  activity row (`activity.py` `lan_row_of`, id `print_auto_import:lan:<id>`, repaired from
+  the table) are one transaction; a record sent again answers the first. A read or a
+  keep that may pass (no answer, a 5xx) raises for `LAN_IMPORT_RETRY` (6 attempts over
+  about 15 minutes); the last attempt records the print in the inbox with the reason; a
+  530, a certificate that is not the pinned one or a file past the cap is recorded at
+  once. A linked LAN record writes no `print_links` row (that table is keyed by
+  archive), so it is not on the model's Prints tab; it is in the activity list.
+  `GET /print-imports/auto`, Unsorted imports and the agent's tools do not list these
+  records yet (#6041). `LanAutoImport` is a new workflow type: a
+  nudge during a roll may reach a print worker build without it, whose workflow task
+  then fails until the new build is current (README, "Rolling it").
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through

@@ -34,6 +34,12 @@ write is natural: a link, a send and a library file's link are ``ON CONFLICT DO
 NOTHING`` on their keys, a gone item sets a flag, and a last print is set by the
 output's key, so a resend after a lost answer leaves what one send left.
 
+A LAN-only printer's job the print watcher read (#4699 phase 4, `print_watch/lan.py`) is
+recorded here (`POST /lan-imports`, area ``lan-imports``): the API matches a model and
+writes the record and its activity row (`print_watch/lan_store.py` `StoreLanRecorder`).
+Natural on the job (the printer, its ``subtask_name`` and start): a record sent again
+answers the first.
+
 A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
 or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
 #4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
@@ -125,9 +131,13 @@ from scadbuddy.crud.operations import operations_router
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
+from scadbuddy.print_watch.component import AutoImportsDep
+from scadbuddy.print_watch.lan import LanCapture, LanImport
+from scadbuddy.print_watch.lan_store import StoreLanRecorder
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.store import printer_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +597,20 @@ async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> Ensure
         listed=None if body.listed is None else frozenset(body.listed),
     )
     return EnsuredPrinter(row=row, written=written)
+
+
+@router.post("/lan-imports", name="crud_print_record_lan_import")
+async def record_lan_import(
+    body: LanCapture, state: StateDep, auto_imports: AutoImportsDep
+) -> LanImport:
+    """A LAN-only printer's job, as the print worker read it (#4699 phase 4): matched to a
+    model, or put in the inbox, and recorded with its activity row. Natural on the job
+    (the printer, ``subtask_name`` and ``started_at``): sent again, it answers the record
+    as it is and writes nothing."""
+    if printer_uuid(body.job.printer_id) is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {body.job.printer_id}")
+    recorder = StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists)
+    return await recorder.record(body)
 
 
 @router.post("/events", name="crud_print_publish_event")

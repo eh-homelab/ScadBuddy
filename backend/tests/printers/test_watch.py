@@ -17,7 +17,13 @@ from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore, advance_print
+from scadbuddy.printers.reports import (
+    Advance,
+    JobStart,
+    PrintEnd,
+    PrinterReportStore,
+    advance_print,
+)
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
 from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
@@ -370,8 +376,8 @@ class Nudges:
         self.fails = fails
         self.seen: list[tuple[str, str]] = []
 
-    async def nudge(self, printer_id: str, subtask: str) -> bool:
-        self.seen.append((printer_id, subtask))
+    async def nudge(self, printer_id: str, start: JobStart) -> bool:
+        self.seen.append((printer_id, start.subtask_name))
         if self.fails:
             raise RuntimeError("Temporal did not answer")
         return True
