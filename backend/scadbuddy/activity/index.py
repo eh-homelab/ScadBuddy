@@ -459,7 +459,9 @@ class ActivityIndex:
         from scadbuddy.bambuddy.runs import PrintRun
         from scadbuddy.operations.activity import row_of as operation_row_of
         from scadbuddy.operations.store import Operation
+        from scadbuddy.print_watch.activity import lan_row_of
         from scadbuddy.print_watch.activity import row_of as auto_import_row_of
+        from scadbuddy.print_watch.lan import LanImport
         from scadbuddy.print_watch.store import AutoImport
         from scadbuddy.render.activity import row_of as render_row_of
         from scadbuddy.render.job_models import Job
@@ -516,6 +518,20 @@ class ActivityIndex:
                 + ", r.seen_at AS created_at, r.seen_at AS finished_at",
                 lambda f: timed(auto_import_row_of(AutoImport.model_validate(f)), f),
                 key="r.archive_id::text",
+                created="r.seen_at",
+                finished="r.seen_at",
+            ),
+            # #4699 phase 4: a LAN-only printer's records, keyed by their own id.
+            _RepairSource(
+                "print_auto_import:lan:",
+                "print_lan_imports",
+                ", ".join(
+                    "r.printer::text AS printer_id" if c == "printer_id" else f"r.{c}"
+                    for c in LanImport.model_fields
+                )
+                + ", r.seen_at AS created_at, r.seen_at AS finished_at",
+                lambda f: timed(lan_row_of(LanImport.model_validate(f)), f),
+                key="r.id::text",
                 created="r.seen_at",
                 finished="r.seen_at",
             ),

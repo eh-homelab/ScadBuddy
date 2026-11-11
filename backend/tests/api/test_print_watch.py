@@ -512,10 +512,25 @@ def test_only_a_person_changes_the_print_watcher(client: TestClient) -> None:
         {"print_auto_import": True},
         {"print_auto_import_sources": ["archive", "printer"]},
         {"print_auto_import_skip_printers": [1]},
+        {"print_auto_import_skip_lan_printers": ["6f1c3a52-6a43-4d2b-9a3e-0d2f4f0b8c11"]},
     ):
         refused = client.put("/api/v1/settings", json=body, headers=agent)
         assert refused.status_code == 403, body
+        assert refused.json()["type"].endswith("person_only"), body
     assert client.get("/api/v1/settings").json()["print_auto_import"] is False
+
+
+def test_a_person_skips_a_lan_only_printer_by_its_registry_id(client: TestClient) -> None:
+    """#4699 phase 4: a LAN-only printer has no Bambuddy id to skip it by."""
+    lan_only = "6f1c3a52-6a43-4d2b-9a3e-0d2f4f0b8c11"
+    assert client.get("/api/v1/settings").json()["print_auto_import_skip_lan_printers"] == []
+    written = client.put(
+        "/api/v1/settings", json={"print_auto_import_skip_lan_printers": [lan_only]}
+    )
+    assert written.status_code == 200, written.text
+    assert client.get("/api/v1/settings").json()["print_auto_import_skip_lan_printers"] == [
+        lan_only
+    ]
 
 
 def dismiss(client: TestClient, archive_id: int, **headers: str) -> httpx.Response:

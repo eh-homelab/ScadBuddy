@@ -105,13 +105,22 @@ class RemoteLibrary:
         return _ROWS.validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
     async def upload(
-        self, filename: str, data: BinaryIO, folder_id: int | None, *, print_subject: str
+        self,
+        filename: str,
+        data: BinaryIO,
+        folder_id: int | None,
+        *,
+        print_subject: str | None = None,
     ) -> LibraryFile:
         """``data`` uploaded as a new native file, streamed, marked with the
-        ``print_subject`` whose run uploads it (#4337). Never retried here (a second PUT
-        would be a second file): the caller finds an earlier attempt's upload by its
-        bytes (`copies.left_unrecorded`), and the activity's retry policy retries."""
-        params = {"filename": filename, "subject": print_subject}
+        ``print_subject`` whose run uploads it (#4337); unmarked without one (the print
+        watcher's copy of a LAN-only printer's file, #4699, which no run owns). Never
+        retried here (a second PUT would be a second file): the caller finds an earlier
+        attempt's upload by its bytes (`copies.left_unrecorded`, `print_watch.lan.keep`),
+        and the activity's retry policy retries."""
+        params = {"filename": filename}
+        if print_subject is not None:
+            params["subject"] = print_subject
         if folder_id is not None:
             params["folder_id"] = str(folder_id)
 

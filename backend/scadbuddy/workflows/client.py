@@ -41,6 +41,7 @@ from scadbuddy.workflows.commands import (
     temporal_failure,
 )
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
+from scadbuddy.workflows.lan_auto_import import LanAutoImport
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
@@ -198,6 +199,8 @@ def bambuddy_worker(
             FollowPrint if build_id is None else VersionedFollowPrint,
             # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.
             PrinterWatch,
+            # A LAN-only printer's job, recorded by the print watcher (#4699 phase 4).
+            LanAutoImport,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),

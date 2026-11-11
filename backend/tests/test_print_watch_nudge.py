@@ -22,11 +22,13 @@ from scadbuddy.print_watch.nudge import (
     nudge_id,
     start_pass,
     wanted,
+    wanted_lan,
 )
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.reports import started_print
+from scadbuddy.printers.reports import JobStart, started_print
 from scadbuddy.printers.watch import NUDGE_TIMEOUT
 from scadbuddy.workflows.housekeeping import AUTO_IMPORT_SWEEP, SWEEPS, Housekeeping
+from scadbuddy.workflows.lan_auto_import import LanJob
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
 ON = StoredSettings(print_auto_import=True)
@@ -37,6 +39,11 @@ LINKED = LAN_ONLY.model_copy(update={"bambuddy_printer_id": 7})
 THEIRS = "benchy"
 #: A native run's start (`workflows/printing.py` `_start_lan`).
 NATIVE = "scadbuddy-0a1b2c3d-p1"
+GCODE = "/data/Metadata/plate_1.gcode"
+
+
+def job(subtask: str) -> JobStart:
+    return JobStart(subtask_name=subtask, started_at=NOW, gcode_file=GCODE)
 
 
 def skipping(bambuddy_printer_id: int) -> StoredSettings:
@@ -103,6 +110,7 @@ class Recorder:
         self.settings, self.row = settings, row
         self.reads: list[str] = []
         self.started: list[str] = []
+        self.jobs: list[LanJob] = []
         self.timeouts: list[float | None] = []
 
     def load(self, timeout: float | None = None) -> StoredSettings:
@@ -118,11 +126,17 @@ class Recorder:
     async def start(self, task_queue: str) -> None:
         self.started.append(task_queue)
 
+    async def start_lan(self, task_queue: str, job: LanJob) -> None:
+        self.started.append(task_queue)
+        self.jobs.append(job)
+
 
 async def test_a_start_the_watcher_takes_starts_a_pass_on_the_library_queue() -> None:
     fake = Recorder(ON, LINKED)
-    nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
-    assert await nudger.nudge("p1", THEIRS) is True
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    assert await nudger.nudge("p1", job(THEIRS)) is True
     assert fake.started == ["library"]
 
 
@@ -130,24 +144,95 @@ async def test_the_settings_and_printer_reads_are_bounded() -> None:
     """#6034, #6037: an unbounded read would keep its thread past the watch's timeout,
     and each later start could add another. Both reads, one after the other, fit in it."""
     fake = Recorder(ON, LINKED)
-    nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
-    await nudger.nudge("p1", THEIRS)
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    await nudger.nudge("p1", job(THEIRS))
     assert fake.timeouts == [SETTINGS_TIMEOUT, PRINTER_TIMEOUT]
     assert SETTINGS_TIMEOUT + PRINTER_TIMEOUT < NUDGE_TIMEOUT
 
 
 async def test_a_native_start_reads_nothing_and_starts_nothing() -> None:
     fake = Recorder(ON, LINKED)
-    nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
-    assert await nudger.nudge("p1", NATIVE) is False
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    assert await nudger.nudge("p1", job(NATIVE)) is False
     assert (fake.reads, fake.started) == ([], [])
 
 
 async def test_with_the_watcher_off_no_pass_starts() -> None:
     fake = Recorder(StoredSettings(), LINKED)
-    nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
-    assert await nudger.nudge("p1", THEIRS) is False
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    assert await nudger.nudge("p1", job(THEIRS)) is False
     assert fake.started == []
+
+
+VIRTUAL = LAN_ONLY.model_copy(update={"kind": "bambuddy_virtual"})
+
+
+@pytest.mark.parametrize(
+    ("settings", "row", "subtask", "expected"),
+    [
+        (ON, LAN_ONLY, THEIRS, True),
+        (ON, LAN_ONLY, NATIVE, False),
+        (StoredSettings(), LAN_ONLY, THEIRS, False),
+        (ON, LINKED, THEIRS, False),
+        (ON, VIRTUAL, THEIRS, False),
+        (ON, None, THEIRS, False),
+        (
+            StoredSettings(print_auto_import=True, print_auto_import_skip_lan_printers=["p1"]),
+            LAN_ONLY,
+            THEIRS,
+            False,
+        ),
+        (
+            StoredSettings(print_auto_import=True, print_auto_import_skip_lan_printers=["p2"]),
+            LAN_ONLY,
+            THEIRS,
+            True,
+        ),
+    ],
+    ids=[
+        "theirs",
+        "native",
+        "off",
+        "Bambuddy archives it",
+        "virtual",
+        "row gone",
+        "skipped",
+        "another skipped",
+    ],
+)
+def test_only_a_lan_only_printers_job_gets_a_record_of_its_own(
+    settings: StoredSettings, row: PrinterRow | None, subtask: str, expected: bool
+) -> None:
+    """#4699 phase 4: a printer with no Bambuddy link gets no archive, so its job is
+    recorded by the watcher itself, unless skipped by its registry id."""
+    assert wanted_lan(settings, row, subtask) is expected
+
+
+async def test_a_lan_only_printers_job_starts_its_record_on_the_print_queue() -> None:
+    fake = Recorder(ON, LAN_ONLY)
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    assert await nudger.nudge("p1", job(THEIRS)) is True
+    assert fake.started == ["bambuddy"]
+    assert fake.jobs == [
+        LanJob(printer_id="p1", subtask_name=THEIRS, started_at=NOW, gcode_file=GCODE)
+    ]
+
+
+async def test_a_job_on_a_printer_bambuddy_knows_gets_no_record_of_its_own() -> None:
+    fake = Recorder(ON, LINKED)
+    nudger = Nudger(
+        fake.load, fake.get, "library", "bambuddy", start=fake.start, start_lan=fake.start_lan
+    )
+    assert await nudger.nudge("p1", job(THEIRS)) is True
+    assert (fake.started, fake.jobs) == (["library"], [])
 
 
 class Sweeps:

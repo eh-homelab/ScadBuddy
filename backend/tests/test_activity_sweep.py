@@ -244,6 +244,28 @@ async def test_repair_restores_an_automatic_import(index: ActivityIndex, pg_pool
     assert await index.repair(DAY) == 0
 
 
+async def test_repair_restores_a_lan_only_printers_record(
+    index: ActivityIndex, pg_pool: PgPool
+) -> None:
+    """#4699 phase 4: a `print_lan_imports` row whose activity write was lost gets its
+    row back, keyed by the record's own id, never as an archive's."""
+    with pg_pool.connection() as conn:
+        found = conn.execute(
+            "INSERT INTO print_lan_imports (printer_key, subtask_name, started_at, state, reason)"
+            " VALUES ('p1', 'benchy', now(), 'inbox', 'no model') RETURNING id, seen_at"
+        ).fetchone()
+    assert found is not None
+    assert await index.repair(DAY) == 1
+    row = await index.get(f"print_auto_import:lan:{found['id']}")
+    assert row is not None
+    assert (row.kind, row.facets["state"], row.created_at) == (
+        "print_auto_import",
+        "inbox",
+        found["seen_at"],
+    )
+    assert await index.repair(DAY) == 0
+
+
 async def test_repair_ignores_rows_outside_the_window(
     pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
 ) -> None:

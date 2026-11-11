@@ -466,6 +466,9 @@ class StoredSettings(BambuddyIds):
     print_auto_import_sources: list[ImportSource] | None = None
     #: The Bambuddy printers whose prints the watcher leaves alone.
     print_auto_import_skip_printers: list[int] | None = None
+    #: The LAN-only printers (registry ids, #4699 phase 4) whose prints the watcher leaves
+    #: alone: a printer with no Bambuddy link has no Bambuddy id to name.
+    print_auto_import_skip_lan_printers: list[str] | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -744,10 +747,14 @@ class SettingsPatch(BaseModel):
     asset_fetch_domains: list[str] | None = Field(default=None, max_length=200)
 
     #: The print watcher (#4699); ``null`` puts each back to its default (off; the
-    #: archive, its slicer project and the library, no printer; no printer skipped).
+    #: archive, its slicer project and the library, no printer; no printer skipped, by
+    #: Bambuddy id or, for a LAN-only printer, by registry id).
     print_auto_import: bool | None = None
     print_auto_import_sources: list[ImportSource] | None = Field(default=None, max_length=4)
     print_auto_import_skip_printers: list[int] | None = Field(default=None, max_length=200)
+    print_auto_import_skip_lan_printers: (
+        list[Annotated[str, StringConstraints(min_length=1, max_length=64)]] | None
+    ) = Field(default=None, max_length=200)
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.

@@ -22,7 +22,9 @@ follow reads only the subject's newest run, and may read it late.
 
 A write that shows a new print running (`reports.started_print`, once per job) is handed
 to ``nudge``, the print watcher's LAN nudge (`print_watch/nudge.py`, #4699 phase 3),
-which may start a watcher pass at once. Each nudge is a task of its own (#6034), so the
+which may start a watcher pass at once, or, on a LAN-only printer, the job's own record
+(phase 4). The start carries the report's time and plate G-code (`reports.JobStart`).
+Each nudge is a task of its own (#6034), so the
 loop's heartbeat, its next report and the rack settle never wait for it. A nudge that
 fails, or takes longer than `NUDGE_TIMEOUT`, is logged and never ends the watch; one
 still running when the attempt ends is cancelled. The Schedule's pass still comes.
@@ -48,7 +50,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
 from scadbuddy.printers.lan import KEEPALIVE, LanPrinter
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.reports import JobStart, PrinterReportStore
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
 from scadbuddy.rack.usage import LanUsage, settle_lan_end
 from scadbuddy.workflows.printer_watch import PRINTER_WATCH_ACTIVITY, PrinterWatchInput
@@ -74,8 +76,8 @@ SHOWN = (
 )
 
 Connect = Callable[[str, str, str, str], LanPrinter]
-#: The print watcher's LAN nudge: the printer's id and the started job's name.
-Nudge = Callable[[str, str], Awaitable[object]]
+#: The print watcher's LAN nudge: the printer's id and the job that started.
+Nudge = Callable[[str, JobStart], Awaitable[object]]
 #: The bound of one nudge (its settings and row reads and its start): past it the nudge's
 #: task is cancelled, so a slow API or Temporal never piles up nudges.
 NUDGE_TIMEOUT = 10.0
@@ -216,9 +218,9 @@ class WatchActivities:
                 task.cancel()
             await asyncio.gather(*nudges, return_exceptions=True)
 
-    async def _nudge(self, nudge: Nudge, printer_id: str, subtask: str) -> None:
+    async def _nudge(self, nudge: Nudge, printer_id: str, start: JobStart) -> None:
         try:
-            await asyncio.wait_for(nudge(printer_id, subtask), NUDGE_TIMEOUT)
+            await asyncio.wait_for(nudge(printer_id, start), NUDGE_TIMEOUT)
         except Exception:
             logger.warning(
                 "the print watcher's nudge failed; its Schedule takes the job",
@@ -235,7 +237,13 @@ class WatchActivities:
         if advance.started is not None and self.nudge is not None:
             # A task of its own (#6034), held in ``nudges`` until it ends: the loop's next
             # heartbeat and report, and the settle below, never wait for it.
-            task = asyncio.create_task(self._nudge(self.nudge, printer_id, advance.started))
+            gcode_file = report.print.get("gcode_file")
+            start = JobStart(
+                subtask_name=advance.started,
+                started_at=report.received_at,
+                gcode_file=gcode_file if isinstance(gcode_file, str) else None,
+            )
+            task = asyncio.create_task(self._nudge(self.nudge, printer_id, start))
             nudges.add(task)
             task.add_done_callback(nudges.discard)
         ended = advance.ended

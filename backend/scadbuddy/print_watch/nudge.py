@@ -12,9 +12,15 @@ starts a pass only when all of these are true (`wanted`):
   the printer gets no nudge; the Schedule's pass still takes it (its archive's hash links
   it to its output);
 - the watcher is on (`print_auto_import`);
-- the printer is linked to a Bambuddy printer (only Bambuddy archives the job; a
-  LAN-only printer is phase 4), and that printer is not in
-  `print_auto_import_skip_printers`.
+- the printer is linked to a Bambuddy printer (only Bambuddy archives the job), and that
+  printer is not in `print_auto_import_skip_printers`.
+
+A LAN-only printer's job (phase 4: a physical printer with no Bambuddy link, not in
+`print_auto_import_skip_lan_printers` by registry id, `wanted_lan`) gets no archive. Its
+nudge starts the job's own `LanAutoImport` run instead (`workflows/lan_auto_import.py`), on
+the ``bambuddy`` queue, where the printer's access code is opened: the run reads the
+job's file over the printer's FTPS and records the print through the API's CRUD route
+(`print_watch/lan.py`).
 
 The pass is a ``Housekeeping`` run with `AUTO_IMPORT_SWEEP` only, on the ``library``
 queue, so it runs in the API's ``library`` worker, the one process with SQL access (root
@@ -67,11 +73,13 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.printers.reports import JobStart
 from scadbuddy.workflows.housekeeping import (
     AUTO_IMPORT_SWEEP,
     HOUSEKEEPING_WORKFLOW,
     housekeeping_timeout,
 )
+from scadbuddy.workflows.lan_auto_import import LanJob, start_lan_import
 
 #: How long a nudge run waits before its pass: Bambuddy reads the 3MF from the printer
 #: before it makes the archive.
@@ -106,6 +114,17 @@ def wanted(settings: StoredSettings, row: PrinterRow | None, subtask: str) -> bo
     return row.bambuddy_printer_id not in (settings.print_auto_import_skip_printers or [])
 
 
+def wanted_lan(settings: StoredSettings, row: PrinterRow | None, subtask: str) -> bool:
+    """Whether the job ``subtask`` started on ``row``'s printer gets a record of its own:
+    a physical printer with no Bambuddy link (no archive is made), not skipped by its
+    registry id (phase 4)."""
+    if claimed(subtask) or not settings.print_auto_import:
+        return False
+    if row is None or row.bambuddy_printer_id is not None or row.kind != "physical":
+        return False
+    return row.id not in (settings.print_auto_import_skip_lan_printers or [])
+
+
 async def start_pass(
     client: Client, task_queue: str, *, delay: timedelta = NUDGE_DELAY
 ) -> WorkflowHandle[Any, Any]:
@@ -124,6 +143,8 @@ async def start_pass(
 
 
 Start = Callable[[str], Awaitable[object]]
+#: Starts a LAN-only printer's job record on the ``bambuddy`` queue (`start_lan_import`).
+StartLan = Callable[[str, LanJob], Awaitable[object]]
 
 
 class SettingsLoader(Protocol):
@@ -140,34 +161,55 @@ class PrinterLoader(Protocol):
 
 class Nudger:
     """The watch's nudge. ``load_settings`` and ``get_printer`` are blocking (run in a
-    thread); ``start`` defaults to `start_pass` on the activity's own client."""
+    thread); ``start`` defaults to `start_pass` on the activity's own client, and
+    ``start_lan`` to `start_lan_import` on it. ``task_queue`` is the ``library`` queue a
+    pass runs on, ``lan_queue`` the ``bambuddy`` queue a LAN-only printer's record runs
+    on."""
 
     def __init__(
         self,
         load_settings: SettingsLoader,
         get_printer: PrinterLoader,
         task_queue: str,
+        lan_queue: str,
         *,
         start: Start | None = None,
+        start_lan: StartLan | None = None,
     ) -> None:
         self.load_settings = load_settings
         self.get_printer = get_printer
         self.task_queue = task_queue
+        self.lan_queue = lan_queue
         self.start = start
+        self.start_lan = start_lan
 
-    async def nudge(self, printer_id: str, subtask: str) -> bool:
-        """Start a pass for the job ``subtask`` that started on ``printer_id``, when the
-        watcher would take it (`wanted`). True when it asked for one."""
+    async def nudge(self, printer_id: str, start: JobStart) -> bool:
+        """For the job that started on ``printer_id``: start a pass when the watcher
+        would take its archive (`wanted`), or the job's own record on a LAN-only printer
+        (`wanted_lan`). True when it asked for either."""
+        subtask = start.subtask_name
         if claimed(subtask):
             return False
         settings = await asyncio.to_thread(self.load_settings, timeout=SETTINGS_TIMEOUT)
         if not settings.print_auto_import:
             return False
         row = await asyncio.to_thread(self.get_printer, printer_id, timeout=PRINTER_TIMEOUT)
-        if not wanted(settings, row, subtask):
-            return False
-        if self.start is not None:
-            await self.start(self.task_queue)
-        else:
-            await start_pass(activity.client(), self.task_queue)
-        return True
+        if wanted(settings, row, subtask):
+            if self.start is not None:
+                await self.start(self.task_queue)
+            else:
+                await start_pass(activity.client(), self.task_queue)
+            return True
+        if wanted_lan(settings, row, subtask):
+            job = LanJob(
+                printer_id=printer_id,
+                subtask_name=subtask,
+                started_at=start.started_at,
+                gcode_file=start.gcode_file,
+            )
+            if self.start_lan is not None:
+                await self.start_lan(self.lan_queue, job)
+            else:
+                await start_lan_import(activity.client(), self.lan_queue, job)
+            return True
+        return False

@@ -78,6 +78,17 @@ def started_print(before: str | None, after: str | None) -> str | None:
 
 
 @dataclass(frozen=True)
+class JobStart:
+    """A job the watch saw start (`started_print`): its ``subtask_name``, when the report
+    that showed it start was received, and the plate G-code the report names
+    (``gcode_file``), for the print watcher's nudge (#4699)."""
+
+    subtask_name: str
+    started_at: datetime
+    gcode_file: str | None = None
+
+
+@dataclass(frozen=True)
 class Advance:
     """What one write showed: the print it ended (`advance_print`) and the print it
     started (`started_print`), each when there is one."""

@@ -65,6 +65,7 @@ from scadbuddy.crud.client import CrudClient, wait_for_areas
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
     RemoteEvents,
+    RemoteLanImports,
     RemoteOutcomes,
     RemoteOutputPrints,
     RemotePrinterStore,
@@ -105,6 +106,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
+from scadbuddy.print_watch.lan import LanImportActivities
 from scadbuddy.print_watch.nudge import Nudger
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.progress import LanProgress, lan_last_print
@@ -1437,6 +1439,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             *lan_printing.all(),
             # The route prunes past the API's own retention (#5298).
             *operation_activities(operations, None, {kind.name: kind for kind in kinds}),
+            # A LAN-only printer's job (#4699 phase 4): read over the printer's FTPS here,
+            # kept in the library and recorded through the API, never this worker's SQL.
+            LanImportActivities(
+                printers, settings_store.load, partial(_given, library), RemoteLanImports(crud)
+            ).lan_auto_import,
         ],
         follow_print=FollowActivities(follower, running=metrics.print_follows_running).follow_print,
         library=library,
@@ -1452,7 +1459,10 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             # A LAN job start starts a print watcher pass on the API's library queue
             # (#4699): a Temporal start, never this worker's SQL (#5295).
             nudge=Nudger(
-                settings_store.load, printers.get, settings.temporal_task_queue_library
+                settings_store.load,
+                printers.get,
+                settings.temporal_task_queue_library,
+                settings.temporal_task_queue_bambuddy,
             ).nudge,
         ).printer_watch,
     )
@@ -1471,6 +1481,7 @@ PRINT_CRUD_AREAS = frozenset(
         "previews",
         "copy-leases",
         "links",
+        "lan-imports",
     }
 )
 
