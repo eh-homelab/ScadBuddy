@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.options import (
     PrintOptions,
     is_options_scope,
 )
+from scadbuddy.bambuddy.print_links import ImportSource
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.authorship import by_a_person
@@ -69,6 +70,7 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
@@ -196,6 +198,11 @@ class SettingsView(BaseModel):
     destination_sort: DestinationSort = "touched"
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
+    #: The print watcher (#4699): whether it imports the prints ScadBuddy did not start,
+    #: where it may take a 3MF from, and the Bambuddy printers it leaves alone.
+    print_auto_import: bool = False
+    print_auto_import_sources: list[ImportSource] = Field(default_factory=list)
+    print_auto_import_skip_printers: list[int] = Field(default_factory=list)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -449,6 +456,9 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         last_project_id=stored.last_project_id,
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
+        print_auto_import=stored.print_auto_import,
+        print_auto_import_sources=list(stored.auto_import_sources()),
+        print_auto_import_skip_printers=stored.print_auto_import_skip_printers or [],
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
@@ -534,6 +544,7 @@ async def put_settings(
     printer that has one is saved as its ``printer_id``, and a ``printer_id`` clears
     ``default_printer``. 422 for a ``default_printer`` the registry does not hold."""
     _mail_connection_by_a_person(patch)
+    _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
@@ -558,6 +569,10 @@ async def put_settings(
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    if "print_auto_import" in patch.model_fields_set:
+        # #4699: the watcher takes the prints started from this moment on, not from its
+        # next pass; switched off, it forgets the moment.
+        await state.components.get(AUTO_IMPORTS).floor(snapshot.stored.print_auto_import)
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()
@@ -587,6 +602,26 @@ def _mail_connection_by_a_person(patch: SettingsPatch) -> None:
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
             "Only a person changes the storefront mail's connection: " + ", ".join(sorted(touched)),
+            type_=PERSON_ONLY,
+        )
+
+
+#: The print watcher's settings (#4699): on, it reads Bambuddy on its own, and with the
+#: ``printer`` source it reads the printers' storage over FTP. A person's to change, as
+#: every other tool that reaches a printer waits for a person's approval.
+PRINT_WATCH = frozenset(
+    {"print_auto_import", "print_auto_import_sources", "print_auto_import_skip_printers"}
+)
+
+
+def _print_watch_by_a_person(patch: SettingsPatch) -> None:
+    """403 ``person_only`` for a change of the print watcher by anyone but a person's own
+    session (`core.authorship.by_a_person`)."""
+    touched = patch.model_fields_set & PRINT_WATCH
+    if touched and not by_a_person():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only a person changes the print watcher: " + ", ".join(sorted(touched)),
             type_=PERSON_ONLY,
         )
 

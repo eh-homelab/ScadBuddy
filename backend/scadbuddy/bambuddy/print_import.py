@@ -240,7 +240,7 @@ async def _library_sources(client: BambuddyClient, archive: ArchiveDetail) -> li
     return sorted(found, key=lambda source: source.matched_by != "hash")
 
 
-async def _printer_sources(client: BambuddyClient, archive: ArchiveDetail) -> list[FoundSource]:
+async def printer_sources(client: BambuddyClient, archive: ArchiveDetail) -> list[FoundSource]:
     printer_id = archive.printer_id
     if printer_id is None:
         return [FoundSource(kind="printer", available=False, reason="no printer is known for it")]
@@ -298,7 +298,7 @@ async def find_sources(
     stops the others. The printer is read only with ``printer``."""
     sources = _archive_sources(archive) + await _library_sources(client, archive)
     if printer:
-        sources += await _printer_sources(client, archive)
+        sources += await printer_sources(client, archive)
     else:
         sources.append(FoundSource(kind="printer", available=False, reason=NOT_CHECKED))
     available = [source for source in sources if source.available]
@@ -400,6 +400,31 @@ async def read_source(
     return SourceFile(name=name, data=data, sha256=hashlib.sha256(data).hexdigest())
 
 
+async def keep_printer_file(
+    client: BambuddyClient, read: SourceFile, folder_id: int
+) -> tuple[int, bool]:
+    """The library copy of a printer file in the inbox folder, and whether this call
+    uploaded it. A copy with the same name and SHA-256 there already (an earlier try of
+    this import that was not recorded) is used again, so a retry uploads nothing."""
+    for row in await client.library_files(folder_id):
+        if row.filename != read.name or row.file_size not in (None, len(read.data)):
+            continue
+        if (await client.library_file(row.id)).file_hash == read.sha256:
+            return row.id, False
+    uploaded = await client.upload_library_file(read.name, read.data, folder_id=folder_id)
+    return uploaded.id, True
+
+
+async def forget_copy(client: BambuddyClient, file_id: int) -> None:
+    try:
+        await client.delete_library_file(file_id)
+    except ApiError:
+        # It stays in the inbox; a retry finds it by its hash and uses it.
+        logger.warning(
+            "could not delete a printer file's library copy", extra={"library_file_id": file_id}
+        )
+
+
 class ModelSuggestion(BaseModel):
     slug: str
     name: str
@@ -429,3 +454,15 @@ def suggested_slugs(slugs: Sequence[str], job: str | None, *, limit: int = 5) ->
             scored.append((len(own & words), slug))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [slug for _, slug in scored[:limit]]
+
+
+def exact_slugs(slugs: Sequence[str], job: str | None) -> list[str]:
+    """The models whose slug has exactly the words of the job's name (``demo_plate``
+    names ``demo-plate``, not ``demo``): the only name match the print watcher (#4699)
+    links by itself. A word more on either side is only a suggestion."""
+    if not job:
+        return []
+    words = _tokens(_stem(job))
+    if not words:
+        return []
+    return [slug for slug in slugs if _tokens(slug.removeprefix("builtin:")) == words]

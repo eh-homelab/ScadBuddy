@@ -291,6 +291,8 @@ async def test_a_failing_sweep_fails_its_activity(
                 bank=None,  # #4961: the linked account, read by the stubbed sync
                 # #5283: the storefront mail left unsent.
                 mail=SimpleNamespace(send_queued=_broken(OSError("the database is gone"))),
+                # #4699: the print watcher's floor, read before Bambuddy is.
+                floor=_broken_async,
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -445,6 +447,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         time.sleep(0.1)
         return 0
 
+    # #4699: the print watcher, off: one read of its floor, and no Bambuddy call.
+    async def slow_floor(enabled: bool) -> None:
+        await asyncio.sleep(0.1)
+
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -468,6 +474,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             service=SimpleNamespace(retry_closes=slow_closes, settle_captures=slow_closes),
             bank=None,  # #4961: the linked account, read by the stubbed sync
             mail=SimpleNamespace(send_queued=slow_mail),
+            floor=slow_floor,
             temporal=object,
             store=None,
             refs=None,

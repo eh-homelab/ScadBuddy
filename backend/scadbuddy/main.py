@@ -121,6 +121,8 @@ from scadbuddy.payments.deposits import sync_deposits
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
+from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.sweep import auto_import
 from scadbuddy.printers.bambuddy_sync import (
     apply_virtual_printers,
     boot_adoption_due,
@@ -181,6 +183,7 @@ from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
     AUTH_SESSIONS_SWEEP,
+    AUTO_IMPORT_SWEEP,
     BACKFILL_SWEEP,
     BANK_DEPOSITS_SWEEP,
     FLOWS_SWEEP,
@@ -736,6 +739,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def send_storefront_mail() -> None:
         await _heartbeating(_send_storefront_mail_logged(state))
 
+    @activity.defn(name=AUTO_IMPORT_SWEEP)
+    async def auto_import_prints() -> None:
+        await _heartbeating(_auto_import_prints_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -765,6 +772,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sync_bank_deposits,
         sweep_storefront_drafts,
         send_storefront_mail,
+        auto_import_prints,
     ]
 
 
@@ -1304,6 +1312,43 @@ async def _send_storefront_mail_logged(state: AppState) -> None:
         raise
     if sent:
         logger.info("sent queued storefront mail", extra={"count": sent})
+
+
+async def _auto_import_prints_logged(state: AppState) -> None:
+    """#4699: the print watcher's pass. With ``print_auto_import`` off it reads nothing
+    from Bambuddy and no printer, and forgets when it was switched on."""
+    store = state.components.get(AUTO_IMPORTS)
+    settings = await asyncio.to_thread(state.settings_store.load)
+    try:
+        since = await store.floor(settings.print_auto_import)
+    except Exception:
+        logger.exception("could not read when the print watcher was switched on")
+        raise
+    if since is None:
+        return
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            result = await auto_import(
+                client,
+                settings,
+                since,
+                links=state.print_links,
+                uploads=state.uploads,
+                store=store,
+                slugs=state.catalogue.slugs,
+                exists=state.catalogue.exists,
+            )
+        except Exception:
+            logger.exception("could not import the prints ScadBuddy did not start")
+            raise
+        if result.linked or result.inbox:
+            logger.info(
+                "imported prints ScadBuddy did not start",
+                extra={"linked": result.linked, "inbox": result.inbox},
+            )
+
+    await _with_bambuddy(state, sweep)
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:
