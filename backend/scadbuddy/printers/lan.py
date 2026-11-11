@@ -215,7 +215,9 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
     either raises at once. It uses ``shutdown``, not ``close``: on Linux a ``close`` does
     not wake a ``recv`` another thread is blocked in, and the reading thread still owns
     the close. A socket set after the cut is shut down as it is registered. Only a TCP
-    connect still in progress is not cut; it waits at most `FTP_TIMEOUT`."""
+    connect still in progress is not cut; it waits at most `FTP_TIMEOUT`. A data
+    connection is let go when its transfer ends (the final reply, or `close`), so a cut
+    touches only live sockets (#6055)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._sock: Any = None
@@ -249,6 +251,18 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
             self._register("_data", conn)
             conn.do_handshake()
         return conn, size
+
+    def voidresp(self) -> str:
+        """Each transfer ends here, after the data connection closes: its final reply
+        (the ``226``). Every other reply passes here too, with no data connection."""
+        self._register("_data", None)
+        return super().voidresp()
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._register("_data", None)
 
     def _register(self, slot: str, value: socket.socket | None) -> None:
         with self._lock:

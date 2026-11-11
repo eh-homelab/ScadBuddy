@@ -46,7 +46,8 @@ class FtpsServer:
     ``clean`` answers the client's ``close_notify``; ``tcp`` drops the connection with
     none; ``silent`` keeps it open and never answers (#4186 review I5).
 
-    ``stall`` is where a session stops answering: ``login`` never answers ``PASS``;
+    ``stall`` is where a session stops answering: ``handshake`` takes the TCP connection
+    and never answers the ``ClientHello`` (#6055); ``login`` never answers ``PASS``;
     ``retr`` opens a ``RETR``'s data connection and never sends on it. ``stalled`` is set
     there, and ``ended`` once the client has closed the control connection (#6049)."""
 
@@ -70,6 +71,9 @@ class FtpsServer:
             raw, _ = self.listener.accept()
         except OSError:
             return
+        if self.stall == "handshake":
+            self._never_answer(raw)
+            return
         try:
             with self.context.wrap_socket(raw, server_side=True) as tls:
                 self.received.versions.append(str(tls.version()))
@@ -77,6 +81,21 @@ class FtpsServer:
         except BaseException as error:
             self.received.errors.append(error)
         finally:
+            self.ended.set()
+
+    def _never_answer(self, raw: socket.socket) -> None:
+        """Read the ``ClientHello`` and never answer it. ``ended`` is set only when the
+        client closes; a timeout or a reset is an error."""
+        with raw:
+            raw.settimeout(5)
+            try:
+                if raw.recv(65536):
+                    self.stalled.set()
+                while raw.recv(65536):
+                    pass
+            except OSError as error:
+                self.received.errors.append(error)
+                return
             self.ended.set()
 
     def _session(self, tls: ssl.SSLSocket) -> None:
@@ -191,6 +210,38 @@ async def test_an_upload_over_128_kib_arrives_whole(ftps: tuple[FtpsServer, str]
     assert server.received.versions == ["TLSv1.2", "TLSv1.2"]
 
 
+async def test_a_transfer_lets_go_of_its_data_connection_when_it_ends(
+    ftps: tuple[FtpsServer, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6055: after the ``226`` the session holds no data connection, so a later `cut`
+    touches only live sockets."""
+    server, sha = ftps
+    printer = LanPrinter("127.0.0.1", "01P00A000000001", CODE, sha)
+    sessions: list[lan_module.ImplicitFtpTls] = []
+    held_at_close: list[socket.socket | None] = []
+    make = printer._session
+
+    def session() -> lan_module.ImplicitFtpTls:
+        ftp = make()
+        close = ftp.close
+
+        def closing() -> None:
+            held_at_close.append(ftp._data)
+            close()
+
+        monkeypatch.setattr(ftp, "close", closing)
+        sessions.append(ftp)
+        return ftp
+
+    monkeypatch.setattr(printer, "_session", session)
+    await printer.upload(io.BytesIO(b"x" * 1000), "scadbuddy-probe.3mf")
+
+    assert server.received.files["scadbuddy-probe.3mf"] == b"x" * 1000
+    assert len(sessions) == 1
+    assert held_at_close == [None]  # let go at the 226, before the close
+    assert sessions[0]._data is None
+
+
 async def test_an_upload_to_another_certificate_is_refused(
     ftps: tuple[FtpsServer, str],
 ) -> None:
@@ -296,13 +347,15 @@ async def test_a_cancelled_download_closes_its_connection(
     assert session.blocks < 500
 
 
-@pytest.mark.parametrize("stall", ["login", "retr"])
+@pytest.mark.parametrize("stall", ["handshake", "login", "retr"])
 async def test_a_cancel_ends_a_stalled_download_at_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stall: str
 ) -> None:
     """#6049: a printer that stops answering mid-login or mid-``RETR`` does not hold the
     thread and its sockets for `FTP_TIMEOUT` after a cancel: the cancel cuts the
-    session, and the thread ends and closes the connection at once."""
+    session, and the thread ends and closes the connection at once. ``handshake``
+    (#6055) is a printer that takes the TCP connection and never answers the
+    ``ClientHello``: the path ``do_handshake_on_connect=False`` is for."""
     assert lan_module.FTP_TIMEOUT >= 30  # the bound the cancel must not wait for
     server, sha = _serving(tmp_path, monkeypatch, "clean", stall)
     printer = LanPrinter("127.0.0.1", "01P00A000000001", CODE, sha)
@@ -328,3 +381,6 @@ async def test_a_cancel_ends_a_stalled_download_at_once(
         assert time.monotonic() - started < 5
     finally:
         server.close()
+    assert not server.thread.is_alive()
+    if stall == "handshake":
+        assert not server.received.errors

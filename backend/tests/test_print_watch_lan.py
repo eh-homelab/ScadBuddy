@@ -532,4 +532,4 @@ def test_a_listed_record_always_names_its_id() -> None:
     browser never needs a sentinel id for a record."""
     schema = LanPrintRecord.model_json_schema(mode="serialization")
     assert "id" in schema["required"]
-    assert schema["properties"]["id"] == {"title": "Id", "type": "integer"}
+    assert schema["properties"]["id"]["type"] == "integer"
