@@ -151,8 +151,10 @@ async def test_a_bounded_read_that_gives_up_is_logged_and_the_watch_goes_on(
     def get(printer_id: str, timeout: float | None = None) -> Any:
         raise error
 
+    started: list[str] = []
+
     async def start(task_queue: str) -> None:
-        raise AssertionError("no pass starts when the printer read fails")
+        started.append(task_queue)
 
     nudger = Nudger(
         lambda timeout=None: StoredSettings(print_auto_import=True), get, "library", start=start
@@ -172,6 +174,7 @@ async def test_a_bounded_read_that_gives_up_is_logged_and_the_watch_goes_on(
         await _run_for(watches, 0.4)
 
     assert reports.written == [RUNNING_X, FINISH_X, RUNNING_Y]
+    assert started == [], "no pass starts when the printer read fails"
     failed = [r for r in caplog.records if "nudge failed" in r.getMessage()]
     assert len(failed) == 2
     assert all(r.exc_info and isinstance(r.exc_info[1], type(error)) for r in failed)
