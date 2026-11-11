@@ -122,6 +122,7 @@ from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copy import library_copy_activities
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.print_watch.component import AUTO_IMPORTS
+from scadbuddy.print_watch.nudge import Nudger
 from scadbuddy.print_watch.sweep import auto_import
 from scadbuddy.printers.bambuddy_sync import (
     apply_virtual_printers,
@@ -1602,6 +1603,10 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         state.events,
         rack=state.components.get(RACK_USAGE),
         settle_failed=state.metrics.rack_watch_settle_failed,
+        # A LAN job start starts a print watcher pass on the library queue (#4699).
+        nudge=Nudger(
+            state.settings_store.load, registry.store.get, settings.temporal_task_queue_library
+        ).nudge,
     )
     content = state.store.content
     lan = LanDeps(

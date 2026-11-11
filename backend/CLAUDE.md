@@ -554,6 +554,24 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   and the Prints page's "Unsorted imports" (`components/prints/UnsortedImports.tsx`, which
   opens `ImportPrintDialog` with `start`, the watcher's recorded source chosen); mocks
   `src/mocks/features/printWatch.ts`.
+  Phase 3, the LAN nudge (`print_watch/nudge.py`): a printer's LAN watch hands each job
+  start to `Nudger.nudge` (`WatchActivities` `nudge`). A start is a report write whose
+  running print is new (`printers/reports.py` `PrinterReportStore.advance`,
+  `started_print`); `running_subtask` changes once per job under its row lock, so one job
+  is one nudge, across reconnects and watch attempts. It starts a pass only when no
+  native run claims the job (`claimed`: the `scadbuddy-<run id[:8]>-p<plate>[-c<copy>]`
+  name `_start_lan` gives every LAN start), the watcher is on, and the printer row links a
+  Bambuddy printer not in `print_auto_import_skip_printers` (`wanted`). The pass is a
+  `Housekeeping` run with `AUTO_IMPORT_SWEEP` only on the `library` queue (`start_pass`;
+  `Housekeeping.run` already takes its sweeps, so no patch), workflow id `nudge_id` with
+  `USE_EXISTING` (one nudge run in flight; a start meanwhile joins it) and `start_delay`
+  `NUDGE_DELAY` (30 s: Bambuddy makes the archive only once it has read the 3MF from the
+  printer). A pass that still runs before the archive exists loses nothing: the prune
+  Schedule's next pass takes it. The watch runs in the print worker (or the API
+  in-process), so the nudge is a Temporal start: no new SQL, grant or route; it reads
+  the settings over the CRUD route and the row through the watch's own
+  `PrinterStore.get`, the read each watch attempt already makes. A nudge that fails or
+  passes `watch.NUDGE_TIMEOUT` (10 s) is logged and never ends the watch.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through

@@ -105,6 +105,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
+from scadbuddy.print_watch.nudge import Nudger
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
@@ -1448,6 +1449,11 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             events,
             rack=rack,
             settle_failed=metrics.rack_watch_settle_failed,
+            # A LAN job start starts a print watcher pass on the API's library queue
+            # (#4699): a Temporal start, never this worker's SQL (#5295).
+            nudge=Nudger(
+                settings_store.load, printers.get, settings.temporal_task_queue_library
+            ).nudge,
         ).printer_watch,
     )
 
