@@ -230,7 +230,7 @@ class InboxLibrary(Protocol):
     async def template_folder(self, name: str) -> _HasId: ...
 
     async def library_listing(
-        self, *, folder_id: int | None, every_folder: bool = False
+        self, *, folder_id: int | None, filename: str | None = None
     ) -> list[LibraryListRow]: ...
 
     async def library_file(self, file_id: int) -> LibraryFile: ...
@@ -260,9 +260,10 @@ Connect = Callable[[str, str, str, str], LanPrinter]
 
 async def keep(library: InboxLibrary, name: str, data: bytes, sha256: str) -> int:
     """The library file of ``data`` in `INBOX_FOLDER`: one of the same name and hash
-    there already (an earlier attempt that was not recorded), or a new upload."""
+    there already (an earlier attempt that was not recorded), or a new upload. Only the
+    files of that name are listed, so the cost does not grow with the folder."""
     folder = await library.template_folder(INBOX_FOLDER)
-    for row in await library.library_listing(folder_id=folder.id):
+    for row in await library.library_listing(folder_id=folder.id, filename=name):
         if row.filename != name or row.file_size not in (None, len(data)):
             continue
         if (await library.library_file(row.id)).file_hash == sha256:

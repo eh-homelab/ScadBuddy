@@ -145,3 +145,19 @@ async def test_the_print_worker_reads_native_files_remotely_and_closes_it(
     await deps.aclose()
 
     assert library.http.is_closed
+
+
+async def test_a_listing_by_filename_sends_the_name() -> None:
+    """#6045: the print watcher's keep asks the API for the files of one name only."""
+    seen: list[httpx.QueryParams] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params)
+        return httpx.Response(200, json=[])
+
+    remote = RemoteLibrary(BASE, httpx.AsyncClient(transport=httpx.MockTransport(api)))
+    try:
+        assert await remote.library_listing(folder_id=7, filename="a b.3mf") == []
+    finally:
+        await remote.aclose()
+    assert dict(seen[0]) == {"folder_id": "7", "filename": "a b.3mf"}

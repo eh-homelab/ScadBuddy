@@ -607,7 +607,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   only when it holds the plate G-code the report named (`printed_file`). It keeps the
   file in ScadBuddy's own library, top-level folder `INBOX_FOLDER` ("Unsorted imports"),
   unmarked (`RemoteLibrary.upload` without `print_subject`, so no per-print sweep takes
-  it), reusing a copy of the same name and hash. Then it records through `LanRecorder`: in the print worker
+  it), reusing a copy of the same name and hash (it lists only that name's files:
+  `library_listing` ``filename``, the internal route's `filename`). Then it records through `LanRecorder`: in the print worker
   `crud/print.py` `RemoteLanImports`, the CRUD route `POST /internal/crud/print/lan-imports`
   (area `lan-imports`, service credential `crud.print`), which runs `StoreLanRecorder` on
   the API (the same confident match, `decide`: earlier imports of the same SHA-256 in
@@ -617,7 +618,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the table) are one transaction; a record sent again answers the first. A read or a
   keep that may pass (no answer, a 5xx) raises for `LAN_IMPORT_RETRY` (6 attempts over
   about 15 minutes); the read and keep are bounded by `CAPTURE_TIMEOUT` (the attempt's
-  timeout less a minute), and the last attempt records the print in the inbox with the
+  timeout less a minute; a cancelled `LanPrinter.download` stops its FTPS thread at the
+  next block, within about `FTP_TIMEOUT`), and the last attempt records the print in the inbox with the
   reason whatever they raised, so only a record the API never takes is lost; a 530, a certificate that is not the pinned one or a file past the cap is recorded at
   once. A linked LAN record writes no `print_links` row (that table is keyed by
   archive), so it is not on the model's Prints tab; it is in the activity list.

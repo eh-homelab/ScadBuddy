@@ -60,18 +60,24 @@ def test_the_print_worker_writes_through_the_internal_route(
             )
             listed = await remote.library_listing(folder_id=folder)
             top = await remote.library_listing(folder_id=None)
+            # #6045: a listing by name holds only that name's files.
+            named = await remote.library_listing(
+                folder_id=folder, filename="bracket (ScadBuddy).3mf"
+            )
+            unnamed = await remote.library_listing(folder_id=folder, filename="other.3mf")
             file = await remote.library_file(uploaded.id)
             with pytest.raises(ApiError) as missing:
                 await remote.upload("x.3mf", io.BytesIO(payload), folder + 999, print_subject="o")
         finally:
             await remote.aclose()
-        return uploaded, listed, top, file, missing.value
+        return uploaded, listed, top, named, unnamed, file, missing.value
 
-    uploaded, listed, top, file, missing = native_client.portal.call(write)
+    uploaded, listed, top, named, unnamed, file, missing = native_client.portal.call(write)
 
     assert is_native_id(uploaded.id)
     assert [row.id for row in listed] == [uploaded.id]
     assert top == []
+    assert [row.id for row in named] == [uploaded.id] and unnamed == []
     assert (file.filename, file.folder_id, file.file_size) == (
         "bracket (ScadBuddy).3mf",
         folder,
