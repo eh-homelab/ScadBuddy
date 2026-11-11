@@ -118,7 +118,7 @@ When ScadBuddy watches a Bambuddy printer over the LAN, a job start also starts 
 about 30 s later (`print_watch/nudge.py` `NUDGE_DELAY`). Bambuddy makes the archive
 only after it has read the 3MF from the printer.
 
-If a printer read fails for a reason that can pass (no answer, 408, 429 or 5xx), the
+If a printer read or upload (into the inbox folder) fails for a reason that can pass (no answer, 408, 429 or 5xx), the
 next pass tries again. It tries until 3 hours after the print ended, or 24 hours after
 the archive was made while the print has no end (`RETRY_AFTER_END`,
 `RETRY_AFTER_START`). After that, and for any other failure, the print goes to Unsorted
