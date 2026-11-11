@@ -97,14 +97,18 @@ BAMBUDDY_LIBRARY = SimpleNamespace(serving_native=_bambuddy_serves)
 #: is None (plan 2026-10-16 Task 13).
 SLICER = SimpleNamespace(starter=None)
 #: The printer registry (#3823): its watch activity is built over these, never run.
-REGISTRY = SimpleNamespace(store=None, reports=None)
+#: Its store's `get` is the print watcher's nudge's printer read (#4699).
+REGISTRY = SimpleNamespace(store=SimpleNamespace(get=lambda printer_id: None), reports=None)
 
 
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(temporal_task_queue_bambuddy="bambuddy"),
+        settings=SimpleNamespace(
+            temporal_task_queue_bambuddy="bambuddy", temporal_task_queue_library="library"
+        ),
         temporal=object(),
-        settings_store=SimpleNamespace(pool=None),
+        # `load` is the print watcher's nudge's settings read (#4699); never called here.
+        settings_store=SimpleNamespace(pool=None, load=lambda: None),
         outputs=SimpleNamespace(prints=None),
         uploads=None,
         catalogue=None,

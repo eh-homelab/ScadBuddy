@@ -20,6 +20,11 @@ A write that shows the print the printer was running has ended (`reports.advance
 settles that start's rack picks up to the report's time (#5138, #5142): the run's own
 follow reads only the subject's newest run, and may read it late.
 
+A write that shows a new print running (`reports.started_print`, once per job) is handed
+to ``nudge``, the print watcher's LAN nudge (`print_watch/nudge.py`, #4699 phase 3),
+which may start a watcher pass at once. A nudge that fails, or takes longer than
+`NUDGE_TIMEOUT`, is logged and never ends the watch: the Schedule's pass still comes.
+
 The access code is opened from the row inside the attempt, never passed in its input,
 and goes nowhere but the connection.
 """
@@ -29,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -67,6 +72,11 @@ SHOWN = (
 )
 
 Connect = Callable[[str, str, str, str], LanPrinter]
+#: The print watcher's LAN nudge: the printer's id and the started job's name.
+Nudge = Callable[[str, str], Awaitable[object]]
+#: The bound of one nudge (its settings and row reads and its start), so a slow API or
+#: Temporal holds the next report back at most this long.
+NUDGE_TIMEOUT = 10.0
 
 
 def shown(report: dict[str, Any]) -> tuple[Any, ...]:
@@ -85,6 +95,7 @@ class WatchActivities:
         clock: Callable[[], float] = time.monotonic,
         rack: LanUsage | None = None,
         settle_failed: Counter | None = None,
+        nudge: Nudge | None = None,
     ) -> None:
         self.printers = printers
         self.reports = reports
@@ -96,6 +107,8 @@ class WatchActivities:
         #: and the count of those settles that failed.
         self.rack = rack
         self.settle_failed = settle_failed
+        #: Each job start, to the print watcher's LAN nudge (#4699 phase 3).
+        self.nudge = nudge
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
     async def printer_watch(self, input: PrinterWatchInput) -> str:
@@ -196,9 +209,19 @@ class WatchActivities:
                 await marker
 
     async def _write(self, printer_id: str, report: LanReport) -> None:
-        ended = await asyncio.to_thread(
-            self.reports.put, printer_id, report.print, report.received_at
+        advance = await asyncio.to_thread(
+            self.reports.advance, printer_id, report.print, report.received_at
         )
+        if advance.started is not None and self.nudge is not None:
+            try:
+                await asyncio.wait_for(self.nudge(printer_id, advance.started), NUDGE_TIMEOUT)
+            except Exception:
+                logger.warning(
+                    "the print watcher's nudge failed; its Schedule takes the job",
+                    extra={"printer_id": printer_id},
+                    exc_info=True,
+                )
+        ended = advance.ended
         if ended is not None:
             # The print's rack picks, up to the report that ended it: the run's follow
             # may read it late, or no longer read it at all (a newer run of the subject).

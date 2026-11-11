@@ -213,7 +213,8 @@ STOREFRONT_MAIL_PATCH = "housekeeping-send-storefront-mail"
 #: #4699: the print watcher (`print_watch/sweep.py`): import the prints ScadBuddy did not
 #: start from Bambuddy's new archives. Last, behind its own patch; on the prune Schedule
 #: too, so a print shows within `PRUNE_INTERVAL`, with the sweeps off as well. It obeys
-#: its own switch (`print_auto_import`, off by default): off, it calls nothing.
+#: its own switch (`print_auto_import`, off by default): off, it calls nothing. A LAN job
+#: start also runs it alone, in a run of its own (`print_watch/nudge.py`, phase 3).
 AUTO_IMPORT_SWEEP = "housekeeping_auto_import_prints"
 AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.

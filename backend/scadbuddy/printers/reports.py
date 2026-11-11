@@ -11,7 +11,12 @@ follow still reads its run.
 The end is timed to the report that shows it. A watch that was down, or a printer off
 the network, past the print's end charges the print up to that report: the end lies
 somewhere after the row's last ``seen_at``, and an upper bound counts the wear a lower
-one would miss."""
+one would miss.
+
+A write that shows a print running that was not running before it returns the start
+(`started_print`): the print watcher's LAN nudge (`print_watch/nudge.py`, #4699 phase 3).
+The row's ``running_subtask`` changes once per job, under the row's lock, so one job
+gives one start, also across a reconnect's ``pushall`` and a new attempt of the watch."""
 
 from __future__ import annotations
 
@@ -66,24 +71,44 @@ def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None,
     return None, PrintEnd(subtask_name=running, timed=state in ("FINISH", "FAILED"))
 
 
+def started_print(before: str | None, after: str | None) -> str | None:
+    """The print a write started: the one running ``after`` it, when that is not the one
+    running ``before`` it."""
+    return after if after is not None and after != before else None
+
+
+@dataclass(frozen=True)
+class Advance:
+    """What one write showed: the print it ended (`advance_print`) and the print it
+    started (`started_print`), each when there is one."""
+
+    ended: PrintEnd | None = None
+    started: str | None = None
+
+
 class PrinterReportStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self.pool = pool
 
     def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
-        """Write the report; the print it shows ended (`advance_print`), if any. A
-        printer gone from the registry (deleted while it was watched) or no longer
-        LAN-linked (an attempt still running after the unlink) writes nothing and ends
+        """Write the report; the print it shows ended (`advance_print`), if any."""
+        return self.advance(printer_id, report, seen_at).ended
+
+    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+        """Write the report; the print it ended and the print it started. A printer gone
+        from the registry (deleted while it was watched) or no longer LAN-linked (an
+        attempt still running after the unlink) writes nothing, and ends and starts
         nothing."""
         key = printer_uuid(printer_id)
         if key is None:
-            return None
+            return Advance()
         with self.pool.connection() as conn, conn.transaction():
             old = conn.execute(
                 "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
                 (printer_id,),
             ).fetchone()
-            running, ended = advance_print(None if old is None else old["running_subtask"], report)
+            before = None if old is None else old["running_subtask"]
+            running, ended = advance_print(before, report)
             written = conn.execute(
                 "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
                 " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
@@ -91,7 +116,9 @@ class PrinterReportStore:
                 " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
                 (Jsonb(report), seen_at, running, printer_id),
             ).rowcount
-        return ended if written else None
+        if not written:
+            return Advance()
+        return Advance(ended=ended, started=started_print(before, running))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         """Heard from as late as ``seen_at``, with nothing new to say; never earlier than
