@@ -1305,7 +1305,9 @@ export const printTools: Tool[] = [
     label: "Remember a printer's bed type",
     description:
       'Remember which build plate type is on a printer (null to forget it). The printer is its Bambuddy ' +
-      'printer id or its registry printer id (a LAN-only printer has only the latter).',
+      'printer id or its registry printer id (a LAN-only printer has only the latter). The plate is kept ' +
+      'on the registry printer only (#5153): a Bambuddy id that no registry printer links is 404 (forgetting ' +
+      'its plate is a no-op), so link it to a registry printer first, and do not retry the same call.',
     input: z.object({
       printer_id: z.union([z.number().int(), z.string().max(64)]),
       bed_type: z.string().max(64).nullable(),
