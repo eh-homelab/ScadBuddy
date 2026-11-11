@@ -127,7 +127,8 @@ export function ImportPrintDialog({
             key={archive.id}
             archive={archive}
             preferred={start?.recorded && archive.id === start.archive.id ? recordedSource(start.recorded) : null}
-            onBack={() => setArchive(null)}
+            // An inbox print (`start`) stays on its own print: no way back to the picker.
+            onBack={start ? undefined : () => setArchive(null)}
             onImported={(imported) => {
               if (live.current === opens) setDone(imported)
               onImported?.(imported)
@@ -156,7 +157,7 @@ function ImportForm({
   archive: PickedPrint
   /** The source to choose first when it is listed and can be used (`recordedSource`). */
   preferred: string | null
-  onBack: () => void
+  onBack?: () => void
   onImported: (imported: ImportedPrint) => void
 }) {
   const [printer, setPrinter] = useState(false)
@@ -217,9 +218,11 @@ function ImportForm({
         <p className="text-sm font-medium" data-testid="import-archive">
           {title}
         </p>
-        <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={busy}>
-          Choose another print
-        </Button>
+        {onBack && (
+          <Button type="button" variant="ghost" size="sm" onClick={onBack} disabled={busy}>
+            Choose another print
+          </Button>
+        )}
       </div>
       {found.error && !sources ? (
         <p className="text-xs text-warn">Could not read where the print's file is: {errorText(found.error)}</p>

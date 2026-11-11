@@ -19,7 +19,8 @@ function errorText(error: unknown): string {
  * to a model with confidence (`GET /print-imports/auto?state=inbox`), each with why. "Link"
  * opens Import print (#4698) on that print, with the source the watcher recorded chosen;
  * "Dismiss" takes it out of the inbox, and the watcher never takes it again. While a page is
- * full, "Show more" reads the next one. The list reads
+ * full, "Show more" reads the next one; once every shown print is dismissed, the first page
+ * is read again. The list reads
  * ScadBuddy only, never Bambuddy, and shows nothing while the inbox is empty. `version`
  * reads it again (the page's own imports).
  */
@@ -31,17 +32,24 @@ export function UnsortedImports({
   onImported?: (imported: ImportedPrint) => void
 }) {
   const [linked, setLinked] = useState(0)
-  const inbox = useAsync(() => api.listAutoImports({ state: 'inbox', limit: PAGE }), [version, linked])
-  const [gone, setGone] = useState<ReadonlySet<number>>(new Set())
+  // Bumped when the last shown print is dismissed: the first page is read again, so the
+  // older pages' prints show (review of #6028).
+  const [emptied, setEmptied] = useState(0)
+  const inbox = useAsync(() => api.listAutoImports({ state: 'inbox', limit: PAGE }), [version, linked, emptied])
   const [start, setStart] = useState<ImportStart | null>(null)
   const [open, setOpen] = useState(false)
-  // The pages "Show more" read after the first; a new first read starts them over.
-  const [pages, setPages] = useState<{ first: AutoImport[] | undefined; rows: AutoImport[]; full: boolean }>({
-    first: undefined,
-    rows: [],
-    full: false,
-  })
-  if (inbox.data !== pages.first) setPages({ first: inbox.data, rows: [], full: (inbox.data?.length ?? 0) === PAGE })
+  // The pages "Show more" read after the first, and the prints dismissed from them; a new
+  // first read starts both over.
+  const [pages, setPages] = useState<{
+    first: AutoImport[] | undefined
+    rows: AutoImport[]
+    full: boolean
+    gone: ReadonlySet<number>
+  }>({ first: undefined, rows: [], full: false, gone: new Set() })
+  if (inbox.data !== pages.first) {
+    setPages({ first: inbox.data, rows: [], full: (inbox.data?.length ?? 0) === PAGE, gone: new Set() })
+  }
+  const gone = pages.gone
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null })
   const read = [...(inbox.data ?? []), ...pages.rows]
   const rows = read.filter((row) => !gone.has(row.archive_id))
@@ -63,7 +71,7 @@ export function UnsortedImports({
 
   return (
     <>
-      {rows.length > 0 && (
+      {(rows.length > 0 || pages.full) && (
         <section className="mb-5" aria-labelledby="unsorted-imports-title" data-testid="unsorted-imports">
           <h2 id="unsorted-imports-title" className="text-sm font-semibold">
             Unsorted imports
@@ -84,7 +92,10 @@ export function UnsortedImports({
                   })
                   setOpen(true)
                 }}
-                onDismissed={() => setGone((was) => new Set([...was, row.archive_id]))}
+                onDismissed={() => {
+                  setPages((was) => ({ ...was, gone: new Set([...was.gone, row.archive_id]) }))
+                  if (rows.length === 1) setEmptied((n) => n + 1)
+                }}
               />
             ))}
           </ul>

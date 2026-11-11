@@ -7,8 +7,8 @@ import { archiveImports } from './orders/pastPrints'
  * #4699 — the print watcher's records (`GET /print-imports/auto`) over the past prints of
  * `orders/pastPrints.ts`. Unsorted imports holds 9104 (Benchy), with its slicer project
  * recorded as the source, and 9105 (Vase), for which no source had the 3MF. An inbox
- * print that an import (`printImports.ts`) links since leaves the inbox, as the route
- * does. A dismiss (`POST /print-imports/auto/{id}/dismiss`) marks a print `dismissed`.
+ * or dismissed print that an import (`printImports.ts`) links since is in no list, as the
+ * route does. A dismiss (`POST /print-imports/auto/{id}/dismiss`) marks a print `dismissed`.
  */
 
 export const NO_MODEL_MATCHED = 'No model matched the job name with confidence'
@@ -54,7 +54,8 @@ export const handlers = [
     const before = Number(query.get('before') ?? 0)
     const limit = Number(query.get('limit') ?? 50)
     const listed = rows
-      .filter((row) => row.state !== 'inbox' || !archiveImports.has(row.archive_id))
+      // Any row but a linked one that a link names since is left out, as `_page` does.
+      .filter((row) => row.state === 'linked' || !archiveImports.has(row.archive_id))
       .filter((row) => state === null || row.state === state)
       .filter((row) => !before || row.archive_id < before)
       .sort((a, b) => b.archive_id - a.archive_id)

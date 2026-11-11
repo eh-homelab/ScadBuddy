@@ -118,8 +118,9 @@ same way, `vite.config.ts`).
   `ImportPrintDialog` with `start`: that print, and the source the watcher recorded chosen
   when the sources list it and it can be used (a kept printer file is its library file;
   the printer is never read for it; a recorded source that is not listed falls back to
-  the preselected one). "Dismiss" calls the dismiss route. While a page of 50 is full,
-  "Show more" reads the next (`before`). Mocks
+  the preselected one), with no way back to the archive picker. "Dismiss" calls the
+  dismiss route. While a page of 50 is full, "Show more" reads the next (`before`); once
+  every shown print is dismissed, the first page is read again. Mocks
   `src/mocks/features/printWatch.ts`.
 
 ## See also
