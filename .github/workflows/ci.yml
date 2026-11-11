@@ -684,12 +684,15 @@ jobs:
   # The Postgres service is for test/pg.test.ts (the agent's `ai_*` tables and
   # migrations), reached on the runner's loopback; each test works in a schema
   # of its own, as the backend's `requires_postgres` tests do.
+  #
+  # 30 minutes (#5990): the job takes 17-19 minutes on main, and on busy runners
+  # it ran out of the old 20 after every test had passed, in the image builds.
   agent:
     name: Agent lint, typecheck, test, build, image
     needs: layout
     if: ${{ needs.layout.outputs.agent == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
