@@ -48,7 +48,8 @@ def test_library_candidates_are_newest_first_and_undated_last() -> None:
     [
         ("succeeded", True, "no longer the file the model 'trophy' was made from"),
         ("succeeded", False, "made the model 'trophy', which was deleted since"),
-        ("running", False, "is still being made (operation op-1, `GET /api/v1/operations/op-1`)"),
+        ("running", False, "operation op-1, `GET /api/v1/operations/op-1`"),
+        ("running", False, "if it never finishes, send the request with a new Idempotency-Key"),
         ("failed", False, "made no model: its operation op-1 failed"),
     ],
 )

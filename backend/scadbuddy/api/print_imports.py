@@ -438,9 +438,10 @@ def _source_changed(name: str, slug: str, first: Operation, made: bool) -> str:
     )
     if first.status == "running":
         return (
-            f"{changed}, and the model {slug!r} that request started is still being made"
-            f" (operation {first.id}, `GET /api/v1/operations/{first.id}`): once it is done,"
-            " import the print onto it with `slug`, or choose another source"
+            f"{changed}, and the model {slug!r} that request started is still being made, as"
+            f" its record says (operation {first.id}, `GET /api/v1/operations/{first.id}`):"
+            " once it is done, import the print onto it with `slug`; if it never finishes,"
+            f" {again}"
         )
     if first.status == "failed":
         return (
