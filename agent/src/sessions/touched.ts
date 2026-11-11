@@ -602,6 +602,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
   },
+  // #6041: a LAN-only printer's print record is no resource of a kind the list keeps (it has no
+  // archive); a dismiss changes only that record.
+  dismiss_lan_auto_import: () => [],
+  // #6041: the model gets the print (it is in Activity under the model, not on its Prints tab).
+  link_lan_auto_import: (input) => {
+    const slug = str(input.slug)
+    return slug ? [{ type: 'model', id: slug, action: 'modified', model: slug }] : []
+  },
   pull_print_timelapse: (input) => {
     const archive = bambuddyId(input.archive_id)
     return archive ? [{ type: 'print_archive', id: archive, action: 'modified' }] : []
