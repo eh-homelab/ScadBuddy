@@ -701,7 +701,7 @@ describe('OrderPage, the customer link (#5283)', () => {
     )
   })
 
-  it('drops the could-not-read text once a later read of the link lands', async () => {
+  it('closes the confirm when a later read of the link shows none live', async () => {
     let reads = 0
     const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
     server.use(
@@ -720,8 +720,10 @@ describe('OrderPage, the customer link (#5283)', () => {
     const card = await screen.findByRole('region', { name: 'Customer link' })
     await within(card).findByText('No link sent yet.')
     await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    // The re-read failed, so the confirm opened; the refresh after it lands with no live link.
     await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3))
-    expect(await within(card).findByText(/stops working/)).toHaveTextContent('The live link stops working.')
+    await waitFor(() => expect(within(card).queryByText(/stops working/)).toBeNull())
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
     expect(within(card).queryByText(/could not be read again/)).toBeNull()
   })
 
