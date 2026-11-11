@@ -3399,7 +3399,9 @@ export const handlers = [
   /**
    * #5153 — the backend keeps the plate on the registry printer only. A Bambuddy id no
    * registry printer links is 404, and its forget is a no-op 200 that names no printer.
-   * A registry id the registry does not hold is 404, forget or not. The key here stays
+   * A numeric id past `BAMBUDDY_ID_MAX` is 404, forget or not (leading zeros count for
+   * nothing, as the backend's `int()`). A registry id the registry does not hold is 404,
+   * forget or not. The key here stays
    * the Bambuddy id where the registry printer has one, as the choices read looks it up.
    */
   http.put(`${base}/print/printers/:id/bed-type`, async ({ params, request }) => {
@@ -3408,7 +3410,7 @@ export const handlers = [
     const bambuddyId = /^\d+$/.test(asked) ? Number(asked) : null
     // As `printer_keys(..., forget=False)`: an id past the backend's integer column is no
     // printer, forget or not (and past 2^53 `Number` would not keep it exact).
-    if (bambuddyId !== null && (asked.length > 10 || bambuddyId > BAMBUDDY_ID_MAX)) {
+    if (bambuddyId !== null && (asked.replace(/^0+/, '').length > 10 || bambuddyId > BAMBUDDY_ID_MAX)) {
       return problem(404, 'Not Found', `no printer ${asked}`)
     }
     const row = printersState().find((printer) =>
