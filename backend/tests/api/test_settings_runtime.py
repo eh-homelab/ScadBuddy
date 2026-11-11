@@ -25,6 +25,7 @@ from scadbuddy.library.settings_store import ModelProject, S3Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 BAMBUDDY = "https://bambuddy.test/api/v1"
 
@@ -254,6 +255,8 @@ def _remember_everything(client: TestClient) -> None:
     _catalogue(client, "gear")
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
     client.put("/api/v1/print/models/box/choices", json={"tier": "draft"})
+    linked_printer(client, 1)
+    linked_printer(client, 2)
     client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Cool Plate"})
     client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Textured PEI Plate"})
     client.put(

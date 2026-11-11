@@ -38,6 +38,7 @@ from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
@@ -554,6 +555,7 @@ def test_without_choices_the_models_remembered_ones_and_printer_are_used(
         "tier": "fine",
     }
     _ok(client.put(f"/api/v1/print/models/{model}/choices", json=remembered))
+    linked_printer(client, 1)
     _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
     output_id = make_output(client, model)
     request = {"filament_plan": SILK_REQUEST["filament_plan"]}

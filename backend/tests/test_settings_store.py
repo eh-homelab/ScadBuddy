@@ -39,6 +39,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.render.pg_store import MIGRATIONS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.printers import bambuddy_printer
 
 #: Threads per race, and how many times a race is run.
 WRITERS = 8
@@ -120,14 +121,15 @@ def test_open_creates_the_tables_and_records_the_migrations(
 
 
 def test_a_model_choice_and_a_printer_plate_written_at_once_both_persist(
-    store: SettingsStore, settings: Settings
+    store: SettingsStore, settings: Settings, pg_conninfo: str
 ) -> None:
     """The Print dialog's pair, which it sends back to back on every print."""
+    printer = bambuddy_printer(pg_conninfo, 1)
     for round_ in range(ROUNDS):
         _at_once(
             [
                 partial(store.set_model_choices, "gear", ModelPrintChoices(printer_id=round_)),
-                partial(store.set_printer_bed_type, 1, f"Plate {round_}"),
+                partial(store.set_printer_bed_type, printer, f"Plate {round_}"),
             ]
         )
         loaded = _fresh_load(settings)
@@ -156,12 +158,13 @@ def test_many_models_remembered_at_once_all_persist(
 
 
 def test_many_printers_plates_remembered_at_once_all_persist(
-    store: SettingsStore, settings: Settings
+    store: SettingsStore, settings: Settings, pg_conninfo: str
 ) -> None:
+    printers = [bambuddy_printer(pg_conninfo, printer) for printer in range(WRITERS)]
     _at_once(
         [
-            partial(store.set_printer_bed_type, printer, f"Plate {printer}")
-            for printer in range(WRITERS)
+            partial(store.set_printer_bed_type, printer, f"Plate {number}")
+            for number, printer in enumerate(printers)
         ]
     )
     assert _fresh_load(settings).printer_bed_types == {str(p): f"Plate {p}" for p in range(WRITERS)}
@@ -202,9 +205,11 @@ def test_a_key_removed_while_another_is_written_leaves_only_the_other(
     assert list(store.load().model_print_options) == ["kept"]
 
 
-def test_a_connection_save_leaves_the_remembered_choices_alone(store: SettingsStore) -> None:
+def test_a_connection_save_leaves_the_remembered_choices_alone(
+    store: SettingsStore, pg_conninfo: str
+) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
-    store.set_printer_bed_type(1, "Cool Plate")
+    store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
     store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
 
     loaded = store.load()
@@ -224,10 +229,11 @@ def test_a_remembered_print_sequence_round_trips(store: SettingsStore) -> None:
 
 
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
+    printer = bambuddy_printer(pg_conninfo, 1)
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
-    store.set_printer_bed_type(1, "Cool Plate")
+    store.set_printer_bed_type(printer, "Cool Plate")
     store.set_model_choices("gear", ModelPrintChoices())
-    store.set_printer_bed_type(1, None)
+    store.set_printer_bed_type(printer, None)
 
     with psycopg.connect(pg_conninfo) as conn:
         choices = conn.execute("SELECT count(*) FROM model_print_choices").fetchone()
@@ -236,7 +242,9 @@ def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> N
     assert plates == (0,)
 
 
-def test_settings_changed_is_published_once_the_write_is_visible(settings: Settings) -> None:
+def test_settings_changed_is_published_once_the_write_is_visible(
+    settings: Settings, pg_conninfo: str
+) -> None:
     """A listener that re-reads on ``settings.changed`` sees the change announced."""
     bus = InProcessEventBus()
     seen: list[str | None] = []
@@ -249,7 +257,7 @@ def test_settings_changed_is_published_once_the_write_is_visible(settings: Setti
     store = SettingsStore(settings, events=bus)
     store.open()
     try:
-        store.set_printer_bed_type(1, "Cool Plate")
+        store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
     finally:
         store.close()
     assert seen == ["Cool Plate"]
@@ -381,11 +389,11 @@ def test_the_patch_refuses_what_the_ui_may_not_set() -> None:
 
 
 def test_forget_all_clears_the_remembered_choices_and_nothing_else(
-    store: SettingsStore,
+    store: SettingsStore, pg_conninfo: str
 ) -> None:
     store.save(SettingsPatch(printer_id=4, render_timeout=33.0))
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
-    store.set_printer_bed_type(1, "Cool Plate")
+    store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
     store.save_print_options("global", None, PrintOptions(timelapse=True))
     store.save_print_options("printer", "1", PrintOptions(vibration_cali=False))
     store.save_print_options("model", "gear", PrintOptions(use_ams=True))
