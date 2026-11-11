@@ -126,7 +126,9 @@ def test_paypal_asks_for_the_app_the_webhook_and_the_environment() -> None:
     ]
 
 
-def test_venmo_is_off_when_left_out_and_on_is_unavailable_until_the_pay_page() -> None:
+def test_venmo_is_off_when_left_out_and_on_is_unavailable_until_the_pay_page_is_switched_on() -> (
+    None
+):
     """#4960: a reconnect from before the field existed still saves; the form shows
     ``on`` as unavailable, with why."""
     (venmo,) = [f for f in PAYPAL.fields if f.name == "venmo"]

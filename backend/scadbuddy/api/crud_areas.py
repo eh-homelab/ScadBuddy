@@ -17,7 +17,7 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: ``printer-ensure`` area is Task 29's ``…/print/printers/ensure-bambuddy`` alone, taken
 #: early by #4625 so a merge never runs on the worker's role. The print ``reprints`` area
 #: is ``…/print/reprints``, the queue item a reprint queued (#3741). The storefront ``pay`` area
-#: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay/{token}`` page reads.
+#: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay#<token>`` page reads.
 #: The storefront ``turnstile`` area is ``…/storefront/turnstile`` and
 #: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
 #: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The

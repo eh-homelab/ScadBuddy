@@ -9,6 +9,7 @@ import { CustomizePage } from './pages/CustomizePage'
 import { DraftPage } from './pages/DraftPage'
 import { ListingsPage } from './pages/ListingsPage'
 import { OrderPage } from './pages/OrderPage'
+import { PayPage } from './pages/PayPage'
 
 function CustomizeRoute() {
   const { id = '' } = useParams()
@@ -75,6 +76,7 @@ export function App() {
             <Route path="/draft" element={<DraftPage />} />
             <Route path="/request" element={<RequestRoute />} />
             <Route path="/o" element={<OrderPage />} />
+            <Route path="/pay" element={<PayPage />} />
             <Route path="/account" element={<AccountPage />} />
             <Route path="/account/sign-in" element={<SignInPage />} />
             <Route path="*" element={<NotFound />} />

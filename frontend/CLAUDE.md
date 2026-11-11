@@ -78,7 +78,12 @@ same way, `vite.config.ts`).
   reads the order link's token from the fragment and posts it in each body (never a path or
   the history); a 404 with no body is a link that opens nothing. It says "Paid" only from
   the edge's answer ("Check for updates" reads again), never from a provider's redirect
-  (spec §7). The mocks open one order with the token `tok`.
+  (spec §7). The mocks open one order with the token `tok`. Its pay link keeps
+  `rel="noreferrer"` (a provider's hosted page never learns `/o?order=<id>`), so the pay
+  page (`pages/PayPage.tsx`) cannot read the referrer to offer "Back to your order": a
+  click on a same-origin pay link sets the `sb_pay_from_order` sessionStorage flag
+  (`payReturn.ts`), and the pay page reads and clears it (and needs `history.length > 1`).
+  No flag, or blocked storage, shows only the mail-link line and "Your orders".
   Accounts (#5283, spec §5.2): `pages/SignInPage.tsx` (`/account/sign-in`, two steps:
   "Send me a code" mails a code to the address, Turnstile `sign_up`, and says the same for
   every address; then the address and the code, Turnstile `sign_in`. A mailed link opens on

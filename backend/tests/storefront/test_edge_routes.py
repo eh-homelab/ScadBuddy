@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator, MutableMapping
 from typing import Any
@@ -1565,3 +1566,56 @@ def test_an_order_refusal_passes_through(
         headers=_keyed(),
     )
     assert r.status_code == 409 and r.json()["type"] == refused["type"]
+
+
+PAY = "/api/v1/internal/crud/storefront/pay"
+CHECKOUT = {
+    "amount_minor": 1000,
+    "currency": "USD",
+    "order_number": "2026-7",
+    "client_id": "AYSq3RDGsmBLJE-otTkBtM",
+    "paypal_order_id": "5O190127TN364715T",
+    "minor_exponent": 2,
+}
+
+
+def test_the_pay_checkout_sends_the_token_in_the_body_and_shows_the_checkout_only(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{PAY}/checkout").respond(
+        200, json={**CHECKOUT, "pay_token_hash": "secret"}, headers=CRUD
+    )
+    r = edge.post(
+        "/api/store/v1/pay/checkout", json={"token": LINK}, headers={"Origin": PUBLIC_URL}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == CHECKOUT
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == {"token": LINK}
+    assert LINK not in str(sent.url)
+
+
+def test_an_empty_crud_404_is_the_edge_s_own_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(f"{PAY}/checkout").respond(404, headers=CRUD)
+    r = edge.post("/api/store/v1/pay/checkout", json={"token": "x"}, headers={"Origin": PUBLIC_URL})
+    assert (r.status_code, r.content) == (404, b"")
+
+
+@pytest.mark.parametrize("code", [404, 422])
+def test_a_pay_checkout_refusal_with_a_problem_is_the_edge_s_502_not_an_empty_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    code: int,
+) -> None:
+    problem = {"type": "about:blank", "title": "No", "status": code, "detail": "A reason."}
+    crud_mock.post(f"{PAY}/checkout").respond(
+        code, json=problem, headers={**CRUD, "Content-Type": "application/problem+json"}
+    )
+    r = edge.post("/api/store/v1/pay/checkout", json={"token": "x"}, headers={"Origin": PUBLIC_URL})
+    # The edge answers its own 502 problem, never an empty 404 and never the CRUD text.
+    assert r.status_code == 502
+    assert r.json()["detail"] == "The shop could not answer this request."

@@ -58,9 +58,10 @@ so no logged or relayed JSON holds it), ending the session the browser held; one
 email or ``null``, and ``GET …/account/orders`` its submitted orders (401
 ``sign_in_required`` with no live session).
 Area ``pay``: ``POST …/pay/checkout`` (#4960, the interface agreed on #5283) answers the
-edge's ``/pay/{token}`` page: what it needs to render PayPal's buttons for one request, or
+edge's ``/pay#<token>`` page: what it needs to render PayPal's buttons for one request, or
 a bare 404 (no reason) for a token that reads nothing (`payments.venmo.venmo_checkout`).
-The token travels in the body, never the path, so no access log holds it. The token is
+The page reads the token from the URL fragment, which the browser never sends, and posts it
+in a body, which the edge forwards. No path or access log holds it. The token is
 the secret here, so it takes no visitor or client header.
 
 Area ``order`` (`orders/storefront/order_page.py`, #5283 Task 5): the customer's order
@@ -525,7 +526,7 @@ async def draft_request(
 
 
 class PayCheckoutRead(BaseModel):
-    """The pay page's token, as the edge took it from ``/pay/{token}``."""
+    """The pay page's token, as the page posted it from the ``/pay#<token>`` fragment."""
 
     model_config = ConfigDict(extra="forbid")
 

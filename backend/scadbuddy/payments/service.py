@@ -215,7 +215,13 @@ class Payments:
             )
         return found
 
-    def _return_url(self, order_id: str) -> str | None:
+    def _return_url(self, order_id: str, source: str) -> str | None:
+        """Where the provider sends the payer back. A storefront order has no back office
+        page for its customer: it is the storefront's ``/o``, which cannot carry the order
+        link's token, so the page asks for the mail's link (#5283 phase 4)."""
+        if source == "storefront":
+            storefront = self._storefront_url()
+            return f"{storefront.rstrip('/')}/o" if storefront else None
         public = self._public_url()
         return f"{public.rstrip('/')}/orders/{order_id}" if public else None
 
@@ -238,7 +244,7 @@ class Payments:
             hosted = await adapter.create_request(
                 credential,
                 found,
-                return_url=self._return_url(found.order_id),
+                return_url=self._return_url(found.order_id, order.source),
                 idempotency_key=found.id,
                 order_number=order.number,
             )
@@ -246,7 +252,7 @@ class Payments:
             if storefront and venmo_eligible(
                 found.provider, credential.settings, found.currency, storefront
             ):
-                # #4960: once the storefront's pay page exists (`PAY_PAGE_READY`), it
+                # #4960: once the pay page is switched on (`PAY_PAGE_READY`), it
                 # offers Venmo for the same order.
                 token, token_digest = pay_token()
                 hosted = HostedRequest.model_validate(

@@ -135,6 +135,8 @@ function outside(body: Body): Response | Listing {
 }
 
 export const ORDER_TOKEN = 'tok'
+/** The pay page's token (`/pay#pay`). */
+export const PAY_TOKEN = 'pay'
 /** The order a signed-in reader opens at `/o?order=<id>`. */
 export const ORDER_ID = 'order-1'
 
@@ -188,6 +190,19 @@ function ensureDraft(): Draft {
 }
 
 export const handlers = [
+  http.post(`${base}/pay/checkout`, async ({ request }) => {
+    const body = (await request.json().catch(() => ({}))) as { token?: unknown }
+    return body.token === PAY_TOKEN
+      ? HttpResponse.json({
+          amount_minor: 1250,
+          currency: 'USD',
+          order_number: 'ORD-2026-7',
+          client_id: 'sb',
+          paypal_order_id: 'MOCK-ORDER',
+          minor_exponent: 2,
+        })
+      : new HttpResponse(null, { status: 404 })
+  }),
   http.get(`${base}/listings`, () => HttpResponse.json({ listings: LISTINGS, requests_enabled: true })),
   http.get(`${base}/listings/:id`, ({ params }) => {
     const listing = LISTINGS.find((l) => l.id === params.id)

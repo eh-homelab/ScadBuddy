@@ -53,8 +53,8 @@ async def list_providers(payments: PaymentsDep) -> list[ProviderStatus]:
         " SCADBUDDY_SECRET_KEY_FILE; 409 `currency_mismatch` when the account takes"
         " payments in one currency and it is not `orders_currency`; 409"
         " `currency_unknown` when such an account names no currency; 409"
-        " `venmo_page_missing` for PayPal's `venmo` `on` until the storefront's pay page"
-        " exists; a field left out that has a `default` takes it; 422 with the"
+        " `venmo_page_missing` for PayPal's `venmo` `on` until the pay page is switched"
+        " on (`PAY_PAGE_READY`); a field left out that has a `default` takes it; 422 with the"
         " provider's own text when it refuses."
     ),
 )

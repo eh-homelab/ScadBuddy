@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { useLocation } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import { formatMoney } from '../../lib/money'
+import { markPayFromOrder } from '../payReturn'
 import {
   ActionKey,
   StoreError,
@@ -25,6 +26,8 @@ function modelJob(url: string): PreviewJob {
 /** What a link that opens no order reads (an unknown, revoked or broken link). */
 const NO_ORDER = 'This link does not open an order. It may have been replaced by a newer one: use the link in the latest mail from the shop.'
 
+/** What `/o` reads with no token and no order id (the payment provider sends a payer here). */
+const NO_LINK = 'Open your order from the link in your mail.'
 /** What an account's order id that opens nothing reads (the order is not this account's, or the session ended). */
 const NO_ACCOUNT_ORDER = 'We cannot open this order. Sign in to your account again to see your orders.'
 
@@ -96,6 +99,20 @@ export function OrderPage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  if (who === null) {
+    return (
+      <section>
+        <h1 className="sf-h1">Your order</h1>
+        <div className="sf-panel">
+          <p className="sf-lead">{NO_LINK}</p>
+          <p className="sf-hint">
+            Have an account? See <Link to="/account">Your orders</Link>.
+          </p>
+        </div>
+      </section>
+    )
   }
 
   if (order === null) {
@@ -323,7 +340,10 @@ function Payments({ order }: { order: CustomerOrder }) {
               )}
               {payment.status === 'open' &&
                 (payment.pay_url ? (
-                  <a className="sf-button" href={payment.pay_url} rel="noreferrer">
+                  <a className="sf-button" href={payment.pay_url}
+                    rel="noreferrer"
+                    onClick={(event) => markPayFromOrder(payment.pay_url!, event.nativeEvent)}
+                  >
                     {payment.kind === 'deposit' ? `Pay deposit ${amount}` : `Pay ${amount}`}
                   </a>
                 ) : (

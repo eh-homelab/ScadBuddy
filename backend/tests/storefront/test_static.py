@@ -17,7 +17,14 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from scadbuddy.storefront.app import create_app
-from scadbuddy.storefront.static import IMMUTABLE, REVALIDATE, StorefrontStatic
+from scadbuddy.storefront.static import (
+    IMMUTABLE,
+    REVALIDATE,
+    STOREFRONT_CSP,
+    TURNSTILE_CSP,
+    TURNSTILE_ORIGIN,
+    StorefrontStatic,
+)
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
     CRUD,
@@ -89,6 +96,42 @@ def test_the_page_is_revalidated_and_has_a_policy(dist: Path) -> None:
     assert response.status_code == 200
     assert response.headers["cache-control"] == REVALIDATE
     assert "default-src 'self'" in response.headers["content-security-policy"]
+
+
+PAYPAL_ORIGINS = ("https://www.paypal.com", "https://www.sandbox.paypal.com")
+
+
+def directive(csp: str, name: str) -> str:
+    return next(part for part in csp.split("; ") if part.startswith(f"{name} "))
+
+
+def test_only_the_pay_path_allows_paypal(dist: Path) -> None:
+    """The pay page (#5283 phase 4) loads PayPal's SDK, and shows its buttons in frames
+    that call PayPal; no other path may."""
+    client = TestClient(static_app(dist))
+    pay = client.get("/pay").headers["content-security-policy"]
+    for name in ("script-src", "frame-src", "connect-src"):
+        for origin in PAYPAL_ORIGINS:
+            assert origin in directive(pay, name), (name, origin)
+    assert "'self'" in directive(pay, "script-src")
+    assert "'self'" in directive(pay, "connect-src")
+    for path in ("/", "/o", "/l/abc", "/draft", "/pay/x", "/payment"):
+        csp = client.get(path).headers["content-security-policy"]
+        assert csp == STOREFRONT_CSP, path
+        assert "paypal" not in csp
+
+
+def test_the_pay_path_keeps_the_bot_check_origin_while_a_site_key_is_set(dist: Path) -> None:
+    async def on() -> bool:
+        return True
+
+    client = TestClient(Starlette(routes=[Mount("/", app=StorefrontStatic(dist, turnstile=on))]))
+    pay = client.get("/pay").headers["content-security-policy"]
+    for name in ("script-src", "frame-src"):
+        assert TURNSTILE_ORIGIN in directive(pay, name)
+        for origin in PAYPAL_ORIGINS:
+            assert origin in directive(pay, name)
+    assert client.get("/o").headers["content-security-policy"] == TURNSTILE_CSP
 
 
 @pytest.mark.parametrize(
