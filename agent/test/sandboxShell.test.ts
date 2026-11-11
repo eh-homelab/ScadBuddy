@@ -208,9 +208,11 @@ describe('Bash in the session sandbox', () => {
     expect(result).toMatchObject({ isError: true, text: expect.stringContaining('no sandbox') })
   })
 
+  // pwsh's first start on a busy hosted runner can pass the 20 s default (#6066); the
+  // run's own signal allows 60 s.
   it.skipIf(!process.env.PATH?.split(':').some((p) => p && existsSync(path.join(p, 'pwsh'))))('runs PowerShell', async () => {
     await mkdir(dir, { recursive: true })
     const body = content((await runShell(ctx, 'pwsh', { command: 'Write-Output (1 + 2)' })).text)
     expect(body).toMatchObject({ exit_code: 0, stdout: '3\n' })
-  })
+  }, 60_000)
 })
