@@ -122,8 +122,14 @@ def moto_s3() -> Iterator[S3Settings]:
         yield settings
     finally:
         # moto's state is the process's, not the server's: the next test starts empty.
-        httpx.post(f"{settings.endpoint}/moto-api/reset").raise_for_status()
+        # The server runs in this process, so the reset is a call, not a request (#5989):
+        # `POST /moto-api/reset` takes about 20 ms, but on a loaded runner the answer
+        # took 5.5 s behind the app's teardown and missed httpx's 5 s read timeout.
+        # The server stops first, so no request of the test's is still in flight.
+        from moto.moto_api._internal.models import moto_api_backend
+
         server.stop()
+        moto_api_backend.reset()
 
 
 @pytest.fixture(params=["local", "s3", "worker"], ids=["local", "s3", "worker"])

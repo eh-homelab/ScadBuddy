@@ -191,7 +191,12 @@ def test_a_pattern_on_another_type_is_not_supported_and_asks_no_max_length(
 
 def test_many_slow_values_share_one_budget() -> None:
     """Each value's deadline alone would let an array of slow items hold the loop for
-    each: the run's patterns share PATTERNS_BUDGET_S."""
+    each: the run's patterns share PATTERNS_BUDGET_S.
+
+    #6010: the check counts the values whose pattern ran, not the wall clock. Each of
+    them takes at least its timeout, so the shared budget lets at most
+    PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S of them run in full (plus one that gets the
+    rest), on any runner. With a budget per value, all 40 would run."""
     schema = {
         "type": "object",
         "properties": {
@@ -201,12 +206,14 @@ def test_many_slow_values_share_one_budget() -> None:
             }
         },
     }
-    started = time.monotonic()
     with pytest.raises(InputsError) as err:
         resolve_inputs(schema, {"s": ["a" * 60 + "!"] * 40})
-    assert time.monotonic() - started < PATTERNS_BUDGET_S + 0.5
-    assert len(err.value.problems) == 40
-    assert any("took over" in p and "together" in p for p in err.value.problems)
+    problems = err.value.problems
+    assert len(problems) == 40
+    ran = [p for p in problems if f"its pattern took over {PATTERN_TIMEOUT_S}s" in p]
+    together = [p for p in problems if f"took over {PATTERNS_BUDGET_S}s to check together" in p]
+    assert len(ran) + len(together) == 40
+    assert 1 <= len(ran) <= PATTERNS_BUDGET_S / PATTERN_TIMEOUT_S + 1
 
 
 def test_an_exponential_pattern_within_its_max_length_is_cut_off() -> None:
