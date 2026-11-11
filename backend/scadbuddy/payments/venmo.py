@@ -138,6 +138,7 @@ def venmo_checkout(conn: Conn, token: str) -> VenmoCheckout | None:
         " AND r.provider_ref IS NOT NULL AND c.settings->>%s = 'on'",
         (token_hash(token), PROVIDER, SETTING),
     ).fetchone()
+    # A credential saved without its client id or environment is half-configured: no page.
     if row is None or row["client_id"] is None or row["environment"] is None:
         return None
     return VenmoCheckout.model_validate({**row, "minor_exponent": minor_exponent(row["currency"])})

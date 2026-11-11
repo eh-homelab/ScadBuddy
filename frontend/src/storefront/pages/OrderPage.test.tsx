@@ -299,6 +299,36 @@ describe('OrderPage', () => {
     expect(await screen.findByRole('heading', { name: 'Order 2026-8' })).toBeInTheDocument()
   })
 
+  it('sends a fresh Idempotency-Key for the same write once the reader changes', async () => {
+    const keys: Array<string | null> = []
+    server.use(
+      http.post('/api/store/v1/order/view', () => HttpResponse.json(ORDER)),
+      http.post('/api/store/v1/order/revisions/:id/answer', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({}, { status: 500 })
+      }),
+    )
+    let go: (to: string) => void = () => {}
+    function Jump() {
+      const navigate = useNavigate()
+      go = (to) => navigate(to)
+      return null
+    }
+    const { user } = renderPage(
+      <>
+        <Jump />
+        <OrderPage />
+      </>,
+      { route: `/o#${TOKEN}` },
+    )
+    await user.click(await screen.findByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(keys).toHaveLength(1))
+    act(() => go('/o#other'))
+    await user.click(await screen.findByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(keys).toHaveLength(2))
+    expect(keys[1]).not.toBe(keys[0])
+  })
+
   it('shows Paid only after a fresh read, never from the redirect', async () => {
     const open = { ...ORDER, payments: [OPEN] } satisfies CustomerOrder
     const paid = { ...ORDER, payments: [{ ...OPEN, status: 'paid', pay_url: null }] } satisfies CustomerOrder
