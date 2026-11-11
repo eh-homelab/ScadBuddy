@@ -31,7 +31,12 @@ A pass reads the archives Bambuddy made since the watcher was switched on (at mo
 A row, its link and its activity row are one transaction (`AutoImportStore.record`).
 The library files' queue items are linked once per pass (`linking.link_library_prints`),
 before the archives. An archive whose import raises is logged and skipped, so it never
-holds back the archives after it; the next pass tries it again.
+holds back the archives after it; the next pass tries it again. The pass records when it
+raised (`AutoImportStore.failed`) and takes first the archives that never failed, oldest
+first, then the failed ones, the oldest failure first (#6023). So an archive that fails
+every pass (a printer down for hours) never holds one of the `MAX_IMPORTS` slots ahead of
+newer archives, and the failing ones take turns. The failure times are in Postgres, so
+both Schedules' passes, on any API replica and after a restart, read the same order.
 """
 
 from __future__ import annotations
@@ -73,14 +78,17 @@ LOOKBACK = timedelta(days=2)
 #: One page of ``GET /archives/``, and how many pages a pass reads at most.
 ARCHIVE_PAGE = 100
 MAX_PAGES = 5
-#: How many archives one pass takes at most, oldest first; the rest wait for the next
-#: pass, so a pass stays inside its activity's timeout.
+#: How many archives one pass takes at most, oldest first, those whose import raised
+#: last (#6023); the rest wait for the next pass, so a pass stays inside its activity's
+#: timeout.
 MAX_IMPORTS = 20
 #: How many printer files with the print's name one archive reads at most, to find the
 #: one whose bytes are the printed file's.
 MAX_PRINTER_READS = 3
 #: The fixed order of the sources Bambuddy keeps; the printer comes after them.
 BAMBUDDY_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
+#: The sort key of an archive whose import never raised: before every failure.
+NEVER_FAILED = datetime.min.replace(tzinfo=UTC)
 
 NO_MATCH = "no model matched with confidence"
 #: Bambuddy answers a later pass may not meet: a timeout, a rate limit, a server error.
@@ -233,7 +241,11 @@ class AutoImporter:
         linked = await self.links.linked_among([archive.id for archive in archives])
         fresh = [archive for archive in archives if archive.id not in linked]
         taken = await self.store.known(fresh)
-        todo = [archive for archive in fresh if archive.id not in taken][:MAX_IMPORTS]
+        waiting = [archive for archive in fresh if archive.id not in taken]
+        failures = await self.store.failures([archive.id for archive in waiting])
+        todo = sorted(
+            waiting, key=lambda archive: (failures.get(archive.id, NEVER_FAILED), archive.id)
+        )[:MAX_IMPORTS]
         if todo:
             # Once per pass, not per archive: `link_archive` below skips it.
             await link_library_prints(self.client, self.links)
@@ -250,6 +262,8 @@ class AutoImporter:
                     "could not import a print ScadBuddy did not start",
                     extra={"archive_id": archive.id},
                 )
+                # Taken after the others on the next passes (#6023).
+                await self.store.failed(archive.id, forget_before=datetime.now(UTC) - LOOKBACK)
                 state = None
             if state == "linked":
                 result.linked += 1

@@ -79,6 +79,9 @@ class Store:
         self.earlier = earlier or set()
         #: A link took the archive between the pass's read and its record.
         self.owned = owned
+        #: When each archive's import last raised (`AutoImportStore.failed`).
+        self.failed_at: dict[int, datetime] = {}
+        self.clock = NOW
 
     async def known(self, archives: Any) -> set[int]:
         return set()
@@ -90,7 +93,15 @@ class Store:
         if self.owned:
             return False
         self.rows.append(row)
+        self.failed_at.pop(row.archive_id, None)
         return True
+
+    async def failures(self, archive_ids: Any) -> dict[int, datetime]:
+        return {i: self.failed_at[i] for i in archive_ids if i in self.failed_at}
+
+    async def failed(self, archive_id: int, *, forget_before: datetime) -> None:
+        self.clock += timedelta(seconds=1)
+        self.failed_at[archive_id] = self.clock
 
 
 class Client:
@@ -270,6 +281,40 @@ async def test_one_failing_archive_does_not_stop_the_rest(monkeypatch: pytest.Mo
     )
     assert [row.archive_id for row in store.rows] == [2]
     assert (result.linked, result.skipped) == (1, 1)
+
+
+async def test_a_failing_archive_waits_behind_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6023: an archive whose import raises is tried again, but after the archives that
+    did not fail, so a printer down for hours never holds a pass's slots."""
+
+    class Failing(Store):
+        async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
+            if row.archive_id in (1, 2):
+                raise RuntimeError("the printer did not answer")
+            return await super().record(row, plate_id=plate_id)
+
+    monkeypatch.setattr(sweep, "MAX_IMPORTS", 2)
+    store = Failing()
+    archives = [detail(1), detail(2), detail(3), detail(4)]
+    sources = [found("archive", name="demo.gcode.3mf")]
+    await _pass(monkeypatch, archives, sources=sources, store=store)
+    assert store.rows == [] and set(store.failed_at) == {1, 2}
+
+    await _pass(monkeypatch, archives, sources=sources, store=store)
+    assert [row.archive_id for row in store.rows] == [3, 4]
+
+    # Among the failing ones, the one that failed longest ago comes first.
+    store.failed_at[2] = NOW - timedelta(hours=1)
+    seen: list[int] = []
+    taken = Failing.record
+
+    async def record(self: Store, row: AutoImport, *, plate_id: int | None = None) -> bool:
+        seen.append(row.archive_id)
+        return await taken(self, row, plate_id=plate_id)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Failing, "record", record)
+    await _pass(monkeypatch, [detail(1), detail(2)], sources=sources, store=store)
+    assert seen == [2, 1]
 
 
 # --- the printer's storage ----------------------------------------------------------
