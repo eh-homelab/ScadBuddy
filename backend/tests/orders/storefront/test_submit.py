@@ -43,7 +43,6 @@ from tests.orders.storefront.test_drafts import (
     _state,
     add_body,
 )
-from tests.orders.test_lifecycle import BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -363,22 +362,21 @@ def test_a_first_order_deposit_applies_even_when_the_email_has_ordered_before(
     assert order.deposit_minor == 500
 
 
-@pytest.mark.parametrize(("tax_shipping", "tax_minor"), [(False, 201), (True, 271)])
+@pytest.mark.parametrize(("tax_shipping", "taxes"), [(False, []), (True, [70])])
 def test_a_submit_sets_the_auto_tax(
     api: TestClient,
     crud: CrudCaller,
     owner_lifecycle: Lifecycle,
     listing: Listing,
     tax_shipping: bool,
-    tax_minor: int,
+    taxes: list[int],
 ) -> None:
-    """Tax is 10 percent of the items (2 x 1005 = 2010), and of the 700 shipping too
-    with ``orders_tax_shipping``: 201, or 271 after rounding half up."""
+    """The submit writes the shipping charge, then the auto tax (`Lifecycle._retax`). A
+    cart's items have no price until the shop quotes them, so at submit the tax is 10
+    percent of the 700 shipping with ``orders_tax_shipping`` (70), and no row without it
+    (an amount of 0 writes none)."""
     owner_lifecycle.rules = lambda: OrderRules("USD", Decimal(10), tax_shipping, (), (POST, PICKUP))
     draft = draft_of(crud, listing)
-    owner_lifecycle.add_custom_item(
-        draft["id"], BY, title="Stand", quantity=2, unit_price_minor=1005
-    )
     r = crud.post(
         "/draft/submit",
         json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
@@ -386,9 +384,7 @@ def test_a_submit_sets_the_auto_tax(
     )
     assert r.status_code == 200, r.text
     charges = _orders(api).store.charges(draft["id"])
-    assert [(c.kind, c.auto, c.amount_minor) for c in charges if c.kind == "tax"] == [
-        ("tax", True, tax_minor)
-    ]
+    assert [c.amount_minor for c in charges if c.kind == "tax" and c.auto] == taxes
     assert [c.amount_minor for c in charges if c.kind == "shipping"] == [700]
 
 
