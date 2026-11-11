@@ -662,6 +662,26 @@ describe('OrderPage, the customer link (#5283)', () => {
     send.mockRestore()
   })
 
+  it('asks nothing on a 409 link_live when a fresh read shows no live link', async () => {
+    const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => HttpResponse.json(none)),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled())
+    expect(within(card).queryByText(/stops working/)).toBeNull()
+    expect(within(card).queryByRole('alert')).toBeNull()
+  })
+
   it('says so when the customer has no email address, and sends to an address typed', async () => {
     const { user } = render(ORDER_CLOSED)
     const card = await screen.findByRole('region', { name: 'Customer link' })

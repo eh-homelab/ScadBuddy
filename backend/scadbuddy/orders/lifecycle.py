@@ -959,11 +959,11 @@ class Lifecycle:
         self, order_id: str, by: Actor, to: str | None, *, replace: bool = False
     ) -> LinkState:
         """The shop sends the order a new customer link (spec §5.2 "Order link"), under the
-        order's lock: every live link is revoked and a new one mailed (`issue_link`) to
-        ``to``, or else to the customer's first email contact that is one address (the
-        primary one first; a contact is free text, and a malformed one is skipped). A
-        `back_office` order gets one too. Audit row `order.customer_link_sent`. A live
-        link is replaced only with ``replace``. Refusals: `order_not_found`;
+        order's lock: with ``replace``, every live link is revoked; then a new one is mailed
+        (`issue_link`) to ``to``, or else to the customer's first email contact that is one
+        address (the primary one first; a contact is free text, and a malformed one is
+        skipped). A `back_office` order gets one too. Audit row `order.customer_link_sent`.
+        Refusals: `order_not_found`;
         `order_not_submitted` on a cart; `link_live` while a link is live and ``replace``
         is false (nothing changes); 422 `no_email` with no ``to`` and no email contact that
         is one address; `EmailInvalidError`; `KekMissingError`."""

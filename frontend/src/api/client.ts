@@ -2515,7 +2515,8 @@ export const api = {
   /** #5283 — the state of the order's customer link (whether it is live, where it went,
    * when it was opened or revoked); never the link itself. */
   customerLink: (orderId: string) => request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`),
-  /** #5283 — mails a new link to `to`, or the customer's email; the live one stops working. */
+  /** #5283 — mails a new link to `to`, or the customer's email. With `replace`, the live one stops
+   * working; without it, a live link is 409 `link_live` and nothing changes. */
   sendCustomerLink: (orderId: string, to?: string, replace = false) =>
     request<CustomerLinkState>(`/orders/${seg(orderId)}/customer-link`, {
       method: 'POST',

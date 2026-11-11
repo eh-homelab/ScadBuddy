@@ -23,6 +23,8 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
   const link = useAsync(() => api.customerLink(orderId), [orderId], [`order:${orderId}`])
   const [to, setTo] = useState('')
   const [confirming, setConfirming] = useState(false)
+  // The address of the live link a `link_live` refusal's fresh read found.
+  const [liveTo, setLiveTo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const state = link.data
@@ -36,8 +38,12 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
       setTo('')
       onChanged?.()
     } catch (err) {
-      if (refusalSlug(err) === 'link_live') setConfirming(true)
-      else setError(refusalText(err))
+      if (refusalSlug(err) === 'link_live') {
+        // The page's state was stale. Ask only if a link is still live after a fresh read.
+        const fresh = await api.customerLink(orderId).catch(() => null)
+        setLiveTo(fresh?.live ? fresh.sent_to : null)
+        setConfirming(fresh?.live !== false)
+      } else setError(refusalText(err))
     } finally {
       link.refresh()
       setBusy(false)
@@ -54,7 +60,7 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
           <p role="alert" className="text-destructive">
             The link's state could not be read: {link.error.message}
           </p>
-          <p className="text-muted-foreground">Sending waits until the state is read: a new link would end a live one without asking.</p>
+          <p className="text-muted-foreground">Sending waits until the state is read.</p>
           <Button size="sm" variant="outline" className="self-start" onClick={() => link.refresh()}>
             Try again
           </Button>
@@ -121,9 +127,9 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
       {confirming && (
         <div className="flex flex-col gap-2 rounded-md border p-2 text-[13px]">
           <p>
-            {state?.live ? (
+            {(state?.live ? state.sent_to : liveTo) ? (
               <>
-                The link sent to <span className="break-all">{state.sent_to}</span> stops working.
+                The link sent to <span className="break-all">{state?.live ? state.sent_to : liveTo}</span> stops working.
               </>
             ) : (
               <>The live link stops working.</>
