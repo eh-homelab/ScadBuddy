@@ -44,6 +44,10 @@ def a_print(archive_id: int, **fields: Any) -> dict[str, Any]:
         "filename": "demo.gcode.3mf",
         "content_hash": HASH,
         "status": "printing",
+        # Still printing, so no end: the recorded archive's 2026-09 end is past the
+        # watcher's retry window (`RETRY_AFTER_END`), which would send a print the
+        # printer could not serve yet straight to the inbox.
+        "completed_at": None,
         "created_at": later(),
         "started_at": STARTED,
         "source_3mf_path": None,
