@@ -204,6 +204,7 @@ class Library:
     def __init__(self, fails: BaseException | None = None) -> None:
         self.files: dict[int, tuple[str, bytes]] = {}
         self.uploads: list[tuple[str, int | None, str | None]] = []
+        self.listed: list[str | None] = []
         self.fails = fails
 
     async def template_folder(self, name: str) -> Folder:
@@ -213,11 +214,13 @@ class Library:
         return Folder(id=7)
 
     async def library_listing(
-        self, *, folder_id: int | None, every_folder: bool = False
+        self, *, folder_id: int | None, filename: str | None = None
     ) -> list[LibraryListRow]:
+        self.listed.append(filename)
         return [
             LibraryListRow(id=i, filename=name, file_type="3mf", file_size=len(data))
             for i, (name, data) in self.files.items()
+            if filename is None or name == filename
         ]
 
     async def library_file(self, file_id: int) -> LibraryFile:
@@ -286,6 +289,17 @@ async def test_a_copy_an_earlier_attempt_kept_is_used_again() -> None:
     lan = Lan({"/cache/demo_plate.gcode.3mf": PRINTED})
     capture = await activities(lan, library=library).capture(JOB, last=False)
     assert capture.library_file_id == 12 and library.uploads == []
+
+
+async def test_the_inbox_folder_is_listed_by_the_files_name_only() -> None:
+    """#6045: the keep lists only the files of the job's name, so its cost does not grow
+    with the folder."""
+    library = Library()
+    library.files[12] = ("another_job.3mf", b"other")
+    lan = Lan({"/cache/demo_plate.gcode.3mf": PRINTED})
+    capture = await activities(lan, library=library).capture(JOB, last=False)
+    assert library.listed == ["demo_plate.gcode.3mf"]
+    assert capture.library_file_id == 42
 
 
 async def test_without_the_printer_source_nothing_reaches_the_printer() -> None:

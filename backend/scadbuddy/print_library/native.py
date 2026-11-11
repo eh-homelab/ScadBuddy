@@ -171,9 +171,11 @@ class NativeLibrary:
         return [shaped(f) for f in children.get(None, [])]
 
     async def library_listing(
-        self, *, folder_id: int | None, every_folder: bool = False
+        self, *, folder_id: int | None, every_folder: bool = False, filename: str | None = None
     ) -> list[LibraryListRow]:
-        files = await asyncio.to_thread(self.rows.files, folder_id, every_folder=every_folder)
+        files = await asyncio.to_thread(
+            self.rows.files, folder_id, every_folder=every_folder, filename=filename
+        )
         return [
             LibraryListRow(
                 id=f.id,

@@ -50,6 +50,7 @@ import logging
 import re
 import socket
 import ssl
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from io import BytesIO
@@ -92,6 +93,11 @@ class FileTooLargeError(Exception):
     def __init__(self, max_bytes: int) -> None:
         super().__init__(f"the file is larger than {max_bytes} bytes")
         self.max_bytes = max_bytes
+
+
+class DownloadCancelledError(Exception):
+    """A download whose caller stopped waiting (a cancelled `LanPrinter.download`): its
+    thread stops at the next block and closes the connection."""
 
 
 class CertificateMismatchError(ssl.SSLError):
@@ -311,9 +317,20 @@ class LanPrinter:
     async def download(self, remote_name: str, *, max_bytes: int | None = None) -> bytes:
         """``remote_name``'s bytes, read over implicit FTPS (the live test's probe file,
         and the print watcher's copy of a LAN-only printer's job, #4699). Past
-        ``max_bytes`` the read stops with `FileTooLargeError`."""
+        ``max_bytes`` the read stops with `FileTooLargeError`.
+
+        A cancel (a caller's ``wait_for`` that ran out) does not wait for the thread: it
+        tells the thread to stop. The thread then stops at its next check (when the login
+        ends, or at the next block it receives) and closes the connection. Each command
+        and each block waits at most `FTP_TIMEOUT`, so the thread ends within about that
+        after the cancel (a login still in progress may take one wait per command)."""
         address = await lan_address(self.host)
-        return await asyncio.to_thread(self._download, address, remote_name, max_bytes)
+        stop = threading.Event()
+        try:
+            return await asyncio.to_thread(self._download, address, remote_name, max_bytes, stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
 
     def _ftps(self, address: str) -> ImplicitFtpTls:
         """A logged-in, protected FTPS session on ``address``; the caller closes it."""
@@ -327,16 +344,26 @@ class LanPrinter:
             raise
         return ftp
 
-    def _download(self, address: str, remote_name: str, max_bytes: int | None = None) -> bytes:
+    def _download(
+        self,
+        address: str,
+        remote_name: str,
+        max_bytes: int | None = None,
+        stop: threading.Event | None = None,
+    ) -> bytes:
         ftp = self._ftps(address)
         try:
             out = BytesIO()
 
             def write(block: bytes) -> None:
+                if stop is not None and stop.is_set():
+                    raise DownloadCancelledError
                 out.write(block)
                 if max_bytes is not None and out.tell() > max_bytes:
                     raise FileTooLargeError(max_bytes)
 
+            if stop is not None and stop.is_set():
+                raise DownloadCancelledError
             ftp.retrbinary(f"RETR {remote_name}", write)
             return out.getvalue()
         finally:

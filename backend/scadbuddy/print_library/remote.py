@@ -68,13 +68,16 @@ class RemoteLibrary:
         return await self.http.get(url, params=params)
 
     async def library_listing(
-        self, *, folder_id: int | None, every_folder: bool = False
+        self, *, folder_id: int | None, every_folder: bool = False, filename: str | None = None
     ) -> list[LibraryListRow]:
         """The files directly in ``folder_id`` (the top level for ``None``), or in every
-        folder: what finds an upload an earlier attempt left unrecorded."""
+        folder: what finds an upload an earlier attempt left unrecorded. Only the files
+        named ``filename``, when it is given."""
         params = {"every_folder": "true"} if every_folder else {}
         if folder_id is not None:
             params["folder_id"] = str(folder_id)
+        if filename is not None:
+            params["filename"] = filename
         response = await self._get(f"{self.base_url}{INTERNAL_LIBRARY}", params)
         return _ROWS.validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 

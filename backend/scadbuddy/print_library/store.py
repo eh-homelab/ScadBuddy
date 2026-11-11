@@ -257,7 +257,11 @@ class NativeLibraryStore:
         )
         return found[0] if found else None
 
-    def files(self, folder_id: int | None, *, every_folder: bool = False) -> list[NativeFile]:
+    def files(
+        self, folder_id: int | None, *, every_folder: bool = False, filename: str | None = None
+    ) -> list[NativeFile]:
+        """The live files in ``folder_id`` (or every folder), only those named
+        ``filename`` when it is given."""
         where = "deleted_at IS NULL"
         params: tuple[Any, ...] = ()
         if not every_folder:
@@ -266,6 +270,9 @@ class NativeLibraryStore:
             else:
                 where += " AND folder_id = %s"
                 params = (folder_id,)
+        if filename is not None:
+            where += " AND name = %s"
+            params = (*params, filename)
         return self._files(
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE {where} ORDER BY id", params
         )

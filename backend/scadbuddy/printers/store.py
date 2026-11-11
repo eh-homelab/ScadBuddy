@@ -178,6 +178,26 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
+def _repoint_lan_imports(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # #6045: a LAN-only printer's print record (#4699 phase 4) is found by
+    # ``printer_key``, so the key follows the row to the kept printer, and a job recorded
+    # again after the merge (under the kept id) finds its row. A job the kept printer
+    # recorded too keeps its old key (the unique index takes each key and job once), and
+    # of two gone rows of one job only one moves: the one keyed by the gone printer, else
+    # the first.
+    conn.execute(
+        "UPDATE print_lan_imports SET printer_key = %(into)s WHERE id IN ("
+        " SELECT DISTINCT ON (subtask_name, started_at) id FROM print_lan_imports AS gone"
+        " WHERE gone.printer = %(merged)s::uuid AND NOT EXISTS ("
+        "  SELECT 1 FROM print_lan_imports AS kept WHERE kept.printer_key = %(into)s"
+        "  AND kept.subtask_name = gone.subtask_name AND kept.started_at = gone.started_at)"
+        " ORDER BY subtask_name, started_at, (printer_key = %(merged_key)s) DESC, id)",
+        # One parameter per type: the ``::uuid`` cast types ``merged`` for every use.
+        {"into": into, "merged": merged, "merged_key": merged},
+    )
+    conn.execute("UPDATE print_lan_imports SET printer = %s WHERE printer = %s", (into, merged))
+
+
 #: A printer's machine rate inputs (#4625), one profile with its wear parts and tasks.
 MACHINE_RATE_TABLES = ("printer_cost_profiles", "printer_wear_parts", "printer_maintenance_costs")
 
@@ -268,8 +288,9 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printer_cost_profiles", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_wear_parts", "printer", repoint=_repoint_machine_rate),
     PrinterReference("printer_maintenance_costs", "printer", repoint=_repoint_machine_rate),
-    # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on.
-    PrinterReference("print_lan_imports", "printer"),
+    # #4699 phase 4: the LAN-only printer a print the watcher recorded ran on, and its
+    # job key (#6045).
+    PrinterReference("print_lan_imports", "printer", repoint=_repoint_lan_imports),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries; #4699: the
     # registry ids in the print watcher's skip list.

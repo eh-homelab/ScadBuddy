@@ -170,6 +170,19 @@ async def test_listing_one_folder_and_every_folder(native: NativeLibrary, three_
     assert all(r.print_count == 0 and not r.is_external for r in every)
 
 
+async def test_a_listing_by_filename_holds_only_that_name(
+    native: NativeLibrary, three_mf: Path
+) -> None:
+    """#6045: the print watcher's keep lists only the files of one name."""
+    folder = native.rows.create_folder("A", None)
+    named = await upload(native, three_mf, folder_id=folder.id)
+    with three_mf.open("rb") as data:
+        await native.upload("other.3mf", data, folder.id)
+    listed = await native.library_listing(folder_id=folder.id, filename=three_mf.name)
+    assert [r.id for r in listed] == [named.id]
+    assert await native.library_listing(folder_id=folder.id, filename="none.3mf") == []
+
+
 async def test_a_file_reads_as_bambuddys_model(native: NativeLibrary, three_mf: Path) -> None:
     f = await upload(native, three_mf)
     got = await native.library_file(f.id)

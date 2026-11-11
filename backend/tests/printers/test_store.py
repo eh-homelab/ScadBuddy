@@ -333,6 +333,66 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     assert set(bus.changed()) == {synthetic.id, mine.id}
 
 
+def _lan_import(conn: Any, printer_id: str, name: str, started: datetime) -> None:
+    conn.execute(
+        "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"
+        " state, reason) VALUES (%s, %s, %s, %s, 'inbox', 'x')",
+        (printer_id, printer_id, name, started),
+    )
+
+
+def test_a_merge_moves_a_lan_records_key_unless_the_kept_printer_has_the_job(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6045: a LAN-only printer's print record is found by ``printer_key``. A merge moves
+    the key with the row, so a job recorded again under the kept id finds it. A job the
+    kept printer recorded too keeps its old key: the unique index takes a job once."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        _lan_import(conn, synthetic.id, "moves", started)
+        _lan_import(conn, synthetic.id, "clash", started)
+        _lan_import(conn, mine.id, "clash", started)
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT subtask_name AS n, printer::text AS p, printer_key AS k"
+            " FROM print_lan_imports ORDER BY id"
+        ).fetchall()
+    assert [(r["n"], r["p"], r["k"]) for r in rows] == [
+        ("moves", mine.id, mine.id),
+        ("clash", mine.id, synthetic.id),
+        ("clash", mine.id, mine.id),
+    ]
+
+
+def test_a_merge_moves_one_key_of_two_gone_lan_records_of_one_job(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#6045: a gone printer may hold two rows of one job (an earlier merge left one with
+    its old key). Only one moves to the kept key, the one keyed by the gone printer."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    earlier = str(uuid.uuid4())
+    started = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_lan_imports (printer, printer_key, subtask_name, started_at,"
+            " state, reason) VALUES (%s, %s, 'job', %s, 'inbox', 'x')",
+            (synthetic.id, earlier, started),
+        )
+        _lan_import(conn, synthetic.id, "job", started)
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        keys = conn.execute("SELECT printer_key AS k FROM print_lan_imports ORDER BY id").fetchall()
+    assert [r["k"] for r in keys] == [earlier, mine.id]
+
+
 def test_a_merge_moves_the_runs_that_printed_on_the_gone_row(
     printers: PrinterStore, pg_pool: PgPool
 ) -> None:
