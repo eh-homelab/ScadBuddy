@@ -316,6 +316,21 @@ def test_a_cookie_the_edge_did_not_sign_is_never_sent_on(
     assert not crud_mock["account"].called and not crud_mock["orders"].called
 
 
+def test_a_back_office_session_is_no_account_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """The back office's cookie, and a bearer for it, mean nothing to the edge: it reads
+    its own cookie only, so the visitor is anonymous and the CRUD side is never asked."""
+    edge.cookies.set("__Host-scadbuddy_session", TOKEN)
+    sent = {"Authorization": f"Bearer {TOKEN}", SESSION_HEADER: TOKEN}
+    assert edge.get(STORE, headers=sent).json() is None
+    r = edge.get(f"{STORE}/orders", headers=sent)
+    assert r.status_code == 401
+    assert r.json()["type"].endswith("/sign_in_required")
+    assert not crud_mock["account"].called and not crud_mock["orders"].called
+
+
 @pytest.mark.parametrize(
     "cookie",
     [f"s1.{TOKEN}.{'A' * 43}", f"v1.{TOKEN}.{'A' * 43}", "not-a-cookie", TOKEN],

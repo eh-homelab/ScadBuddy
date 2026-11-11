@@ -43,6 +43,7 @@ from tests.orders.storefront.test_drafts import (
     _state,
     add_body,
 )
+from tests.orders.test_lifecycle import BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -360,6 +361,35 @@ def test_a_first_order_deposit_applies_even_when_the_email_has_ordered_before(
     order = _orders(api).store.order(draft["id"])
     assert order is not None and order.customer_id != known.id
     assert order.deposit_minor == 500
+
+
+@pytest.mark.parametrize(("tax_shipping", "tax_minor"), [(False, 201), (True, 271)])
+def test_a_submit_sets_the_auto_tax(
+    api: TestClient,
+    crud: CrudCaller,
+    owner_lifecycle: Lifecycle,
+    listing: Listing,
+    tax_shipping: bool,
+    tax_minor: int,
+) -> None:
+    """Tax is 10 percent of the items (2 x 1005 = 2010), and of the 700 shipping too
+    with ``orders_tax_shipping``: 201, or 271 after rounding half up."""
+    owner_lifecycle.rules = lambda: OrderRules("USD", Decimal(10), tax_shipping, (), (POST, PICKUP))
+    draft = draft_of(crud, listing)
+    owner_lifecycle.add_custom_item(
+        draft["id"], BY, title="Stand", quantity=2, unit_price_minor=1005
+    )
+    r = crud.post(
+        "/draft/submit",
+        json=submit_body(draft, shipping_option_id="post", address=ADDRESS),
+        key="s1",
+    )
+    assert r.status_code == 200, r.text
+    charges = _orders(api).store.charges(draft["id"])
+    assert [(c.kind, c.auto, c.amount_minor) for c in charges if c.kind == "tax"] == [
+        ("tax", True, tax_minor)
+    ]
+    assert [c.amount_minor for c in charges if c.kind == "shipping"] == [700]
 
 
 def test_another_visitors_submit_sees_no_draft(
