@@ -5,6 +5,7 @@ row; the worker runs no SQL. The record is natural on the job (the printer, its
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,7 +66,8 @@ def kept(printer_id: str, subtask: str = "demo_plate") -> LanCapture:
         printer_path=f"/cache/{subtask}.gcode.3mf",
         filename=f"{subtask}.gcode.3mf",
         size=3,
-        sha256="ab" * 32,
+        # One hash per file: a second job of the same bytes links as an earlier import.
+        sha256=hashlib.sha256(subtask.encode()).hexdigest(),
     )
 
 
@@ -118,7 +120,7 @@ async def test_a_record_and_its_activity_row_are_one_write(
     assert activity.facets == {"state": "linked", "source": "printer", "matched_by": "job_name"}
     assert activity.detail["printer"] == printer
     # A linked record names its file's hash: a later job of the same file links its model.
-    assert await lan.slugs_by_hash("ab" * 32) == {"demo-plate"}
+    assert await lan.slugs_by_hash(kept(printer).sha256 or "") == {"demo-plate"}
 
 
 async def test_a_printer_deleted_since_the_start_leaves_a_record_naming_none(
