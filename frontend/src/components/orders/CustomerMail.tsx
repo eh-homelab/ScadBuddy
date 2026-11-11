@@ -70,12 +70,14 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
   useEffect(() => setNow(Date.now()), [mail.data])
   // The sender needs a host and a sender address (`MailConfig.ready`); without both it sends nothing.
   const unset = settings.data !== undefined && (!settings.data.storefront_mail_host || !settings.data.storefront_mail_sender)
+  // A row not yet sent or given up. Both polls below read this one value.
+  const queued = mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false
   // A row the sender stamps publishes nothing, so read again while a row waits.
   // With no mail server set up, nothing is sent, so there is nothing to wait for.
-  const waiting = !unset && (mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false)
+  const waiting = !unset && queued
   // Queued rows with no server set up: settings changed in another tab clear the note, so
   // read the settings slowly. When they show a server, `waiting` turns on and the poll resumes.
-  const queuedUnset = unset && (mail.data?.some((m) => m.sent_at == null && m.failed_at == null) ?? false)
+  const queuedUnset = unset && queued
   const refreshMail = mail.refresh
   const refreshSettings = settings.refresh
   const refreshServer = server.refresh
