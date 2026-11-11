@@ -193,7 +193,7 @@ class OrderMail(BaseModel):
     next_attempt_at: datetime
 
 
-#: The most rows `order_mail` returns: the newest.
+#: The most rows `order_mail` returns: the newest. The card's `MAIL_MAX` repeats it.
 ORDER_MAIL_MAX = 200
 
 

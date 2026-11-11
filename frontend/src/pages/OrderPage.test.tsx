@@ -711,6 +711,17 @@ describe('OrderPage, the customer link (#5283)', () => {
     expect(within(list).getByText(/mail server is not set up/)).toBeInTheDocument()
   })
 
+  it('says the list shows only the newest rows when it is at the cap', async () => {
+    const row = { event: 'shipped' as const, to: 'ada@example.test', attempts: 0, last_error: null, sent_at: '2026-11-01T10:01:00Z', failed_at: null, next_attempt_at: '2026-11-01T10:00:00Z' }
+    mockOrderMail(
+      ORDER_ACCEPTED,
+      Array.from({ length: 200 }, (_, i) => ({ ...row, created_at: new Date(Date.UTC(2026, 10, 1, 10, 0, 200 - i)).toISOString() })),
+    )
+    render(ORDER_ACCEPTED)
+    const list = await screen.findByRole('region', { name: 'Customer mail' })
+    expect(await within(list).findByText('Showing the newest 200.')).toBeInTheDocument()
+  })
+
   it('reads a backed-off mail as queued once its next try has passed', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-11-09T12:00:00Z'))
@@ -781,6 +792,28 @@ describe('OrderPage, the customer link (#5283)', () => {
       const before = reads.count
       await vi.advanceTimersByTimeAsync(31_000)
       expect(reads.count).toBe(before)
+    })
+
+    it('reads the settings slowly while mail is queued and the mail server is not set up', async () => {
+      countMailReads()
+      let settingsReads = 0
+      server.use(
+        http.get('/api/v1/settings', () => {
+          settingsReads += 1
+          return HttpResponse.json(mockSettings())
+        }),
+      )
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      render(ORDER_ACCEPTED)
+      const list = await screen.findByRole('region', { name: 'Customer mail' })
+      expect(await within(list).findByText(/mail server is not set up/)).toBeInTheDocument()
+      await within(list).findAllByRole('listitem')
+      const before = settingsReads
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(settingsReads).toBe(before)
+      setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
+      await vi.advanceTimersByTimeAsync(30_000)
+      await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
     })
 
     it('reads the settings and the server error again on the poll', async () => {

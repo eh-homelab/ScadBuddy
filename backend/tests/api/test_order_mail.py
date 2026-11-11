@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.orders.storefront import mail
 from tests.api.test_order_customer_link import back_office_order, link_url
 from tests.orders.storefront.test_drafts import _state
 from tests.orders.storefront.test_submit import api, rows
@@ -119,6 +120,24 @@ def test_the_list_is_the_orders_rows_newest_first_with_each_state(api: TestClien
     )
     # The other order's mail stays out.
     assert len(api.get(mail_url(other["id"])).json()) == 1
+
+
+def test_the_list_stops_at_the_cap_and_keeps_the_newest(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = back_office_order(api)
+    for day in (1, 2, 3):
+        insert(
+            api,
+            "INSERT INTO storefront_mail (order_id, to_address, template, created_at)"
+            " VALUES (%s, %s, 'shipped', %s)",
+            order["id"],
+            f"day{day}@example.test",
+            f"2026-11-0{day}T10:00:00Z",
+        )
+    monkeypatch.setattr(mail, "ORDER_MAIL_MAX", 2)
+    body = api.get(mail_url(order["id"])).json()
+    assert [m["to"] for m in body] == ["day3@example.test", "day2@example.test"]
 
 
 def test_the_list_never_shows_a_body_a_link_a_token_or_a_link_id(api: TestClient) -> None:
