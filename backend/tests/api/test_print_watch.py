@@ -342,3 +342,35 @@ def test_a_printer_file_that_fails_now_is_tried_again(client: TestClient, model:
         55,
         f"/cache/{name}",
     )
+
+
+@respx.mock
+def test_the_same_job_archived_again_is_not_imported_twice(client: TestClient, model: str) -> None:
+    switch_on(client)
+    listing = bambuddy(a_print(307))
+    run_pass(client)
+    # A re-sync: Bambuddy archives the same job (printer, file, start) under a new id.
+    listing.mock(return_value=httpx.Response(200, json=[a_print(307), a_print(308)]))
+    run_pass(client)
+    assert [row["archive_id"] for row in auto(client)] == [307]
+
+
+@respx.mock
+def test_an_archive_from_before_the_switch_is_left_alone(client: TestClient, model: str) -> None:
+    switch_on(client)
+    before = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    bambuddy(a_print(309, created_at=before))
+    run_pass(client)
+    assert auto(client) == []
+
+
+def test_only_a_person_changes_the_print_watcher(client: TestClient) -> None:
+    agent = {"X-ScadBuddy-Agent-Author": "token:p1", "X-ScadBuddy-Agent-Author-Session": "s1"}
+    for body in (
+        {"print_auto_import": True},
+        {"print_auto_import_sources": ["archive", "printer"]},
+        {"print_auto_import_skip_printers": [1]},
+    ):
+        refused = client.put("/api/v1/settings", json=body, headers=agent)
+        assert refused.status_code == 403, body
+    assert client.get("/api/v1/settings").json()["print_auto_import"] is False
