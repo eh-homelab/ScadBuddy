@@ -906,9 +906,8 @@ class Lifecycle:
            queues no `payment_requested` mail, since no link exists yet: the order link's
            mail leads to the page that shows it). An anonymous submit's customer is new, so
            a ``first_order`` rule always applies to it, even when the email has ordered
-           before; the shop can change the deposit before it accepts (§8). A policy that
-           applies only in another currency sets none, and `deposit.policy_skipped` tells
-           the shop;
+           before; the shop can change the deposit before it accepts (§8). Step 2 gave the
+           cart the shop's currency, so no rule is skipped for its currency;
         6. stamps ``submitted_at``;
         7. makes the order link and queues its `order_link` mail to ``body.email``
            (`issue_link`, the back office's `send_customer_link` path too);
@@ -960,12 +959,7 @@ class Lifecycle:
             )
             self._event(tx, order, customer, "order.customer_set")
             order = self._shipping_option(tx, order, customer, option_id, rules)
-            try:
-                self._deposit_policy(tx, order, customer, rules)
-            except LifecycleError as error:
-                if error.slug != "deposit_policy_currency":
-                    raise
-                self._event(tx, order, customer, "deposit.policy_skipped", reason=str(error))
+            self._deposit_policy(tx, order, customer, rules)
             order = self.store.stamp_submitted(tx, order.id)
             self._event(tx, order, customer, "order.submitted", account_id=body.account_id)
             token = issue_link(tx, self.kek, order.id, order.label, email)
