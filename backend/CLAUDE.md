@@ -516,14 +516,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   file (`print_imports.content_hash`, the archive's, whatever the source; `sha256` for a
   row from before it) name one model (`earlier_import`) or the job's name has exactly one
   slug's words (`print_import.exact_slugs`, `job_name`). Anything else goes to the inbox
-  with `reason` and `suggested`. An archive whose import raises is logged and skipped.
-  `PUT /settings` writes the floor when it switches the watcher on, and forgets it off. `store.py` `AutoImportStore`
+  with `reason` and `suggested`. An archive whose import raises is logged and skipped;
+  a printer read or upload that fails raises, so the next pass tries it again (only a
+  hash that differs, or a file too large or not a 3MF, is an inbox row). Under the lock
+  the pass checks `known` again, as both Schedules run it (#6011).
+  `PUT /settings` writes the floor when it switches the watcher on, and forgets it off.
+  `AutoImportStore.floor` reads the switch from `settings` and writes the floor in one
+  transaction under `FLOOR_LOCK`, for the pass and the route both (#6011). `store.py` `AutoImportStore`
   writes the `print_auto_imports` row, its link (`print_links.import_in`, the body of
   `record_import`) and its `print_auto_import` activity row (`activity.py`) in one
   transaction; a re-archived job (same printer, hash and start) is never taken twice.
   The three settings are a person's only (`api/settings.py` `PRINT_WATCH`, 403
   `person_only`). `GET /print-imports/auto` lists the rows (`state` `linked` or `inbox`;
-  an inbox row a link names since is left out); the agent reads it with `list_auto_imports`
+  an inbox row a link names since is left out, and a linked row whose model link a model
+  delete removed is shown as an inbox row, reason `MODEL_GONE`); the agent reads it with `list_auto_imports`
   (`agent/src/tools/prints.ts`).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware

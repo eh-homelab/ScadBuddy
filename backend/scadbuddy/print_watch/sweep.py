@@ -10,7 +10,8 @@ A pass reads the archives Bambuddy made since the watcher was switched on (at mo
 
 1. Under the archive's import lock (`PrintLinkStore.import_lock`, the lock "Import print"
    takes), it runs the link passes for the archive (`linking.link_archive`). A print
-   ScadBuddy made is linked to its run there, and left alone.
+   ScadBuddy made is linked to its run there, and left alone. It then checks again that
+   no pass took the archive meanwhile (`AutoImportStore.known`): both Schedules run it.
 2. It chooses where the 3MF is, in a fixed order, among the sources the settings allow
    (`StoredSettings.auto_import_sources`): the archive's sliced file, the archive's
    slicer project, a Bambuddy library file with the archive's hash (a file with its name
@@ -19,7 +20,9 @@ A pass reads the archives Bambuddy made since the watcher was switched on (at mo
    only when its bytes hash to the archive's ``content_hash`` (the printed file's), so a
    newer file of the same name is never taken; it is then kept as a Bambuddy library file
    in the inbox folder, as the printer overwrites its cache. An archive with no hash
-   takes no printer file.
+   takes no printer file. A printer read or upload that fails raises, so no row is
+   written and the next pass tries again; a file whose hash differs, or that is too
+   large or not a 3MF (`PERMANENT_READ_FAILURES`), sends the print to the inbox.
 3. It links a model only with confidence: an earlier import of the same printed file
    (its hash) names one model, or the job's name has exactly one model's words. Anything
    else, and a print no source had, goes to the inbox ("Unsorted imports") with why.
@@ -37,6 +40,8 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+
+from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import link_archive, link_library_prints
@@ -76,6 +81,11 @@ MAX_PRINTER_READS = 3
 BAMBUDDY_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
 
 NO_MATCH = "no model matched with confidence"
+#: What `read_source` answers for a file it read that cannot be taken (too large, not a
+#: 3MF): no retry changes that. Any other read failure is tried again on the next pass.
+PERMANENT_READ_FAILURES = frozenset(
+    {status.HTTP_413_CONTENT_TOO_LARGE, status.HTTP_422_UNPROCESSABLE_CONTENT}
+)
 
 
 @dataclass
@@ -241,6 +251,10 @@ class AutoImporter:
             return None  # ScadBuddy's own print, linked to its run now.
         if await self.links.linked(archive.id) is not None:
             return None
+        if await self.store.known([archive]):
+            # The other Schedule's pass took it while this one waited for the lock: read
+            # no source again (#6011).
+            return None
         allowed = self.settings.auto_import_sources()
         sources = await find_sources(self.client, archive, printer=False)
         source = _bambuddy_source(sources, allowed)
@@ -327,24 +341,29 @@ class AutoImporter:
         source: FoundSource | None = None
         read: SourceFile | None = None
         problems: list[str] = []
+        failed: ApiError | None = None
         for candidate in found[:MAX_PRINTER_READS]:
             try:
                 data = await read_source(self.client, archive, candidate)
             except ApiError as error:
-                problems.append(f"{candidate.path} could not be read: {error.detail}")
+                if error.status in PERMANENT_READ_FAILURES:
+                    problems.append(f"{candidate.path} could not be read: {error.detail}")
+                else:
+                    failed = error
                 continue
             if data.sha256 == archive.content_hash:
                 source, read = candidate, data
                 break
             problems.append(f"{candidate.path} is not the printed file (its hash differs)")
         if source is None or read is None:
+            if failed is not None:
+                # A read that failed may work on the next pass, while the job runs: write
+                # no row, which `known` would never retry (#6011).
+                raise failed
             row.reason = "no source had the 3MF (printer: " + "; ".join(problems) + ")"
             return row, None
-        try:
-            file_id, uploaded = await keep_printer_file(self.client, read, folder)
-        except ApiError as error:
-            row.reason = f"the printer's file could not be kept: {error.detail}"
-            return row, None
+        # A failed upload raises too, for the next pass to try again (#6011).
+        file_id, uploaded = await keep_printer_file(self.client, read, folder)
         row.source = "printer"
         row.library_file_id = file_id
         row.printer_path = source.path

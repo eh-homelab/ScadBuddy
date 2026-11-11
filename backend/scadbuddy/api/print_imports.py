@@ -276,7 +276,8 @@ async def _one_import(links: PrintLinkStore, archive_id: int) -> AsyncIterator[N
         "the job's name), and each it put in the inbox, Unsorted imports (`inbox`, with "
         "`reason` and the models the job's name suggests). An inbox print that a link "
         "names since (a person imported it, or ScadBuddy found it was its own print) is "
-        "left out. Page with `before`, the last `archive_id` read."
+        "left out. A linked print whose model was deleted since is in the inbox, with "
+        "that as its `reason`. Page with `before`, the last `archive_id` read."
     ),
 )
 async def list_auto_imports(

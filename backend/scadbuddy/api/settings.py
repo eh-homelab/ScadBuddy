@@ -571,8 +571,9 @@ async def put_settings(
     snapshot = await asyncio.to_thread(store.snapshot)
     if "print_auto_import" in patch.model_fields_set:
         # #4699: the watcher takes the prints started from this moment on, not from its
-        # next pass; switched off, it forgets the moment.
-        await state.components.get(AUTO_IMPORTS).floor(snapshot.stored.print_auto_import)
+        # next pass; switched off, it forgets the moment. It reads the committed switch
+        # itself, under the lock a pass takes (#6011).
+        await state.components.get(AUTO_IMPORTS).floor()
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()
