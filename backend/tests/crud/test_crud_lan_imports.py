@@ -130,3 +130,40 @@ async def test_a_printer_deleted_since_the_start_leaves_a_record_naming_none(
     lan = LanImportStore(store.pool)
     row = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
     assert row.id is not None and row.printer_id is None
+
+
+def _counts(store: SettingsStore) -> tuple[int, int]:
+    """The LAN records, and their activity rows."""
+    with store.pool.connection() as conn:
+        rows = conn.execute("SELECT count(*) AS n FROM print_lan_imports").fetchone()
+        activity = conn.execute(
+            "SELECT count(*) AS n FROM activity WHERE id LIKE 'print_auto_import:lan:%'"
+        ).fetchone()
+    assert rows is not None and activity is not None
+    return rows["n"], activity["n"]
+
+
+async def test_a_deleted_printers_capture_sent_twice_is_one_record(
+    store: SettingsStore, printer: str
+) -> None:
+    """The record's printer is null once its printer is gone, and a unique index treats
+    nulls as distinct: the job is keyed by the registry id it was recorded for."""
+    PrinterStore(store.pool, None).delete(printer)
+    lan = LanImportStore(store.pool, ActivityIndex(store.pool, events=None))
+    first = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
+    again = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
+    assert again == first
+    assert await lan.find(printer, "demo_plate", STARTED) == first
+    assert _counts(store) == (1, 1)
+
+
+async def test_a_resend_after_the_printer_was_deleted_finds_the_first_record(
+    store: SettingsStore, printer: str
+) -> None:
+    lan = LanImportStore(store.pool, ActivityIndex(store.pool, events=None))
+    first = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
+    assert first.printer_id == printer
+    PrinterStore(store.pool, None).delete(printer)
+    again = await lan.record(decide(kept(printer), slugs=[], earlier=[]))
+    assert again.id == first.id and again.printer_id is None
+    assert _counts(store) == (1, 1)

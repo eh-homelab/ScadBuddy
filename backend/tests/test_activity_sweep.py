@@ -251,8 +251,8 @@ async def test_repair_restores_a_lan_only_printers_record(
     row back, keyed by the record's own id, never as an archive's."""
     with pg_pool.connection() as conn:
         found = conn.execute(
-            "INSERT INTO print_lan_imports (subtask_name, started_at, state, reason)"
-            " VALUES ('benchy', now(), 'inbox', 'no model') RETURNING id, seen_at"
+            "INSERT INTO print_lan_imports (printer_key, subtask_name, started_at, state, reason)"
+            " VALUES ('p1', 'benchy', now(), 'inbox', 'no model') RETURNING id, seen_at"
         ).fetchone()
     assert found is not None
     assert await index.repair(DAY) == 1

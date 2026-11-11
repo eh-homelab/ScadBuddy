@@ -7,7 +7,9 @@ service) reads or writes it: the print worker posts each record to the CRUD rout
 A row and its activity row are one transaction (`LanImportStore.record`). A job (the
 printer, ``subtask_name`` and ``started_at``) is recorded once: a record sent again
 finds the row and answers it as it is, so a retried attempt or a resend after a lost
-answer writes nothing more.
+answer writes nothing more. The job's printer is ``printer_key``, the registry id it was
+recorded for, never null: a printer deleted before the first send or between two sends
+leaves ``printer`` null, and the resend still finds its row.
 """
 
 from __future__ import annotations
@@ -42,6 +44,12 @@ _COLUMNS = (
 )
 #: Every column a read returns, the printer as text under the model's name.
 _RETURNED = ", ".join(("id", "printer::text AS printer_id", *_COLUMNS, "seen_at", "dismissed_at"))
+#: The job's record, by the registry id it was recorded for (never null), its name and
+#: start.
+_BY_JOB = (
+    f"SELECT {_RETURNED} FROM print_lan_imports"
+    " WHERE printer_key = %s AND subtask_name = %s AND started_at = %s"
+)
 
 
 class LanImportStore:
@@ -74,11 +82,7 @@ class LanImportStore:
 
     def _find(self, printer_id: str, subtask_name: str, started_at: datetime) -> LanImport | None:
         with self._pool.connection() as conn:
-            found = conn.execute(
-                f"SELECT {_RETURNED} FROM print_lan_imports"
-                " WHERE printer = %s AND subtask_name = %s AND started_at = %s",
-                (printer_id, subtask_name, started_at),
-            ).fetchone()
+            found = conn.execute(_BY_JOB, (printer_id, subtask_name, started_at)).fetchone()
         return None if found is None else LanImport.model_validate(dict(found))
 
     def _slugs_by_hash(self, sha256: str) -> set[str]:
@@ -96,24 +100,25 @@ class LanImportStore:
     def _record(self, row: LanImport) -> LanImport:
         values: dict[str, Any] = row.model_dump(include=set(_COLUMNS))
         values["printer"] = row.printer_id
-        columns = ("printer", *_COLUMNS)
-        # A printer deleted since the job started is no printer: its record names none.
-        placed = ["(SELECT id FROM printers WHERE id = %(printer)s::uuid)"] + [
-            f"%({c})s" for c in _COLUMNS
+        columns = ("printer", "printer_key", *_COLUMNS)
+        # A printer deleted since the job started is no printer: its record names none,
+        # and keeps the job's registry id as its key.
+        placed = [
+            "(SELECT id FROM printers WHERE id = %(printer)s::uuid)",
+            "%(printer)s",
+            *(f"%({c})s" for c in _COLUMNS),
         ]
         with self._pool.connection() as conn, conn.transaction():
             inserted = conn.execute(
                 f"INSERT INTO print_lan_imports ({', '.join(columns)})"
                 f" VALUES ({', '.join(placed)})"
-                " ON CONFLICT (printer, subtask_name, started_at) DO NOTHING"
+                " ON CONFLICT (printer_key, subtask_name, started_at) DO NOTHING"
                 f" RETURNING {_RETURNED}",
                 values,
             ).fetchone()
             if inserted is None:
                 found = conn.execute(
-                    f"SELECT {_RETURNED} FROM print_lan_imports"
-                    " WHERE printer = %s AND subtask_name = %s AND started_at = %s",
-                    (row.printer_id, row.subtask_name, row.started_at),
+                    _BY_JOB, (row.printer_id, row.subtask_name, row.started_at)
                 ).fetchone()
                 assert found is not None
                 return LanImport.model_validate(dict(found))
