@@ -756,6 +756,25 @@ def test_an_import_rewrites_the_print_watcher_s_activity_row(
 
 
 @respx.mock
+def test_an_import_rewrites_an_inbox_print_s_activity_row(client: TestClient, model: str) -> None:
+    """#6030 review: an inbox row (never dismissed) is rewritten too."""
+    configure(client)
+    bambuddy()
+    store = state(client).components.get(AUTO_IMPORTS)
+    row = AutoImport(archive_id=ARCHIVE, printer_id=1, print_name="demo_elan", state="inbox")
+    assert asyncio.run(store.record(row))
+    assert watcher_activity(client).json()["row"]["facets"]["state"] == "inbox"
+
+    response = import_print(client, {"source": {"kind": "archive"}, "slug": model})
+
+    assert response.status_code == 201, response.text
+    item = watcher_activity(client).json()["row"]
+    assert item["facets"] == {"state": "linked", "source": "archive", "matched_by": "import"}
+    assert item["title"] == f"Imported print demo_elan onto {model}"
+    assert item["subject"] == f"model:{model}"
+
+
+@respx.mock
 def test_an_import_writes_no_watcher_row_the_watcher_never_had(
     client: TestClient, model: str
 ) -> None:
