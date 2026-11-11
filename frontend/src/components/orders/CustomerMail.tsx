@@ -10,7 +10,8 @@ const WAITING_REFRESH_MS = 15_000
 /** How often the settings are read again while mail is queued and the server is not set up. */
 const UNSET_REFRESH_MS = 60_000
 
-/** The most rows the API returns (backend `ORDER_MAIL_MAX`): the newest. */
+/** The most rows the API returns (backend `ORDER_MAIL_MAX`): the newest. A test checks it
+ * against the route's `maxItems` in the exported spec. */
 const MAIL_MAX = 200
 
 const EVENT: Record<OrderMail['event'], string> = {
@@ -140,7 +141,7 @@ export function CustomerMail({ orderId, version = 0 }: { orderId: string; versio
         </ul>
       )}
       {mail.data && mail.data.length >= MAIL_MAX && (
-        <p className="text-[13px] text-muted-foreground">Showing the newest {MAIL_MAX}.</p>
+        <p className="text-[13px] text-muted-foreground">The list shows at most the newest {MAIL_MAX}.</p>
       )}
     </section>
   )

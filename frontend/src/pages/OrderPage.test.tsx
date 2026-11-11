@@ -14,6 +14,18 @@ import { choose } from '../test/select'
 import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
+import { readSpec } from '../test/spec'
+
+/** The mail route's `maxItems` in the exported spec: the backend's `ORDER_MAIL_MAX`, read
+ * rather than restated, so the card's `MAIL_MAX` must match it (#5969 review). */
+function specMailMax(): number {
+  const { json, path } = readSpec()
+  type Get = { responses?: { '200'?: { content?: { 'application/json'?: { schema?: { maxItems?: unknown } } } } } }
+  const spec = json as { paths?: Record<string, { get?: Get }> }
+  const max = spec.paths?.['/api/v1/orders/{order_id}/mail']?.get?.responses?.['200']?.content?.['application/json']?.schema?.maxItems
+  if (typeof max !== 'number') throw new Error(`the mail route's maxItems is not in the spec at ${path}`)
+  return max
+}
 
 function render(id: string, suffix = '') {
   return renderPage(
@@ -715,11 +727,11 @@ describe('OrderPage, the customer link (#5283)', () => {
     const row = { event: 'shipped' as const, to: 'ada@example.test', attempts: 0, last_error: null, sent_at: '2026-11-01T10:01:00Z', failed_at: null, next_attempt_at: '2026-11-01T10:00:00Z' }
     mockOrderMail(
       ORDER_ACCEPTED,
-      Array.from({ length: 200 }, (_, i) => ({ ...row, created_at: new Date(Date.UTC(2026, 10, 1, 10, 0, 200 - i)).toISOString() })),
+      Array.from({ length: specMailMax() }, (_, i) => ({ ...row, created_at: new Date(Date.UTC(2026, 10, 1, 10, 0, 0) - i * 1000).toISOString() })),
     )
     render(ORDER_ACCEPTED)
     const list = await screen.findByRole('region', { name: 'Customer mail' })
-    expect(await within(list).findByText('Showing the newest 200.')).toBeInTheDocument()
+    expect(await within(list).findByText(`The list shows at most the newest ${specMailMax()}.`)).toBeInTheDocument()
   })
 
   it('reads a backed-off mail as queued once its next try has passed', async () => {
