@@ -895,6 +895,8 @@ describe('OrderPage, the customer link (#5283)', () => {
       setMockSettings({ ...mockSettings(), storefront_mail_host: 'smtp.example.com', storefront_mail_sender: 'shop@example.com' })
       await vi.advanceTimersByTimeAsync(30_000)
       await waitFor(() => expect(within(list).queryByText(/mail server is not set up/)).toBeNull())
+      // One read at 60 s, none before it: the slow cadence itself.
+      expect(settingsReads).toBe(before + 1)
     })
 
     it('reads the settings and the server error again on the poll', async () => {
