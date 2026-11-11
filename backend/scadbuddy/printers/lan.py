@@ -216,10 +216,10 @@ class ImplicitFtpTls(ftplib.FTP_TLS):
     not wake a ``recv`` another thread is blocked in, and the reading thread still owns
     the close. A socket set after the cut is shut down as it is registered. Only a TCP
     connect still in progress is not cut; it waits at most `FTP_TIMEOUT`. A data
-    connection is let go when its transfer ends (the final reply, or `close`), so a cut
-    touches only live sockets, or a data connection just closed and not yet let go
-    (between its ``close`` and the final reply), whose ``OSError`` `_shut` ignores
-    (#6055)."""
+    connection is let go at the final reply, or at the session's `close` when the
+    transfer raised and no final reply came. So a cut touches only live sockets, or a
+    data connection already closed and not yet let go, whose ``OSError`` `_shut`
+    ignores (#6055)."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._sock: Any = None
