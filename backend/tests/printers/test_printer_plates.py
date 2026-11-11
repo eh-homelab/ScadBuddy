@@ -1,7 +1,9 @@
 """#4971 (tier 3b): the plate remembered per printer, keyed by the registry printer.
 Part 1 (``migrations/20261101T1804Z_printer_bed_types_registry.sql``) kept the Bambuddy
-id beside it for the previous build; #5153
-(``migrations/20261111T1842Z_printer_bed_types_drop_bambuddy_id.sql``) drops it."""
+id beside it for the previous build. #5153
+(``migrations/20261111T1842Z_printer_bed_types_backfill_registry.sql``) moves every row
+onto its registry printer, and this build never reads or writes the Bambuddy id. The
+column stays for the previous build's rollout until #6059 drops it."""
 
 from __future__ import annotations
 
@@ -22,12 +24,38 @@ from tests.conftest import UNUSED_TEMPORAL_ADDRESS, PgPool
 pytestmark = pytest.mark.requires_postgres
 
 MIGRATION = MIGRATIONS_DIR / "20261101T1804Z_printer_bed_types_registry.sql"
-CONTRACT = MIGRATIONS_DIR / "20261111T1842Z_printer_bed_types_drop_bambuddy_id.sql"
+BACKFILL = MIGRATIONS_DIR / "20261111T1842Z_printer_bed_types_backfill_registry.sql"
 
-#: The build before #4971's write, which ran beside part 1's during its rolling deploy.
+#: The write of the build before #4971 part 1, which ran beside part 1's during its
+#: rolling deploy. Part 1 writes it too, for a Bambuddy printer the registry does not link.
 OLD_WRITE = (
     "INSERT INTO printer_bed_types (printer_id, bed_type) VALUES (%s, %s)"
     " ON CONFLICT (printer_id) DO UPDATE SET bed_type = EXCLUDED.bed_type, updated_at = now()"
+)
+
+#: Part 1's other statements (`set_printer_bed_type` and `_PLATES` before #5153), which
+#: run beside this build's during its rolling deploy.
+PART1_FORGET = "DELETE FROM printer_bed_types WHERE printer = %s OR printer_id = %s"
+PART1_DROP_UNREGISTERED = "DELETE FROM printer_bed_types WHERE printer_id = %s AND printer IS NULL"
+PART1_RELEASE = (
+    "UPDATE printer_bed_types SET printer_id = NULL WHERE printer_id = %s AND printer <> %s"
+)
+PART1_WRITE = (
+    "INSERT INTO printer_bed_types (printer, printer_id, bed_type)"
+    " VALUES (%s, %s, %s) ON CONFLICT (printer) DO UPDATE"
+    " SET printer_id = EXCLUDED.printer_id, bed_type = EXCLUDED.bed_type,"
+    " updated_at = now()"
+)
+PART1_READ = (
+    "SELECT coalesce(b.printer, linked.id)::text AS printer,"
+    " CASE WHEN own.id IS NOT NULL THEN own.bambuddy_printer_id ELSE b.printer_id END"
+    " AS bambuddy_printer_id,"
+    " coalesce(own.name, linked.name) AS name, b.bed_type"
+    " FROM printer_bed_types AS b"
+    " LEFT JOIN printers AS own ON own.id = b.printer"
+    " LEFT JOIN printers AS linked"
+    " ON b.printer IS NULL AND linked.bambuddy_printer_id = b.printer_id"
+    " ORDER BY b.updated_at, b.bed_type"
 )
 
 
@@ -118,8 +146,43 @@ def test_a_plate_goes_with_its_printer(store: SettingsStore, printers: PrinterSt
     assert store.load().printer_plates == []
 
 
-def test_a_plate_needs_a_registry_printer(pg_conninfo: str, store: SettingsStore) -> None:
-    with psycopg.connect(pg_conninfo) as conn, pytest.raises(psycopg.errors.NotNullViolation):
+def test_the_previous_builds_statements_still_run_beside_this_ones(
+    store: SettingsStore, printers: PrinterStore, pg_conninfo: str
+) -> None:
+    """#5153 keeps ``printer_id`` for part 1's pods, which still run during the rollout:
+    each of their statements works, and this build reads and upserts their rows by the
+    registry printer."""
+    row = printers.create(PrinterCreate(serial="0938AB000000009", name="H2C"))
+    printers.link_bambuddy(row.id, 3)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(PART1_DROP_UNREGISTERED, (3,))
+        conn.execute(PART1_RELEASE, (3, row.id))
+        conn.execute(PART1_WRITE, (row.id, 3, "Cool Plate"))
+        conn.execute(OLD_WRITE, (6, "Engineering Plate"))  # a printer the registry lacks
+
+    loaded = store.load()
+    assert loaded.printer_plates == [
+        PrinterPlate(printer=row.id, bambuddy_printer_id=3, name="H2C", bed_type="Cool Plate")
+    ]
+    assert loaded.printer_bed_types == {"3": "Cool Plate"}
+
+    # This build's upsert lands on part 1's row, by the registry printer.
+    store.set_printer_bed_type(row.id, "Textured PEI Plate")
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute(
+            "SELECT printer::text, printer_id, bed_type FROM printer_bed_types ORDER BY printer_id"
+        ).fetchall()
+        assert rows == [(row.id, 3, "Textured PEI Plate"), (None, 6, "Engineering Plate")]
+        read = conn.execute(PART1_READ).fetchall()
+        assert sorted((r[0] or "", r[1], r[3]) for r in read) == sorted(
+            [("", 6, "Engineering Plate"), (row.id, 3, "Textured PEI Plate")]
+        )
+        conn.execute(PART1_FORGET, (None, 3))
+    assert store.load().printer_plates == []
+
+
+def test_a_plate_names_a_printer(pg_conninfo: str, store: SettingsStore) -> None:
+    with psycopg.connect(pg_conninfo) as conn, pytest.raises(psycopg.errors.CheckViolation):
         conn.execute("INSERT INTO printer_bed_types (bed_type) VALUES ('Cool Plate')")
 
 
@@ -156,14 +219,13 @@ def test_the_migration_backfills_the_registry_id(pg_conninfo: str) -> None:
             conn.execute("INSERT INTO printer_bed_types (bed_type) VALUES ('Cool Plate')")
 
 
-def test_the_contract_migration_keys_every_plate_by_the_registry_printer(
-    pg_conninfo: str,
-) -> None:
+def test_the_backfill_puts_every_plate_on_its_registry_printer(pg_conninfo: str) -> None:
     """#5153: a row the old build wrote after part 1's backfill gets its registry printer;
     where its printer also has a registry-keyed row, the newer of the two is kept; a row
-    of a Bambuddy printer the registry never held goes; then ``printer_id`` goes."""
+    of a Bambuddy printer the registry never held goes. ``printer_id`` stays for part 1's
+    pods (#6059 drops it)."""
     with psycopg.connect(pg_conninfo) as conn:
-        migrate(conn, MIGRATIONS[: _index(CONTRACT.stem)])
+        migrate(conn, MIGRATIONS[: _index(BACKFILL.stem)])
         both = _printer(conn, "0938AB000000011", 1)
         late = _printer(conn, "0938AB000000012", 2)
         old_newer = _printer(conn, "0938AB000000013", 3)
@@ -186,28 +248,36 @@ def test_the_contract_migration_keys_every_plate_by_the_registry_printer(
         migrate(conn)
 
         rows = conn.execute(
-            "SELECT printer::text, bed_type FROM printer_bed_types ORDER BY bed_type"
+            "SELECT printer::text, printer_id, bed_type FROM printer_bed_types ORDER BY bed_type"
         ).fetchall()
-        assert sorted(rows) == sorted(
-            [
-                (both, "Cool Plate"),
-                (late, "Engineering Plate"),
-                (old_newer, "Old build, newer"),
-                (own_newer, "Own, newer"),
-                (lan, "Textured PEI Plate"),
-            ]
+        assert rows == [
+            (both, 1, "Cool Plate"),
+            (late, 2, "Engineering Plate"),
+            (old_newer, 3, "Old build, newer"),
+            (own_newer, None, "Own, newer"),
+            (lan, None, "Textured PEI Plate"),
+        ]
+
+
+def test_the_backfill_touches_only_the_matching_printers_rows(pg_conninfo: str) -> None:
+    """#5153: the de-duplicate and delete statements match a stale row only to the
+    printer that links its Bambuddy id: a part-1 row (both keys) of another Bambuddy id is
+    left as it is."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _index(BACKFILL.stem)])
+        part1 = _printer(conn, "0938AB000000021", 1)
+        other = _printer(conn, "0938AB000000022", 2)
+        insert = (
+            "INSERT INTO printer_bed_types (printer, printer_id, bed_type, updated_at)"
+            " VALUES (%s, %s, %s, now() + %s * interval '1 minute')"
         )
-        columns = {
-            row[0]
-            for row in conn.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_schema = current_schema() AND table_name = 'printer_bed_types'"
-            )
-        }
-        assert columns == {"printer", "bed_type", "updated_at"}
-        key = conn.execute(
-            "SELECT a.attname FROM pg_index i"
-            " JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)"
-            " WHERE i.indrelid = 'printer_bed_types'::regclass AND i.indisprimary"
+        conn.execute(insert, (part1, 1, "Part 1", 0))
+        conn.execute(insert, (other, None, "Other's own", 0))
+        conn.execute(insert, (None, 2, "Other's stale", 1))
+
+        migrate(conn)
+
+        rows = conn.execute(
+            "SELECT printer::text, printer_id, bed_type FROM printer_bed_types ORDER BY printer_id"
         ).fetchall()
-        assert key == [("printer",)]
+        assert rows == [(part1, 1, "Part 1"), (other, 2, "Other's stale")]

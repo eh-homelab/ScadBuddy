@@ -514,6 +514,8 @@ def put_printer_bed_type(
     if printer is None:
         if body.bed_type is not None:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        # On purpose: a Bambuddy id no registry printer links has no plate to forget, so
+        # the forget answers `printer: None` and never calls the store.
         return PrinterBedType(printer_id=bambuddy_id, printer=None, bed_type=None)
     settings = store.set_printer_bed_type(printer, body.bed_type)
     return PrinterBedType(

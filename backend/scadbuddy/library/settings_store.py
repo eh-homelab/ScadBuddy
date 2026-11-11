@@ -15,8 +15,9 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
   library file's ``library:<file id>`` (#313, #1754).
 - ``printer_bed_types``: the plate last printed on, one row per printer, keyed by the
   registry printer (#4971, #5153,
-  ``migrations/20261111T1842Z_printer_bed_types_drop_bambuddy_id.sql``); its Bambuddy
-  id is the registry's link.
+  ``migrations/20261111T1842Z_printer_bed_types_backfill_registry.sql``); its Bambuddy
+  id is the registry's link. The ``printer_id`` column is the previous build's, which
+  this build never reads or writes; #6059 drops it.
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
