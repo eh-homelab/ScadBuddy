@@ -6,7 +6,7 @@ import { useAsync } from '../../lib/useAsync'
 import { ImportPrintDialog, type ImportStart } from './ImportPrintDialog'
 import { Button } from '@/components/ui/button'
 
-/** The route's default page; more inbox prints than this wait for the next ones to be sorted. */
+/** The route's default page; "Show more" reads the next one (`before`, the last archive read). */
 const PAGE = 50
 
 function errorText(error: unknown): string {
@@ -18,7 +18,8 @@ function errorText(error: unknown): string {
  * #4699 phase 2 — "Unsorted imports": the prints the print watcher took but could not link
  * to a model with confidence (`GET /print-imports/auto?state=inbox`), each with why. "Link"
  * opens Import print (#4698) on that print, with the source the watcher recorded chosen;
- * "Dismiss" takes it out of the inbox, and the watcher never takes it again. The list reads
+ * "Dismiss" takes it out of the inbox, and the watcher never takes it again. While a page is
+ * full, "Show more" reads the next one. The list reads
  * ScadBuddy only, never Bambuddy, and shows nothing while the inbox is empty. `version`
  * reads it again (the page's own imports).
  */
@@ -34,7 +35,31 @@ export function UnsortedImports({
   const [gone, setGone] = useState<ReadonlySet<number>>(new Set())
   const [start, setStart] = useState<ImportStart | null>(null)
   const [open, setOpen] = useState(false)
-  const rows = (inbox.data ?? []).filter((row) => !gone.has(row.archive_id))
+  // The pages "Show more" read after the first; a new first read starts them over.
+  const [pages, setPages] = useState<{ first: AutoImport[] | undefined; rows: AutoImport[]; full: boolean }>({
+    first: undefined,
+    rows: [],
+    full: false,
+  })
+  if (inbox.data !== pages.first) setPages({ first: inbox.data, rows: [], full: (inbox.data?.length ?? 0) === PAGE })
+  const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null })
+  const read = [...(inbox.data ?? []), ...pages.rows]
+  const rows = read.filter((row) => !gone.has(row.archive_id))
+
+  async function showMore() {
+    const last = read.at(-1)
+    if (!last) return
+    const first = inbox.data
+    setMore({ busy: true, error: null })
+    try {
+      const next = await api.listAutoImports({ state: 'inbox', limit: PAGE, before: last.archive_id })
+      // A page read for an older first page is dropped.
+      setPages((was) => (was.first === first ? { ...was, rows: [...was.rows, ...next], full: next.length === PAGE } : was))
+      setMore({ busy: false, error: null })
+    } catch (caught) {
+      setMore({ busy: false, error: errorText(caught) })
+    }
+  }
 
   return (
     <>
@@ -63,6 +88,18 @@ export function UnsortedImports({
               />
             ))}
           </ul>
+          {pages.full && (
+            <div className="mt-2 flex flex-col items-start gap-1">
+              <Button type="button" size="sm" variant="outline" onClick={() => void showMore()} disabled={more.busy}>
+                {more.busy ? 'Reading…' : 'Show more'}
+              </Button>
+              {more.error && (
+                <span className="text-xs text-warn" role="alert">
+                  Could not read more: {more.error}
+                </span>
+              )}
+            </div>
+          )}
         </section>
       )}
       <ImportPrintDialog

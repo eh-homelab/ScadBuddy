@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
-import type { ModelSummary } from '../../api/types'
+import type { AutoImport, ModelSummary } from '../../api/types'
 import { addMockModel, mockModels, resetMockState } from '../../mocks/handlers'
 import { NO_MODEL_MATCHED, NO_SOURCE } from '../../mocks/features/printWatch'
 import { server } from '../../mocks/server'
@@ -76,5 +76,54 @@ describe('UnsortedImports', () => {
     expect(await within(dialog).findByTestId('import-done')).toHaveTextContent('benchy')
     expect(onImported).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(screen.queryByTestId('unsorted-9104')).toBeNull())
+  })
+
+  it('falls back to the preselected source when the recorded one is not listed (review of #6028)', async () => {
+    // A printer file with no kept library file: the dialog never reads the printer for it.
+    server.use(
+      http.get('/api/v1/print-imports/auto', () =>
+        HttpResponse.json([
+          { archive_id: 9105, print_name: 'Vase', state: 'inbox', source: 'printer', library_file_id: null, reason: 'r', suggested: [] },
+        ] satisfies AutoImport[]),
+      ),
+    )
+    const read = vi.spyOn(api, 'getPrintSources')
+    const { user } = renderPage(<UnsortedImports />)
+    const row = await screen.findByTestId('unsorted-9105')
+    await user.click(within(row).getByRole('button', { name: 'Link Vase' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Import print' })
+    const sources = await within(dialog).findByRole('radiogroup', { name: 'Source' })
+    // The only usable source is preselected, as without a recorded one.
+    expect(within(sources).getByRole('radio', { name: /The archive's file/ })).toBeChecked()
+    expect(read).toHaveBeenLastCalledWith(9105, { printer: false })
+  })
+
+  it('reads the next page with Show more while a page was full', async () => {
+    const page = (from: number, count: number): AutoImport[] =>
+      Array.from({ length: count }, (_, i) => ({
+        archive_id: from - i,
+        print_name: `Job ${from - i}`,
+        state: 'inbox' as const,
+        reason: 'r',
+        suggested: [],
+      }))
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/print-imports/auto', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        asked.push(query.get('before'))
+        const limit = Number(query.get('limit'))
+        return HttpResponse.json(query.get('before') === null ? page(2000, limit) : page(1000, 2))
+      }),
+    )
+    const { user } = renderPage(<UnsortedImports />)
+    const list = await screen.findByRole('list', { name: 'Unsorted imports' })
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(50))
+    await user.click(screen.getByRole('button', { name: 'Show more' }))
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(52))
+    expect(asked).toEqual([null, '1951'])
+    expect(within(list).getByTestId('unsorted-999')).toBeInTheDocument()
+    // A short page is the last one.
+    expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
   })
 })

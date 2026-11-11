@@ -117,7 +117,9 @@ same way, `vite.config.ts`).
   only, so it shows on every backend before Bambuddy's lists are asked for. "Link…" opens
   `ImportPrintDialog` with `start`: that print, and the source the watcher recorded chosen
   when the sources list it and it can be used (a kept printer file is its library file;
-  the printer is never read for it). "Dismiss" calls the dismiss route. Mocks
+  the printer is never read for it; a recorded source that is not listed falls back to
+  the preselected one). "Dismiss" calls the dismiss route. While a page of 50 is full,
+  "Show more" reads the next (`before`). Mocks
   `src/mocks/features/printWatch.ts`.
 
 ## See also

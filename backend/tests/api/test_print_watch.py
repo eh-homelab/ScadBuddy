@@ -434,6 +434,12 @@ def test_a_dismissed_print_leaves_the_inbox_and_is_never_taken_again(
     assert first.json()["dismissed_at"] is not None
     assert auto(client, state="inbox") == []
     assert [row["archive_id"] for row in auto(client, state="dismissed")] == [320]
+    # The activity row says so too, in the same transaction (review of #6028).
+    activity = client.get("/api/v1/activity/print_auto_import:320", params={"advanced": 1})
+    assert activity.status_code == 200, activity.text
+    item = activity.json()["row"]
+    assert item["facets"]["state"] == "dismissed"
+    assert item["title"].startswith("Dismissed print")
 
     run_pass(client)
     assert [(row["archive_id"], row["state"]) for row in auto(client)] == [(320, "dismissed")]
@@ -480,6 +486,25 @@ def test_an_inbox_print_a_link_names_since_is_not_dismissed(client: TestClient, 
         )
     )
     assert dismiss(client, 324).status_code == 409
+
+
+@respx.mock
+def test_a_dismissed_print_a_link_names_since_leaves_the_dismissed_list(
+    client: TestClient, model: str
+) -> None:
+    """Review of #6028: Import print links a dismissed print later. Like an inbox row, it
+    is then in no list: the link owns the print."""
+    switch_on(client)
+    bambuddy(a_print(325, print_name="demo_elan", filename="demo_elan.gcode.3mf"))
+    run_pass(client)
+    assert dismiss(client, 325).status_code == 200
+    asyncio.run(
+        state(client).print_links.record_import(
+            PrintImport(archive_id=325, slug=model, source="archive", filename="demo_elan.3mf")
+        )
+    )
+    assert auto(client, state="dismissed") == []
+    assert auto(client) == []
 
 
 @respx.mock

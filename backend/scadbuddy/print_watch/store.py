@@ -151,7 +151,8 @@ class AutoImportStore:
         return await asyncio.to_thread(self._page, state, limit, before)
 
     async def dismiss(self, archive_id: int) -> AutoImport | None:
-        """Mark an inbox row ``dismissed``, so it leaves the inbox. The row stays, so the
+        """Mark an inbox row ``dismissed``, so it leaves the inbox, and rewrite its activity
+        row in the same transaction. The row stays, so the
         watcher never takes the archive again (`known`). None when the watcher has no
         row for the archive. A row dismissed before is answered as it is.
         `AutoImportLinkedError` when a link names the archive: the print is a model's,
@@ -300,8 +301,12 @@ class AutoImportStore:
                 f" WHERE archive_id = %s RETURNING {returned}",
                 (archive_id,),
             ).fetchone()
-        assert dismissed is not None
-        return AutoImport.model_validate(dict(dismissed))
+            assert dismissed is not None
+            updated = AutoImport.model_validate(dict(dismissed))
+            # The activity row says where the print is now, in the same transaction.
+            if self.activity is not None:
+                self.activity.upsert_in(conn, lambda: row_of(updated))
+        return updated
 
     def _page(
         self, state: AutoImportState | None, limit: int, before: int | None
