@@ -14,9 +14,17 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_watch.nudge import Nudger, claimed, nudge_id, start_pass, wanted
+from scadbuddy.print_watch.nudge import (
+    SETTINGS_TIMEOUT,
+    Nudger,
+    claimed,
+    nudge_id,
+    start_pass,
+    wanted,
+)
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import started_print
+from scadbuddy.printers.watch import NUDGE_TIMEOUT
 from scadbuddy.workflows.housekeeping import AUTO_IMPORT_SWEEP, SWEEPS, Housekeeping
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
@@ -94,9 +102,11 @@ class Recorder:
         self.settings, self.row = settings, row
         self.reads: list[str] = []
         self.started: list[str] = []
+        self.timeouts: list[float | None] = []
 
-    def load(self) -> StoredSettings:
+    def load(self, timeout: float | None = None) -> StoredSettings:
         self.reads.append("settings")
+        self.timeouts.append(timeout)
         return self.settings
 
     def get(self, printer_id: str) -> PrinterRow | None:
@@ -112,6 +122,16 @@ async def test_a_start_the_watcher_takes_starts_a_pass_on_the_library_queue() ->
     nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
     assert await nudger.nudge("p1", THEIRS) is True
     assert fake.started == ["library"]
+
+
+async def test_the_settings_read_is_bounded() -> None:
+    """#6034: an unbounded read would keep its thread past the watch's timeout, and each
+    later start could add another."""
+    fake = Recorder(ON, LINKED)
+    nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
+    await nudger.nudge("p1", THEIRS)
+    assert fake.timeouts == [SETTINGS_TIMEOUT]
+    assert SETTINGS_TIMEOUT < NUDGE_TIMEOUT
 
 
 async def test_a_native_start_reads_nothing_and_starts_nothing() -> None:
