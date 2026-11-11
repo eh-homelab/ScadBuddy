@@ -901,7 +901,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`send_customer_link`: `to`, or the customer's first email contact that is one address,
   primary first, a malformed one skipped; 422
   `no_customer` (an order with no customer: every customer write runs as it), `no_email`,
-  `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`).
+  `email_invalid`, 409 `kek_missing`; audit `order.customer_link_sent`). A live link is
+  replaced only when the body says `replace: true`: without it the route answers 409
+  `link_live` and changes nothing, so a stale page cannot revoke a live link.
   `DELETE` revokes (`order.customer_link_revoked`, only when one was live); `GET` and
   both writes answer `links.py` `LinkState`, never the token or its hash. Both writes run
   under the order's lock; the GET takes none. Agent `order_customer_link_get` (read),

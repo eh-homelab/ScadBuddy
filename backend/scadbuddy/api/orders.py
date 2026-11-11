@@ -508,6 +508,8 @@ class CustomerLinkSend(BaseModel):
 
     #: One address; the customer's email contact when left out.
     to: str | None = Field(default=None, max_length=320)
+    #: Replace a live link. Without it, a live link is 409 `link_live` and nothing changes.
+    replace: bool = False
 
 
 # -- views -------------------------------------------------------------------------------------
@@ -1455,16 +1457,16 @@ async def get_order_mail(order_id: str, orders: OrdersDep) -> list[OrderMail]:
     summary="Send the customer a new order link",
     description=(
         "Mails the customer a link that opens this order on the storefront without an "
-        "account. Every live link of the order is revoked first, so an old one stops "
-        "working. The mail goes to `to` (one address), or else to the customer's first "
-        "email contact that is one address, the primary one first. A back-office order "
-        "gets one too. Answers the "
-        "link's state, never its token. Audit row `order.customer_link_sent`. 422 "
-        "`email_invalid` for a `to` that is not one address, 422 `no_customer` for an order "
-        "with no customer (set one first), 422 `no_email` with no `to` "
-        "and no email contact that is one address (a malformed contact is skipped), 409 "
-        "`order_not_submitted` for a cart, 409 `kek_missing` with no key to seal the link "
-        "with."
+        "account. With `replace` true, every live link of the order is revoked first, so an "
+        "old one stops working. With `replace` false (the default) and a live link, it "
+        "answers 409 `link_live` and changes nothing. The mail goes to `to` (one address), "
+        "or else to the customer's first email contact that is one address, the primary "
+        "one first. A back-office order gets one too. Answers the link's state, never its "
+        "token. Audit row `order.customer_link_sent`. 422 `email_invalid` for a `to` that "
+        "is not one address, 422 `no_customer` for an order with no customer (set one "
+        "first), 422 `no_email` with no `to` and no email contact that is one address (a "
+        "malformed contact is skipped), 409 `order_not_submitted` for a cart, 409 "
+        "`kek_missing` with no key to seal the link with."
     ),
 )
 async def send_customer_link(
@@ -1473,8 +1475,11 @@ async def send_customer_link(
     check_path(order_id)
     by = current_actor()
     to = body.to if body else None
+    replace = body.replace if body else False
     try:
-        return await asyncio.to_thread(orders.lifecycle.send_customer_link, order_id, by, to)
+        return await asyncio.to_thread(
+            lambda: orders.lifecycle.send_customer_link(order_id, by, to, replace=replace)
+        )
     except LifecycleError as error:
         if error.slug == "no_customer":
             raise ApiError(

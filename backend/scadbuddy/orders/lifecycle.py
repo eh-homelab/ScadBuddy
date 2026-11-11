@@ -986,15 +986,18 @@ class Lifecycle:
                 raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
             return order_mail(conn, order_id)
 
-    def send_customer_link(self, order_id: str, by: Actor, to: str | None) -> LinkState:
+    def send_customer_link(
+        self, order_id: str, by: Actor, to: str | None, *, replace: bool = False
+    ) -> LinkState:
         """The shop sends the order a new customer link (spec §5.2 "Order link"), under the
-        order's lock: every live link is revoked and a new one mailed (`issue_link`) to
-        ``to``, or else to the customer's first email contact that is one address (the
-        primary one first; a contact is free text, and a malformed one is skipped). A
-        `back_office` order gets one too. Audit row `order.customer_link_sent`. Refusals:
-        `order_not_found`; `order_not_submitted` on a cart; 422 `no_customer` for an order
-        with no customer (every customer write runs as the order's customer, so a link
-        with none could read but never answer); 422 `no_email` with no ``to`` and no email
+        order's lock: with ``replace``, every live link is revoked; then a new one is mailed
+        (`issue_link`) to ``to``, or else to the customer's first email contact that is one
+        address (the primary one first; a contact is free text, and a malformed one is
+        skipped). A `back_office` order gets one too. Audit row `order.customer_link_sent`.
+        Refusals: `order_not_found`; `order_not_submitted` on a cart; 422 `no_customer` for
+        an order with no customer (every customer write runs as the order's customer, so a
+        link with none could read but never answer); `link_live` while a link is live and
+        ``replace`` is false (nothing changes); 422 `no_email` with no ``to`` and no email
         contact that is one address; `EmailInvalidError`; `KekMissingError`."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -1005,6 +1008,11 @@ class Lifecycle:
                     "the order has no customer: set one before sending a link",
                     unprocessable=True,
                 )
+            if not replace and live_link(conn, order.id) is not None:
+                raise LifecycleError(
+                    "link_live",
+                    f"order {order.label} has a live customer link: send again with replace",
+                )
             address = to if to is not None else self._customer_email(conn, order)
             if address is None:
                 raise LifecycleError(
@@ -1012,11 +1020,9 @@ class Lifecycle:
                     "to: the customer has no email contact that is one address",
                     unprocessable=True,
                 )
-            if to is not None:
-                address = check_address(address)
             issue_link(conn, self.kek, order.id, order.label, address)
-            self._event(conn, order, by, "order.customer_link_sent", to=address)
             state = link_state(conn, order.id)
+            self._event(conn, order, by, "order.customer_link_sent", to=state.sent_to)
         self._told(_Change(order))
         return state
 
