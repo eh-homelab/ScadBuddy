@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS print_auto_import_watch (
     since    timestamptz NOT NULL DEFAULT now()
 );
 
--- The earlier imports of a printed file, by its hash (`AutoImportStore.slugs_by_hash`).
+-- The printed file's hash: the archive's `content_hash`, whatever source the import read
+-- (`sha256` is the source file's, and a slicer project's is not the printed file's). The
+-- watcher matches earlier imports of a printed file by it (`AutoImportStore.slugs_by_hash`);
+-- a row from before it has none, and its `sha256` stands in.
+ALTER TABLE print_imports ADD COLUMN IF NOT EXISTS content_hash text;
+CREATE INDEX IF NOT EXISTS print_imports_content_hash ON print_imports (content_hash)
+    WHERE content_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS print_imports_sha256 ON print_imports (sha256)
-    WHERE sha256 IS NOT NULL;
+    WHERE sha256 IS NOT NULL AND content_hash IS NULL;

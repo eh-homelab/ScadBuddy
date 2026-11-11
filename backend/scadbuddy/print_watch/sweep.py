@@ -15,13 +15,19 @@ A pass reads the archives Bambuddy made since the watcher was switched on (at mo
    (`StoredSettings.auto_import_sources`): the archive's sliced file, the archive's
    slicer project, a Bambuddy library file with the archive's hash (a file with its name
    only may be another version, so it is never taken). Last, and only when allowed, the
-   printer's storage over FTP: that file is read now, while the print runs, and kept as a
-   Bambuddy library file in the inbox folder, as the printer overwrites its cache.
+   printer's storage over FTP: that file is read now, while the print runs, and taken
+   only when its bytes hash to the archive's ``content_hash`` (the printed file's), so a
+   newer file of the same name is never taken; it is then kept as a Bambuddy library file
+   in the inbox folder, as the printer overwrites its cache. An archive with no hash
+   takes no printer file.
 3. It links a model only with confidence: an earlier import of the same printed file
    (its hash) names one model, or the job's name has exactly one model's words. Anything
    else, and a print no source had, goes to the inbox ("Unsorted imports") with why.
 
 A row, its link and its activity row are one transaction (`AutoImportStore.record`).
+The library files' queue items are linked once per pass (`linking.link_library_prints`),
+before the archives. An archive whose import raises is logged and skipped, so it never
+holds back the archives after it; the next pass tries it again.
 """
 
 from __future__ import annotations
@@ -33,10 +39,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.linking import link_archive
+from scadbuddy.bambuddy.linking import link_archive, link_library_prints
 from scadbuddy.bambuddy.models import ArchiveDetail
 from scadbuddy.bambuddy.print_import import (
     FoundSource,
+    SourceFile,
     exact_slugs,
     find_sources,
     forget_copy,
@@ -62,6 +69,9 @@ MAX_PAGES = 5
 #: How many archives one pass takes at most, oldest first; the rest wait for the next
 #: pass, so a pass stays inside its activity's timeout.
 MAX_IMPORTS = 20
+#: How many printer files with the print's name one archive reads at most, to find the
+#: one whose bytes are the printed file's.
+MAX_PRINTER_READS = 3
 #: The fixed order of the sources Bambuddy keeps; the printer comes after them.
 BAMBUDDY_SOURCES: tuple[ImportSource, ...] = ("archive", "archive_source", "library")
 
@@ -182,11 +192,23 @@ class AutoImporter:
         linked = await self.links.linked_among([archive.id for archive in archives])
         fresh = [archive for archive in archives if archive.id not in linked]
         taken = await self.store.known(fresh)
-        for archive in [archive for archive in fresh if archive.id not in taken][:MAX_IMPORTS]:
+        todo = [archive for archive in fresh if archive.id not in taken][:MAX_IMPORTS]
+        if todo:
+            # Once per pass, not per archive: `link_archive` below skips it.
+            await link_library_prints(self.client, self.links)
+        for archive in todo:
             try:
                 async with self.links.import_lock(archive.id):
                     state = await self._take(archive)
             except ImportBusyError:
+                state = None
+            except Exception:
+                # One archive that fails (a Bambuddy error on its sources) must not hold
+                # back the archives after it; the next pass tries it again.
+                logger.exception(
+                    "could not import a print ScadBuddy did not start",
+                    extra={"archive_id": archive.id},
+                )
                 state = None
             if state == "linked":
                 result.linked += 1
@@ -215,7 +237,7 @@ class AutoImporter:
     async def _take(self, archive: ArchiveDetail) -> str | None:
         """Import one archive under its lock: "linked", "inbox", or None when it is left
         alone."""
-        if await link_archive(self.client, self.uploads, self.links, archive):
+        if await link_archive(self.client, self.uploads, self.links, archive, library_prints=False):
             return None  # ScadBuddy's own print, linked to its run now.
         if await self.links.linked(archive.id) is not None:
             return None
@@ -250,7 +272,12 @@ class AutoImporter:
             row.state, row.slug, row.matched_by = "linked", slug, matched_by
         elif row.source is not None:
             row.reason = NO_MATCH
-        recorded = await self.store.record(row, plate_id=archive.plate_id)
+        try:
+            recorded = await self.store.record(row, plate_id=archive.plate_id)
+        except BaseException:
+            if kept is not None:
+                await forget_copy(self.client, kept)
+            raise
         if not recorded:
             if kept is not None:
                 await forget_copy(self.client, kept)
@@ -274,8 +301,17 @@ class AutoImporter:
         allowed: Sequence[ImportSource],
     ) -> tuple[AutoImport, int | None]:
         """The printer's copy, read now and kept in the library inbox folder; the row,
-        and the copy this call uploaded (to delete when the row is not written)."""
+        and the copy this call uploaded (to delete when the row is not written). Only a
+        file whose bytes hash to the archive's ``content_hash`` is kept: the hash is
+        compared before the upload, so no other file is ever copied."""
         folder = self.settings.library_folder_id
+        if not archive.content_hash:
+            row.reason = (
+                _why_none(sources, allowed)
+                + "; the printer's file is taken only when its bytes are the printed file's,"
+                " and Bambuddy gave no hash for this print"
+            )
+            return row, None
         if folder is None:
             row.reason = (
                 _why_none(sources, allowed)
@@ -288,9 +324,23 @@ class AutoImporter:
         if not found:
             row.reason = _why_none([*sources, *listed], allowed)
             return row, None
-        source = found[0]
+        source: FoundSource | None = None
+        read: SourceFile | None = None
+        problems: list[str] = []
+        for candidate in found[:MAX_PRINTER_READS]:
+            try:
+                data = await read_source(self.client, archive, candidate)
+            except ApiError as error:
+                problems.append(f"{candidate.path} could not be read: {error.detail}")
+                continue
+            if data.sha256 == archive.content_hash:
+                source, read = candidate, data
+                break
+            problems.append(f"{candidate.path} is not the printed file (its hash differs)")
+        if source is None or read is None:
+            row.reason = "no source had the 3MF (printer: " + "; ".join(problems) + ")"
+            return row, None
         try:
-            read = await read_source(self.client, archive, source)
             file_id, uploaded = await keep_printer_file(self.client, read, folder)
         except ApiError as error:
             row.reason = f"the printer's file could not be kept: {error.detail}"

@@ -70,6 +70,7 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
@@ -568,6 +569,10 @@ async def put_settings(
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)
+    if "print_auto_import" in patch.model_fields_set:
+        # #4699: the watcher takes the prints started from this moment on, not from its
+        # next pass; switched off, it forgets the moment.
+        await state.components.get(AUTO_IMPORTS).floor(snapshot.stored.print_auto_import)
     apply_runtime(state, snapshot.runtime)
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()

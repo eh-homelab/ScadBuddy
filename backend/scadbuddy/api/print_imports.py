@@ -392,6 +392,7 @@ async def import_print(
             filename=read.name if read is not None else source.name or f"print-{archive_id}.3mf",
             size=len(read.data) if read is not None else source.size,
             sha256=read.sha256 if read is not None else source.sha256,
+            content_hash=archive.content_hash,
             created_model=created,
         )
         owner = await _record(links, client, record, archive, kept)

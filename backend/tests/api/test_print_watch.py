@@ -55,9 +55,9 @@ def bambuddy(*archives: dict[str, Any]) -> respx.Route:
 
 
 def switch_on(client: TestClient, **extra: Any) -> None:
+    """The settings write records the floor (review of #6002); the archives are made
+    after it."""
     configure(client, print_auto_import=True, **extra)
-    # The floor is the first pass's; the archives are made after it.
-    asyncio.run(state(client).components.get(AUTO_IMPORTS).floor(True))
 
 
 def run_pass(client: TestClient) -> None:
@@ -188,6 +188,46 @@ def test_an_earlier_import_of_the_file_names_the_model(client: TestClient, model
 
     (row,) = auto(client)
     assert (row["state"], row["slug"], row["matched_by"]) == ("linked", model, "earlier_import")
+
+
+@respx.mock
+def test_an_earlier_import_from_a_slicer_project_names_the_model(
+    client: TestClient, model: str
+) -> None:
+    """Review of #6002: the project's own hash is not the printed file's; the import
+    keeps the archive's `content_hash`, which the next print of that file matches."""
+    switch_on(client)
+    asyncio.run(
+        state(client).print_links.record_import(
+            PrintImport(
+                archive_id=201,
+                slug=model,
+                source="archive_source",
+                filename="project.3mf",
+                sha256="9" * 64,
+                content_hash=HASH,
+            )
+        )
+    )
+    bambuddy(a_print(310, print_name="something else", filename="other.gcode.3mf"))
+
+    run_pass(client)
+
+    (row,) = auto(client)
+    assert (row["slug"], row["matched_by"]) == (model, "earlier_import")
+
+
+def test_switching_on_records_the_floor_and_off_forgets_it(client: TestClient) -> None:
+    store = state(client).components.get(AUTO_IMPORTS)
+    configure(client, print_auto_import=True)
+    first = asyncio.run(store.floor(True))
+    assert first is not None
+    configure(client, print_auto_import=True)
+    assert asyncio.run(store.floor(True)) == first  # switched on again: kept
+    configure(client, print_auto_import=False)
+    configure(client, print_auto_import=True)
+    again = asyncio.run(store.floor(True))
+    assert again is not None and again > first  # off, then on: a new floor
 
 
 @respx.mock

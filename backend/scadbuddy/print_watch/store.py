@@ -110,7 +110,8 @@ class AutoImportStore:
         return await asyncio.to_thread(self._known, list(archives))
 
     async def slugs_by_hash(self, sha256: str) -> set[str]:
-        """The models earlier imports of the file with this SHA-256 were linked to."""
+        """The models earlier imports of the printed file with this SHA-256 (an archive's
+        ``content_hash``) were linked to, whatever source each import read."""
         return await asyncio.to_thread(self._slugs_by_hash, sha256)
 
     async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
@@ -176,7 +177,12 @@ class AutoImportStore:
     def _slugs_by_hash(self, sha256: str) -> set[str]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT slug FROM print_imports WHERE sha256 = %s", (sha256,)
+                # The printed file's hash; a row from before `content_hash` was kept
+                # has its source's, which is the printed file's for an archive or a
+                # library file matched by hash.
+                "SELECT DISTINCT slug FROM print_imports"
+                " WHERE content_hash = %(hash)s OR (content_hash IS NULL AND sha256 = %(hash)s)",
+                {"hash": sha256},
             ).fetchall()
         return {row["slug"] for row in rows}
 
@@ -219,6 +225,7 @@ class AutoImportStore:
                         filename=row.filename,
                         size=row.size,
                         sha256=row.sha256,
+                        content_hash=row.content_hash,
                     ),
                     printer_id=row.printer_id,
                     plate_id=plate_id,

@@ -4,6 +4,7 @@ Bambuddy is `tests/api/test_print_watch.py`."""
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.bambuddy.models import ArchiveDetail
-from scadbuddy.bambuddy.print_import import FoundSource, exact_slugs
+from scadbuddy.bambuddy.print_import import FoundSource, SourceFile, exact_slugs
 from scadbuddy.bambuddy.print_links import ImportBusyError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_watch import sweep
@@ -71,9 +72,11 @@ class Links:
 
 
 class Store:
-    def __init__(self, earlier: set[str] | None = None) -> None:
+    def __init__(self, earlier: set[str] | None = None, *, owned: bool = False) -> None:
         self.rows: list[AutoImport] = []
         self.earlier = earlier or set()
+        #: A link took the archive between the pass's read and its record.
+        self.owned = owned
 
     async def known(self, archives: Any) -> set[int]:
         return set()
@@ -82,6 +85,8 @@ class Store:
         return self.earlier
 
     async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
+        if self.owned:
+            return False
         self.rows.append(row)
         return True
 
@@ -116,9 +121,16 @@ async def _pass(
     store: Store | None = None,
     slugs: list[str] | None = None,
     settings: StoredSettings | None = None,
+    printer: Printer | None = None,
+    library_prints: list[int] | None = None,
 ) -> tuple[sweep.PassResult, Store]:
-    async def no_link(*_: Any) -> list[Any]:
+    async def no_link(*_: Any, library_prints: bool = True) -> list[Any]:
+        assert not library_prints, "the pass links the library prints once itself"
         return []
+
+    async def link_library(*_: Any) -> None:
+        if library_prints is not None:
+            library_prints.append(1)
 
     async def listed(*_: Any, printer: bool) -> list[FoundSource]:
         assert not printer
@@ -126,6 +138,9 @@ async def _pass(
 
     monkeypatch.setattr(sweep, "link_archive", no_link)
     monkeypatch.setattr(sweep, "find_sources", listed)
+    monkeypatch.setattr(sweep, "link_library_prints", link_library)
+    if printer is not None:
+        printer.install(monkeypatch)
     store = store or Store()
 
     async def all_slugs() -> list[str]:
@@ -219,3 +234,228 @@ async def test_old_skipped_unprinted_and_busy_archives_are_left(
     )
     assert store.rows == []
     assert (result.linked, result.inbox, result.skipped) == (0, 0, 1)
+
+
+# --- the library prints, once a pass ------------------------------------------------
+
+
+async def test_the_library_prints_are_linked_once_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    await _pass(
+        monkeypatch,
+        [detail(1), detail(2, print_name="other")],
+        sources=[found("archive", name="demo.gcode.3mf")],
+        library_prints=calls,
+    )
+    assert calls == [1]
+
+
+async def test_one_failing_archive_does_not_stop_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Failing(Store):
+        async def record(self, row: AutoImport, *, plate_id: int | None = None) -> bool:
+            if row.archive_id == 1:
+                raise RuntimeError("Bambuddy said no")
+            return await super().record(row, plate_id=plate_id)
+
+    result, store = await _pass(
+        monkeypatch,
+        [detail(1), detail(2)],
+        sources=[found("archive", name="demo.gcode.3mf")],
+        store=Failing(),
+    )
+    assert [row.archive_id for row in store.rows] == [2]
+    assert (result.linked, result.skipped) == (1, 1)
+
+
+# --- the printer's storage ----------------------------------------------------------
+
+PRINTER: Any = ("archive", "archive_source", "library", "printer")
+PRINTED = b"PK printed bytes"
+PRINTED_HASH = hashlib.sha256(PRINTED).hexdigest()
+
+
+class Printer:
+    """The printer's storage (`printer_sources`, `read_source`) and the library inbox
+    folder (`keep_printer_file`, `forget_copy`), faked."""
+
+    def __init__(self, files: dict[str, bytes], *, uploaded: bool = True) -> None:
+        self.files = files
+        self.uploaded = uploaded
+        self.read: list[str] = []
+        self.kept: list[SourceFile] = []
+        self.forgotten: list[int] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def listing(client: Any, archive: ArchiveDetail) -> list[FoundSource]:
+            if not self.files:
+                return [FoundSource(kind="printer", available=False, reason="no such file")]
+            return [
+                FoundSource(kind="printer", available=True, name=path.rsplit("/", 1)[-1], path=path)
+                for path in self.files
+            ]
+
+        async def read(client: Any, archive: ArchiveDetail, source: FoundSource) -> SourceFile:
+            assert source.path is not None
+            self.read.append(source.path)
+            data = self.files[source.path]
+            return SourceFile(
+                name=source.name or "x.3mf", data=data, sha256=hashlib.sha256(data).hexdigest()
+            )
+
+        async def keep(client: Any, file: SourceFile, folder: int) -> tuple[int, bool]:
+            self.kept.append(file)
+            return 55, self.uploaded
+
+        async def forget(client: Any, file_id: int) -> None:
+            self.forgotten.append(file_id)
+
+        monkeypatch.setattr(sweep, "printer_sources", listing)
+        monkeypatch.setattr(sweep, "read_source", read)
+        monkeypatch.setattr(sweep, "keep_printer_file", keep)
+        monkeypatch.setattr(sweep, "forget_copy", forget)
+
+
+NO_BAMBUDDY_SOURCE = [FoundSource(kind="archive", available=False, reason="gone")]
+
+
+def printer_settings(**fields: Any) -> StoredSettings:
+    values: dict[str, Any] = {
+        "print_auto_import": True,
+        "print_auto_import_sources": PRINTER,
+        "library_folder_id": 2,
+        **fields,
+    }
+    return StoredSettings.model_validate(values)
+
+
+async def test_the_printed_file_is_read_kept_and_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert (row.state, row.source, row.printer_path, row.library_file_id) == (
+        "linked",
+        "printer",
+        "/cache/demo.gcode.3mf",
+        55,
+    )
+    assert (row.sha256, row.size) == (PRINTED_HASH, len(PRINTED))
+    assert [file.sha256 for file in printer.kept] == [PRINTED_HASH]
+    assert printer.forgotten == []
+
+
+async def test_a_file_of_the_same_name_with_other_bytes_is_never_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #6002: a newer file of the print's name took its place in the cache."""
+    printer = Printer({"/cache/demo.gcode.3mf": b"PK a newer print"})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert (row.state, row.source) == ("inbox", None)
+    assert row.reason is not None and "is not the printed file" in row.reason
+    assert printer.kept == []
+
+
+async def test_the_matching_file_among_several_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    printer = Printer({"/demo.gcode.3mf": b"PK other", "/cache/demo.gcode.3mf": PRINTED})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    assert store.rows[0].printer_path == "/cache/demo.gcode.3mf"
+    assert [file.sha256 for file in printer.kept] == [PRINTED_HASH]
+
+
+async def test_an_archive_with_no_hash_takes_no_printer_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=None)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert row.state == "inbox" and row.reason is not None and "gave no hash" in row.reason
+    assert printer.read == [] and printer.kept == []
+
+
+async def test_a_copy_is_deleted_when_the_archive_was_owned_meanwhile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED})
+    result, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+        store=Store(owned=True),
+    )
+    assert store.rows == [] and result.skipped == 1
+    assert printer.forgotten == [55]
+
+
+async def test_a_copy_found_in_the_inbox_already_is_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED}, uploaded=False)
+    await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+        store=Store(owned=True),
+    )
+    assert printer.forgotten == []
+
+
+async def test_no_inbox_folder_says_so_and_reads_no_printer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    printer = Printer({"/cache/demo.gcode.3mf": PRINTED})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(library_folder_id=None),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert row.state == "inbox" and row.reason is not None
+    assert "library inbox folder" in row.reason
+    assert printer.read == []
+
+
+async def test_a_printer_with_no_file_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    printer = Printer({})
+    _, store = await _pass(
+        monkeypatch,
+        [detail(1, content_hash=PRINTED_HASH)],
+        sources=NO_BAMBUDDY_SOURCE,
+        settings=printer_settings(),
+        printer=printer,
+    )
+    (row,) = store.rows
+    assert row.state == "inbox" and row.reason is not None
+    assert "printer: no such file" in row.reason
+    assert printer.kept == []

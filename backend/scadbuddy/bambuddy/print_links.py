@@ -121,6 +121,9 @@ class PrintImport(BaseModel):
     filename: str
     size: int | None = None
     sha256: str | None = None
+    #: The printed file's SHA-256: the archive's ``content_hash``, whatever the source
+    #: (#4699: a slicer project's ``sha256`` is not the printed file's).
+    content_hash: str | None = None
     #: Whether the import made its model (``new_model``), so a repeat answers the same.
     created_model: bool = False
     #: Set by the database.
@@ -375,13 +378,14 @@ def import_in(
     # this row stayed) is replaced.
     conn.execute(
         "INSERT INTO print_imports (archive_id, slug, source, library_file_id,"
-        " printer_id, printer_path, filename, size, sha256, created_model)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " printer_id, printer_path, filename, size, sha256, created_model, content_hash)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         " ON CONFLICT (archive_id) DO UPDATE SET slug = EXCLUDED.slug,"
         " source = EXCLUDED.source, library_file_id = EXCLUDED.library_file_id,"
         " printer_id = EXCLUDED.printer_id, printer_path = EXCLUDED.printer_path,"
         " filename = EXCLUDED.filename, size = EXCLUDED.size,"
         " sha256 = EXCLUDED.sha256, created_model = EXCLUDED.created_model,"
+        " content_hash = EXCLUDED.content_hash,"
         " imported_at = now()",
         (
             record.archive_id,
@@ -394,6 +398,7 @@ def import_in(
             record.size,
             record.sha256,
             record.created_model,
+            record.content_hash,
         ),
     )
     conn.execute(
@@ -678,8 +683,8 @@ class PrintLinkStore:
         with self._pool.connection() as conn:
             row = conn.execute(
                 "SELECT archive_id, slug, source, library_file_id, printer_id, printer_path,"
-                " filename, size, sha256, created_model, imported_at FROM print_imports"
-                " WHERE archive_id = %s",
+                " filename, size, sha256, created_model, content_hash, imported_at"
+                " FROM print_imports WHERE archive_id = %s",
                 (archive_id,),
             ).fetchone()
         return None if row is None else PrintImport.model_validate(dict(row))

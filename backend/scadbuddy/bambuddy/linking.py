@@ -455,6 +455,8 @@ async def link_archive(
     uploads: BambuddyUploadStore,
     links: PrintLinkStore,
     archive: Archive,
+    *,
+    library_prints: bool = True,
 ) -> list[PrintLink]:
     """The link passes above for one archive (#4698 review), before an import may take
     it: ScadBuddy links its own prints only when a read runs these, so an archive it
@@ -464,8 +466,11 @@ async def link_archive(
     a LAN start's, as `link_subject_by_hash` and `link_lan_starts` match them), after
     the hashes not read yet of the subjects whose send window holds the archive's day
     (at most `ARCHIVE_PASS_SUBJECTS`) are read. Each subject that matches gets the link
-    its own pass would have written. Returns those links."""
-    await link_library_prints(client, links)
+    its own pass would have written. Returns those links. A caller that links many
+    archives runs `link_library_prints` once itself and passes ``library_prints=False``
+    (the print watcher, #4699)."""
+    if library_prints:
+        await link_library_prints(client, links)
     if not archive.content_hash:
         return []
     if archive.created_at is not None:
