@@ -2750,6 +2750,21 @@ def short_follow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
 
 
+async def _follow_until_answered(
+    service: RenderService, workflow_id: str, request_id: str, *, supersedes: str | None
+) -> Job:
+    """Follow the Update again while it is still accepting, as the browser's `command()`
+    does after each 202 (#6007). With `short_follow`, one follow waits a second, and a
+    worker that has just started can take longer than that to run the first task on a
+    slow runner. Each follow names the same Update, so it makes no second claim."""
+    async with asyncio.timeout(60):
+        while True:
+            try:
+                return await service.follow(workflow_id, request_id, supersedes=supersedes)
+            except CommandStillAcceptingError:
+                continue
+
+
 async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, short_follow: None
 ) -> None:
@@ -2775,7 +2790,7 @@ async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
             await service.follow(workflow_id, request_id, supersedes=None)
 
         async with _worker(client, queue, ProjectingActivities(deps)):
-            job = await service.follow(workflow_id, request_id, supersedes=None)
+            job = await _follow_until_answered(service, workflow_id, request_id, supersedes=None)
             await _settled(projection, job.id)
         await service.aclose()
 
@@ -2822,8 +2837,8 @@ async def test_a_followed_submit_releases_the_render_it_supersedes(
             # Not released before the new job exists.
             assert (await asyncio.to_thread(projection.read, old.id)).state == "running"
             async with _worker(client, later_queue, ProjectingActivities(deps)):
-                new = await later_service.follow(
-                    str(accepting.value.args[0]), request_id, supersedes=old.id
+                new = await _follow_until_answered(
+                    later_service, str(accepting.value.args[0]), request_id, supersedes=old.id
                 )
                 released = await _settled(projection, old.id)
                 await _settled(projection, new.id)
