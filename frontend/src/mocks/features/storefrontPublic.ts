@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import type { Draft, Listing, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, StoreEstimate, StoreRender } from '../../storefront/api/client'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
 
@@ -13,6 +13,12 @@ import { problem } from '../handlers'
  *
  * The draft is kept in `sessionStorage` too, so a reload or a new page shows the cart, as
  * the edge's cookie would; `reset` clears it.
+ *
+ * The customer's order page (#5283): the token `tok` (`/o#tok`) opens one order whose
+ * design waits for an answer at $12.50. Accepting it approves the item and opens a
+ * payment request with a pay link, as the CRUD side's last accept does; any other token
+ * is a 404 with no body. A cancel is refused 409 `order_approved` once anything is approved
+ * and 409 `order_paid` once a payment is paid, as the CRUD side's.
  */
 
 const base = '/api/store/v1'
@@ -128,6 +134,54 @@ function outside(body: Body): Response | Listing {
   return listing
 }
 
+export const ORDER_TOKEN = 'tok'
+/** The order a signed-in reader opens at `/o?order=<id>`. */
+export const ORDER_ID = 'order-1'
+
+function freshOrder(): CustomerOrder {
+  return {
+    number: 'ORD-2026-7',
+    status: 'We are reviewing your order',
+    currency: 'USD',
+    minor_exponent: 2,
+    can_cancel: true,
+    items: [
+      {
+        id: 'oi1',
+        title: 'Name keychain',
+        quantity: 1,
+        status: 'Price ready',
+        revisions: [
+          {
+            id: 'r1',
+            number: 1,
+            note: 'Here is your keychain with "Ada" raised on it.',
+            sent_at: '2026-11-09T10:00:00Z',
+            answer: null,
+            answer_note: null,
+            can_answer: true,
+            pictures: [],
+            colours: [{ slot: 0, colour: '#1B6CA8', name: 'Ocean blue' }],
+          },
+        ],
+        quote: { id: 'q1', unit_price_minor: 1250, quantity: 1, total_minor: 1250, accepted: false, can_accept: false },
+      },
+    ],
+    payments: [],
+    shipments: [],
+  }
+}
+
+let order = freshOrder()
+
+/** The order the body's token, or a signed-in reader's `order_id`, opens, or the empty 404 the CRUD side answers. */
+async function orderOf(request: Request): Promise<CustomerOrder | Response> {
+  const body = (await request.json().catch(() => ({}))) as { token?: unknown; order_id?: unknown }
+  return body.token === ORDER_TOKEN || (body.token === undefined && body.order_id === ORDER_ID)
+    ? order
+    : new HttpResponse(null, { status: 404 })
+}
+
 function ensureDraft(): Draft {
   draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
@@ -233,6 +287,46 @@ export const handlers = [
     save()
     return HttpResponse.json(submitted)
   }),
+  http.post(`${base}/order/view`, async ({ request }) => {
+    const found = await orderOf(request)
+    return found instanceof Response ? found : HttpResponse.json(found)
+  }),
+  http.post(`${base}/order/revisions/:id/answer`, async ({ request, params }) => {
+    const missing = keyMissing(request.clone())
+    if (missing) return missing
+    const found = await orderOf(request.clone())
+    if (found instanceof Response) return found
+    const body = (await request.json()) as { answer: 'accepted' | 'changes_requested'; note?: string }
+    const item = found.items[0]!
+    const revision = item.revisions.find((r) => r.id === params.id)
+    if (!revision) return refused(404, 'revision_not_found', 'There is no such design.')
+    if (revision.answer) return refused(409, 'revision_answered', 'This design was answered already. Load the page again.')
+    if (body.answer === 'changes_requested' && !body.note?.trim()) return refused(422, 'note', 'Say what you would like changed.')
+    Object.assign(revision, { answer: body.answer, answer_note: body.note ?? '', can_answer: false })
+    if (body.answer === 'accepted') {
+      item.status = 'Approved'
+      item.quote = { ...item.quote!, accepted: true }
+      order = {
+        ...found,
+        status: 'Accepted: we will start making it soon',
+        can_cancel: false,
+        payments: [{ id: 'p1', kind: 'balance', amount_minor: 1250, currency: 'USD', status: 'open', pay_url: '/mock-pay/p1' }],
+      }
+    }
+    return HttpResponse.json(order)
+  }),
+  http.post(`${base}/order/cancel`, async ({ request }) => {
+    const missing = keyMissing(request.clone())
+    if (missing) return missing
+    const found = await orderOf(request)
+    if (found instanceof Response) return found
+    if (found.payments.some((p) => p.status === 'paid')) {
+      return refused(409, 'order_paid', 'You have paid part of this order. Ask the shop to cancel it.')
+    }
+    if (!found.can_cancel) return refused(409, 'order_approved', 'Part of your order is approved already. Ask the shop to cancel it.')
+    order = { ...found, status: 'Cancelled', can_cancel: false, items: found.items.map((i) => ({ ...i, status: 'Cancelled' })) }
+    return HttpResponse.json(order)
+  }),
   http.post(`${base}/draft/requests`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -257,6 +351,7 @@ export const handlers = [
 
 export function reset(): void {
   draft = null
+  order = freshOrder()
   orders = 0
   renders = new Map()
   serial = 0

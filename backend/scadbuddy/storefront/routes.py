@@ -11,6 +11,13 @@ is relayed as a stream, never held whole, as ``model/gltf-binary``. A design req
 read with its caps as it arrives (`uploads.py`: refused before any CRUD call), its files
 spooled, then sent on as multipart a chunk at a time.
 
+The customer's order page (``/o#<token>``, or ``/o?order=<id>`` signed in) posts the
+order link's token, or the order's id, in each body, which goes on unread with the store
+session's token when there is one (`order_view` and the writes under ``/order``); its
+answer goes back with the fields of `ORDER_VIEW_FIELDS` only (`_shown`). A reader that
+reads nothing is the CRUD side's 404 with no body, and the edge's own 404 with no body
+too.
+
 Accounts (#5283): ``POST /account/code`` (the bot check ``sign_up`` first) has the CRUD
 side mail a sign-in code and answers 204 for every address. ``POST /account/verify`` (the
 bot check ``sign_in`` first) sets the ``sb_session`` cookie from the CRUD side's answer
@@ -35,7 +42,7 @@ from starlette.types import Receive, Scope, Send
 
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.core.proxies import client_address
-from scadbuddy.crud.client import CrudStream, CrudUnavailableError
+from scadbuddy.crud.client import CrudRefusedError, CrudStream, CrudUnavailableError
 from scadbuddy.crud.storefront import StorefrontCrud
 from scadbuddy.storefront.accounts import clear_session, session_of, set_session
 from scadbuddy.storefront.ratelimit import REQUEST_LIMITED, UploadAllowance
@@ -49,7 +56,15 @@ from scadbuddy.storefront.turnstile import SiteKey, require_turnstile
 from scadbuddy.storefront.uploads import UPLOADS_BUSY, RequestUpload, read_request, uploads_busy
 from scadbuddy.storefront.visitors import VISITOR_COOKIE, VISITOR_MAX_AGE
 from scadbuddy.storefront.visitors import sign as sign_visitor
-from scadbuddy.storefront.wire import ITEM_ID, JOB_ID, LISTING_ID, STOREFRONT_PROBLEMS
+from scadbuddy.storefront.wire import (
+    ITEM_ID,
+    JOB_ID,
+    LISTING_ID,
+    ORDER_VIEW_FIELDS,
+    QUOTE_ID,
+    REVISION_ID,
+    STOREFRONT_PROBLEMS,
+)
 
 #: The largest render or draft item body the edge relays: far past any listing's values.
 MAX_RENDER_BODY: Final = 64 * 1024
@@ -395,6 +410,72 @@ async def render_preview(
     ):
         headers["Content-Length"] = stream.response.headers["content-length"]
     return _Relayed(stream, headers=headers)
+
+
+def _shown(node: Any, path: str = "") -> Any:
+    """``node`` (a customer's order view, or a part of it at ``path``) with the fields of
+    `ORDER_VIEW_FIELDS` only: anything else the CRUD side sent stops here."""
+    if isinstance(node, list):
+        return [_shown(value, path) for value in node]
+    if isinstance(node, dict):
+        kept = ORDER_VIEW_FIELDS.get(path, frozenset())
+        return {k: _shown(v, f"{path}.{k}" if path else k) for k, v in node.items() if k in kept}
+    return node
+
+
+async def _order(
+    request: Request, crud: StorefrontCrud, path: str, body: bytes, key: str | None = None
+) -> Any:
+    """The CRUD side's order route's answer, allowlisted, sent with the browser's store
+    session when it has one (a signed-in reader's ``order_id``); a reader that read
+    nothing is a 404 with no body here too."""
+    try:
+        answer = await crud.order(path, body, key=key, session=session_of(request))
+    except CrudRefusedError as error:
+        if error.status == status.HTTP_404_NOT_FOUND and not error.problem:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+        raise
+    return _shown(answer)
+
+
+@visitor_router.post("/order/view")
+async def order_view(request: Request, crud: Crud) -> Any:
+    """The customer's order, which the body's token opens, or the ``order_id`` of the
+    signed-in account (``/o?order=<id>``)."""
+    return await _order(request, crud, "view", await _body(request, "order_body_invalid"))
+
+
+@visitor_router.post("/order/revisions/{revision_id}/answer")
+async def order_answer(revision_id: str, request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer's answer to a design: ``accepted``, or ``changes_requested`` with a
+    note."""
+    if REVISION_ID.fullmatch(revision_id) is None:
+        raise ApiError(
+            404, "There is no such design.", type_=f"{STOREFRONT_PROBLEMS}revision_not_found"
+        )
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, f"revisions/{revision_id}/answer", body, key)
+
+
+@visitor_router.post("/order/quotes/{quote_id}/accept")
+async def order_accept(quote_id: str, request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer accepts a price."""
+    if QUOTE_ID.fullmatch(quote_id) is None:
+        raise ApiError(
+            404, "There is no such price.", type_=f"{STOREFRONT_PROBLEMS}quote_not_found"
+        )
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, f"quotes/{quote_id}/accept", body, key)
+
+
+@visitor_router.post("/order/cancel")
+async def order_cancel(request: Request, crud: Crud, visitor_id: Visitor) -> Any:
+    """The customer cancels the order while nothing is approved and nothing is paid."""
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "order_body_invalid")
+    return await _order(request, crud, "cancel", body, key)
 
 
 def _sign_in_required() -> ApiError:

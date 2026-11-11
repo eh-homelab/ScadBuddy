@@ -612,3 +612,12 @@ fieldset.sf-field {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.sf-swatch {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 8px;
+  vertical-align: -0.15em;
+  border: 1px solid var(--sf-line);
+  border-radius: 50%;
+}

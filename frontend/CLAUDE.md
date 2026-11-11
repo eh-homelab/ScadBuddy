@@ -74,6 +74,11 @@ same way, `vite.config.ts`).
   and loads Cloudflare's script only when `components/Turnstile.tsx` mounts. A form that
   takes the check sends the widget's token as `X-Turnstile-Token` and draws a new widget
   after each send, because a token passes one check only. The mocks keep the check off.
+  The customer's order page (#5283, spec §5.6) is `pages/OrderPage.tsx` at `/o#<token>`: it
+  reads the order link's token from the fragment and posts it in each body (never a path or
+  the history); a 404 with no body is a link that opens nothing. It says "Paid" only from
+  the edge's answer ("Check for updates" reads again), never from a provider's redirect
+  (spec §7). The mocks open one order with the token `tok`.
   Accounts (#5283, spec §5.2): `pages/SignInPage.tsx` (`/account/sign-in`, two steps:
   "Send me a code" mails a code to the address, Turnstile `sign_up`, and says the same for
   every address; then the address and the code, Turnstile `sign_in`. A mailed link opens on

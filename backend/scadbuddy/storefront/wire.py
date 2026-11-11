@@ -12,6 +12,53 @@ LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 #: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``item_not_found`` before a lookup.
 ITEM_ID: Final = LISTING_ID
+#: A design revision's id (``gen_random_uuid()::text``). Both sides answer any other 404
+#: ``revision_not_found`` before a lookup.
+REVISION_ID: Final = LISTING_ID
+#: A quote's id: ``gen_random_uuid()::text``, or a quote run's ``uuid.hex``
+#: (`orders/quote.py` `operation_quote_id`). Both sides answer any other 404
+#: ``quote_not_found`` before a lookup.
+QUOTE_ID: Final = re.compile(rf"{LISTING_ID.pattern}|[0-9a-f]{{32}}")
+#: Every field of the customer's order view (`orders/storefront/wire.py`
+#: `CustomerOrderView`), by its dotted path from the view: the edge sends on these only
+#: (`storefront/routes.py`), so no cost, margin, internal note, shop event or staff name
+#: reaches a customer. A field added to the view is added here too, or
+#: `tests/orders/storefront/test_order_page.py` fails.
+ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
+    "": frozenset(
+        {
+            "number",
+            "status",
+            "currency",
+            "minor_exponent",
+            "can_cancel",
+            "items",
+            "payments",
+            "shipments",
+        }
+    ),
+    "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote"}),
+    "items.revisions": frozenset(
+        {
+            "id",
+            "number",
+            "note",
+            "sent_at",
+            "answer",
+            "answer_note",
+            "can_answer",
+            "pictures",
+            "colours",
+        }
+    ),
+    "items.revisions.pictures": frozenset({"url", "kind", "caption"}),
+    "items.revisions.colours": frozenset({"slot", "colour", "name"}),
+    "items.quote": frozenset(
+        {"id", "unit_price_minor", "quantity", "total_minor", "accepted", "can_accept"}
+    ),
+    "payments": frozenset({"id", "kind", "amount_minor", "currency", "status", "pay_url"}),
+    "shipments": frozenset({"carrier", "service", "tracking", "shipped_at"}),
+}
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404
 #: ``render_not_found`` before a lookup.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}")

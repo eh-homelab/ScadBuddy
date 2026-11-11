@@ -20,7 +20,8 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: is ``…/storefront/pay/checkout`` (#4960), which the edge's ``/pay/{token}`` page reads.
 #: The storefront ``turnstile`` area is ``…/storefront/turnstile`` and
 #: ``…/turnstile/verify``, the bot check (#5283). The storefront ``accounts`` area is
-#: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283).
+#: ``…/storefront/account`` and its ``verify``, ``sign-out`` and ``orders`` (#5283). The
+#: storefront ``order`` area is ``…/storefront/order/*``, the customer's order page (#5283).
 #: The agent's ``workspace-blob-refs`` area is ``…/agent/workspace-blob-refs`` and its
 #: ``/release`` (#5299), the holds of its workspace files' blobs. The print ``uploads``
 #: area also covers ``…/print/slices`` and ``…/print/slice-starts`` (#5298 Task 25). Its
@@ -43,7 +44,16 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "copy-leases",
         "links",
     ],
-    "storefront": ["listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"],
+    "storefront": [
+        "listings",
+        "renders",
+        "drafts",
+        "requests",
+        "pay",
+        "turnstile",
+        "accounts",
+        "order",
+    ],
     "agent": ["order-costs", "workspace-blob-refs"],
 }
 

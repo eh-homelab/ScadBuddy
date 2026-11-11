@@ -120,7 +120,16 @@ def test_a_storefront_route_needs_the_storefront_credential(
     r = client.get(url, headers=bearer(storefront_token))
     assert r.status_code == 200 and r.headers["X-ScadBuddy-Crud"] == "1"
     assert r.json() == {
-        "areas": ["listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts"]
+        "areas": [
+            "listings",
+            "renders",
+            "drafts",
+            "requests",
+            "pay",
+            "turnstile",
+            "accounts",
+            "order",
+        ]
     }
 
 
@@ -203,6 +212,7 @@ def test_the_edge_waits_for_every_area_it_calls() -> None:
         "pay",
         "turnstile",
         "accounts",
+        "order",
     } == EDGE_AREAS
     assert set(crud_areas.CRUD_AREAS["storefront"]) == EDGE_AREAS
 

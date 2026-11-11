@@ -1094,7 +1094,8 @@ export const orderTools: Tool[] = [
       "old one stops working. The mail goes to `to` (one address), or else to the customer's email contact. This " +
       'mails the customer, so it is outward: a person must approve it first (it returns a pending action). The ' +
       'reply is the link state (`live`, `created_at`, `sent_to`, `opened_at`, `revoked_at`), never the link itself. ' +
-      '422 `no_email` with no `to` and no email contact; 422 `email_invalid` for anything but one address; ' +
+      '422 `no_customer` for an order with no customer (set one first); 422 `no_email` with no `to` and no ' +
+      'email contact; 422 `email_invalid` for anything but one address; ' +
       '`order_not_submitted` on a storefront cart.',
     input: z.object({
       order_id: orderId,

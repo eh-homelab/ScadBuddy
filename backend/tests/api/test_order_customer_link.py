@@ -223,3 +223,25 @@ def test_the_read_takes_no_order_lock(api: TestClient) -> None:
     reader.join()
     assert not held, "the read waited for the order's lock"
     assert answers == [200]
+
+
+def test_an_order_with_no_customer_gets_no_link(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every customer write runs as the order's customer: a link with none behind it
+    could read but never answer, so the send is 422 `no_customer`. The orders table's
+    `orders_customer_and_number` check already keeps a submitted order from losing its
+    customer, so the order is read as having none."""
+    order = back_office_order(api)
+    store = _orders(api).store
+    locked = store.lock_order
+
+    def without_customer(conn: Any, order_id: str) -> Any:
+        return locked(conn, order_id).model_copy(update={"customer_id": None})
+
+    monkeypatch.setattr(store, "lock_order", without_customer)
+    refused = problem(
+        api.post(link_url(order["id"]), json={"to": "ada@example.com"}), "no_customer", 422
+    )
+    assert "customer" in refused["detail"]
+    assert rows(api, "SELECT id FROM storefront_order_links") == []

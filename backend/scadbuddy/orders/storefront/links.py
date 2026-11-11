@@ -66,12 +66,31 @@ def create_order_link(conn: Conn, kek: Kek | None, order_id: str, to: str) -> tu
 
 
 def revoke_order_links(conn: Conn, order_id: str) -> int:
-    """Revoke every live link of the order, dropping each one's sealed token. How many."""
-    return conn.execute(
-        "UPDATE storefront_order_links SET revoked_at = clock_timestamp(), token_sealed = NULL,"
-        " dek_sealed = NULL, kek_id = NULL WHERE order_id = %s AND revoked_at IS NULL",
-        (order_id,),
-    ).rowcount
+    """Revoke every live link of the order, dropping each one's sealed token. How many.
+
+    The account attachments those links made (`accounts.attach_order`'s ``link_id``) go in
+    the same transaction, so a revoked link leaves no way in for the account that opened
+    it; a submit-made attachment (no link) stays. A later view through another live link
+    attaches again.
+
+    The links are revoked first, which locks their rows; the attachments go after. An
+    attach running at the same time takes the link's row ``FOR SHARE``
+    (`accounts.attach_order`), so it waits for this revoke and then finds the link
+    revoked and attaches nothing."""
+    revoked = [
+        str(row["id"])
+        for row in conn.execute(
+            "UPDATE storefront_order_links SET revoked_at = clock_timestamp(),"
+            " token_sealed = NULL, dek_sealed = NULL, kek_id = NULL"
+            " WHERE order_id = %s AND revoked_at IS NULL RETURNING id",
+            (order_id,),
+        ).fetchall()
+    ]
+    if revoked:
+        conn.execute(
+            "DELETE FROM storefront_account_orders WHERE link_id = ANY(%s::text[])", (revoked,)
+        )
+    return len(revoked)
 
 
 def live_link(conn: Conn, order_id: str) -> LiveLink | None:
@@ -82,6 +101,33 @@ def live_link(conn: Conn, order_id: str) -> LiveLink | None:
         (order_id,),
     ).fetchone()
     return None if row is None else LiveLink(id=str(row["id"]), sent_to=str(row["sent_to"]))
+
+
+@dataclass(frozen=True)
+class OpenedLink:
+    id: str
+    order_id: str
+
+
+def link_by_token(conn: Conn, token: str) -> OpenedLink | None:
+    """The live link ``token`` opens, found by its sha256; None for any token that reads
+    nothing (unknown, revoked, or not a token at all). Every token costs the same one
+    lookup by an index: none is refused by its shape first."""
+    row = conn.execute(
+        "SELECT id, order_id FROM storefront_order_links"
+        " WHERE token_sha256 = %s AND revoked_at IS NULL",
+        (token_sha256(token),),
+    ).fetchone()
+    return None if row is None else OpenedLink(id=str(row["id"]), order_id=str(row["order_id"]))
+
+
+def mark_opened(conn: Conn, link_id: str) -> None:
+    """Stamp the link's first view (``opened_at``); a later view keeps the first."""
+    conn.execute(
+        "UPDATE storefront_order_links SET opened_at = clock_timestamp()"
+        " WHERE id = %s AND opened_at IS NULL",
+        (link_id,),
+    )
 
 
 class LinkState(BaseModel):

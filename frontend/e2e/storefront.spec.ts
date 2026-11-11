@@ -46,8 +46,24 @@ test.describe('the public storefront', () => {
     await expect(page.locator('.sf-item')).toHaveCount(0)
   })
 
+  test("opens the customer's order from its link, accepts the design and sees Pay", async ({ page }) => {
+    // #5283 (spec §5.6): the token is the URL fragment, which no request carries.
+    const paths: string[] = []
+    page.on('request', (request) => paths.push(request.url()))
+    await page.goto('/store/o#tok')
+    await expect(page.getByRole('heading', { name: 'Order ORD-2026-7', level: 1 })).toBeVisible()
+    await expect(page.getByText('Price: $12.50')).toBeVisible()
+    await page.getByRole('button', { name: 'Accept', exact: true }).click()
+    await expect(page.getByText('You accepted this design.')).toBeVisible()
+    await expect(page.getByText('Price: $12.50')).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Pay $12.50' })).toBeVisible()
+    expect(paths.filter((url) => /[/=?&]tok([/?&#]|$)/.test(url))).toEqual([])
+    const width = Number(await page.evaluate('document.documentElement.scrollWidth'))
+    expect(width).toBeLessThanOrEqual(390)
+  })
+
   test('fits every page in a phone width', async ({ page }) => {
-    for (const path of ['/store/', '/store/l/l1', '/store/l/l2', '/store/request', '/store/draft']) {
+    for (const path of ['/store/', '/store/l/l1', '/store/l/l2', '/store/request', '/store/draft', '/store/o#tok']) {
       await page.goto(path)
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
       const width = Number(await page.evaluate('document.documentElement.scrollWidth'))

@@ -1370,3 +1370,198 @@ def test_a_submit_refusal_passes_through(
     crud_mock.post(SUBMIT).respond(409, json=refused, headers=CRUD)
     r = edge.post("/api/store/v1/draft/submit", json=SUBMIT_BODY, headers=_keyed())
     assert r.status_code == 409 and r.json()["type"] == refused["type"]
+
+
+# -- the customer's order page (#5283 Task 5) ----------------------------------------------
+
+ORDER = "/api/v1/internal/crud/storefront/order"
+REVISION = "4a1c0b9e-5d0c-4d43-9d33-6c1f9d0f6a11"
+QUOTE_HEX = "5b2d1c0f5d0c4d439d336c1f9d0f6a11"
+LINK = "T" * 43
+ORDER_VIEW: dict[str, Any] = {
+    "number": "2026-7",
+    "status": "We are reviewing your order",
+    "currency": "USD",
+    "minor_exponent": 2,
+    "can_cancel": True,
+    "items": [
+        {
+            "id": ITEM,
+            "title": "Box",
+            "quantity": 1,
+            "status": "Price ready",
+            "revisions": [
+                {
+                    "id": REVISION,
+                    "number": 1,
+                    "note": "Here it is",
+                    "sent_at": "2026-11-09T00:00:00Z",
+                    "answer": None,
+                    "answer_note": None,
+                    "can_answer": True,
+                    "pictures": [{"url": "https://s3/x", "kind": "image", "caption": "Design 1"}],
+                    "colours": [{"slot": 0, "colour": "#ff0000", "name": "Red"}],
+                }
+            ],
+            "quote": {
+                "id": QUOTE_HEX,
+                "unit_price_minor": 1250,
+                "quantity": 1,
+                "total_minor": 1250,
+                "accepted": False,
+                "can_accept": False,
+            },
+        }
+    ],
+    "payments": [],
+    "shipments": [],
+}
+
+
+def test_the_order_view_sends_the_token_in_the_body_and_keeps_the_allowlist(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    leaky = {
+        **ORDER_VIEW,
+        "notes": "internal",
+        "items": [
+            {
+                **ORDER_VIEW["items"][0],
+                "unit_cost_minor": 300,
+                "quote": {**ORDER_VIEW["items"][0]["quote"], "margin": 900},
+                "revisions": [
+                    {
+                        **ORDER_VIEW["items"][0]["revisions"][0],
+                        "created_by": {"kind": "browser"},
+                        "pictures": [
+                            {
+                                "url": "https://s3/x",
+                                "kind": "image",
+                                "caption": "Design 1",
+                                "filename": "internal.png",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "payments": [
+            {
+                "id": "p1",
+                "kind": "deposit",
+                "amount_minor": 500,
+                "currency": "USD",
+                "status": "open",
+                "pay_url": "https://pay",
+                "provider_ref": "secret",
+            }
+        ],
+    }
+    route = crud_mock.post(f"{ORDER}/view").respond(200, json=leaky, headers=CRUD)
+    r = edge.post("/api/store/v1/order/view", json={"token": LINK}, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 200, r.text
+    expected = {
+        **ORDER_VIEW,
+        "payments": [
+            {
+                "id": "p1",
+                "kind": "deposit",
+                "amount_minor": 500,
+                "currency": "USD",
+                "status": "open",
+                "pay_url": "https://pay",
+            }
+        ],
+    }
+    assert r.json() == expected
+    sent = route.calls.last.request
+    assert LINK not in str(sent.url)
+    assert sent.content == b'{"token":"' + LINK.encode() + b'"}'
+    assert VISITOR_HEADER not in sent.headers
+
+
+def test_an_empty_crud_404_is_an_empty_404_at_the_edge(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(f"{ORDER}/view").respond(404, headers=CRUD)
+    crud_mock.post(f"{ORDER}/cancel").respond(404, headers=CRUD)
+    seen = edge.post(
+        "/api/store/v1/order/view", json={"token": "x"}, headers={"Origin": PUBLIC_URL}
+    )
+    cancel = edge.post("/api/store/v1/order/cancel", json={"token": "x"}, headers=_keyed())
+    for r in (seen, cancel):
+        assert (r.status_code, r.content) == (404, b"")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/api/store/v1/order/revisions/{REVISION}/answer",
+        f"/api/store/v1/order/quotes/{QUOTE_HEX}/accept",
+        "/api/store/v1/order/cancel",
+    ],
+)
+def test_an_order_write_needs_a_browser_key_before_any_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    path: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.post(path, json={"token": LINK}, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 428
+    assert len(crud_mock.calls) == before
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/store/v1/order/revisions/not-one/answer",
+        "/api/store/v1/order/quotes/..%2F..%2Fx/accept",
+        f"/api/store/v1/order/quotes/{'A' * 32}/accept",
+    ],
+)
+def test_an_id_that_is_not_one_never_reaches_the_crud_side(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    path: str,
+) -> None:
+    before = len(crud_mock.calls)
+    r = edge.post(path, json={"token": LINK}, headers=_keyed())
+    assert r.status_code == 404
+    assert len(crud_mock.calls) == before
+
+
+def test_an_answer_is_forwarded_with_its_key_and_body(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{ORDER}/revisions/{REVISION}/answer").respond(
+        200, json=ORDER_VIEW, headers=CRUD
+    )
+    body = {"token": LINK, "answer": "changes_requested", "note": "wider"}
+    r = edge.post(f"/api/store/v1/order/revisions/{REVISION}/answer", json=body, headers=_keyed())
+    assert r.status_code == 200 and r.json() == ORDER_VIEW
+    sent = route.calls.last.request
+    assert len(sent.headers["idempotency-key"]) == 64
+    assert LINK not in str(sent.url)
+
+
+def test_an_order_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    refused = {
+        "type": f"{STOREFRONT_PROBLEMS}revision_answered",
+        "title": "Conflict",
+        "status": 409,
+        "detail": "This design was answered already.",
+    }
+    crud_mock.post(f"{ORDER}/revisions/{REVISION}/answer").respond(409, json=refused, headers=CRUD)
+    r = edge.post(
+        f"/api/store/v1/order/revisions/{REVISION}/answer",
+        json={"token": LINK, "answer": "accepted"},
+        headers=_keyed(),
+    )
+    assert r.status_code == 409 and r.json()["type"] == refused["type"]
