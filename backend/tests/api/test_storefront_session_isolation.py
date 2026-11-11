@@ -52,6 +52,9 @@ def _storefront_session(client: TestClient, settings: Settings) -> str:
 
 
 def _staff_session(client: TestClient) -> str:
+    """A back-office session token, made as the login callback makes it
+    (`api/auth.py`, ``sessions.create`` with ``kind="login"``): the session cookie a
+    browser holds carries this same token."""
     app = client.app
     assert isinstance(app, FastAPI)
     auth = getattr(app.state, STATE_ATTR).components.get(AUTH)

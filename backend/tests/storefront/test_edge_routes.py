@@ -148,13 +148,23 @@ def _walk(routes: Any, prefix: str = "") -> Iterator[tuple[str, set[str]]]:
 def _edge_routes() -> list[tuple[str, str]]:
     """The (method, path) of every route the edge serves under its prefix, from the app's
     own route table, so a new route is counted here at once. Path parameters are filled
-    with a plain word."""
+    with a plain word. The walk must find exactly the operations the app's OpenAPI
+    document lists under the prefix, so a change in how FastAPI nests routers cannot
+    quietly shrink it."""
+    app = create_app(load())
     found: list[tuple[str, str]] = []
-    for path, methods in _walk(create_app(load()).routes):
+    for path, methods in _walk(app.routes):
         if not path.startswith(STOREFRONT_PREFIX + "/"):
             continue
         filled = re.sub(r"\{[^}]+\}", "x", path)
         found += [(m, filled) for m in sorted(methods) if m not in ("HEAD", "OPTIONS")]
+    listed = {
+        (method.upper(), re.sub(r"\{[^}]+\}", "x", path))
+        for path, operations in app.openapi()["paths"].items()
+        if path.startswith(STOREFRONT_PREFIX + "/")
+        for method in operations
+    }
+    assert set(found) == listed, sorted(set(found) ^ listed)
     return found
 
 
