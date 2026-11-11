@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
-from scadbuddy.activity.index import ACTIVITY_PRUNE_MARGIN, ActivityIndex
+from scadbuddy.activity.index import ACTIVITY_PRUNE_MARGIN, ActivityIndex, _RepairSource
 from scadbuddy.activity.models import ActivityRow
 from scadbuddy.library.settings_store import (
     RETENTION_MAX_SECONDS,
@@ -213,6 +213,37 @@ async def test_repair_restores_a_print_run(index: ActivityIndex, pg_pool: PgPool
     )
 
 
+async def test_repair_restores_an_automatic_import(index: ActivityIndex, pg_pool: PgPool) -> None:
+    """#4699 phase 2: a `print_auto_imports` row whose activity write was lost gets its
+    row back, timed to when the watcher took the archive (`seen_at`)."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_auto_imports (archive_id, printer_id, print_name, state, reason,"
+            " seen_at) VALUES (41, 1, 'demo_elan', 'inbox', 'no model', now() - interval '1 hour')"
+        )
+        conn.execute(
+            "INSERT INTO print_auto_imports (archive_id, printer_id, print_name, state, slug,"
+            " matched_by, source, filename) VALUES (42, 1, 'demo', 'linked', 'demo', 'job_name',"
+            " 'archive', 'demo.gcode.3mf')"
+        )
+        seen = conn.execute(
+            "SELECT seen_at FROM print_auto_imports WHERE archive_id = 41"
+        ).fetchone()
+    assert seen is not None
+    assert await index.repair(DAY) == 2
+    inbox = await index.get("print_auto_import:41")
+    assert inbox is not None
+    assert (inbox.kind, inbox.facets["state"], inbox.created_at, inbox.finished_at) == (
+        "print_auto_import",
+        "inbox",
+        seen["seen_at"],
+        seen["seen_at"],
+    )
+    linked = await index.get("print_auto_import:42")
+    assert linked is not None and linked.facets["matched_by"] == "job_name"
+    assert await index.repair(DAY) == 0
+
+
 async def test_repair_ignores_rows_outside_the_window(
     pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
 ) -> None:
@@ -414,7 +445,7 @@ def test_a_repair_commits_each_row_it_restores(pg_pool: PgPool, index: ActivityI
         # What this relies on: the repair's own pool commits each row's transaction.
         assert conn.autocommit, "the repair's pool is no longer autocommit"
     restored = index._repair_source(
-        DAY, "print_run:", "print_runs", "r.id, r.created_at, r.finished_at", build
+        DAY, _RepairSource("print_run:", "print_runs", "r.id, r.created_at, r.finished_at", build)
     )
     assert restored == 2
     assert seen == [0, 1]

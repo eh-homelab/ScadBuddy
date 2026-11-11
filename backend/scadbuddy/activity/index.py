@@ -226,6 +226,21 @@ class Attribution:
     via_tool: str | None
 
 
+@dataclass(frozen=True)
+class _RepairSource:
+    """A table `ActivityIndex.repair` restores rows from: its activity ids are ``prefix``
+    plus ``key``, and a row is in the window by ``created`` or ``finished`` (SQL over the
+    source's alias ``r``). ``columns`` is what ``build`` reads."""
+
+    prefix: str
+    table: str
+    columns: str
+    build: Callable[[Any], ActivityRow]
+    key: str = "r.id"
+    created: str = "r.created_at"
+    finished: str = "r.finished_at"
+
+
 class ActivityIndex:
     def __init__(
         self,
@@ -444,6 +459,8 @@ class ActivityIndex:
         from scadbuddy.bambuddy.runs import PrintRun
         from scadbuddy.operations.activity import row_of as operation_row_of
         from scadbuddy.operations.store import Operation
+        from scadbuddy.print_watch.activity import row_of as auto_import_row_of
+        from scadbuddy.print_watch.store import AutoImport
         from scadbuddy.render.activity import row_of as render_row_of
         from scadbuddy.render.job_models import Job
         from scadbuddy.render.projection import PROJECTION_COLUMNS
@@ -453,8 +470,8 @@ class ActivityIndex:
             row.finished_at = found["finished_at"]
             return row
 
-        sources: list[tuple[str, str, str, Callable[[Any], ActivityRow]]] = [
-            (
+        sources: list[_RepairSource] = [
+            _RepairSource(
                 "render:",
                 "render_jobs",
                 ", ".join(f"r.{c}" for c in PROJECTION_COLUMNS),
@@ -462,7 +479,7 @@ class ActivityIndex:
                     render_row_of(Job.model_validate({c: f[c] for c in PROJECTION_COLUMNS})), f
                 ),
             ),
-            (
+            _RepairSource(
                 "operation:",
                 "operations",
                 "r.id, r.kind, r.subject, r.status, r.result, r.error, r.created_at,"
@@ -474,7 +491,7 @@ class ActivityIndex:
                     f,
                 ),
             ),
-            (
+            _RepairSource(
                 "print_run:",
                 "print_runs",
                 "r.id, r.output_id, r.status, r.created_at, r.finished_at, r.result, r.error,"
@@ -490,13 +507,25 @@ class ActivityIndex:
                     f,
                 ),
             ),
+            # #4699: the print watcher's rows. Keyed by archive, with one time (`seen_at`):
+            # the watcher writes each row finished, with its activity row.
+            _RepairSource(
+                "print_auto_import:",
+                "print_auto_imports",
+                ", ".join(f"r.{c}" for c in AutoImport.model_fields)
+                + ", r.seen_at AS created_at, r.seen_at AS finished_at",
+                lambda f: timed(auto_import_row_of(AutoImport.model_validate(f)), f),
+                key="r.archive_id::text",
+                created="r.seen_at",
+                finished="r.seen_at",
+            ),
         ]
         restored = 0
-        for prefix, table, columns, build in sources:
+        for source in sources:
             try:
-                restored += self._repair_source(window, prefix, table, columns, build)
+                restored += self._repair_source(window, source)
             except Exception:
-                logger.exception("an activity repair failed", extra={"table": table})
+                logger.exception("an activity repair failed", extra={"table": source.table})
                 self._count_failure()
         try:
             with self.pool.connection() as conn:
@@ -526,26 +555,43 @@ class ActivityIndex:
             self.metrics.activity_write_failures.inc()
 
     @staticmethod
-    def _missing(prefix: str, table: str, columns: str) -> sql.Composed:
-        return sql.SQL(
-            "SELECT {columns} FROM {table} r LEFT JOIN activity a ON a.id = {prefix} || r.id"
-            " WHERE (a.id IS NULL OR a.source = '')"
-            " AND (r.created_at >= now() - make_interval(secs => %(window)s)"
-            " OR r.finished_at >= now() - make_interval(secs => %(window)s))"
-        ).format(columns=sql.SQL(columns), table=sql.Identifier(table), prefix=sql.Literal(prefix))
-
-    def _repair_source(
-        self,
-        window: float,
+    def _missing(
         prefix: str,
         table: str,
         columns: str,
-        build: Callable[[Any], ActivityRow],
-    ) -> int:
+        *,
+        key: str = "r.id",
+        created: str = "r.created_at",
+        finished: str = "r.finished_at",
+    ) -> sql.Composed:
+        return sql.SQL(
+            "SELECT {columns} FROM {table} r LEFT JOIN activity a ON a.id = {prefix} || {key}"
+            " WHERE (a.id IS NULL OR a.source = '')"
+            " AND ({created} >= now() - make_interval(secs => %(window)s)"
+            " OR {finished} >= now() - make_interval(secs => %(window)s))"
+        ).format(
+            columns=sql.SQL(columns),
+            table=sql.Identifier(table),
+            prefix=sql.Literal(prefix),
+            key=sql.SQL(key),
+            created=sql.SQL(created),
+            finished=sql.SQL(finished),
+        )
+
+    def _repair_source(self, window: float, source: _RepairSource) -> int:
         restored = 0
+        build = source.build
         with self.pool.connection() as conn:
             found = conn.execute(
-                self._missing(prefix, table, columns), {"window": window}
+                self._missing(
+                    source.prefix,
+                    source.table,
+                    source.columns,
+                    key=source.key,
+                    created=source.created,
+                    finished=source.finished,
+                ),
+                {"window": window},
             ).fetchall()
             # The pool is autocommit (the projection's), so each row's `upsert_in`
             # commits on its own. Keep it so: a restore takes the event log's lock, which

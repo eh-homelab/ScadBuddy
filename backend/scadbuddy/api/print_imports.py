@@ -68,7 +68,7 @@ from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_watch.component import AutoImportsDep
-from scadbuddy.print_watch.store import AutoImport, AutoImportState
+from scadbuddy.print_watch.store import AutoImport, AutoImportLinkedError, AutoImportState
 
 router = APIRouter(prefix="/print-imports", tags=["prints"])
 
@@ -277,16 +277,44 @@ async def _one_import(links: PrintLinkStore, archive_id: int) -> AsyncIterator[N
         "`reason` and the models the job's name suggests). An inbox print that a link "
         "names since (a person imported it, or ScadBuddy found it was its own print) is "
         "left out. A linked print whose model was deleted since is in the inbox, with "
-        "that as its `reason`. Page with `before`, the last `archive_id` read."
+        "that as its `reason`. A print dismissed from the inbox is `dismissed` (`POST "
+        "/print-imports/auto/{archive_id}/dismiss`). Page with `before`, the last "
+        "`archive_id` read."
     ),
 )
 async def list_auto_imports(
     store: AutoImportsDep,
-    state: Annotated[AutoImportState | None, Query(description="Only linked or inbox")] = None,
+    state: Annotated[AutoImportState | None, Query(description="Only this state")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: Annotated[int | None, Query(ge=1)] = None,
 ) -> list[AutoImport]:
     return await store.page(state=state, limit=limit, before=before)
+
+
+@router.post(
+    "/auto/{archive_id}/dismiss",
+    response_model=AutoImport,
+    summary="Dismiss a print from Unsorted imports",
+    description=(
+        "Takes an inbox print (#4699) out of Unsorted imports: its row becomes "
+        "`dismissed`, and the print watcher never takes the archive again. It reaches no "
+        "printer and no Bambuddy, and the print can still be linked with Import print "
+        "(`POST /print-imports/{archive_id}`). A print dismissed before gives the same "
+        "answer. 404 when the watcher never took the archive; 409 when a link names the "
+        "archive (the print is a model's, an output's or a library file's, not in the "
+        "inbox)."
+    ),
+)
+async def dismiss_auto_import(archive_id: ArchiveIdPath, store: AutoImportsDep) -> AutoImport:
+    try:
+        row = await store.dismiss(archive_id)
+    except AutoImportLinkedError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), subject=error.subject) from None
+    if row is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"the print watcher has no print for archive {archive_id}"
+        )
+    return row
 
 
 @router.post(
