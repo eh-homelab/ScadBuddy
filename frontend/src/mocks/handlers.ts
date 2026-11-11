@@ -66,6 +66,7 @@ import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { trashFiledMockLibraryFiles } from './features/library'
 import { attachmentsOf } from './features/printAttachments'
+import { printersState } from './features/printers'
 import { mockRackCheck, mockRackPicks } from './features/rack'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
@@ -3392,17 +3393,30 @@ export const handlers = [
     } satisfies ChoicesView)
   }),
 
+  /**
+   * #5153 — the backend keeps the plate on the registry printer only. A Bambuddy id no
+   * registry printer links is 404, and its forget is a no-op 200 that names no printer.
+   * A registry id the registry does not hold is 404, forget or not. The key here stays
+   * the Bambuddy id where the registry printer has one, as the choices read looks it up.
+   */
   http.put(`${base}/print/printers/:id/bed-type`, async ({ params, request }) => {
-    const printerId = String(params['id'])
+    const asked = String(params['id'])
     const body = (await request.json()) as { bed_type: string | null }
-    if (body.bed_type === null) delete state.printerBedTypes[printerId]
-    else state.printerBedTypes[printerId] = body.bed_type
-    const bambuddy = /^\d+$/.test(printerId)
-    return HttpResponse.json({
-      printer_id: bambuddy ? Number(printerId) : null,
-      printer: bambuddy ? null : printerId,
-      bed_type: state.printerBedTypes[printerId] ?? null,
-    })
+    const bambuddyId = /^\d+$/.test(asked) ? Number(asked) : null
+    const row = printersState().find((printer) =>
+      bambuddyId === null ? printer.id === asked : printer.bambuddy_printer_id === bambuddyId,
+    )
+    if (!row) {
+      if (bambuddyId !== null && body.bed_type === null) {
+        return HttpResponse.json({ printer_id: bambuddyId, printer: null, bed_type: null })
+      }
+      return problem(404, 'Not Found', `no printer ${asked}`)
+    }
+    const linked = row.bambuddy_printer_id ?? null
+    const key = linked === null ? row.id : String(linked)
+    if (body.bed_type === null) delete state.printerBedTypes[key]
+    else state.printerBedTypes[key] = body.bed_type
+    return HttpResponse.json({ printer_id: linked, printer: row.id, bed_type: state.printerBedTypes[key] ?? null })
   }),
 
   http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {

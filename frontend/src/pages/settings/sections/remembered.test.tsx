@@ -5,6 +5,9 @@ import { setMockRemembered } from '../../../mocks/handlers'
 import { renderSettingsSection } from '../testing'
 import { Component as Remembered } from './remembered'
 
+/** The mock registry's LAN-only printer (`mocks/features/printers.ts`): a plate route 404s for an id it does not hold. */
+const GARAGE = '00000000-0000-4000-8000-0000000000aa'
+
 describe('Remembered choices (#322)', () => {
   it('forgets one remembered choice and leaves the rest', async () => {
     setMockRemembered({
@@ -28,12 +31,12 @@ describe('Remembered choices (#322)', () => {
   })
 
   it("lists and forgets a LAN-only printer's plate by its registry id (#4971)", async () => {
-    setMockRemembered({ printerBedTypes: { 'lan-row': 'Cool Plate', '1': 'Textured PEI Plate' } })
+    setMockRemembered({ printerBedTypes: { [GARAGE]: 'Cool Plate', '1': 'Textured PEI Plate' } })
     const { user } = renderSettingsSection(<Remembered />, { route: '/settings/printing' })
     const table = await screen.findByRole('table', { name: 'Remembered choices' })
     expect(within(table).getByText('Cool Plate')).toBeInTheDocument()
 
-    await user.click(within(table).getByRole('button', { name: 'Forget plate for Printer lan-row' }))
+    await user.click(within(table).getByRole('button', { name: `Forget plate for Printer ${GARAGE}` }))
     await waitFor(() => expect(within(table).queryByText('Cool Plate')).toBeNull())
     expect((await api.getRemembered()).printer_plates).toEqual([
       { printer: null, bambuddy_printer_id: 1, name: null, bed_type: 'Textured PEI Plate' },
