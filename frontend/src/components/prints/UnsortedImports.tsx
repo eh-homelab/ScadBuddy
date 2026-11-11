@@ -32,22 +32,32 @@ export function UnsortedImports({
   onImported?: (imported: ImportedPrint) => void
 }) {
   const [linked, setLinked] = useState(0)
-  // Bumped when the last shown print is dismissed: the first page is read again, so the
-  // older pages' prints show (review of #6028).
-  const [emptied, setEmptied] = useState(0)
-  const inbox = useAsync(() => api.listAutoImports({ state: 'inbox', limit: PAGE }), [version, linked, emptied])
-  const [start, setStart] = useState<ImportStart | null>(null)
-  const [open, setOpen] = useState(false)
   // The pages "Show more" read after the first, and the prints dismissed from them; a new
-  // first read starts both over.
+  // first read starts both over. `emptied` is bumped when the last shown print is
+  // dismissed: the first page is read again, so the older pages' prints show (review of
+  // #6028). The dismiss decides it from the state it updates, so dismisses that answer
+  // together still bump it (#6029).
   const [pages, setPages] = useState<{
     first: AutoImport[] | undefined
     rows: AutoImport[]
     full: boolean
     gone: ReadonlySet<number>
-  }>({ first: undefined, rows: [], full: false, gone: new Set() })
+    emptied: number
+  }>({ first: undefined, rows: [], full: false, gone: new Set(), emptied: 0 })
+  const inbox = useAsync(
+    () => api.listAutoImports({ state: 'inbox', limit: PAGE }),
+    [version, linked, pages.emptied],
+  )
+  const [start, setStart] = useState<ImportStart | null>(null)
+  const [open, setOpen] = useState(false)
   if (inbox.data !== pages.first) {
-    setPages({ first: inbox.data, rows: [], full: (inbox.data?.length ?? 0) === PAGE, gone: new Set() })
+    setPages({
+      first: inbox.data,
+      rows: [],
+      full: (inbox.data?.length ?? 0) === PAGE,
+      gone: new Set(),
+      emptied: pages.emptied,
+    })
   }
   const gone = pages.gone
   const [more, setMore] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null })
@@ -93,8 +103,11 @@ export function UnsortedImports({
                   setOpen(true)
                 }}
                 onDismissed={() => {
-                  setPages((was) => ({ ...was, gone: new Set([...was.gone, row.archive_id]) }))
-                  if (rows.length === 1) setEmptied((n) => n + 1)
+                  setPages((was) => {
+                    const gone = new Set([...was.gone, row.archive_id])
+                    const left = [...(was.first ?? []), ...was.rows].some((shown) => !gone.has(shown.archive_id))
+                    return { ...was, gone, emptied: left ? was.emptied : was.emptied + 1 }
+                  })
                 }}
               />
             ))}

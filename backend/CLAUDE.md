@@ -546,7 +546,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   A row a link names is 409 (`AutoImportLinkedError`); no row is 404; a second dismiss
   gives the same answer and writes nothing. A person or an agent may call it
   (agent `dismiss_auto_import`, `write`): it reaches no printer and no Bambuddy, and Import
-  print can still link the print. `GET /print-imports/auto` takes `state=dismissed` too; a
+  print can still link the print. When Import print links an archive the watcher took (a
+  dismissed or an inbox row), it rewrites that `print_auto_import` activity row in the
+  link's transaction (#6029: `record_import`'s `also`, `AutoImportStore.imported_in`,
+  `activity.py` `imported_row`): facet `state` `linked`, `matched_by` `import`, the source
+  the person chose. The `print_auto_imports` row stays as the watcher wrote it. `GET /print-imports/auto` takes `state=dismissed` too; a
   dismissed row that a link names since is in no list, as an inbox row is.
   The activity repair restores `print_auto_import` rows from `print_auto_imports`
   (`activity/index.py` `_RepairSource`, keyed by `archive_id`, timed by `seen_at`). The

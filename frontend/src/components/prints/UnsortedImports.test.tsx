@@ -162,6 +162,34 @@ describe('UnsortedImports', () => {
     expect(screen.getByTestId('unsorted-2949')).toBeInTheDocument()
   }, 60_000)
 
+  it('reads the first page again when the last shown prints are dismissed at once (#6029)', async () => {
+    const job = (id: number): AutoImport => ({ archive_id: id, print_name: `Job ${id}`, state: 'inbox', reason: 'r', suggested: [] })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print-imports/auto', () => {
+        reads += 1
+        // The second read finds an older print the first page did not hold.
+        return HttpResponse.json(reads === 1 ? [job(8003), job(8002)] : [job(8001)])
+      }),
+      http.post('/api/v1/print-imports/auto/:id/dismiss', async ({ params }) => {
+        await held
+        return HttpResponse.json({ ...job(Number(params['id'])), state: 'dismissed' })
+      }),
+    )
+    const { user } = renderPage(<UnsortedImports />)
+    await screen.findByTestId('unsorted-8003')
+    // Both dismisses start before either answers.
+    await user.click(screen.getByRole('button', { name: 'Dismiss Job 8003' }))
+    await user.click(screen.getByRole('button', { name: 'Dismiss Job 8002' }))
+    release()
+    expect(await screen.findByTestId('unsorted-8001')).toBeInTheDocument()
+    expect(reads).toBe(2)
+  })
+
   it('keeps an inbox print on its own print, with no way back to the archive picker', async () => {
     const { user } = renderPage(<UnsortedImports />)
     const row = await screen.findByTestId('unsorted-9105')

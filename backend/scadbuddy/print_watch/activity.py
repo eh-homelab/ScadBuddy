@@ -9,6 +9,7 @@ from scadbuddy.activity.models import ActivityKind, ActivityRow, Facet
 from scadbuddy.bambuddy.subject import PrintSubject
 
 if TYPE_CHECKING:
+    from scadbuddy.bambuddy.print_links import PrintImport
     from scadbuddy.print_watch.store import AutoImport
 
 KIND = "print_auto_import"
@@ -45,6 +46,26 @@ def row_of(row: AutoImport) -> ActivityRow:
             "suggested": row.suggested,
         },
     )
+
+
+def imported_row(row: AutoImport, record: PrintImport) -> ActivityRow:
+    """``row``'s activity row once Import print (#4698) linked its archive to a model
+    (#6029): the print is on that model now, from the source the person chose. The
+    ``print_auto_imports`` row stays as the watcher wrote it."""
+    linked = row.model_copy(
+        update={
+            "state": "linked",
+            "slug": record.slug,
+            "source": record.source,
+            "filename": record.filename,
+            "matched_by": None,
+            "reason": None,
+            "suggested": [],
+        }
+    )
+    activity = row_of(linked)
+    activity.facets["matched_by"] = "import"
+    return activity
 
 
 PRINT_AUTO_IMPORT = ActivityKind(

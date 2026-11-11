@@ -120,7 +120,8 @@ same way, `vite.config.ts`).
   the printer is never read for it; a recorded source that is not listed falls back to
   the preselected one), with no way back to the archive picker. "Dismiss" calls the
   dismiss route. While a page of 50 is full, "Show more" reads the next (`before`); once
-  every shown print is dismissed, the first page is read again. Mocks
+  every shown print is dismissed, the first page is read again (the functional `setPages`
+  update decides it, so dismisses that answer together still read again, #6029). Mocks
   `src/mocks/features/printWatch.ts`.
 
 ## See also
