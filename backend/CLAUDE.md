@@ -575,7 +575,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   in-process), so the nudge is a Temporal start: no new SQL, grant or route; it reads
   the settings over the CRUD route and the row through the watch's own
   `PrinterStore.get`, the read each watch attempt already makes. The settings read is
-  bounded by `SETTINGS_TIMEOUT` (5 s, #6034). Each nudge is a task of its own, off the
+  bounded by `SETTINGS_TIMEOUT` (5 s, #6034), the row read by `PRINTER_TIMEOUT` (3 s,
+  #6037: `PrinterStore.get`'s `timeout`, one deadline for the pool wait and a
+  `SET LOCAL statement_timeout` on the store's own pool; it bounds a slow or locked read,
+  not a dead server or a dropped TCP link). Each nudge is a task of its own, off the
   watch's loop (its heartbeat, next report and rack settle never wait for it), cancelled
   past `watch.NUDGE_TIMEOUT` (10 s) or when its attempt ends. A nudge that fails is
   logged and never ends the watch.

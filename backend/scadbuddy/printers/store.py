@@ -34,6 +34,7 @@ and the test above sees it; ``print_runs.printer`` is ``ON DELETE SET NULL`` ins
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -351,8 +352,23 @@ class PrinterStore:
         data = found.fetchone()
         return None if data is None else _row(data)
 
-    def get(self, printer_id: str) -> PrinterRow | None:
-        with self.pool.connection() as conn:
+    def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
+        """``timeout``, in seconds, is one deadline for a slow or locked read (#6037): the
+        pool wait (`PoolTimeout`) and then the statement, which gets what the wait left
+        (`QueryCanceled`, a ``statement_timeout`` local to this read's transaction), on
+        the store's own pool. ``statement_timeout`` is enforced by the server, so a dead
+        server or a dropped TCP link still blocks the client (that is the pool's
+        keepalives, `core/pg_keepalive.py`). With a timeout the read costs a ``BEGIN``,
+        a ``SET LOCAL`` and a ``COMMIT`` more than without one. None waits as long as it
+        takes."""
+        if timeout is None:
+            with self.pool.connection() as conn:
+                return self._one(conn, "id", printer_id)
+        deadline = time.monotonic() + timeout
+        with self.pool.connection(timeout=timeout) as conn, conn.transaction():
+            # 0 would be no bound at all; 1 ms is the least.
+            left_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            conn.execute(f"SET LOCAL statement_timeout = {left_ms}")
             return self._one(conn, "id", printer_id)
 
     def by_serial(self, serial: str) -> PrinterRow | None:

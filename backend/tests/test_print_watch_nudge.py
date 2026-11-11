@@ -15,6 +15,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_watch.nudge import (
+    PRINTER_TIMEOUT,
     SETTINGS_TIMEOUT,
     Nudger,
     claimed,
@@ -109,8 +110,9 @@ class Recorder:
         self.timeouts.append(timeout)
         return self.settings
 
-    def get(self, printer_id: str) -> PrinterRow | None:
+    def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
         self.reads.append(printer_id)
+        self.timeouts.append(timeout)
         return self.row
 
     async def start(self, task_queue: str) -> None:
@@ -124,14 +126,14 @@ async def test_a_start_the_watcher_takes_starts_a_pass_on_the_library_queue() ->
     assert fake.started == ["library"]
 
 
-async def test_the_settings_read_is_bounded() -> None:
-    """#6034: an unbounded read would keep its thread past the watch's timeout, and each
-    later start could add another."""
+async def test_the_settings_and_printer_reads_are_bounded() -> None:
+    """#6034, #6037: an unbounded read would keep its thread past the watch's timeout,
+    and each later start could add another. Both reads, one after the other, fit in it."""
     fake = Recorder(ON, LINKED)
     nudger = Nudger(fake.load, fake.get, "library", start=fake.start)
     await nudger.nudge("p1", THEIRS)
-    assert fake.timeouts == [SETTINGS_TIMEOUT]
-    assert SETTINGS_TIMEOUT < NUDGE_TIMEOUT
+    assert fake.timeouts == [SETTINGS_TIMEOUT, PRINTER_TIMEOUT]
+    assert SETTINGS_TIMEOUT + PRINTER_TIMEOUT < NUDGE_TIMEOUT
 
 
 async def test_a_native_start_reads_nothing_and_starts_nothing() -> None:

@@ -43,7 +43,11 @@ no row, so the prune Schedule's next pass takes it, as it did before this nudge.
 nudge run per job would only shorten that rare wait, and would need a workflow change for
 its timer; the Schedule is the retry.
 
-The settings read is bounded by `SETTINGS_TIMEOUT` (#6034). The watch runs each nudge
+The settings read is bounded by `SETTINGS_TIMEOUT` (#6034), and the printer row read by
+`PRINTER_TIMEOUT` (#6037: one deadline for the pool wait and a statement timeout local
+to that read, on the store's own pool; no new pool or client). Both bound a slow or
+locked read only: a dead server or a dropped TCP link still blocks the read's thread,
+and the watch's cancel then frees the nudge but not that thread. The watch runs each nudge
 as a task of its own, off its report loop, and cancels it past
 `printers.watch.NUDGE_TIMEOUT` or when its attempt ends. A nudge that fails is logged
 and never ends the watch: the Schedule's pass still comes.
@@ -75,6 +79,10 @@ NUDGE_DELAY = timedelta(seconds=30)
 #: The bound of the settings read, retries included (#6034), below the watch's
 #: `NUDGE_TIMEOUT`, so a stalled API never leaves the read's thread running past it.
 SETTINGS_TIMEOUT = 5.0
+#: The bound of the printer row read (#6037): one deadline for its pool wait and a
+#: statement timeout local to the read. With `SETTINGS_TIMEOUT` it stays below the watch's
+#: `NUDGE_TIMEOUT`, so a slow or locked read never leaves the read's thread running past it.
+PRINTER_TIMEOUT = 3.0
 #: The ``subtask_name`` of a native run's LAN start (`workflows/printing.py` `_start_lan`).
 NATIVE_SUBTASK = re.compile(r"scadbuddy-[0-9a-f]{8}-p\d+(?:-c\d+)?")
 
@@ -124,6 +132,12 @@ class SettingsLoader(Protocol):
     def __call__(self, timeout: float | None = None) -> StoredSettings: ...
 
 
+class PrinterLoader(Protocol):
+    """`PrinterStore.get`: ``timeout`` bounds the pool wait and the statement."""
+
+    def __call__(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None: ...
+
+
 class Nudger:
     """The watch's nudge. ``load_settings`` and ``get_printer`` are blocking (run in a
     thread); ``start`` defaults to `start_pass` on the activity's own client."""
@@ -131,7 +145,7 @@ class Nudger:
     def __init__(
         self,
         load_settings: SettingsLoader,
-        get_printer: Callable[[str], PrinterRow | None],
+        get_printer: PrinterLoader,
         task_queue: str,
         *,
         start: Start | None = None,
@@ -149,7 +163,7 @@ class Nudger:
         settings = await asyncio.to_thread(self.load_settings, timeout=SETTINGS_TIMEOUT)
         if not settings.print_auto_import:
             return False
-        row = await asyncio.to_thread(self.get_printer, printer_id)
+        row = await asyncio.to_thread(self.get_printer, printer_id, timeout=PRINTER_TIMEOUT)
         if not wanted(settings, row, subtask):
             return False
         if self.start is not None:
