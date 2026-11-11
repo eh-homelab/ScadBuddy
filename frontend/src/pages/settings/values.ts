@@ -55,7 +55,13 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
   printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #4699 — the print watcher's settings; only a person saves them (403 `person_only`).
-  'print-watcher': ['print_auto_import', 'print_auto_import_sources', 'print_auto_import_skip_printers'],
+  // #6041 — and the LAN-only printers it leaves alone, by registry id.
+  'print-watcher': [
+    'print_auto_import',
+    'print_auto_import_sources',
+    'print_auto_import_skip_printers',
+    'print_auto_import_skip_lan_printers',
+  ],
   // #426 — the blob store beside the inbox folder it needs.
   projects: [
     'library_folder_id',
@@ -155,10 +161,17 @@ export function printerIdsValue(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',')
 }
 
+/** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
+export function registryIdsValue(ids: readonly string[]): string {
+  return [...new Set(ids)].sort().join(',')
+}
+
 export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'print_auto_import') return settings.print_auto_import ? 'true' : 'false'
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
+  if (name === 'print_auto_import_skip_lan_printers')
+    return registryIdsValue(settings.print_auto_import_skip_lan_printers ?? [])
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
   if (name === 'destination_sort') return settings.destination_sort ?? 'touched'
   if (name === 'activity_follow') {
@@ -192,6 +205,7 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
+  if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')
   if (RETENTIONS.includes(name)) {
     // Empty keeps every row; a number of days prunes the older ones.
     if (raw.trim() === '') return null

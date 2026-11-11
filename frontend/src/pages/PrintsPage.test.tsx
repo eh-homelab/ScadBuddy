@@ -16,6 +16,7 @@ import { intersect } from '../test/intersection'
 import { optionNames, selectOption } from '../test/select'
 import { renderPage } from '../test/utils'
 import { setHotPath } from '../mocks/features/hotPath'
+import { LAN_PRINTER, addLanRecord } from '../mocks/features/printWatch'
 import { resetBambuddyLinks, setBambuddyLinks } from '../lib/bambuddyLinks'
 import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
@@ -852,6 +853,40 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
     // Every other sent output already has its print.
     expect(waiting).not.toHaveTextContent('Reagan')
     expect(waiting).not.toHaveTextContent('Draft')
+  })
+
+  it('says that its prints from LAN-only printers are in Activity (#6041)', async () => {
+    addLanRecord({
+      id: 9,
+      printer_id: LAN_PRINTER.id,
+      printer_name: LAN_PRINTER.name,
+      subtask_name: 'name-keychain',
+      started_at: '2026-11-11T13:00:00Z',
+      state: 'linked',
+      slug: 'name-keychain',
+      matched_by: 'job_name',
+      source: 'printer',
+      suggested: [],
+    })
+    render('/m/name-keychain/prints')
+    const note = await screen.findByTestId('lan-prints-note')
+    expect(within(note).getByRole('link', { name: 'See them in Activity' })).toHaveAttribute(
+      'href',
+      '/activity?kind=print_auto_import&subject=model%3Aname-keychain',
+    )
+  })
+
+  it('says nothing of LAN-only printers when none of its prints is from one (#6041)', async () => {
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/print-imports/auto/lan', ({ request }) => {
+        asked.push(new URL(request.url).searchParams.get('slug'))
+        return HttpResponse.json([])
+      }),
+    )
+    render('/m/name-keychain/prints')
+    await waitFor(() => expect(asked).toEqual(['name-keychain']))
+    expect(screen.queryByTestId('lan-prints-note')).toBeNull()
   })
 })
 

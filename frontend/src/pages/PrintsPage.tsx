@@ -7,6 +7,7 @@ import { liveJobs, queueTail, startedOn, type LiveJob } from '../components/prin
 import { PrinterStrip, usePrintersNow } from '../components/prints/NowPrinting'
 import { QueueNotes, usePrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
+import { lanPrintsActivityPath } from '../components/prints/prints'
 import { UnsortedImports } from '../components/prints/UnsortedImports'
 import { modelPath } from '../lib/deeplink'
 import { nativeBackends } from '../lib/printerRegistry'
@@ -136,8 +137,28 @@ export function TemplatePrintsPage() {
           <span className="text-faint">/</span>
           <h1 className="text-[13px] font-medium">Prints</h1>
         </div>
+        <LanPrintsNote slug={slug} />
         <PrintHistory key={slug} fixedSlug={slug} />
       </div>
     </div>
+  )
+}
+
+/**
+ * #6041 — a print on a LAN-only printer that is linked to this model has no Bambuddy archive,
+ * so the history above does not list it. When the model has one, this says so and links to
+ * Activity, where each is. A failed read shows nothing.
+ */
+function LanPrintsNote({ slug }: { slug: string }) {
+  const linked = useAsync(() => api.listLanAutoImports({ state: 'linked', slug, limit: 1 }), [slug])
+  if (!linked.data?.length) return null
+  return (
+    <p className="mb-3 text-[13px] text-subtle" data-testid="lan-prints-note">
+      Prints from printers with no Bambuddy link are not listed here.{' '}
+      <Link className="underline" to={lanPrintsActivityPath(slug)}>
+        See them in Activity
+      </Link>
+      .
+    </p>
   )
 }

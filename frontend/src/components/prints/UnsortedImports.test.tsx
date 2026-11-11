@@ -2,11 +2,12 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
-import type { AutoImport, ModelSummary } from '../../api/types'
+import type { AutoImport, LanPrintRecord, ModelSummary } from '../../api/types'
 import { addMockModel, mockModels, resetMockState } from '../../mocks/handlers'
-import { NO_MODEL_MATCHED, NO_SOURCE } from '../../mocks/features/printWatch'
+import { LAN_PRINTER, NO_FILE, NO_MODEL_MATCHED, NO_SOURCE, lanRecords } from '../../mocks/features/printWatch'
 import { archiveImports } from '../../mocks/features/orders/pastPrints'
 import { server } from '../../mocks/server'
+import { selectOption } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { UnsortedImports } from './UnsortedImports'
 
@@ -25,12 +26,122 @@ describe('UnsortedImports', () => {
     expect(within(rows[1]!).getByText('Benchy')).toBeInTheDocument()
   })
 
-  it('shows nothing while the inbox is empty', async () => {
-    server.use(http.get('/api/v1/print-imports/auto', () => HttpResponse.json([])))
+  it('shows nothing while both inboxes are empty', async () => {
+    server.use(
+      http.get('/api/v1/print-imports/auto', () => HttpResponse.json([])),
+      http.get('/api/v1/print-imports/auto/lan', () => HttpResponse.json([])),
+    )
     const read = vi.spyOn(api, 'listAutoImports')
+    const readLan = vi.spyOn(api, 'listLanAutoImports')
     const { container } = renderPage(<UnsortedImports />)
     await waitFor(() => expect(read).toHaveBeenCalledWith({ state: 'inbox', limit: 50 }))
+    await waitFor(() => expect(readLan).toHaveBeenCalledWith({ state: 'inbox', limit: 50 }))
     await waitFor(() => expect(container.querySelector('[data-testid="unsorted-imports"]')).toBeNull())
+  })
+
+  // #6041 — the prints the watcher recorded on LAN-only printers, in a list of their own.
+  it('lists the LAN-only printers’ inbox prints apart, with the printer and the job', async () => {
+    renderPage(<UnsortedImports />)
+    const list = await screen.findByRole('list', { name: 'Unsorted imports on LAN-only printers' })
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows.map((row) => row.dataset['testid'])).toEqual(['unsorted-lan-7', 'unsorted-lan-6'])
+    expect(within(rows[0]!).getByText('cube')).toBeInTheDocument()
+    expect(within(rows[0]!).getByText(/Garage/)).toBeInTheDocument()
+    expect(within(rows[1]!).getByText(NO_FILE)).toBeInTheDocument()
+    // No Import print for them: a model picker only.
+    expect(within(rows[0]!).getByRole('button', { name: 'Link cube' })).toHaveTextContent('Link to model…')
+    // The archive list holds no LAN print.
+    const archives = screen.getByRole('list', { name: 'Unsorted imports' })
+    expect(within(archives).queryByTestId('unsorted-lan-7')).toBeNull()
+  })
+
+  it('shows the LAN-only printers’ prints while the archive inbox is empty', async () => {
+    server.use(http.get('/api/v1/print-imports/auto', () => HttpResponse.json([])))
+    renderPage(<UnsortedImports />)
+    expect(await screen.findByTestId('unsorted-lan-7')).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Unsorted imports' })).toBeNull()
+  })
+
+  it('dismisses a LAN-only printer’s print, which leaves the inbox', async () => {
+    const dismiss = vi.spyOn(api, 'dismissLanAutoImport')
+    const { user } = renderPage(<UnsortedImports />)
+    const row = await screen.findByTestId('unsorted-lan-6')
+    await user.click(within(row).getByRole('button', { name: 'Dismiss vase' }))
+    await waitFor(() => expect(screen.queryByTestId('unsorted-lan-6')).toBeNull())
+    expect(dismiss).toHaveBeenCalledWith(6)
+    expect(screen.getByTestId('unsorted-lan-7')).toBeInTheDocument()
+    expect(lanRecords().find((r) => r.id === 6)?.state).toBe('dismissed')
+  })
+
+  it('links a LAN-only printer’s print to a model, and says it is in Activity', async () => {
+    const link = vi.spyOn(api, 'linkLanAutoImport')
+    const getSources = vi.spyOn(api, 'getPrintSources')
+    const { user } = renderPage(<UnsortedImports />)
+    const row = await screen.findByTestId('unsorted-lan-7')
+    await user.click(within(row).getByRole('button', { name: 'Link cube' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Link to model' })
+    expect(within(dialog).getByTestId('lan-link-print')).toHaveTextContent('cube · Garage')
+    // The job's name suggests the keychain: it is chosen.
+    const suggested = await within(dialog).findByLabelText('Suggested models')
+    expect(within(suggested).getByRole('button', { pressed: true })).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Link' }))
+    const done = await within(dialog).findByTestId('lan-link-done')
+    expect(done).toHaveTextContent('cube is now a print of name-keychain')
+    expect(within(done).getByRole('link', { name: 'See it in Activity' })).toHaveAttribute(
+      'href',
+      '/activity?kind=print_auto_import&subject=model%3Aname-keychain',
+    )
+    expect(link).toHaveBeenCalledWith(7, 'name-keychain')
+    // No source step, and Bambuddy is never asked.
+    expect(getSources).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.queryByTestId('unsorted-lan-7')).toBeNull())
+    expect(lanRecords().find((r) => r.id === 7)).toMatchObject({ state: 'linked', matched_by: 'import' })
+  })
+
+  it('says why a LAN-only printer’s print with no kept file cannot be linked', async () => {
+    const models = vi.spyOn(api, 'listModels')
+    const { user } = renderPage(<UnsortedImports />)
+    const row = await screen.findByTestId('unsorted-lan-6')
+    await user.click(within(row).getByRole('button', { name: 'Link vase' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Link to model' })
+    // Wait for the models, then pick one.
+    await waitFor(() => expect(models).toHaveBeenCalled())
+    await models.mock.results[0]?.value
+    await selectOption(user, within(dialog).getByRole('combobox', { name: 'Model to link' }), (mockModels()[0] as ModelSummary).name)
+    await user.click(within(dialog).getByRole('button', { name: 'Link' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('a model link needs the file')
+    expect(screen.getByTestId('unsorted-lan-6')).toBeInTheDocument()
+  })
+
+  it('reads the next page of LAN-only printers’ prints by the record id', async () => {
+    const page = (from: number, count: number): LanPrintRecord[] =>
+      Array.from({ length: count }, (_, i) => ({
+        id: from - i,
+        printer_id: LAN_PRINTER.id,
+        printer_name: LAN_PRINTER.name,
+        subtask_name: `Job ${from - i}`,
+        started_at: '2026-11-11T12:00:00Z',
+        state: 'inbox' as const,
+        reason: 'r',
+        suggested: [],
+      }))
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/print-imports/auto', () => HttpResponse.json([])),
+      http.get('/api/v1/print-imports/auto/lan', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        asked.push(query.get('before'))
+        const limit = Number(query.get('limit'))
+        return HttpResponse.json(query.get('before') === null ? page(500, limit) : page(100, 1))
+      }),
+    )
+    const { user } = renderPage(<UnsortedImports />)
+    const list = await screen.findByRole('list', { name: 'Unsorted imports on LAN-only printers' })
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(50))
+    await user.click(screen.getByRole('button', { name: 'Show more' }))
+    await waitFor(() => expect(within(list).getAllByRole('listitem')).toHaveLength(51))
+    expect(asked).toEqual([null, '451'])
+    expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull()
   })
 
   it('dismisses a print, which leaves the inbox', async () => {

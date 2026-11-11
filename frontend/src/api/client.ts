@@ -116,6 +116,7 @@ import type {
   PrintSources,
   PrintImportRequest,
   AutoImport,
+  LanPrintRecord,
   ImportedPrint,
   TimelapseFrames,
   PrintPage,
@@ -1989,6 +1990,37 @@ export const api = {
   /** #4699 — takes a print out of Unsorted imports; the watcher never takes it again. */
   dismissAutoImport: (archiveId: number) =>
     request<AutoImport>(`/print-imports/auto/${archiveId}/dismiss`, { method: 'POST' }),
+
+  /**
+   * #6041 — the prints the watcher recorded on LAN-only printers, newest record first. Their
+   * ids are the records' own, so they page apart from the archives: `before`, the last `id`
+   * read. `slug` keeps only the records linked to that model.
+   */
+  listLanAutoImports: ({
+    state,
+    slug,
+    limit,
+    before,
+  }: { state?: LanPrintRecord['state']; slug?: string; limit?: number; before?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (state) query.set('state', state)
+    if (slug) query.set('slug', slug)
+    if (limit !== undefined) query.set('limit', String(limit))
+    if (before !== undefined) query.set('before', String(before))
+    const tail = query.toString()
+    return request<LanPrintRecord[]>(`/print-imports/auto/lan${tail ? `?${tail}` : ''}`)
+  },
+
+  /** #6041 — takes a LAN-only printer's print out of Unsorted imports. */
+  dismissLanAutoImport: (recordId: number) =>
+    request<LanPrintRecord>(`/print-imports/auto/lan/${recordId}/dismiss`, { method: 'POST' }),
+
+  /** #6041 — links a LAN-only printer's print to a model; its one source is the file the watcher kept. */
+  linkLanAutoImport: (recordId: number, slug: string) =>
+    request<LanPrintRecord>(`/print-imports/auto/lan/${recordId}/link`, {
+      method: 'POST',
+      body: JSON.stringify({ slug }),
+    }),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),

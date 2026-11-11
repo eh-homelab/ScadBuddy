@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
 import { resetMockState } from '../../../mocks/handlers'
+import { LAN_PRINTER } from '../../../mocks/features/printWatch'
 import { region, renderSettingsSection } from '../testing'
 import { Component as PrintWatcher } from './print-watcher'
 
@@ -41,6 +42,30 @@ describe('Print watcher', () => {
     const stored = await api.getSettings()
     expect(stored.print_auto_import).toBe(true)
     expect(stored.print_auto_import_skip_printers).toEqual([2])
+  })
+
+  // #6041 — a LAN-only printer (no Bambuddy link) is skipped by its registry id.
+  it('lists only the LAN-only printers, and saves the ones to skip by registry id', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderSettingsSection(<PrintWatcher />, { route: '/settings/printing' })
+    const lan = await screen.findByRole('group', { name: 'LAN-only printers to skip' })
+    const garage = await within(lan).findByRole('checkbox', { name: `Skip ${LAN_PRINTER.name}` })
+    // The registry's Bambuddy-linked printer is not a LAN-only one.
+    expect(within(lan).queryByRole('checkbox', { name: 'Skip 3DP-31B-598' })).toBeNull()
+    expect(garage).not.toBeChecked()
+    await user.click(garage)
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ print_auto_import_skip_lan_printers: [LAN_PRINTER.id] })
+    expect((await api.getSettings()).print_auto_import_skip_lan_printers).toEqual([LAN_PRINTER.id])
+  })
+
+  it('keeps a skipped printer shown once it has a Bambuddy link, so it can be cleared', async () => {
+    const linked = '00000000-0000-4000-8000-000000000001'
+    await api.putSettings({ print_auto_import_skip_lan_printers: [linked] })
+    renderSettingsSection(<PrintWatcher />, { route: '/settings/printing' })
+    const lan = await screen.findByRole('group', { name: 'LAN-only printers to skip' })
+    expect(await within(lan).findByRole('checkbox', { name: 'Skip 3DP-31B-598' })).toBeChecked()
   })
 
   it('warns that the printer source reaches the printer', async () => {

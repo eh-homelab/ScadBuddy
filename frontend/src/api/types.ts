@@ -579,6 +579,8 @@ export type PrintImportRequest = Schemas['ImportRequest']
 export type ImportedPrint = Schemas['ImportedPrint']
 /** #4699 — a print the print watcher took: linked to a model, in Unsorted imports, or dismissed. */
 export type AutoImport = Schemas['AutoImport']
+/** #6041 — a LAN-only printer's print the watcher recorded: its own id, apart from the archive ids. */
+export type LanPrintRecord = Schemas['LanPrintRecord']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
