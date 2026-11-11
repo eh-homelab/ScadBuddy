@@ -1627,6 +1627,13 @@ describe('mock PUT /print/printers/:id/bed-type, as the backend keys it (#5153)'
     })
   })
 
+  it('refuses a zero-padded id past the integer column, and reads all zeros as printer 0', async () => {
+    await expect(api.putPrinterBedType('0002147483648', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('0002147483648', null)).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('00000000000', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
+    await expect(api.putPrinterBedType('00000000000', null)).resolves.toEqual({ printer_id: 0, printer: null, bed_type: null })
+  })
+
   it('refuses a registry id the registry does not hold, forget or not', async () => {
     await expect(api.putPrinterBedType('no-such-printer', 'Cool Plate')).rejects.toMatchObject({ status: 404 })
     await expect(api.putPrinterBedType('no-such-printer', null)).rejects.toMatchObject({ status: 404 })
