@@ -16,7 +16,10 @@ logged and never stored: the ledger keeps its sha256 inside the request's digest
 `view` builds the `CustomerOrderView`: the status in the customer's words (`ORDER_WORDS`,
 `ITEM_WORDS`: a mapping, not new states), each item's sent revisions with their pictures
 as presigned GETs, its price, the payment requests (an open one with its pay link; "paid"
-only once the provider's payment settled it, spec §7) and the shipments. Every field is in
+only once the provider's payment settled it, spec §7), the shop's payment instructions
+(`CustomerOrderView.payment_instructions`: only while an open request has no provider, so
+the shop records that payment by hand; one read of the setting, never a secret) and the
+shipments. Every field is in
 `storefront/wire.py` `ORDER_VIEW_FIELDS`: no cost, margin, internal note, shop event or
 staff name. The first view stamps the link's ``opened_at``.
 
@@ -143,6 +146,8 @@ _PICTURE_COPIES: Final = 4
 _SHOWN_ROLES: Final = REVISION_ROLES | {"reference"}
 #: The video types a picture may be; images are `SHOWN_IMAGES`.
 _VIDEOS: Final = frozenset({"video/mp4", "video/webm", "video/quicktime"})
+#: The setting the customer's "how to pay" text is (`_read`).
+INSTRUCTIONS_SETTING: Final = frozenset({"storefront_payment_instructions"})
 #: A render's 3D preview, which the storefront's viewer (`components/Preview.tsx`) shows.
 PREVIEW_3D: Final = "model/gltf-binary"
 
@@ -259,6 +264,8 @@ class _Rows:
     shipments: list[Shipment]
     approved: bool
     paid: bool
+    #: The shop's payment instructions, read only when an open request has no provider.
+    instructions: str | None
     #: The price book's colour names, by filament id.
     colour_names: dict[str, str | None]
 
@@ -281,6 +288,7 @@ def _picture_kind(attachment: Attachment) -> Literal["image", "video", "model"]:
 
 def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
     store = orders.store
+    open_requests = payments.open_requests_for_order(conn, order_id)
     order = store.order(order_id, conn=conn)
     assert order is not None  # A link's foreign key keeps its order.
     items = store.items(order_id, conn=conn)
@@ -292,6 +300,12 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
             found = store.attachment(attachment.id, conn=conn)
             if found is not None:
                 pictures.setdefault(attachment.revision_id, []).append(found)
+    instructions: str | None = None
+    if any(r.provider is None for r in open_requests):
+        text = orders.core.settings_store.read(INSTRUCTIONS_SETTING)[
+            "storefront_payment_instructions"
+        ]
+        instructions = (text or "").strip() or None
     return _Rows(
         order=order,
         items=items,
@@ -299,10 +313,11 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
         quotes={item.id: store.quotes(item.id, conn=conn) for item in items},
         pictures=pictures,
         requests=payments.requests_for_order(conn, order_id),
-        open_requests=payments.open_requests_for_order(conn, order_id),
+        open_requests=open_requests,
         shipments=store.shipments(order_id, conn=conn),
         approved=orders.lifecycle.approved_anything(conn, order),
         paid=payments.has_payment(conn, order_id),
+        instructions=instructions,
         colour_names={
             f.id: f.colour_name for f in store.filaments(include_archived=True, conn=conn)
         },
@@ -550,6 +565,7 @@ async def _build(state: AppState, rows: _Rows) -> CustomerOrderView:
             if item.status != "cancelled" or order.status == "cancelled"
         ],
         payments=_payments(rows),
+        payment_instructions=rows.instructions,
         shipments=[
             CustomerShipment(
                 carrier=s.carrier, service=s.service, tracking=s.tracking, shipped_at=s.shipped_at

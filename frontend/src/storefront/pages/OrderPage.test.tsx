@@ -47,6 +47,7 @@ const ORDER: CustomerOrder = {
     },
   ],
   payments: [],
+  payment_instructions: null,
   shipments: [],
 }
 
@@ -260,6 +261,25 @@ describe('OrderPage', () => {
     expect(await screen.findByText('This payment did not go through. The shop will be in touch.')).toBeInTheDocument()
     expect(screen.queryByText('Paid')).toBeNull()
     expect(screen.queryByRole('link', { name: /Pay/ })).toBeNull()
+  })
+
+  it("shows the shop's payment instructions as plain text with its line breaks", async () => {
+    const text = 'Venmo @shop\nor <b>cash</b> on pickup'
+    serve({ ...ORDER, payments: [{ ...OPEN, pay_url: null }], payment_instructions: text })
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByRole('heading', { name: 'How to pay' })).toBeInTheDocument()
+    const shown = screen.getByText(/Venmo @shop/)
+    expect(shown.textContent).toBe(text)
+    expect(shown.querySelector('b')).toBeNull()
+    expect(shown).toHaveStyle({ whiteSpace: 'pre-line' })
+    expect(screen.queryByRole('link', { name: /Pay/ })).toBeNull()
+  })
+
+  it('shows no payment instructions when the view has none', async () => {
+    serve({ ...ORDER, payments: [{ ...OPEN, pay_url: null }] })
+    renderPage(<OrderPage />, { route: `/o#${TOKEN}` })
+    expect(await screen.findByText('The shop will tell you how to pay.')).toBeInTheDocument()
+    expect(screen.queryByText('How to pay')).toBeNull()
   })
 
   it('drops the order shown when the reader changes in place', async () => {

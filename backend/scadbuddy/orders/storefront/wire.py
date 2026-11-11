@@ -445,6 +445,9 @@ class CustomerOrderView(BaseModel):
     can_cancel: bool
     items: list[CustomerItem]
     payments: list[CustomerPayment]
+    #: The shop's own words on how to pay (plain text, never markup): set only while an
+    #: open request has no provider page, and the shop has saved some.
+    payment_instructions: str | None
     shipments: list[CustomerShipment]
 
 

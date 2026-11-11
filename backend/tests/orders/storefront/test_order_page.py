@@ -420,6 +420,73 @@ def test_a_failed_request_shows_as_not_settled_with_no_link(
     assert [(p["kind"], p["status"], p["pay_url"]) for p in shown] == [("deposit", "failed", None)]
 
 
+def _manual_request(api: TestClient, order_id: str, *, paid: bool = False) -> None:
+    with _orders(api).store.transaction() as conn:
+        request = payments.insert_request(
+            conn,
+            order_id=order_id,
+            kind="deposit",
+            provider=None,
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        if paid:
+            payments.set_request_status(conn, request.id, "paid")
+
+
+def _instructions(api: TestClient, text: str | None) -> None:
+    saved = api.put("/api/v1/settings", json={"storefront_payment_instructions": text})
+    assert saved.status_code == 200, saved.text
+
+
+def test_an_open_request_with_no_provider_shows_the_shops_instructions(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    made = make_order(api, crud)
+    _instructions(api, "Venmo @shop\nor cash <b>on pickup</b>")
+    _manual_request(api, made.order.id)
+    view = made.reader.view().json()
+    assert view["payment_instructions"] == "Venmo @shop\nor cash <b>on pickup</b>"
+    assert [(p["status"], p["pay_url"]) for p in view["payments"]] == [("open", None)]
+
+
+def test_no_instructions_when_the_request_has_a_pay_link(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    _instructions(api, "Venmo @shop")
+    with _orders(api).store.transaction() as conn:
+        request = payments.insert_request(
+            conn,
+            order_id=made.order.id,
+            kind="deposit",
+            provider="fake",
+            amount_minor=500,
+            currency="USD",
+            created_by=BY,
+        )
+        payments.set_request_link(
+            conn, request.id, provider_ref="r1", hosted_url="https://pay.example/1", link_error=None
+        )
+    assert made.reader.view().json()["payment_instructions"] is None
+
+
+def test_no_instructions_when_the_shop_saved_none(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    _manual_request(api, made.order.id)
+    assert made.reader.view().json()["payment_instructions"] is None
+    _instructions(api, "   ")
+    assert made.reader.view().json()["payment_instructions"] is None
+
+
+def test_no_instructions_for_a_paid_request(api: TestClient, crud: CrudCaller) -> None:
+    made = make_order(api, crud)
+    _instructions(api, "Venmo @shop")
+    _manual_request(api, made.order.id, paid=True)
+    view = made.reader.view().json()
+    assert view["payment_instructions"] is None
+    assert [p["status"] for p in view["payments"]] == ["paid"]
+
+
 def test_a_write_that_finds_no_order_is_the_empty_404_not_order_changed(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:

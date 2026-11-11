@@ -947,7 +947,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   reads nothing is a 404 with no body on both sides. The first view stamps `opened_at` (`mark_opened`). The
   view (`CustomerOrderView`) is allowlisted: every field is in `storefront/wire.py`
   `ORDER_VIEW_FIELDS`, which the edge filters by (`routes.py` `_shown`) and
-  `test_order_page.py` pins. A revision's pictures (its `render` and `test_print` files and
+  `test_order_page.py` pins. `payment_instructions` is the shop's `storefront_payment_instructions`
+  text (plain text), set only while an open payment request has no provider; `_read` reads that one
+  setting then, in the CRUD process (the edge only forwards it). A revision's pictures (its `render` and `test_print` files and
   the customer's `reference` files, never another role) are copied once from the packed
   blob to `customer-file-<sha256>` on S3, held by every attachment that shows them, and
   presigned; one that cannot be shown (a failed copy, past `MAX_PICTURE_COPY_BYTES`, a store

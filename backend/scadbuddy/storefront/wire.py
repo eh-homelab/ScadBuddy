@@ -46,6 +46,7 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
             "can_cancel",
             "items",
             "payments",
+            "payment_instructions",
             "shipments",
         }
     ),
