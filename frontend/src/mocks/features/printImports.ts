@@ -120,7 +120,7 @@ export const handlers = [
       if (owner === target) {
         const print = prints.find((p) => p.archive_id === archive.id)
         if (print?.imported) {
-          return HttpResponse.json({ archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: false, imported: print.imported } satisfies ImportedPrint)
+          return HttpResponse.json({ archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: print.imported.created_model, made_now: false, imported: print.imported } satisfies ImportedPrint)
         }
       }
       return problem(409, 'Conflict', `archive ${archive.id} is a print of another subject already`)
@@ -170,7 +170,7 @@ export const handlers = [
     prints.unshift(print)
     added.push(print)
     return HttpResponse.json(
-      { archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: created, imported: record } satisfies ImportedPrint,
+      { archive_id: archive.id, slug: target, print_url: `/api/v1/prints/${archive.id}`, created_model: created, made_now: true, imported: record } satisfies ImportedPrint,
       { status: 201 },
     )
   }),
