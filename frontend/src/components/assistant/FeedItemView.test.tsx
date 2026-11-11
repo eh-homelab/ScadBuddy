@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { FeedItem } from '../../agent/chat/state'
 import { api } from '../../api/client'
 import { server } from '../../mocks/server'
@@ -421,6 +421,12 @@ describe('the attention card (#815)', () => {
   })
 
   it("says how long 'wait' waits, naming the day when it is not today", () => {
+    // At noon a minute ahead is still today; in a day's last minute it is not (#6003).
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 10, 10, 12, 0, 0))
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
     const tomorrow = new Date(Date.now() + 86_400_000)
     const { unmount } = raise('wait', { attention: { reason: 'blocked', onTimeout: 'wait', expiresAt: tomorrow.toISOString() } })
     const day = tomorrow.toLocaleString([], { weekday: 'short' })
