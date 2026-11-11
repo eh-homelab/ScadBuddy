@@ -504,12 +504,20 @@ def put_printer_bed_type(
     ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
     Needs no Bambuddy, like the model's other remembered choices. The path names a
     registry printer, so a LAN-only one remembers its plate too (#4971), or a Bambuddy
-    printer by its integer id, as before; the plate is kept under both where the registry
-    links them. 404 for a registry id the registry does not hold.
+    printer by its integer id, resolved to the registry printer that links it. The plate
+    is kept on the registry printer only (#5153). 404 for a registry id the registry does
+    not hold, and for a Bambuddy id no registry printer links; forgetting that one's
+    plate forgets nothing.
     """
     keys = printer_keys(registry.store, printer_id, forget=False)
     bambuddy_id, printer = keys.bambuddy_id, keys.printer
-    settings = store.set_printer_bed_type(bambuddy_id, body.bed_type, printer=printer)
+    if printer is None:
+        if body.bed_type is not None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        # On purpose: a Bambuddy id no registry printer links has no plate to forget, so
+        # the forget answers `printer: None` and never calls the store.
+        return PrinterBedType(printer_id=bambuddy_id, printer=None, bed_type=None)
+    settings = store.set_printer_bed_type(printer, body.bed_type)
     return PrinterBedType(
         printer_id=bambuddy_id,
         printer=printer,

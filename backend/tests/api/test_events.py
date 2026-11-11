@@ -29,6 +29,7 @@ from tests.api.test_print_run_choices import follow_run, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 API = f"{BASE}/api/v1"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
@@ -582,6 +583,7 @@ def test_every_settings_write_publishes_settings_changed(
         )
     )
     _ok(client.put(f"/api/v1/print/models/{model}/choices", json={"printer_id": 2}))
+    linked_printer(client, 1)
     _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
 
     assert [event["section"] for event in published(events, "settings.changed")] == [

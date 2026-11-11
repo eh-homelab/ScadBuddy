@@ -33,6 +33,7 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import ModelProject, SettingsPatch, SettingsStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.printers import bambuddy_printer
 
 
 def _model(slug: str, kind: str = "model.updated") -> ModelEvent:
@@ -307,7 +308,7 @@ def test_every_settings_write_is_announced_with_its_section(
     store.open()
     try:
         store.save(SettingsPatch(public_url="https://scad.example"))
-        store.set_printer_bed_type(1, "Cool Plate")
+        store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
         store.set_model_project("demo", None, ModelProject(project_id=7))
     finally:
         store.close()

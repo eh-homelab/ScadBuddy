@@ -33,6 +33,7 @@ from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 from tests.test_bambu3mf import add_plate
 
 
@@ -53,16 +54,17 @@ def test_the_plate_type_is_remembered_per_printer(client: TestClient, settings: 
     would still echo each PUT's own response correctly while sharing one entry between
     printers, and only a real readback of both keys together catches that.
     """
+    first, second = linked_printer(client, 1), linked_printer(client, 2)
     answer = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"})
-    assert answer.json() == {"printer_id": 1, "printer": None, "bed_type": "Supertack Plate"}
+    assert answer.json() == {"printer_id": 1, "printer": first, "bed_type": "Supertack Plate"}
     other = client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Cool Plate"})
-    assert other.json() == {"printer_id": 2, "printer": None, "bed_type": "Cool Plate"}
+    assert other.json() == {"printer_id": 2, "printer": second, "bed_type": "Cool Plate"}
 
     stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"1": "Supertack Plate", "2": "Cool Plate"}
 
     cleared = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": None})
-    assert cleared.json() == {"printer_id": 1, "printer": None, "bed_type": None}
+    assert cleared.json() == {"printer_id": 1, "printer": first, "bed_type": None}
 
     stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"2": "Cool Plate"}
@@ -107,6 +109,20 @@ def test_the_plate_is_remembered_by_the_registry_printer(client: TestClient) -> 
 
     client.put(f"/api/v1/print/printers/{linked_id}/bed-type", json={"bed_type": None})
     client.put(f"/api/v1/print/printers/{lan_id}/bed-type", json={"bed_type": None})
+    assert client.get("/api/v1/settings/remembered").json()["printer_plates"] == []
+
+
+def test_a_bambuddy_printer_the_registry_does_not_hold_remembers_no_plate(
+    client: TestClient,
+) -> None:
+    """#5153: a plate is kept on a registry printer only, so a Bambuddy id no registry
+    printer links is 404, and forgetting its plate forgets nothing."""
+    answer = client.put("/api/v1/print/printers/5/bed-type", json={"bed_type": "Cool Plate"})
+    assert answer.status_code == 404, answer.text
+
+    forgot = client.put("/api/v1/print/printers/5/bed-type", json={"bed_type": None})
+    assert forgot.status_code == 200, forgot.text
+    assert forgot.json() == {"printer_id": 5, "printer": None, "bed_type": None}
     assert client.get("/api/v1/settings/remembered").json()["printer_plates"] == []
 
 
