@@ -701,6 +701,32 @@ describe('OrderPage, the customer link (#5283)', () => {
     )
   })
 
+  it('closes the confirm when a later read of the link shows none live', async () => {
+    let reads = 0
+    const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
+    server.use(
+      http.get('/api/v1/orders/:id/customer-link', () => {
+        reads += 1
+        return reads === 2 ? HttpResponse.json({ detail: 'down' }, { status: 503 }) : HttpResponse.json(none)
+      }),
+      http.post('/api/v1/orders/:id/customer-link', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/orders/link_live', status: 409, detail: 'a link is live' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = render(ORDER_ACCEPTED)
+    const card = await screen.findByRole('region', { name: 'Customer link' })
+    await within(card).findByText('No link sent yet.')
+    await user.click(within(card).getByRole('button', { name: 'Send link' }))
+    // The re-read failed, so the confirm opened; the refresh after it lands with no live link.
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3))
+    await waitFor(() => expect(within(card).queryByText(/stops working/)).toBeNull())
+    expect(within(card).getByRole('button', { name: 'Send link' })).toBeEnabled()
+    expect(within(card).queryByText(/could not be read again/)).toBeNull()
+  })
+
   it('asks nothing on a 409 link_live when a fresh read shows no live link', async () => {
     const none = { live: false, created_at: null, sent_to: null, opened_at: null, revoked_at: null }
     server.use(

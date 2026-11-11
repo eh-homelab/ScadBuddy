@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
 import { useAsync } from '../../lib/useAsync'
@@ -30,6 +30,12 @@ export function CustomerLink({ orderId, onChanged }: { orderId: string; onChange
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const state = link.data
+  // A later read that lands tells more than the failed re-read did. With no live link,
+  // there is nothing to confirm, as when the re-read itself finds none.
+  useEffect(() => {
+    setUnread(false)
+    if (state && !state.live) setConfirming(false)
+  }, [state])
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true)
