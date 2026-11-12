@@ -391,6 +391,37 @@ def test_the_leftovers_migration_drops_every_bambuddy_key_an_old_pod_wrote(
     }
 
 
+def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
+    pg_conninfo: str,
+) -> None:
+    """#6108: the leftovers migration merges `printer_rack_algorithms` and
+    `printer_rack_algorithm_versions` each on its own. An unversioned save writes the
+    algorithm only, so a printer can hold a registry algorithm and get the old pod's
+    version. That is safe: a version is the client's clock in ms
+    (`nextRackAlgorithmVersion`), so the old pod's is older than every later save, and a
+    later save is still taken."""
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _before(LEFTOVERS)])
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (%s, '0938AB000000046', 'H2C', 3)",
+            (LINKED,),
+        )
+        settings = {
+            "printer_rack_algorithms": {"3": "old", LINKED: "new"},
+            "printer_rack_algorithm_versions": {"3": 1_700_000_000_000},
+        }
+        for name, value in settings.items():
+            conn.execute("INSERT INTO settings (name, value) VALUES (%s, %s)", (name, Jsonb(value)))
+
+        migrate(conn)
+
+        stored: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+
+    assert stored["printer_rack_algorithms"] == {LINKED: "new"}
+    assert stored["printer_rack_algorithm_versions"] == {LINKED: 1_700_000_000_000}
+
+
 def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[: _before(LEFTOVERS)])
