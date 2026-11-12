@@ -24,6 +24,7 @@ from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
@@ -47,7 +48,12 @@ def configure(client: TestClient, **extra: Any) -> None:
         "library_folder_id": 2,
     }
     body.update(extra)
-    assert client.put("/api/v1/settings", json=body).status_code == 200
+    if isinstance(body.get("printer_id"), int):
+        # Settings keep the default printer by its registry id (#5167), so the Bambuddy
+        # id must name a registry printer.
+        linked_printer(client, body["printer_id"])
+    response = client.put("/api/v1/settings", json=body)
+    assert response.status_code == 200, response.text
 
 
 def upload_route(file_id: int = 41) -> respx.Route:

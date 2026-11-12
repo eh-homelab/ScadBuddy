@@ -117,7 +117,7 @@ class SpoolUse(BaseModel):
 
 
 class RackUsage(Protocol):
-    async def seen(self, printer: str, serials: Iterable[str]) -> None: ...
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None: ...
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]: ...
 
@@ -231,15 +231,15 @@ class RackUsageStore:
                 self._pool.close()
                 self._pool_open = False
 
-    async def seen(self, printer: str, serials: Iterable[str]) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         """Upsert each non-empty serial once: moves its printer, never its
         ``first_seen_at`` (spec §4). ``printer`` is the registry printer (#4971,
-        #5167)."""
+        #5167), or ``None`` for a printer the registry does not hold."""
         unique = sorted({serial for serial in serials if serial})
         if unique:
             await asyncio.to_thread(self._seen, printer, unique)
 
-    def _seen(self, printer: str, unique: list[str]) -> None:
+    def _seen(self, printer: str | None, unique: list[str]) -> None:
         with self._ready().connection() as conn:
             conn.execute(
                 "INSERT INTO rack_nozzle_seen (serial, printer)"
@@ -636,9 +636,11 @@ async def record_seen(
     status: PrinterStatus | None,
 ) -> None:
     """Record the rack's hotends as seen by the print flow (spec §4), on the registry
-    printer (#4971, #5167); with none, nothing is recorded. Advisory: a failure is
-    logged by exception type and never stops the read that called it."""
-    if store is None or status is None or not printer:
+    printer (#4971, #5167). With none (a Bambuddy printer the registry does not hold
+    yet), the hotends are recorded with no printer, so their first sighting is kept.
+    Advisory: a failure is logged by exception type and never stops the read that
+    called it."""
+    if store is None or status is None:
         return
     try:
         await store.seen(printer, rack_serials(status.nozzle_rack))

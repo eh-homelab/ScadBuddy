@@ -19,6 +19,7 @@ from tests.api.test_print_filaments import slice_kept, slice_routes
 from tests.api.test_print_run_choices import body, run_print, run_request, run_routes
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.printers import linked_printer
 
 OPTIONS_ROUTE = "/api/v1/settings/print-options"
 
@@ -29,6 +30,9 @@ def remember(
     body: dict[str, Any] = {"scope": scope, "options": options}
     if key is not None:
         body["key"] = key
+    if scope == "printer" and key is not None and key.isdigit():
+        # Kept under the registry printer that links the Bambuddy id (#5167).
+        linked_printer(client, int(key))
     assert client.put(OPTIONS_ROUTE, json=body).status_code == 200
 
 

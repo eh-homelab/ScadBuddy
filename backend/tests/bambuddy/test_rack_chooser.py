@@ -59,7 +59,7 @@ class Usages:
         self.calls: list[str] = []
         self._usage = usage or {}
 
-    async def seen(self, printer: str, serials: Iterable[str]) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         self.calls.append("seen")
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:

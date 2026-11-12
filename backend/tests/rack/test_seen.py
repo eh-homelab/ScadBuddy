@@ -14,10 +14,10 @@ from tests.rack.helpers import mounted, serial, slot, status
 
 class Seen:
     def __init__(self, error: Exception | None = None) -> None:
-        self.calls: list[tuple[str, list[str]]] = []
+        self.calls: list[tuple[str | None, list[str]]] = []
         self.error = error
 
-    async def seen(self, printer: str, serials: Iterable[str]) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         if self.error is not None:
             raise self.error
         self.calls.append((printer, sorted(serials)))
@@ -28,6 +28,14 @@ async def test_the_racks_hotends_are_recorded_and_the_left_hotend_is_not() -> No
     left = mounted().model_copy(update={"id": 1, "serial_number": serial(1)})
     await record_seen(store, "p1", status(mounted(), left, *(slot(p) for p in (2, 3, 4, 5, 6))))  # type: ignore[arg-type]
     assert store.calls == [("p1", sorted([serial(0), *(serial(p + 15) for p in (2, 3, 4, 5, 6))]))]
+
+
+async def test_a_printer_the_registry_does_not_hold_records_the_hotends_with_none() -> None:
+    """#5167: a Bambuddy printer the registry does not hold yet still records its rack, so
+    each hotend's first sighting is kept."""
+    store = Seen()
+    await record_seen(store, None, status(slot(2)))  # type: ignore[arg-type]
+    assert store.calls == [(None, [serial(17)])]
 
 
 async def test_no_status_or_no_store_records_nothing() -> None:

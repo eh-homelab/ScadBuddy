@@ -598,6 +598,7 @@ def test_a_library_print_queues_with_the_options_remembered_for_that_file(
     slice_routes()
     queued = queue_route()
     options = "/api/v1/settings/print-options"
+    linked_printer(client, 1)
     for remembered in (
         {"scope": "printer", "key": "1", "options": {"timelapse": True, "use_ams": False}},
         {"scope": "model", "key": "library:89", "options": {"timelapse": False}},

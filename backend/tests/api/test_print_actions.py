@@ -24,6 +24,7 @@ from tests.api.test_print_history import link, link_library, mock_archive
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -74,6 +75,9 @@ def test_print_again_queues_with_the_remembered_print_options(
     mock_archive(35, printer_id=3, plate_id=2)
     queue = mock_enqueue()
     options = "/api/v1/settings/print-options"
+    # Kept under the registry printers that link Bambuddy printers 3 and 4 (#5167).
+    linked_printer(client, 3)
+    linked_printer(client, 4)
     remember = [
         {"scope": "global", "options": {"use_ams": False, "layer_inspect": True}},
         {"scope": "printer", "key": "3", "options": {"manual_start": True, "timelapse": True}},
@@ -111,6 +115,7 @@ def test_print_again_of_a_library_file_queues_with_that_files_options(
     mock_archive(35, printer_id=3, plate_id=2)
     queue = mock_enqueue()
     options = "/api/v1/settings/print-options"
+    linked_printer(client, 3)
     for body in (
         {"scope": "printer", "key": "3", "options": {"timelapse": True, "use_ams": False}},
         {"scope": "model", "key": "library:89", "options": {"timelapse": False}},
