@@ -46,6 +46,18 @@ from tests.support.store import store_pool
 pytestmark = pytest.mark.requires_postgres
 
 JOB = "a" * 32
+LEASE_WAITS = "a library take waits for a removal on the API"
+
+
+class _Heard(logging.Handler):
+    """The records one logger's own handler gets, whatever the root's handlers are."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.INFO)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 @pytest.fixture
@@ -103,18 +115,32 @@ async def test_a_lease_taken_while_the_apis_removal_holds_the_lock_waits(
             leased.set()
             await done.wait()
 
-    with caplog.at_level(logging.INFO, logger=crud_module.__name__):
-        async with api.removing():
-            task = asyncio.create_task(render())
-            await asyncio.sleep(1.0)
-            # Not taken while the removal runs: it would have checked for leases already.
-            assert not leased.is_set()
-            assert not task.done()
-        await asyncio.wait_for(leased.wait(), 10)
-    assert any(
-        record.getMessage() == "a library take waits for a removal on the API"
-        for record in caplog.records
-    )
+    # Heard on the module's own logger (#5860): an app's start (`configure_logging`)
+    # replaces the root's handlers, caplog's too, so a record that only propagates to
+    # the root can be lost.
+    logger = logging.getLogger(crud_module.__name__)
+    monkeypatch.setattr(logger, "disabled", False)
+    heard = _Heard()
+    logger.addHandler(heard)
+
+    def waits() -> int:
+        return sum(record.getMessage() == LEASE_WAITS for record in heard.records)
+
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            async with api.removing():
+                task = asyncio.create_task(render())
+                # Two of the route's lock waits, however late the first send arrives on
+                # a loaded runner: a fixed sleep could end before the first one did.
+                async with asyncio.timeout(10):
+                    while waits() < 2:
+                        await asyncio.sleep(0.05)
+                # Not taken while the removal runs: it would have checked for leases already.
+                assert not leased.is_set()
+                assert not task.done()
+            await asyncio.wait_for(leased.wait(), 10)
+    finally:
+        logger.removeHandler(heard)
     assert await asyncio.to_thread(api.leased, checkout) == [JOB]
     done.set()
     await asyncio.wait_for(task, 10)
