@@ -59,6 +59,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     StringConstraints,
     ValidationError,
     ValidationInfo,
@@ -530,6 +531,10 @@ class StoredSettings(BambuddyIds):
     #: (#5167). Not stored: a load reads it from the registry, so that a reader that
     #: has only a Bambuddy id finds the registry key (:meth:`registry_printer`).
     bambuddy_links: dict[str, int] = Field(default_factory=dict)
+    #: ``bambuddy_links`` and its inverse, built once on the first read (#6106). The
+    #: first item is the map the inverse was built from, so a copy with other links
+    #: builds its own.
+    _linked_by: tuple[dict[str, int], dict[int, str]] | None = PrivateAttr(default=None)
 
     @field_validator(
         "print_run_retention_seconds",
@@ -641,9 +646,14 @@ class StoredSettings(BambuddyIds):
         Bambuddy printer ``printer_id`` (#5167)."""
         if printer is not None or printer_id is None:
             return printer
-        return next(
-            (row for row, linked in self.bambuddy_links.items() if linked == printer_id), None
-        )
+        built = self._linked_by
+        if built is None or built[0] is not self.bambuddy_links:
+            inverse: dict[int, str] = {}
+            for row, linked in self.bambuddy_links.items():
+                inverse.setdefault(linked, row)
+            built = (self.bambuddy_links, inverse)
+            self._linked_by = built
+        return built[1].get(printer_id)
 
     def rack_algorithm(self, printer_id: int | None, printer: str | None = None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4), by its

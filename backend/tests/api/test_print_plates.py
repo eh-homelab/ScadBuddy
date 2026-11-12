@@ -136,6 +136,17 @@ def test_a_printer_the_registry_does_not_hold_is_not_found(
     assert answer.status_code == 404, answer.text
 
 
+def test_a_forget_above_the_bambuddy_id_limit_forgets_nothing(client: TestClient) -> None:
+    """#6106: a forget names no stored row, so an id past ``printers.bambuddy_printer_id``'s
+    range answers 200 with that id and changes nothing, as any Bambuddy id no registry
+    printer links does. A save of it is still 404."""
+    big = 2**31
+    forgot = client.put(f"/api/v1/print/printers/{big}/bed-type", json={"bed_type": None})
+    assert forgot.status_code == 200, forgot.text
+    assert forgot.json() == {"printer_id": big, "printer": None, "bed_type": None}
+    assert client.get("/api/v1/settings/remembered").json()["printer_plates"] == []
+
+
 @pytest.mark.requires_postgres
 @respx.mock
 def test_a_chosen_plate_type_is_sliced_with_and_queued_on_the_printer(

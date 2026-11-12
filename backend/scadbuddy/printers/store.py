@@ -270,6 +270,13 @@ def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
         " WHERE name = ANY(%s) AND value ? %s",
         (printer_id, [*PRINTER_KEYED_SETTINGS, *PRINTER_LISTED_SETTINGS], printer_id),
     )
+    # A subject's remembered printer goes too (#6106): the dialog does not offer a gone
+    # printer.
+    conn.execute(
+        "UPDATE model_print_choices SET choices = choices - 'printer', updated_at = now()"
+        " WHERE choices ->> 'printer' = %s",
+        (printer_id,),
+    )
 
 
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every

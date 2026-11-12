@@ -281,6 +281,25 @@ describe('PrintOptionsDisclosure', () => {
     expect(puts[0]?.key).toBe('lan-row')
   })
 
+  it("finds a Bambuddy printer's scope from the read's links, with no registry printer given (#6106)", async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({
+          ...printOptionsFixture,
+          default_printer: null,
+          printer_id: null,
+          printers: { 'linked-row': { timelapse: true } },
+          bambuddy_links: { 'linked-row': 7 },
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<Harness printerId={7} registryPrinter={null} />)
+    await open(user)
+
+    expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
+  })
+
   it('still knows the printer after a save, since the PUT does not report one', async () => {
     const user = userEvent.setup()
     render(<Harness />)

@@ -558,7 +558,11 @@ def put_printer_rack_algorithm(
     keys = printer_keys(registry.store, printer_id, forget=body.algorithm is None)
     bambuddy_id, printer = keys.bambuddy_id, keys.printer
     if keys.key is None:
-        return PrinterRackAlgorithm(printer_id=None, printer=None, algorithm=DEFAULT_ALGORITHM)
+        # A forget of a Bambuddy id no registry printer links: echo the id, as the
+        # bed-type route does (#6106).
+        return PrinterRackAlgorithm(
+            printer_id=bambuddy_id, printer=None, algorithm=DEFAULT_ALGORITHM
+        )
     try:
         algorithm = store.set_printer_rack_algorithm(keys.key, body.algorithm, body.version)
     except RackAlgorithmSupersededError:

@@ -54,7 +54,7 @@ import {
   withoutSeededDefaults,
 } from '../lib/partSettings'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
-import { resolveOptions } from '../lib/printOptions'
+import { linkedRegistryPrinter, resolveOptions } from '../lib/printOptions'
 import { useLanCleared } from '../lib/useLanCleared'
 import {
   attachPrintToProject,
@@ -1112,8 +1112,10 @@ export function PrintPicker({
     }
   }, [open, scopeKey])
 
-  // #5167 — a printer's options are kept under its registry id.
-  const printerKey = registryPrinter
+  // #5167 — a printer's options are kept under its registry id. #6106: the options read
+  // names each Bambuddy printer's registry id too, so the key does not wait for the
+  // registry list, and a failed list still finds it.
+  const printerKey = registryPrinter ?? linkedRegistryPrinter(remembered?.bambuddy_links, printerId)
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,

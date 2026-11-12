@@ -197,7 +197,9 @@ printer by `printer` (uuid, the registry printer's id, `REFERENCES printers (id)
 DELETE SET NULL`). The contract step #5167 dropped both `printer_id` columns, so the
 tables below show the design, not the schema. The upsert is now
 `ON CONFLICT (serial) DO UPDATE SET printer = excluded.printer`: it moves `printer`
-and still never touches `first_seen_at`.
+and still never touches `first_seen_at`. A sighting with no registry printer (a
+Bambuddy printer the registry does not hold yet) records a new hotend with a null
+`printer`, but never clears a known hotend's `printer` (#6106).
 
 For `rack_nozzle_picks` a conflict is never expected: Bambuddy mints a new queue item
 id per `POST /queue/`, and the write runs once per item. `DO NOTHING` is kept so a

@@ -38,6 +38,7 @@ pytestmark = pytest.mark.requires_postgres
 LAN = "00000000-0000-4000-8000-0000000000aa"
 LINKED = "00000000-0000-4000-8000-000000000003"
 CONTRACT = MIGRATIONS_DIR / "20261112T1451Z_printer_settings_registry_only.sql"
+LEFTOVERS = MIGRATIONS_DIR / "20261112T1930Z_printer_settings_roll_leftovers.sql"
 
 
 def _before(migration: Path) -> int:
@@ -172,15 +173,16 @@ async def test_a_projects_printer_is_kept_by_its_registry_id(
     assert (await uploads.project_targets())[1] == ProjectTarget(
         printer_id=5, printer=linked.id, nozzle_diameter="0.6"
     )
-    # A Bambuddy printer the registry does not link changes nothing.
+    # A Bambuddy printer the registry does not link is not remembered, and the project
+    # forgets the target of the printer before it (#6106).
     await uploads.remember_project_target(1, ProjectTarget(printer_id=8))
-    assert (await uploads.project_target(1)) == ProjectTarget(
-        printer_id=5, printer=linked.id, nozzle_diameter="0.6"
-    )
+    assert await uploads.project_target(1) is None
     await uploads.remember_project_target(2, ProjectTarget(printer_id=8))
     assert await uploads.project_target(2) is None
 
     # A deleted printer takes its targets with it.
+    await uploads.remember_project_target(1, ProjectTarget(printer_id=5))
+    assert (await uploads.project_target(1)) is not None
     printers.delete(linked.id)
     assert await uploads.project_target(1) is None
 
@@ -196,7 +198,9 @@ async def test_the_rack_tables_name_the_registry_printer(
 
     def seen() -> tuple[str | None, str]:
         with psycopg.connect(pg_conninfo) as conn:
-            got = conn.execute("SELECT printer::text, xmin::text FROM rack_nozzle_seen").fetchone()
+            got = conn.execute(
+                "SELECT printer::text, xmin::text FROM rack_nozzle_seen WHERE serial = 'HOTEND'"
+            ).fetchone()
         assert got is not None
         return got
 
@@ -207,6 +211,15 @@ async def test_the_rack_tables_name_the_registry_printer(
         assert seen() == before
         await store.seen(other.id, ["HOTEND"])
         assert seen()[0] == other.id
+        # #6106: a sighting with no registry printer keeps the known printer, and a new
+        # hotend is still recorded with none.
+        await store.seen(None, ["HOTEND", "NEW"])
+        assert seen()[0] == other.id
+        with psycopg.connect(pg_conninfo) as conn:
+            fresh = conn.execute(
+                "SELECT printer FROM rack_nozzle_seen WHERE serial = 'NEW'"
+            ).fetchone()
+        assert fresh == (None,)
         assert await store.record_picks(10, None, []) == 0
     finally:
         store.close()
@@ -317,6 +330,88 @@ def test_the_contract_migration_rewrites_every_bambuddy_key(pg_conninfo: str) ->
     assert seen == [("A", LINKED), ("B", LAN), ("C", None)]
     assert picks == [(10, LINKED), (11, None)]
     assert rack_columns == (0,)
+
+
+def test_the_leftovers_migration_drops_every_bambuddy_key_an_old_pod_wrote(
+    pg_conninfo: str,
+) -> None:
+    """#6106: rows an old pod wrote under Bambuddy keys after the contract migration ran.
+    Each goes to the registry printer that links it where that printer has no registry
+    key yet; the registry key wins otherwise; every Bambuddy key goes."""
+    other = "00000000-0000-4000-8000-0000000000bb"
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _before(LEFTOVERS)])
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id) VALUES"
+            " (%s, '0938AB000000041', 'H2C', 3), (%s, '0938AB000000042', 'P1S', 5)",
+            (LINKED, other),
+        )
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, '0938AB000000043', 'LAN')",
+            (LAN,),
+        )
+        settings = {
+            # 3 links LINKED, which has a registry key: the registry key wins.
+            "printer_rack_algorithms": {"3": "old", LINKED: "new", "5": "five", "9": "gone"},
+            "printer_rack_algorithm_versions": {"3": 9, LINKED: 2, "5": 1},
+            "printer_print_options": {"5": {"a": 1}, LAN: {"b": 2}, "99999999999": {"c": 3}},
+            "printer_id": 5,
+        }
+        for name, value in settings.items():
+            conn.execute("INSERT INTO settings (name, value) VALUES (%s, %s)", (name, Jsonb(value)))
+        choices = {
+            "gear": {"printer_id": 3, "printer": None, "tier": "fine"},
+            "keychain": {"printer_id": 5, "printer": LAN},
+            "gone": {"printer_id": 9, "printer": None},
+            "kept": {"printer": LAN},
+        }
+        for scope, value in choices.items():
+            conn.execute(
+                "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)",
+                (scope, Jsonb(value)),
+            )
+
+        migrate(conn)
+
+        stored: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+        remembered: dict[str, Any] = dict(
+            conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
+        )
+
+    assert stored["printer_rack_algorithms"] == {LINKED: "new", other: "five"}
+    assert stored["printer_rack_algorithm_versions"] == {LINKED: 2, other: 1}
+    assert stored["printer_print_options"] == {other: {"a": 1}, LAN: {"b": 2}}
+    assert "printer_id" not in stored
+    assert stored["default_printer"] == other
+    assert remembered == {
+        "gear": {"printer": LINKED, "tier": "fine"},
+        "keychain": {"printer": LAN},
+        "gone": {"printer": None},
+        "kept": {"printer": LAN},
+    }
+
+
+def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[: _before(LEFTOVERS)])
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (%s, '0938AB000000044', 'H2C', 3)",
+            (LINKED,),
+        )
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, '0938AB000000045', 'LAN')",
+            (LAN,),
+        )
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES ('printer_id', '3'),"
+            " ('default_printer', %s)",
+            (Jsonb(LAN),),
+        )
+        migrate(conn)
+        stored: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+    assert stored.get("default_printer") == LAN
+    assert "printer_id" not in stored
 
 
 def test_the_contract_migration_drops_a_default_no_registry_printer_links(
@@ -447,6 +542,12 @@ def test_deleting_a_printer_forgets_it_as_the_default_and_in_the_maps(
             "printer_print_options": {row.id: {"a": 1}},
         },
     )
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO model_print_choices (model_id, choices) VALUES"
+            " ('gear', %s), ('keychain', %s)",
+            (Jsonb({"printer": row.id, "tier": "fine"}), Jsonb({"printer": other.id})),
+        )
 
     printers.delete(row.id)
 
@@ -454,6 +555,15 @@ def test_deleting_a_printer_forgets_it_as_the_default_and_in_the_maps(
         "printer_rack_algorithms": {other.id: "x"},
         "printer_print_options": {},
     }
+    # #6106: a subject's remembered printer goes with it; its other choices stay.
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT model_id, choices FROM model_print_choices ORDER BY model_id"
+        ).fetchall()
+    assert [(r["model_id"], r["choices"]) for r in rows] == [
+        ("gear", {"tier": "fine"}),
+        ("keychain", {"printer": other.id}),
+    ]
 
 
 def test_the_watchers_skip_list_follows_a_merge_and_forgets_a_delete(

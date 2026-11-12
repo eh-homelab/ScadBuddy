@@ -234,7 +234,8 @@ class RackUsageStore:
     async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         """Upsert each non-empty serial once: moves its printer, never its
         ``first_seen_at`` (spec §4). ``printer`` is the registry printer (#4971,
-        #5167), or ``None`` for a printer the registry does not hold."""
+        #5167), or ``None`` for a printer the registry does not hold. ``None`` never
+        clears a known hotend's printer (#6106)."""
         unique = sorted({serial for serial in serials if serial})
         if unique:
             await asyncio.to_thread(self._seen, printer, unique)
@@ -247,8 +248,10 @@ class RackUsageStore:
                 " ON CONFLICT (serial) DO UPDATE SET printer = excluded.printer"
                 # Rewrite only a hotend that moved: /check re-records the rack on every
                 # debounced re-check (#1082). A row this skips makes no new version, but
-                # is still locked, so a re-check is cheap rather than free.
-                " WHERE rack_nozzle_seen.printer IS DISTINCT FROM excluded.printer",
+                # is still locked, so a re-check is cheap rather than free. A sighting with
+                # no registry printer keeps the known printer (#6106).
+                " WHERE excluded.printer IS NOT NULL"
+                " AND rack_nozzle_seen.printer IS DISTINCT FROM excluded.printer",
                 (printer, unique),
             )
 
@@ -637,9 +640,9 @@ async def record_seen(
 ) -> None:
     """Record the rack's hotends as seen by the print flow (spec §4), on the registry
     printer (#4971, #5167). With none (a Bambuddy printer the registry does not hold
-    yet), the hotends are recorded with no printer, so their first sighting is kept.
-    Advisory: a failure is logged by exception type and never stops the read that
-    called it."""
+    yet), the hotends are recorded with no printer, so their first sighting is kept. A
+    hotend already seen on a printer keeps that printer (#6106). Advisory: a failure is
+    logged by exception type and never stops the read that called it."""
     if store is None or status is None:
         return
     try:
