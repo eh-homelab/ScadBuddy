@@ -142,7 +142,9 @@ export function resolveOptions(...layers: (PrintOptions | undefined | null)[]): 
  * #6106 — the registry printer that links the Bambuddy printer `printerId`, from the
  * print options read's `bambuddy_links` (registry id to Bambuddy id). It needs no
  * registry list, so a printer's remembered options apply while `GET /printers` loads or
- * when it fails. Null with no printer, or when no registry printer links it.
+ * when it fails. Null with no printer, or when no registry printer links it. At most one
+ * row links a Bambuddy printer (`printers.bambuddy_printer_id` is UNIQUE), so the first
+ * match is the only one.
  */
 export function linkedRegistryPrinter(
   links: Record<string, number> | null | undefined,

@@ -533,7 +533,8 @@ class StoredSettings(BambuddyIds):
     bambuddy_links: dict[str, int] = Field(default_factory=dict)
     #: ``bambuddy_links`` and its inverse, built once on the first read (#6106). The
     #: first item is the map the inverse was built from, so a copy with other links
-    #: builds its own.
+    #: builds its own. The check is by identity: replace ``bambuddy_links``, never
+    #: change it in place, or the inverse goes stale (#6108).
     _linked_by: tuple[dict[str, int], dict[int, str]] | None = PrivateAttr(default=None)
 
     @field_validator(
@@ -649,6 +650,8 @@ class StoredSettings(BambuddyIds):
         built = self._linked_by
         if built is None or built[0] is not self.bambuddy_links:
             inverse: dict[int, str] = {}
+            # At most one row links a Bambuddy printer (`printers.bambuddy_printer_id`
+            # is UNIQUE), so `setdefault` never has to choose.
             for row, linked in self.bambuddy_links.items():
                 inverse.setdefault(linked, row)
             built = (self.bambuddy_links, inverse)
