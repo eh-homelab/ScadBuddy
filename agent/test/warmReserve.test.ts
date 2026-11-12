@@ -176,6 +176,20 @@ describe('WarmSessions.reserve and release', () => {
     }
   })
 
+  it('onClosed tells each listener of a close until its disposer is called', async () => {
+    const { warm, running } = cache(8)
+    const kept: string[] = []
+    const disposed: string[] = []
+    warm.onClosed((id) => kept.push(id))
+    const dispose = warm.onClosed((id) => disposed.push(id))
+    await warm.cut((await running('a')).entry, 'first')
+    dispose()
+    dispose()
+    await warm.cut((await running('b')).entry, 'second')
+    expect(kept).toEqual(['a', 'b'])
+    expect(disposed).toEqual(['a'])
+  })
+
   it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {
     const { warm, spawned, running } = cache(1)
     const cutOff = await running('a')

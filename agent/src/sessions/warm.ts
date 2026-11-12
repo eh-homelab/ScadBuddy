@@ -780,9 +780,13 @@ export class WarmSessions {
     })
   }
 
-  /** `listener` is told each session whose process here closes with no newer one spawned for it. */
-  onClosed(listener: (sessionId: string) => void): void {
+  /** `listener` is told each session whose process here closes with no newer one spawned for it, until the returned disposer is called. */
+  onClosed(listener: (sessionId: string) => void): () => void {
     this.closedListeners.push(listener)
+    return () => {
+      const at = this.closedListeners.indexOf(listener)
+      if (at !== -1) this.closedListeners.splice(at, 1)
+    }
   }
 
   /**

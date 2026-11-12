@@ -101,7 +101,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
    * so a `vi.waitFor` on it races a loaded runner (#5954).
    */
   function nextClose(id: string): Promise<void> {
-    return new Promise((resolve) => warm!.onClosed((closed) => closed === id && resolve()))
+    return new Promise((resolve) => {
+      const dispose = warm!.onClosed((closed) => {
+        if (closed !== id) return
+        dispose()
+        resolve()
+      })
+    })
   }
 
   it('a recycled process ends on its own first: its exit writes land, and the next one carries its total', async () => {
