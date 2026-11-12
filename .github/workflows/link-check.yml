@@ -43,8 +43,9 @@ jobs:
       #   builds its anchors in the browser, so the served HTML has none and
       #   --include-fragments reports "Cannot find fragment" for a live anchor
       #   (#5856; checked 2026-11-11, the orders v2 page's HTML has no
-      #   orders_patch). Other PayPal links are still checked; check these two
-      #   pages by hand when editing the README section that cites them.
+      #   orders_patch). Other PayPal links are still checked, and the next two
+      #   steps check the excluded pages themselves, without their fragments
+      #   (#6084).
       - name: lychee
         id: lychee
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
@@ -65,8 +66,38 @@ jobs:
             tools/go/CLAUDE.md workers/rust/CLAUDE.md e2e-stack/CLAUDE.md models/CLAUDE.md
             deploy/CLAUDE.md plugins/CLAUDE.md
           fail: true
+      # The pages behind the PayPal links excluded above, each once and without its
+      # fragment, so a page that moved or answers 404 still fails the check (#6084).
+      # The list comes from the files lychee reads above, so a new such link is
+      # covered. `:(glob)` makes `**/` match zero or more directories, as lychee's
+      # globs do; without it, git's pathspec skips docs/*.md.
+      - name: Collect the excluded PayPal pages
+        id: paypal_pages
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          git ls-files -z -- ':(glob)docs/**/*.md' README.md CLAUDE.md ':(glob)**/SKILL.md' \
+            backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md agent-durable/CLAUDE.md \
+            tools/go/CLAUDE.md workers/rust/CLAUDE.md e2e-stack/CLAUDE.md models/CLAUDE.md \
+            deploy/CLAUDE.md plugins/CLAUDE.md \
+            | xargs -0 grep -hoE 'https://developer\.paypal\.com/docs/api/[^#)> ]*#' \
+            | sed 's/#$//' | sort -u > paypal-pages.txt || true
+          cat paypal-pages.txt
+          if [ -s paypal-pages.txt ]; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
+      - name: lychee (the excluded PayPal pages, no fragments)
+        id: lychee_paypal
+        if: ${{ !cancelled() && steps.paypal_pages.outputs.found == 'true' }}
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --accept '100..=103,200..=299,429'
+            paypal-pages.txt
+          # Its own report, so the first pass's lychee/out.md stays.
+          output: lychee/paypal.md
+          fail: true
       - name: Open an issue
-        if: failure() && steps.lychee.outcome == 'failure'
+        if: failure() && (steps.lychee.outcome == 'failure' || steps.lychee_paypal.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
