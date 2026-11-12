@@ -95,6 +95,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
     return { ...acquired, result }
   }
 
+  /**
+   * Settles when `drop` has closed the session's next process and released its assembly (warm.ts
+   * `onClosed`). The slot leaves `size()` at once, but `release` waits for the drain (up to DRAIN_MS),
+   * so a `vi.waitFor` on it races a loaded runner (#5954).
+   */
+  function nextClose(id: string): Promise<void> {
+    return new Promise((resolve) => warm!.onClosed((closed) => closed === id && resolve()))
+  }
+
   it('a recycled process ends on its own first: its exit writes land, and the next one carries its total', async () => {
     const id = randomUUID()
     const one = await turn(id)
@@ -180,13 +189,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
     it('0 evicts every idle entry, and from then on each turn is cold: its process goes when it settles', async () => {
       const id = randomUUID()
       const first = await turn(id)
+      const firstClosed = nextClose(id)
       warm!.resize(0, 600_000)
-      await vi.waitFor(() => expect(warm!.size()).toBe(0))
-      await vi.waitFor(() => expect(first.entry.turn.release).toHaveBeenCalledTimes(1))
+      expect(warm!.size()).toBe(0)
+      await firstClosed
+      expect(first.entry.turn.release).toHaveBeenCalledTimes(1)
+      const twoClosed = nextClose(id)
       const two = await turn(id, 1 - 0.02)
       expect(two.outcome).toBe('miss')
-      await vi.waitFor(() => expect(warm!.size()).toBe(0))
-      await vi.waitFor(() => expect(two.entry.turn.release).toHaveBeenCalledTimes(1))
+      await twoClosed
+      expect(warm!.size()).toBe(0)
+      expect(two.entry.turn.release).toHaveBeenCalledTimes(1)
       const three = await turn(id, 1 - 0.04)
       expect(three.outcome).toBe('miss')
       expect(scripted.runs).toHaveLength(3)
@@ -197,9 +210,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
       const one = await turn(id)
       warm!.resize(2, 600_000)
       expect(warm!.size()).toBe(1)
+      const closed = nextClose(id)
       warm!.resize(2, 50)
-      await vi.waitFor(() => expect(warm!.size()).toBe(0), { timeout: 3000 })
-      await vi.waitFor(() => expect(one.entry.turn.release).toHaveBeenCalledTimes(1))
+      await closed
+      expect(warm!.size()).toBe(0)
+      expect(one.entry.turn.release).toHaveBeenCalledTimes(1)
     })
   })
 })
