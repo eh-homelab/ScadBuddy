@@ -254,7 +254,8 @@ export class WarmSessions {
   private readonly now: () => number
   private readonly log: (message: string) => void
   /** Told each session whose process here has closed and left no other (workspace/directory.ts drops its copy). */
-  private readonly closedListeners: ((sessionId: string) => void)[] = []
+  /** One entry per registration, so a disposer removes exactly its own (#6098). */
+  private readonly closedListeners: { readonly listener: (sessionId: string) => void }[] = []
   private readonly start: (run: HarnessRun) => WarmQuery
   /** By session, least recently used first. */
   private readonly slots = new Map<string, Slot>()
@@ -776,25 +777,25 @@ export class WarmSessions {
         this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       this.log(`warm: closed session ${id}'s process: ${reason}`)
-      // A copy, so a listener that disposes itself here never shifts the next one
-      // out of this close; one disposed meanwhile is not told (#6087 review).
+      // A copy, so a registration disposed here never shifts the next one out of this
+      // close; one disposed meanwhile is not told (#6087 review, #6098).
       if (!this.slots.has(id))
-        for (const listener of [...this.closedListeners]) if (this.closedListeners.includes(listener)) listener(id)
+        for (const entry of [...this.closedListeners]) if (this.closedListeners.includes(entry)) entry.listener(id)
     })
   }
 
   /**
    * `listener` is told each session whose process here closes with no newer one
-   * spawned for it, until the returned disposer is called. Each call registers it
-   * once more, and each registration is told once per close. A disposer removes one
-   * registration. While another registration of the same function stays, a disposal
-   * during a close does not stop that close's calls to it: the dispatch tells each
-   * registration it copied whose function is still registered (#6094).
+   * spawned for it, until the returned disposer is called. Each call is a
+   * registration of its own, told once per close, and its disposer removes only it,
+   * however often it is called. A registration disposed during a close is not told
+   * of that close (#6094, #6098).
    */
   onClosed(listener: (sessionId: string) => void): () => void {
-    this.closedListeners.push(listener)
+    const entry = { listener }
+    this.closedListeners.push(entry)
     return () => {
-      const at = this.closedListeners.indexOf(listener)
+      const at = this.closedListeners.indexOf(entry)
       if (at !== -1) this.closedListeners.splice(at, 1)
     }
   }
