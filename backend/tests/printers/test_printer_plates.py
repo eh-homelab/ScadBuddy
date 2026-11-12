@@ -275,5 +275,12 @@ def test_the_contract_step_moves_the_last_bambuddy_rows_then_drops_the_column(
             " WHERE i.indrelid = 'printer_bed_types'::regclass AND i.indisprimary"
         ).fetchall()
         assert key == [("printer",)]
+        # The key itself refuses a second row for one printer (#6103). In a savepoint, so
+        # the failed insert leaves the transaction usable for the next check.
+        with pytest.raises(psycopg.errors.UniqueViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO printer_bed_types (printer, bed_type) VALUES (%s, 'Cool Plate')",
+                (lan,),
+            )
         with pytest.raises(psycopg.errors.NotNullViolation):
             conn.execute("INSERT INTO printer_bed_types (bed_type) VALUES ('Cool Plate')")
