@@ -166,13 +166,13 @@ def as_the_h2c(fake_lan: FakeLan) -> dict[str, Any]:
 class Usage:
     """Rack usage: no history, and what it was asked."""
 
-    def __init__(self, *, linked: bool = False) -> None:
+    def __init__(self) -> None:
         self.asked: list[list[str]] = []
-        self.linked = linked
-        self.seen_by: list[int | None] = []
+        #: The registry printer each `seen` names (#4971, #5167).
         self.seen_on: list[str | None] = []
-        #: Each `record_lan_picks` (#4543): the run, the start, the Bambuddy id, the picks.
-        self.picks: list[tuple[str, str, int | None, list[PickedHotend]]] = []
+        #: Each `record_lan_picks` (#4543): the run, the start, the registry printer, the
+        #: picks.
+        self.picks: list[tuple[str, str, str | None, list[PickedHotend]]] = []
 
     async def usage(self, serials: Iterable[str]) -> dict[str, object]:
         self.asked.append(list(serials))
@@ -182,19 +182,14 @@ class Usage:
         self,
         run_id: str,
         subtask_name: str,
-        printer_id: int | None,
+        printer: str | None,
         picks: list[PickedHotend],
-        printer: str | None = None,
     ) -> int:
-        self.picks.append((run_id, subtask_name, printer_id, list(picks)))
+        self.picks.append((run_id, subtask_name, printer, list(picks)))
         return len(picks)
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
-        # #4971: a LAN-only printer is recorded under its registry id alone.
-        assert (printer_id is not None) == self.linked and printer is not None
-        self.seen_by.append(printer_id)
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
+        # #5167: every printer is recorded under its registry id alone.
         self.seen_on.append(printer)
 
 
@@ -569,8 +564,8 @@ async def test_a_rack_print_sends_its_nozzle_mapping(
     # #4543: the picks are saved under the run and the start, with the spools each
     # group printed from, so Least used sees the open pick and the follow settles it.
     stem = "scadbuddy-run-1-p1"
-    [(run_id, subtask, printer_id, picks)] = usage.picks
-    assert (run_id, subtask, printer_id) == ("run-1", stem, None)
+    [(run_id, subtask, printer, picks)] = usage.picks
+    assert (run_id, subtask, printer) == ("run-1", stem, registry_native)
     assert sorted(pick.position for pick in picks) == [2, 3, 5, 6]
     assert all(pick.serial and pick.spools for pick in picks)
     [outcome] = fake.outcomes
@@ -686,11 +681,10 @@ async def test_the_rack_is_recorded_seen_once_per_report_read(
     that prints nothing from the rack records it too, once."""
     PrinterStore(pg_pool, KEK).link_bambuddy(registry_native, 9)
     as_the_h2c(fake_lan)
-    usage = Usage(linked=True)
+    usage = Usage()
     _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
     assert run.status == "succeeded"
-    assert usage.seen_by == [9] and usage.asked == []
-    assert usage.seen_on == [registry_native]
+    assert usage.seen_on == [registry_native] and usage.asked == []
 
 
 async def test_a_lan_only_printers_rack_is_recorded_seen_by_its_registry_id(
@@ -701,7 +695,7 @@ async def test_a_lan_only_printers_rack_is_recorded_seen_by_its_registry_id(
     usage = Usage()
     _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
     assert run.status == "succeeded"
-    assert (usage.seen_by, usage.seen_on) == ([None], [registry_native])
+    assert usage.seen_on == [registry_native]
 
 
 async def test_copies_start_one_after_another(

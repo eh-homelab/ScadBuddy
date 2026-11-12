@@ -1132,6 +1132,8 @@ export const settings: Settings = {
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
   printer_id: 1,
+  // #5167 — the default printer by registry id: the mocked registry's row for printer 1.
+  default_printer: '00000000-0000-4000-8000-000000000001',
   default_plate: null,
   display_unit: 'mm',
   print_run_retention_seconds: null,
@@ -1306,6 +1308,8 @@ export const printOptions: PrintOptionsState = {
   printers: {},
   models: {},
   printer_id: 1,
+  // #5167 — the Settings printer by registry id: the mocked registry's row for printer 1.
+  default_printer: '00000000-0000-4000-8000-000000000001',
 }
 
 export const targets: BambuddyTargets = {

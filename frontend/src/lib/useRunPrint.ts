@@ -231,8 +231,9 @@ export function useRunPrint({
     const last = choices?.model_choices
     const next = {
       printer_id: printerId,
-      // #4971 — a LAN-only printer is remembered by its registry id.
-      printer: printerId === null ? registryPrinter : null,
+      // #5167 — the server keeps the registry printer only; with none named it keeps the
+      // registry printer that links `printer_id`.
+      printer: registryPrinter,
       filament_plan: planChanged ? plan : [],
       nozzles,
       tier,
@@ -254,11 +255,11 @@ export function useRunPrint({
   }
 
   /**
-   * #83 — the plate this printer now has on it, the fallback when it has no archives. A
-   * LAN-only printer has no Bambuddy id, so its registry id names it (#4971).
+   * #83 — the plate this printer now has on it, the fallback when it has no archives. The
+   * registry id names it (#4971, #5167); a Bambuddy id the server resolves to it.
    */
   function rememberBedType() {
-    const printer = printerId ?? registryPrinter
+    const printer = registryPrinter ?? printerId
     if (printer === null || bedType === null) return
     void api.putPrinterBedType(printer, bedType).catch(() => undefined)
   }

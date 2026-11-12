@@ -19,6 +19,7 @@ from tests.api.test_print import printers_route
 from tests.api.test_print_filaments import inventory_routes, prepared
 from tests.api.test_send import BASE, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.printers import linked_printer
 
 # A run and the dialog both read or record the output's upload copies (#316), which
 # live in Postgres.
@@ -171,6 +172,7 @@ def test_choices_list_the_filament_presets_each_nozzle_size_takes(
 @respx.mock
 def test_choices_carry_what_this_model_last_printed_with(client: TestClient, model: str) -> None:
     """The dialog reopens on the remembered spools; only the run writes them."""
+    printer = linked_printer(client, 1)
     client.put(
         f"/api/v1/print/models/{model}/choices",
         json={"printer_id": 1, "filament_plan": [{"slot_id": 1, "spool_id": 22}]},
@@ -187,8 +189,8 @@ def test_choices_carry_what_this_model_last_printed_with(client: TestClient, mod
 
     assert body["model_choices"] == {
         "printer_id": 1,
-        # #4971: the registry printer, only for a printer with no Bambuddy id.
-        "printer": None,
+        # #5167: the registry printer that links Bambuddy printer 1.
+        "printer": printer,
         "filament_plan": [{"slot_id": 1, "spool_id": 22}],
         "nozzles": [],
         "tier": None,
@@ -204,7 +206,7 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
     """Spec §7 — the dialog reopens on the last choices for this model."""
     remembered = {
         "printer_id": 1,
-        "printer": None,
+        "printer": linked_printer(client, 1),
         "filament_plan": [],
         "nozzles": [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "high_flow"}],
         "tier": None,
@@ -267,14 +269,15 @@ def test_a_stored_choice_with_only_the_printer_and_spools_still_loads(
     client: TestClient, app: FastAPI, model: str, settings: Settings
 ) -> None:
     """Every dialog choice defaults to "nothing remembered", so a row without them loads."""
+    printer = linked_printer(client, 2)
     _store_choices_row(
-        settings, model, {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
+        settings, model, {"printer": printer, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
     )
 
     loaded = _load(app)
 
     choices = loaded.model_print_choices[model]
-    assert choices.printer_id == 2
+    assert (choices.printer, choices.printer_id) == (printer, 2)
     assert choices.nozzles == []
     assert choices.tier is None
     assert choices.process_name is None
@@ -301,6 +304,7 @@ def printer_1_hardware() -> None:
 def test_a_remembered_printer_no_longer_active_falls_through_to_an_active_one(
     client: TestClient, model: str
 ) -> None:
+    linked_printer(client, 7)
     client.put(f"/api/v1/print/models/{model}/choices", json={"printer_id": 7})
     output_id = prepared(client, model)
     upload_route()
@@ -320,6 +324,8 @@ def test_a_settings_printer_that_is_gone_falls_through_to_the_first_active_one(
     client: TestClient, model: str
 ) -> None:
     output_id = prepared(client, model)
+    # The registry still links Bambuddy printer 42, which Bambuddy no longer lists.
+    linked_printer(client, 42)
     client.put(
         "/api/v1/settings",
         json={"bambuddy_url": BASE, "bambuddy_api_key": "s3cret", "printer_id": 42},

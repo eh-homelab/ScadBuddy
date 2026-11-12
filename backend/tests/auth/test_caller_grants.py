@@ -195,7 +195,8 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
             conn.execute("UPDATE project_print_targets SET printer = printer WHERE false")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 conn.execute(
-                    "INSERT INTO project_print_targets (project_id, printer_id) VALUES (1, 1)"
+                    "INSERT INTO project_print_targets (project_id, printer)"
+                    " VALUES (1, gen_random_uuid())"
                 )
             conn.rollback()
     finally:

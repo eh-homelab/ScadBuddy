@@ -128,12 +128,12 @@ def test_a_model_choice_and_a_printer_plate_written_at_once_both_persist(
     for round_ in range(ROUNDS):
         _at_once(
             [
-                partial(store.set_model_choices, "gear", ModelPrintChoices(printer_id=round_)),
+                partial(store.set_model_choices, "gear", ModelPrintChoices(printer=f"p{round_}")),
                 partial(store.set_printer_bed_type, printer, f"Plate {round_}"),
             ]
         )
         loaded = _fresh_load(settings)
-        assert loaded.model_print_choices["gear"].printer_id == round_
+        assert loaded.model_print_choices["gear"].printer == f"p{round_}"
         assert loaded.printer_bed_types == {"1": f"Plate {round_}"}
 
 
@@ -146,14 +146,14 @@ def test_many_models_remembered_at_once_all_persist(
                 partial(
                     store.set_model_choices,
                     f"model-{model}",
-                    ModelPrintChoices(printer_id=round_ * 100 + model),
+                    ModelPrintChoices(printer=f"p{round_ * 100 + model}"),
                 )
                 for model in range(WRITERS)
             ]
         )
         remembered = _fresh_load(settings).model_print_choices
-        assert {slug: choice.printer_id for slug, choice in remembered.items()} == {
-            f"model-{m}": round_ * 100 + m for m in range(WRITERS)
+        assert {slug: choice.printer for slug, choice in remembered.items()} == {
+            f"model-{m}": f"p{round_ * 100 + m}" for m in range(WRITERS)
         }
 
 
@@ -210,6 +210,8 @@ def test_a_connection_save_leaves_the_remembered_choices_alone(
 ) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
+    # #5167: the default printer by Bambuddy id is kept as the registry printer.
+    bambuddy_printer(pg_conninfo, 4)
     store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
 
     loaded = store.load()
@@ -299,7 +301,7 @@ def test_an_env_var_added_after_other_settings_were_saved_is_honoured(
     """Review focus (#322): the ENV_SEEDED semantics, extended to every field."""
     store = _store_over(settings)
     try:
-        store.save(SettingsPatch(render_timeout=45.0, printer_id=3))
+        store.save(SettingsPatch(render_timeout=45.0, library_folder_id=3))
     finally:
         store.close()
     later = settings.model_copy(update={"job_ttl": 600.0, "log_level": "DEBUG"})
@@ -391,6 +393,7 @@ def test_the_patch_refuses_what_the_ui_may_not_set() -> None:
 def test_forget_all_clears_the_remembered_choices_and_nothing_else(
     store: SettingsStore, pg_conninfo: str
 ) -> None:
+    bambuddy_printer(pg_conninfo, 4)
     store.save(SettingsPatch(printer_id=4, render_timeout=33.0))
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(bambuddy_printer(pg_conninfo, 1), "Cool Plate")
@@ -686,17 +689,21 @@ def test_a_printers_rack_algorithm_round_trips_and_is_forgotten(
     store: SettingsStore, settings: Settings
 ) -> None:
     """#836: kept in the jsonb ``settings`` row, one printer at a time, no own table."""
-    store.set_printer_rack_algorithm(1, "oldest_first")
-    store.set_printer_rack_algorithm(2, "bambuddy")
+    store.set_printer_rack_algorithm("1", "oldest_first")
+    store.set_printer_rack_algorithm("2", "bambuddy")
     loaded = _fresh_load(settings)
     assert loaded.printer_rack_algorithms == {"1": "oldest_first", "2": "bambuddy"}
-    assert (loaded.rack_algorithm(1), loaded.rack_algorithm(3), loaded.rack_algorithm(None)) == (
+    assert (
+        loaded.rack_algorithm(None, "1"),
+        loaded.rack_algorithm(None, "3"),
+        loaded.rack_algorithm(None),
+    ) == (
         "oldest_first",
         "least_used",
         "least_used",
     )
 
-    assert store.set_printer_rack_algorithm(2, None) == "least_used"
+    assert store.set_printer_rack_algorithm("2", None) == "least_used"
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "oldest_first"}
 
     store.forget_remembered()
@@ -710,18 +717,18 @@ def test_an_older_rack_algorithm_save_arriving_after_a_newer_one_is_refused(
     dialog gave up on that turns up after the next one is refused, and the newer choice
     stays; a resend of the same version stores the same choice again (a 503 is safe to
     retry); and a forget is ordered too, so an older save cannot bring a choice back."""
-    store.set_printer_rack_algorithm(1, "bambuddy", version=2)
+    store.set_printer_rack_algorithm("1", "bambuddy", version=2)
     with pytest.raises(settings_store.RackAlgorithmSupersededError):
-        store.set_printer_rack_algorithm(1, "oldest_first", version=1)
+        store.set_printer_rack_algorithm("1", "oldest_first", version=1)
     assert _fresh_load(settings).printer_rack_algorithms == {"1": "bambuddy"}
 
-    assert store.set_printer_rack_algorithm(1, "bambuddy", version=2) == "bambuddy"
+    assert store.set_printer_rack_algorithm("1", "bambuddy", version=2) == "bambuddy"
     # Another printer has its own order.
-    store.set_printer_rack_algorithm(2, "oldest_first", version=1)
+    store.set_printer_rack_algorithm("2", "oldest_first", version=1)
 
-    store.set_printer_rack_algorithm(1, None, version=3)
+    store.set_printer_rack_algorithm("1", None, version=3)
     with pytest.raises(settings_store.RackAlgorithmSupersededError):
-        store.set_printer_rack_algorithm(1, "oldest_first", version=2)
+        store.set_printer_rack_algorithm("1", "oldest_first", version=2)
     assert _fresh_load(settings).printer_rack_algorithms == {"2": "oldest_first"}
 
 
@@ -808,7 +815,7 @@ def test_a_bounded_settings_read_that_postgres_answers_reads_the_settings(
     store: SettingsStore,
 ) -> None:
     """#1111: the bound leaves an ordinary read alone."""
-    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
+    store.save(SettingsPatch(library_folder_id=4, public_url="https://scad.example"))
     assert store.load(timeout=5) == store.load()
 
 
@@ -819,12 +826,12 @@ def test_a_rack_algorithm_write_held_up_gives_up_and_never_lands_later(
     A save that is still waiting in Postgres must give up first, or it could commit
     after the one that replaced it and leave the printer on the older choice."""
     monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
-    store.set_printer_rack_algorithm(1, "oldest_first")
+    store.set_printer_rack_algorithm("1", "oldest_first")
     failed: list[BaseException] = []
 
     def save() -> None:
         try:
-            store.set_printer_rack_algorithm(1, "bambuddy")
+            store.set_printer_rack_algorithm("1", "bambuddy")
         except Exception as exc:
             failed.append(exc)
 
@@ -843,12 +850,12 @@ def test_a_rack_algorithm_save_gives_up_waiting_for_a_connection(
     monkeypatch.setattr(settings_store, "RACK_ALGORITHM_WRITE_TIMEOUT", 0.2)
     store = SettingsStore(settings.model_copy(update={"database_pool_size": 1}))
     store.open()
-    store.set_printer_rack_algorithm(1, "oldest_first")
+    store.set_printer_rack_algorithm("1", "oldest_first")
     failed: list[BaseException] = []
 
     def save() -> None:
         try:
-            store.set_printer_rack_algorithm(1, "bambuddy")
+            store.set_printer_rack_algorithm("1", "bambuddy")
         except Exception as exc:
             failed.append(exc)
 
@@ -872,7 +879,7 @@ def test_a_committed_rack_algorithm_save_answers_without_reading_everything_back
     with psycopg.connect(settings.database_url) as holder, holder.transaction():
         holder.execute("LOCK TABLE printer_bed_types IN ACCESS EXCLUSIVE MODE")
         finished = _finishes_while_held(
-            lambda: answered.append(store.set_printer_rack_algorithm(1, "bambuddy"))
+            lambda: answered.append(store.set_printer_rack_algorithm("1", "bambuddy"))
         )
     assert finished
     assert answered == ["bambuddy"]

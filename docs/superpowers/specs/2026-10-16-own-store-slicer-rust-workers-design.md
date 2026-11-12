@@ -524,6 +524,8 @@ choices) keep their key in 3a and are read through one resolver,
 `printers.resolve_bambuddy_id`; moving them to the registry id, with a backfill from
 the link, is tier 3b, its own plan. A LAN-only printer therefore has no remembered
 choices until 3b; that is the one gap 3a leaves, and it is listed in the plan.
+As built: tier 3b (#4971, contract steps #6059 and #5167) keys all of these tables by
+the registry id only, and `resolve_bambuddy_id` is gone.
 
 The path is chosen by the row's `preferred_path`: `auto` picks native when the LAN
 link is set and reachable, else Bambuddy. `PrintRunWorkflow` branches after the slice:

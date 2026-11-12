@@ -90,7 +90,7 @@ def link(archive_id: int, queue_item_id: int | None) -> PrintLink:
 @pytest.fixture
 async def store(pg_conninfo: str) -> AsyncIterator[RackUsageStore]:
     opened = RackUsageStore(pg_conninfo)
-    await opened.record_picks(51, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    await opened.record_picks(51, None, [PickedHotend(group_id=0, position=4, serial=A)])
     try:
         yield opened
     finally:
@@ -146,7 +146,7 @@ async def test_a_settle_reads_only_archives_not_yet_recorded(store: RackUsageSto
     archive reads on every settle; an archive already counted is not read again."""
     first = ArchiveDetail(id=101, status="completed", actual_time_seconds=60)
     await settle(store, Links(link(101, 51)), Archives(first))
-    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    await store.record_picks(52, None, [PickedHotend(group_id=0, position=4, serial=A)])
     archives = Archives(first, ArchiveDetail(id=102, status="completed", actual_time_seconds=40))
     assert await settle(store, Links(link(101, 51), link(102, 52)), archives) == 1
     assert archives.reads == [102]
@@ -168,7 +168,7 @@ async def test_a_second_print_of_one_output_counts_only_its_own_archives(
         Links(link(101, 51)),
         Archives(ArchiveDetail(id=101, status="completed", actual_time_seconds=60)),
     )
-    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    await store.record_picks(52, None, [PickedHotend(group_id=0, position=4, serial=A)])
     archives = Archives(
         ArchiveDetail(id=101, status="completed", actual_time_seconds=9999),
         ArchiveDetail(id=102, status="completed", actual_time_seconds=40),
@@ -184,7 +184,7 @@ async def test_another_print_still_running_is_left_for_its_own_settle(
 ) -> None:
     """claude-review on #1043, finding 1: the output's other print, still running, is not
     credited with its estimate (``DO NOTHING`` would freeze it); its own settle counts it."""
-    await store.record_picks(52, 1, [PickedHotend(group_id=0, position=4, serial=A)])
+    await store.record_picks(52, None, [PickedHotend(group_id=0, position=4, serial=A)])
     running = ArchiveDetail(id=101, status=status, print_time_seconds=9999, filament_used_grams=9.0)
     done = ArchiveDetail(id=102, status="completed", actual_time_seconds=40)
     links = Links(link(101, 51), link(102, 52))

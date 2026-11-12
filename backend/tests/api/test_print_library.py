@@ -54,6 +54,7 @@ from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.printers import linked_printer
 from tests.test_clearance import two_objects_3mf
 
 pytestmark = pytest.mark.requires_postgres
@@ -597,6 +598,7 @@ def test_a_library_print_queues_with_the_options_remembered_for_that_file(
     slice_routes()
     queued = queue_route()
     options = "/api/v1/settings/print-options"
+    linked_printer(client, 1)
     for remembered in (
         {"scope": "printer", "key": "1", "options": {"timelapse": True, "use_ams": False}},
         {"scope": "model", "key": "library:89", "options": {"timelapse": False}},
@@ -1424,6 +1426,8 @@ def test_a_remembered_printer_that_is_gone_falls_through(client: TestClient) -> 
     configure(client)
     library_file(89)
     run_routes()
+    # The registry still links Bambuddy printer 99, which Bambuddy no longer lists.
+    linked_printer(client, 99)
     put = client.put("/api/v1/print/library/89/choices", json={"printer_id": 99})
 
     choices = client.get("/api/v1/print/library/89/choices")
@@ -2300,8 +2304,10 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert {row["id"]: row["output_id"] for row in listed} == {141: None, 89: None}
     remembered = asyncio.run(uploads.project_target(7))
     assert remembered is not None
+    # Kept under the registry printer the run made for Bambuddy printer 1 (#5167).
+    assert remembered.printer is not None
     assert remembered.model_copy(update={"nozzle_plan": None}) == ProjectTarget(
-        printer_id=1, nozzle_diameter="0.2"
+        printer_id=1, printer=remembered.printer, nozzle_diameter="0.2"
     )
     # The run's nozzle plan too, which the next Generate lays the file out with (#2166).
     assert remembered.nozzle_plan is not None

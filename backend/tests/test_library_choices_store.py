@@ -35,7 +35,6 @@ def store(tmp_path: Path, pg_conninfo: str) -> Iterator[SettingsStore]:
 
 
 CHOSEN = ModelPrintChoices(
-    printer_id=1,
     filament_plan=[SlotChoice(slot_id=1, spool_id=9)],
     nozzles=[NozzleChoice(size="0.2")],
     tier="fine",
@@ -110,6 +109,8 @@ def test_an_unreadable_row_does_not_stop_the_settings_loading(
 
 
 MIGRATION = MIGRATIONS_DIR / "20261009T0541Z_print_choices_by_subject.sql"
+# #5167 rewrites ``printer_id`` in the choices to a registry ``printer``.
+REGISTRY_ONLY = "20261112T1451Z_printer_settings_registry_only"
 
 
 def _rows(conn: psycopg.Connection[Any]) -> list[Any]:
@@ -122,8 +123,10 @@ def test_the_migration_moves_every_library_row_and_is_idempotent(pg_conninfo: st
     """Every ``library_print_choices`` row lands under ``library:<file id>`` with its
     choices and time; applying the migration again changes nothing; a model's row is
     left alone; and on a key already present the newer row wins. The table itself is
-    dropped by a later migration (#1963), so this stops just before the copy."""
+    dropped by a later migration (#1963), so this stops just before the copy. The later
+    migrations run up to #5167's, which rewrites the printer keys."""
     copy = next(i for i, m in enumerate(MIGRATIONS) if m.id == MIGRATION.stem)
+    registry_only = next(i for i, m in enumerate(MIGRATIONS) if m.id == REGISTRY_ONLY)
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[:copy])
         conn.execute(
@@ -146,7 +149,7 @@ def test_the_migration_moves_every_library_row_and_is_idempotent(pg_conninfo: st
         assert _rows(conn) == once
         # The old table keeps its rows until #1963's migration drops it.
         assert conn.execute("SELECT count(*) FROM library_print_choices").fetchone() == (4,)
-        migrate(conn)
+        migrate(conn, MIGRATIONS[:registry_only])
         assert _rows(conn) == once
         assert conn.execute(
             "SELECT to_regclass('library_print_choices') IS NULL",

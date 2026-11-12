@@ -87,7 +87,7 @@ export const SETTINGS_FIELDS = [
   'bambuddy_url',
   'public_url',
   'library_folder_id',
-  'printer_id',
+  'default_printer',
   'default_plate',
   'display_unit',
 ] as const

@@ -259,15 +259,12 @@ def test_link_bambuddy_takes_over_a_synthetic_row(printers: PrinterStore) -> Non
     assert printers.get(synthetic.id) is None
 
 
-def test_unlink_bambuddy_and_resolve(printers: PrinterStore) -> None:
+def test_unlink_bambuddy(printers: PrinterStore) -> None:
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     printers.link_bambuddy(row.id, 3)
-    assert printers.resolve_bambuddy_id(row.id) == 3
-    assert printers.resolve_bambuddy_id(9) == 9
-    assert printers.resolve_bambuddy_id(None) is None
-    assert printers.resolve_bambuddy_id("nope") is None
+    assert printers.by_bambuddy_id(3) == printers.get(row.id)
     assert printers.unlink_bambuddy(row.id).bambuddy_printer_id is None
-    assert printers.resolve_bambuddy_id(row.id) is None
+    assert printers.by_bambuddy_id(3) is None
 
 
 def test_delete(printers: PrinterStore) -> None:
@@ -285,7 +282,7 @@ def test_ids_are_uuids_and_a_malformed_id_is_not_found(printers: PrinterStore) -
     """M1: `printers.id` is a uuid (spec §6.1)."""
     row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
     assert str(uuid.UUID(row.id)) == row.id
-    assert printers.get("nope") is None and printers.resolve_bambuddy_id("nope") is None
+    assert printers.get("nope") is None
     with pytest.raises(PrinterNotFoundError):
         printers.delete("nope")
 

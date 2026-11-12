@@ -32,6 +32,7 @@ from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import served_print_crud, threaded_print_crud
+from tests.support.printers import bambuddy_printer
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -334,9 +335,12 @@ async def test_a_retried_activity_claims_under_the_same_key(
 
 
 async def test_project_records_answer_as_the_sql_store(
-    remote: RemoteUploadStore, sql: BambuddyUploadStore, store: SettingsStore
+    remote: RemoteUploadStore, sql: BambuddyUploadStore, store: SettingsStore, pg_conninfo: str
 ) -> None:
-    target = ProjectTarget(printer_id=3, nozzle_diameter="0.4", nozzle_plan={"left": "0.4"})
+    printer = bambuddy_printer(pg_conninfo, 3)
+    target = ProjectTarget(
+        printer_id=3, printer=printer, nozzle_diameter="0.4", nozzle_plan={"left": "0.4"}
+    )
     assert await remote.project_target(8) is None
     for _ in range(2):
         await remote.remember_project_target(8, target)

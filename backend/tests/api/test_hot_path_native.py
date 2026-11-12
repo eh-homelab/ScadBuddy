@@ -532,9 +532,10 @@ def test_the_first_reads_open_on_the_native_row_with_bambuddy_configured(
     assert (choices.json()["printer_id"], choices.json()["lan_printers"]) == (None, [row])
     assert filaments.json()["source"] == "trays"
 
-    # Settings' printer, which no row links, is Bambuddy's: its reads go there. Bambuddy
-    # failing, the problem names the row a run reaches natively, which the dialog then
-    # offers; asked for, it opens with no Bambuddy call.
+    # Settings' printer, a registry row linked to Bambuddy only (`configure` makes it,
+    # #5167), is Bambuddy's: its reads go there. Bambuddy failing, the problem names the
+    # row a run reaches natively, which the dialog then offers; asked for, it opens with
+    # no Bambuddy call.
     configure(native_app, printer_id=7)
     with pytest.raises(BambuddyCalledError), forbid_bambuddy(spans, BASE):
         failed = native_app.get(f"/api/v1/print/outputs/{output}/choices")

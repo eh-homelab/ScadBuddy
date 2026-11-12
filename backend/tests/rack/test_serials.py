@@ -43,9 +43,7 @@ def leak(serial: str) -> str:
 class Leaky:
     """A store whose every call fails with a serial in its message, as a database's might."""
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         raise RuntimeError(leak(next(iter(serials))))
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -54,7 +52,7 @@ class Leaky:
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -123,6 +121,7 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         choose = rack_chooser(
             Reads(grouped(requirement()), rack),
             printer_id=1,
+            printer="p1",
             plate_id=1,
             spools={1: SpoolOption(spool_id=9, material="PLA")},
             algorithm="least_used",
@@ -135,6 +134,7 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         unreadable = rack_chooser(
             Reads(grouped(requirement()), RuntimeError(leak(INVENTED_SERIALS[4]))),
             printer_id=1,
+            printer="p1",
             plate_id=1,
             spools={1: SpoolOption(spool_id=9, material="PLA")},
             algorithm="least_used",
@@ -143,9 +143,9 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
             warnings=warnings,
         )
         assert await unreadable(77) is None  # status failed: no choice, a warning
-        await record_seen(Leaky(), 1, rack)
+        await record_seen(Leaky(), "p1", rack)
         await save_picks(
-            Leaky(), 1, [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
+            Leaky(), "p1", [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
         )
         await record_settled(
             PrintSubject.output("c" * 32), client=Archives(), links=Links(), store=Leaky()

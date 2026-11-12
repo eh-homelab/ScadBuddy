@@ -40,7 +40,7 @@ type Row = {
 
 function describeChoices(choices: ModelPrintChoices, printerName: (id: number | string) => string): string {
   const parts: string[] = []
-  // #4971 — a LAN-only printer is remembered by its registry id.
+  // #5167 — remembered by its registry id; `printer_id` is the Bambuddy printer it links.
   const printer = choices.printer_id ?? choices.printer
   if (printer !== null && printer !== undefined) parts.push(printerName(printer))
   if (choices.tier) parts.push(`${choices.tier} quality`)
@@ -132,7 +132,7 @@ export function RememberedChoicesPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // #4971 — a printer with no Bambuddy id is keyed by its registry id, named by the server.
+  // #5167 — the per-printer maps are keyed by the registry id, named by the server.
   const printerName = (id: number | string) =>
     targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ??
     state.data?.printer_names?.[String(id)] ??

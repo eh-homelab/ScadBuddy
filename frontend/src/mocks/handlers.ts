@@ -852,6 +852,8 @@ export function mockRemembered() {
       name: null,
       bed_type: bed,
     })),
+    // #5167 — every registry printer's name: the per-printer maps are keyed by its id.
+    printer_names: Object.fromEntries(printersState().map((row) => [row.id, row.name])),
     print_options: dropEmpty(state.printOptions.global_options),
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
@@ -3514,12 +3516,18 @@ export const handlers = [
     }
     // Resolved as the server does (#124): an omitted `copies` is the remembered quantity,
     // global → the printer the run names → this model, else 1.
-    const scopePrinter = body.printer_id ?? state.printOptions.printer_id ?? null
+    // #5167 — the per-printer options are keyed by the registry id.
+    const scopePrinter =
+      body.printer ??
+      (body.printer_id != null
+        ? printersState().find((row) => row.bambuddy_printer_id === body.printer_id)?.id
+        : state.printOptions.default_printer) ??
+      null
     const copies =
       body.copies ??
       resolveOptions(
         state.printOptions.global_options,
-        scopePrinter === null ? undefined : state.printOptions.printers?.[String(scopePrinter)],
+        scopePrinter === null ? undefined : state.printOptions.printers?.[scopePrinter],
         state.printOptions.models?.[output.slug],
       ).quantity ??
       1
@@ -3975,8 +3983,16 @@ export const handlers = [
       ) {
         return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
       }
-      if (empty) delete map[body.key]
-      else map[body.key] = options
+      // #5167 — a printer's options are kept under its registry id; a Bambuddy id names
+      // the row that links it.
+      const key =
+        body.scope === 'printer' && /^\d+$/.test(body.key)
+          ? printersState().find((row) => row.bambuddy_printer_id === Number(body.key))?.id
+          : body.key
+      if (key === undefined) {
+        if (!empty) return problem(404, 'Not Found', `no printer ${body.key}`)
+      } else if (empty) delete map[key]
+      else map[key] = options
     }
     // Shaped like the real response, which is declared `response_model=PrintOptionsView`
     // and so cannot carry `printer_id` however much the server-side object holds. Reusing
