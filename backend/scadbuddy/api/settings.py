@@ -177,9 +177,10 @@ class SettingsView(BaseModel):
     store_s3_path_style: bool = True
     public_url: str | None = None
     library_folder_id: int | None = None
+    #: The Bambuddy printer the default printer links, if any (#5167). Read only: a
+    #: save of it keeps the registry printer that links it as ``default_printer``.
     printer_id: int | None = None
-    #: The default printer by registry id, when it has no Bambuddy id (#4971); one that
-    #: has one is ``printer_id``.
+    #: The default printer by registry id (#4971, #5167).
     default_printer: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
@@ -272,8 +273,7 @@ class PrintOptionsView(BaseModel):
 
     defaults: PrintOptions
     global_options: PrintOptions
-    #: Keyed by a stringified Bambuddy printer id, or the registry id of a printer with
-    #: none (#4971).
+    #: Keyed by the registry printer id (#4971, #5167).
     printers: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Keyed by ScadBuddy model slug.
     models: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -281,9 +281,11 @@ class PrintOptionsView(BaseModel):
 
 class PrintOptionsState(PrintOptionsView):
     """The view plus the printer the per-printer scope keys on: the printer set in
-    Settings, or none. Neither half needs Bambuddy."""
+    Settings, or none. Neither half needs Bambuddy. ``default_printer`` is its registry
+    id, the scope's key (#5167), and ``printer_id`` the Bambuddy printer it links."""
 
     printer_id: int | None = None
+    default_printer: str | None = None
 
 
 class PrintOptionsUpdate(BaseModel):
@@ -351,13 +353,13 @@ class RememberedChoices(BaseModel):
     #: Every remembered plate with its registry printer and its Bambuddy one (#4971), a
     #: LAN-only printer's among them; forgotten by either id.
     printer_plates: list[PrinterPlate] = Field(default_factory=list)
-    #: Registry printer id -> its name (#4971), for the entries keyed by a registry id:
-    #: a printer with no Bambuddy id.
+    #: Registry printer id -> its name (#4971, #5167), for every registry printer: the
+    #: per-printer entries below are keyed by the registry id.
     printer_names: dict[str, str] = Field(default_factory=dict)
-    #: A stringified Bambuddy printer id, or the registry id of a printer with none
-    #: (#4971), -> its rack nozzle algorithm (#836).
+    #: Registry printer id (#5167) -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
+    #: Registry printer id (#5167) -> its print options.
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
@@ -542,10 +544,10 @@ async def put_settings(
     deployment's value. A live field applies before this answers, here and (through
     ``settings.changed``) on every other replica.
 
-    The default printer (#4971) is ``printer_id`` for a printer with a Bambuddy id and
-    ``default_printer`` for one with none, never both: a ``default_printer`` naming a
-    printer that has one is saved as its ``printer_id``, and a ``printer_id`` clears
-    ``default_printer``. 422 for a ``default_printer`` the registry does not hold."""
+    The default printer is ``default_printer``, a registry id (#4971, #5167). An older
+    client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
+    it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
+    registry does not hold, and for a ``printer_id`` no registry printer links."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
@@ -637,7 +639,8 @@ def _print_watch_by_a_person(patch: SettingsPatch) -> None:
 
 
 def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:
-    """``patch`` with the default printer under one key (#4971, `put_settings`)."""
+    """``patch`` with the default printer as a registry id only (#4971, #5167,
+    `put_settings`)."""
     if "default_printer" in patch.model_fields_set:
         if patch.default_printer is None:
             return patch
@@ -646,13 +649,15 @@ def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {patch.default_printer}"
             )
-        if row.bambuddy_printer_id is not None:
-            return patch.model_copy(
-                update={"printer_id": row.bambuddy_printer_id, "default_printer": None}
+        return patch.model_copy(update={"default_printer": row.id})
+    if "printer_id" in patch.model_fields_set and patch.printer_id is not None:
+        linked = registry.store.by_bambuddy_id(patch.printer_id)
+        if linked is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"no printer links Bambuddy printer {patch.printer_id}",
             )
-        return patch.model_copy(update={"printer_id": None, "default_printer": row.id})
-    if "printer_id" in patch.model_fields_set:
-        return patch.model_copy(update={"default_printer": None})
+        return patch.model_copy(update={"default_printer": linked.id})
     return patch
 
 
@@ -747,7 +752,7 @@ async def get_remembered(
         _current_model_projects, settings, catalogue, presets, store
     )
     rows = await asyncio.to_thread(registry.store.list)
-    names = {row.id: row.name for row in rows if row.bambuddy_printer_id is None}
+    names = {row.id: row.name for row in rows}
     return _remembered(settings, await uploads.project_targets(), model_projects, names)
 
 
@@ -791,7 +796,11 @@ def _options_view(settings: StoredSettings) -> PrintOptionsView:
 )
 def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
     settings = store.load()
-    return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=settings.printer_id)
+    return PrintOptionsState(
+        **_options_view(settings).model_dump(),
+        printer_id=settings.printer_id,
+        default_printer=settings.default_printer,
+    )
 
 
 @router.put(
@@ -803,16 +812,15 @@ def put_print_options(
     body: PrintOptionsUpdate, store: SettingsStoreDep, registry: PrintersDep
 ) -> PrintOptionsView:
     """Only the named scope changes; the other two are left exactly as they were. A
-    printer's key is its Bambuddy id, or the registry id of one with none (#4971): the
-    registry id of a printer that has one is kept under the Bambuddy id, as the previous
-    build reads it."""
+    printer's key is its registry id (#5167); a Bambuddy id is resolved to the registry
+    printer that links it (404 when none does, and a forget then removes nothing)."""
     scope: OptionScope = body.scope
     key = body.key
-    stale: tuple[str, ...] = ()
     if scope == "printer" and key is not None:
-        keys = printer_keys(registry.store, key, forget=body.options.is_empty())
-        key, stale = keys.key, keys.stale
-    return _options_view(store.save_print_options(scope, key, body.options, stale=stale))
+        key = printer_keys(registry.store, key, forget=body.options.is_empty()).key
+        if key is None:
+            return _options_view(store.load())
+    return _options_view(store.save_print_options(scope, key, body.options))
 
 
 @router.post("/settings/test", response_model=ConnectionTest, summary="Verify the API key")

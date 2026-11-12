@@ -48,12 +48,12 @@ export function patchFields(settings: Settings, from: Settings, names: readonly 
   return out as Settings
 }
 
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
+const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'last_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
-  printing: ['printer_id', 'print_run_retention_seconds', 'operation_retention_seconds'],
+  printing: ['default_printer', 'print_run_retention_seconds', 'operation_retention_seconds'],
   // #4699 — the print watcher's settings; only a person saves them (403 `person_only`).
   // #6041 — and the LAN-only printers it leaves alone, by registry id.
   'print-watcher': [

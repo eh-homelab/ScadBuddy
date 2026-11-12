@@ -1743,7 +1743,8 @@ describe('PrintPicker · Plate type', () => {
     await screen.findByTestId('queued-items')
     await waitFor(() => expect(bodies).toHaveLength(1))
 
-    expect(urls[0]).toContain('/print/printers/1/bed-type')
+    // #5167 — kept under the registry id of Bambuddy printer 1.
+    expect(urls[0]).toContain('/print/printers/00000000-0000-4000-8000-000000000001/bed-type')
     expect(bodies[0]).toEqual({ bed_type: 'Engineering Plate' })
   })
 })

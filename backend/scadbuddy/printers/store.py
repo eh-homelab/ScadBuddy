@@ -215,8 +215,7 @@ def _repoint_machine_rate(conn: Connection[DictRow], merged: str, into: str) -> 
             conn.execute(f"UPDATE {table} SET printer = %s WHERE printer = %s", (into, merged))
 
 
-#: The per-printer settings maps whose keys may be a registry id (#4971): a LAN-only
-#: printer's entries, keyed by its row since it has no Bambuddy id.
+#: The per-printer settings maps, keyed by the registry id (#4971, #5167).
 PRINTER_KEYED_SETTINGS = (
     "printer_rack_algorithms",
     "printer_rack_algorithm_versions",
@@ -230,9 +229,9 @@ PRINTER_LISTED_SETTINGS = ("print_auto_import_skip_lan_printers",)
 
 
 def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
-    # The default printer and the registry-keyed map entries are JSON values in
-    # `settings` (#4971), so no foreign key keeps them. A map entry ``into`` has of its
-    # own wins.
+    # The default printer, the registry-keyed map entries and each subject's
+    # remembered printer are JSON values (#4971, #5167), so no foreign key keeps them. A
+    # map entry ``into`` has of its own wins.
     conn.execute(
         "UPDATE settings SET value = to_jsonb(%s::text), updated_at = now()"
         " WHERE name = 'default_printer' AND value = to_jsonb(%s::text)",
@@ -243,6 +242,12 @@ def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None
         " ELSE (value - %(merged)s) || jsonb_build_object(%(into)s::text, value -> %(merged)s)"
         " END, updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
         {"into": into, "merged": merged, "names": list(PRINTER_KEYED_SETTINGS)},
+    )
+    conn.execute(
+        "UPDATE model_print_choices"
+        " SET choices = jsonb_set(choices, '{printer}', to_jsonb(%s::text)), updated_at = now()"
+        " WHERE choices ->> 'printer' = %s",
+        (into, merged),
     )
     # A listed id follows its row; listed once when ``into`` was listed too.
     conn.execute(
@@ -425,15 +430,6 @@ class PrinterStore:
         if row is None:
             raise PrinterNotFoundError(printer_id)
         return row
-
-    def resolve_bambuddy_id(self, printer_id: str | int | None) -> int | None:
-        """The Bambuddy integer behind a registry id, an integer passed through, or
-        ``None``: the one way the tables still keyed by the Bambuddy printer id are
-        reached from a registry id (plan, "Deferred to 3b")."""
-        if printer_id is None or isinstance(printer_id, int):
-            return printer_id
-        row = self.get(printer_id)
-        return None if row is None else row.bambuddy_printer_id
 
     # ── writes ────────────────────────────────────────────────────────────────────
 

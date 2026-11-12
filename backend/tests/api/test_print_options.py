@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored
+from tests.support.printers import linked_printer
 
 ROUTE = "/api/v1/settings/print-options"
 
@@ -26,43 +27,51 @@ def test_nothing_is_remembered_to_begin_with_and_bambuddys_defaults_are_served(
     assert body["defaults"]["project_id"] is None
 
 
-def test_a_per_printer_override_is_remembered_under_the_printer_id(
+def test_a_per_printer_override_is_remembered_under_the_registry_id(
     client: TestClient, settings: Settings
 ) -> None:
+    """A Bambuddy id names the registry printer that links it (#5167)."""
+    printer = linked_printer(client, 1)
     response = client.put(
         ROUTE, json={"scope": "printer", "key": "1", "options": {"timelapse": False}}
     )
 
     assert response.status_code == 200
-    assert response.json()["printers"] == {"1": {**_unset(), "timelapse": False}}
+    assert response.json()["printers"] == {printer: {**_unset(), "timelapse": False}}
 
     stored = read_stored(settings.database_url)
-    assert stored["printer_print_options"]["1"]["timelapse"] is False
+    assert stored["printer_print_options"][printer]["timelapse"] is False
 
 
 def test_each_scope_is_stored_separately(client: TestClient) -> None:
+    printer = linked_printer(client, 1)
     client.put(ROUTE, json={"scope": "global", "options": {"use_ams": False}})
-    client.put(ROUTE, json={"scope": "printer", "key": "1", "options": {"timelapse": False}})
+    client.put(ROUTE, json={"scope": "printer", "key": printer, "options": {"timelapse": False}})
     body = client.put(
         ROUTE, json={"scope": "model", "key": "demo", "options": {"quantity": 2}}
     ).json()
 
     assert body["global_options"]["use_ams"] is False
-    assert body["printers"]["1"]["timelapse"] is False
+    assert body["printers"][printer]["timelapse"] is False
     assert body["models"]["demo"]["quantity"] == 2
 
 
 def test_a_scope_is_replaced_wholesale_not_merged(client: TestClient) -> None:
+    printer = linked_printer(client, 1)
     client.put(
         ROUTE,
-        json={"scope": "printer", "key": "1", "options": {"timelapse": False, "use_ams": False}},
+        json={
+            "scope": "printer",
+            "key": printer,
+            "options": {"timelapse": False, "use_ams": False},
+        },
     )
 
     body = client.put(
-        ROUTE, json={"scope": "printer", "key": "1", "options": {"timelapse": False}}
+        ROUTE, json={"scope": "printer", "key": printer, "options": {"timelapse": False}}
     ).json()
 
-    assert body["printers"]["1"]["use_ams"] is None
+    assert body["printers"][printer]["use_ams"] is None
 
 
 def test_clearing_a_scope_removes_it_rather_than_storing_an_empty_object(
@@ -78,6 +87,7 @@ def test_clearing_a_scope_removes_it_rather_than_storing_an_empty_object(
 
 
 def test_saving_options_leaves_the_connection_settings_alone(client: TestClient) -> None:
+    linked_printer(client, 1)
     client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test", "printer_id": 1})
 
     client.put(ROUTE, json={"scope": "global", "options": {"timelapse": False}})
@@ -143,8 +153,10 @@ def _unset() -> dict[str, None]:
 def test_a_configured_printer_is_used_directly_without_asking_bambuddy(
     client: TestClient,
 ) -> None:
+    printer = linked_printer(client, 7)
     client.put("/api/v1/settings", json={"printer_id": 7})
-    assert client.get(ROUTE).json()["printer_id"] == 7
+    body = client.get(ROUTE).json()
+    assert (body["printer_id"], body["default_printer"]) == (7, printer)
 
 
 @respx.mock

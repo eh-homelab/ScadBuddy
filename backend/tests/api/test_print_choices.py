@@ -19,6 +19,7 @@ from tests.api.test_print import printers_route
 from tests.api.test_print_filaments import inventory_routes, prepared
 from tests.api.test_send import BASE, upload_route
 from tests.bambuddy.conftest import recording
+from tests.support.printers import linked_printer
 
 # A run and the dialog both read or record the output's upload copies (#316), which
 # live in Postgres.
@@ -320,6 +321,8 @@ def test_a_settings_printer_that_is_gone_falls_through_to_the_first_active_one(
     client: TestClient, model: str
 ) -> None:
     output_id = prepared(client, model)
+    # The registry still links Bambuddy printer 42, which Bambuddy no longer lists.
+    linked_printer(client, 42)
     client.put(
         "/api/v1/settings",
         json={"bambuddy_url": BASE, "bambuddy_api_key": "s3cret", "printer_id": 42},

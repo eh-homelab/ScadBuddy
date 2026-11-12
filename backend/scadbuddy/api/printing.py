@@ -81,7 +81,7 @@ from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.destinations import DefaultDestination, default_destination
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
-from scadbuddy.bambuddy.models import RackAlgorithm
+from scadbuddy.bambuddy.models import DEFAULT_ALGORITHM, RackAlgorithm
 from scadbuddy.bambuddy.options import LAN_CALIBRATION_API_HINT, LAN_CALIBRATION_PROBLEM
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import (
@@ -289,39 +289,35 @@ PrinterIdPath = Annotated[
 
 @dataclass(frozen=True)
 class PrinterKeys:
-    """Where a per-printer settings map write lands (#4971): ``key``, and the ``stale``
-    keys it removes, ``bambuddy_id`` and ``printer`` the printer's two ids."""
+    """Where a per-printer settings map write lands (#4971, #5167): ``key``, the
+    registry printer id (``None`` for a forget with nothing to remove), ``bambuddy_id``
+    and ``printer`` the printer's two ids."""
 
-    key: str
-    stale: tuple[str, ...]
+    key: str | None
     bambuddy_id: int | None
     printer: str | None
 
 
 def printer_keys(store: PrinterStore, printer_id: str, *, forget: bool) -> PrinterKeys:
-    """A per-printer map's key for a route's path (#4971): the Bambuddy id, which the
-    previous build reads, else the registry id of a printer with none. A printer with
-    both ids also drops the entry its registry id kept from before it was linked, which
-    the previous build never reads, so it cannot outlive a change or a forget. A forget
-    naming a registry id the registry no longer holds removes that key as given, so a
-    deleted printer's entry can still go; any other unknown id is 404."""
+    """A per-printer map's key for a route's path (#5167): the registry printer id. A
+    Bambuddy id is resolved to the registry printer that links it. A forget that names
+    a registry id the registry no longer holds removes that key as given, so a deleted
+    printer's entry can still go. A forget that names a Bambuddy id no registry printer
+    links has nothing to remove. Any other unknown id is 404."""
     if printer_id.isascii() and printer_id.isdecimal():
         bambuddy_id = int(printer_id)
-        if bambuddy_id > _BAMBUDDY_ID_MAX:
+        linked = store.by_bambuddy_id(bambuddy_id) if bambuddy_id <= _BAMBUDDY_ID_MAX else None
+        if linked is None:
             if forget:
-                return PrinterKeys(printer_id, (), None, None)
+                return PrinterKeys(None, bambuddy_id, None)
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-        linked = store.by_bambuddy_id(bambuddy_id)
-        stale = (linked.id,) if linked is not None else ()
-        return PrinterKeys(printer_id, stale, bambuddy_id, linked.id if linked else None)
+        return PrinterKeys(linked.id, bambuddy_id, linked.id)
     row = store.get(printer_id)
     if row is None:
         if forget:
-            return PrinterKeys(printer_id, (), None, None)
+            return PrinterKeys(printer_id, None, None)
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-    if row.bambuddy_printer_id is None:
-        return PrinterKeys(row.id, (), None, row.id)
-    return PrinterKeys(str(row.bambuddy_printer_id), (row.id,), row.bambuddy_printer_id, row.id)
+    return PrinterKeys(row.id, row.bambuddy_printer_id, row.id)
 
 
 class PrinterRackAlgorithmPut(BaseModel):
@@ -339,8 +335,8 @@ RACK_ALGORITHM_SUPERSEDED_PROBLEM = "https://scadbuddy.dev/problems/rack-algorit
 
 
 class PrinterRackAlgorithm(BaseModel):
-    """The rack algorithm in force on one printer (#836): ``printer_id`` its Bambuddy
-    printer, ``printer`` its registry printer when it has no Bambuddy id (#4971)."""
+    """The rack algorithm in force on one printer (#836): ``printer`` its registry
+    printer (#4971, #5167), ``printer_id`` the Bambuddy printer it links, if any."""
 
     printer_id: int | None = None
     printer: str | None = None
@@ -509,8 +505,11 @@ def put_printer_bed_type(
     not hold, and for a Bambuddy id no registry printer links; forgetting that one's
     plate forgets nothing.
     """
-    keys = printer_keys(registry.store, printer_id, forget=False)
+    keys = printer_keys(registry.store, printer_id, forget=body.bed_type is None)
     bambuddy_id, printer = keys.bambuddy_id, keys.printer
+    if printer is None and keys.key is not None:
+        # A registry id the registry does not hold: 404 for a forget too.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
     if printer is None:
         if body.bed_type is not None:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
@@ -552,16 +551,16 @@ def put_printer_rack_algorithm(
     registry: PrintersDep,
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
-    Bambuddy, like the printer's remembered plate. The path is a Bambuddy printer's id or
-    a registry printer's (#4971): one with a Bambuddy id is kept under it, as the
-    previous build reads it, one with none (LAN-only) under its registry id."""
+    Bambuddy, like the printer's remembered plate. The path is a registry printer's id
+    or a Bambuddy printer's (#4971). It is kept under the registry id (#5167): a
+    Bambuddy id is resolved to the registry printer that links it, and is 404 when none
+    does (a forget then has nothing to remove)."""
     keys = printer_keys(registry.store, printer_id, forget=body.algorithm is None)
-    bambuddy_id = keys.bambuddy_id
-    printer = None if bambuddy_id is not None else keys.printer
+    bambuddy_id, printer = keys.bambuddy_id, keys.printer
+    if keys.key is None:
+        return PrinterRackAlgorithm(printer_id=None, printer=None, algorithm=DEFAULT_ALGORITHM)
     try:
-        algorithm = store.set_printer_rack_algorithm(
-            keys.key, body.algorithm, body.version, stale=keys.stale
-        )
+        algorithm = store.set_printer_rack_algorithm(keys.key, body.algorithm, body.version)
     except RackAlgorithmSupersededError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -1591,11 +1590,10 @@ def names_no_printer(settings: StoredSettings, printer: str | None, printer_id: 
 def remembered_printer(
     printer: str | None, printer_id: int | None, remembered: ModelPrintChoices | None
 ) -> tuple[str | None, int | None]:
-    """The request's printer, else the one the subject last printed on: its Bambuddy id,
-    else the registry id of a printer with none (#4971)."""
-    printer_id = printer_id or (remembered.printer_id if remembered else None)
-    if printer is None and printer_id is None and remembered is not None:
-        printer = remembered.printer
+    """The request's printer, else the one the subject last printed on (#4971): its
+    registry id and the Bambuddy printer that one links now (#5167)."""
+    if printer is None and not printer_id and remembered is not None:
+        return remembered.printer, remembered.printer_id
     return printer, printer_id
 
 

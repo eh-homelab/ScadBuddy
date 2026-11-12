@@ -667,8 +667,7 @@ class MachineRates:
         if printer_id is not None:
             return self.printers.by_bambuddy_id(printer_id)
         stored = self.settings.load()
-        if stored.printer_id is not None:
-            return self.printers.by_bambuddy_id(stored.printer_id)
+        # The default printer is a registry id only (#5167).
         if stored.default_printer is not None:
             return self.printers.get(stored.default_printer)
         return None

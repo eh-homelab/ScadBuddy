@@ -119,11 +119,13 @@ class LostStart(BaseModel):
 
 
 class ProjectTarget(BaseModel):
-    """The printer and nozzle a Bambuddy project last printed on (#317). ``printer_id``
-    is its Bambuddy printer, ``0`` for one with none (a LAN-only printer), which then has
-    only ``printer``, its registry id (#4971)."""
+    """The printer and nozzle a Bambuddy project last printed on (#317). ``printer`` is
+    its registry printer, the one key stored (#4971, #5167). ``printer_id`` is not
+    stored: a read gives the Bambuddy printer that ``printer`` links, ``0`` for none (a
+    LAN-only printer). A write with no ``printer`` (a build before #5167) keeps the
+    registry printer that links ``printer_id``, and nothing when none does."""
 
-    printer_id: int
+    printer_id: int = 0
     printer: str | None = None
     nozzle_diameter: str | None = None
     #: Its ``NozzlePlan`` (#2166), as JSON: this module is below the plan's.
@@ -622,10 +624,11 @@ class BambuddyUploadStore:
     def _project_targets(self) -> dict[int, ProjectTarget]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT project_id, printer_id,"
-                " CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
-                " nozzle_diameter, nozzle_plan"
-                " FROM project_print_targets ORDER BY project_id"
+                "SELECT t.project_id, t.printer::text AS printer,"
+                " COALESCE(p.bambuddy_printer_id, 0) AS printer_id,"
+                " t.nozzle_diameter, t.nozzle_plan"
+                " FROM project_print_targets AS t JOIN printers AS p ON p.id = t.printer"
+                " ORDER BY t.project_id"
             ).fetchall()
         return {row["project_id"]: ProjectTarget.model_validate(row) for row in rows}
 
@@ -641,9 +644,11 @@ class BambuddyUploadStore:
     def _project_target(self, project_id: int) -> ProjectTarget | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT printer_id, CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
-                " nozzle_diameter, nozzle_plan"
-                " FROM project_print_targets WHERE project_id = %s",
+                "SELECT t.printer::text AS printer,"
+                " COALESCE(p.bambuddy_printer_id, 0) AS printer_id,"
+                " t.nozzle_diameter, t.nozzle_plan"
+                " FROM project_print_targets AS t JOIN printers AS p ON p.id = t.printer"
+                " WHERE t.project_id = %s",
                 (project_id,),
             ).fetchone()
         if row is None:
@@ -652,20 +657,26 @@ class BambuddyUploadStore:
 
     def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
         with self._pool.connection() as conn:
+            # The registry printer: the one named, else the one that links the Bambuddy
+            # printer (#5167). A target with neither is not remembered.
             conn.execute(
                 "INSERT INTO project_print_targets"
-                " (project_id, printer_id, printer, nozzle_diameter, nozzle_plan)"
-                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
-                " SET printer_id = EXCLUDED.printer_id, printer = EXCLUDED.printer,"
+                " (project_id, printer, nozzle_diameter, nozzle_plan)"
+                " SELECT %(project)s, p.id, %(nozzle)s, %(plan)s FROM printers AS p"
+                " WHERE CASE WHEN %(printer)s::text IS NOT NULL"
+                " THEN p.id::text = %(printer)s::text"
+                " ELSE p.bambuddy_printer_id = %(bambuddy)s END"
+                " ON CONFLICT (project_id) DO UPDATE"
+                " SET printer = EXCLUDED.printer,"
                 " nozzle_diameter = EXCLUDED.nozzle_diameter,"
                 " nozzle_plan = EXCLUDED.nozzle_plan, updated_at = now()",
-                (
-                    project_id,
-                    target.printer_id,
-                    target.printer,
-                    target.nozzle_diameter,
-                    Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
-                ),
+                {
+                    "project": project_id,
+                    "printer": target.printer,
+                    "bambuddy": target.printer_id or None,
+                    "nozzle": target.nozzle_diameter,
+                    "plan": Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
+                },
             )
 
     def _folderless(self, name: str, parent_id: int | None) -> list[int]:

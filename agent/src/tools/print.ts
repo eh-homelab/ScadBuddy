@@ -1251,7 +1251,7 @@ export const printTools: Tool[] = [
           .max(64)
           .nullable()
           .optional()
-          .describe('A registry printer id, for a printer with no Bambuddy id (LAN-only); ignored beside printer_id'),
+          .describe('A registry printer id (list_printers); with none, printer_id is kept as the registry printer that links it'),
         filament_plan: z.array(slotChoice).optional().describe('Only spools moved off the suggestion'),
         nozzles: z.array(nozzleChoice).max(2).optional(),
         tier: tier.nullable().optional(),

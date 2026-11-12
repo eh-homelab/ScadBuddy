@@ -707,8 +707,8 @@ export function PrintPicker({
     const session = algorithmSession.current
     const save = ++algorithmSave.current
     const savedOn = printerId
-    // #4971 — a LAN-only printer has no Bambuddy id, so its registry id names it.
-    const savedAt = printerId ?? registryPrinter
+    // #5167 — kept under the registry id; a Bambuddy id the server resolves to it.
+    const savedAt = registryPrinter ?? printerId
     if (savedAt === null) return
     // Taken when chosen, not when sent, so the order is the user's (#1216).
     const version = nextRackAlgorithmVersion()
@@ -1112,8 +1112,8 @@ export function PrintPicker({
     }
   }, [open, scopeKey])
 
-  // #4971 — a LAN-only printer's options are kept under its registry id.
-  const printerKey = printerId === null ? registryPrinter : String(printerId)
+  // #5167 — a printer's options are kept under its registry id.
+  const printerKey = registryPrinter
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,

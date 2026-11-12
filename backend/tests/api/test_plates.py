@@ -77,7 +77,7 @@ def test_clearing_the_default_plate_outlasts_the_environment(settings: Settings)
 def test_a_field_never_written_still_follows_the_environment(settings: Settings) -> None:
     """Saving an unrelated field must not freeze an unset env-backed one as null."""
     with TestClient(create_app(settings)) as client:
-        client.put("/api/v1/settings", json={"printer_id": 3})
+        client.put("/api/v1/settings", json={"library_folder_id": 3})
     seeded = settings.model_copy(update={"default_plate": "P1S"})
     with TestClient(create_app(seeded)) as client:
         assert client.get("/api/v1/plate").json()["name"] == "P1S"

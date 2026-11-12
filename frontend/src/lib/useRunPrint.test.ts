@@ -117,7 +117,7 @@ describe('useRunPrint', () => {
     await waitFor(() => expect(api.putPrinterBedType).toHaveBeenCalledWith('lan-row', 'Textured PEI Plate'))
   })
 
-  it("remembers a LAN-only printer by its registry id, a Bambuddy one by its own (#4971)", async () => {
+  it("remembers every printer by its registry id, beside a linked one's Bambuddy id (#4971, #5167)", async () => {
     const lan = renderHook(() => useRunPrint({ ...input(), printerId: null, registryPrinter: 'lan-row' }))
     await act(() => lan.result.current.run())
     await waitFor(() =>
@@ -133,7 +133,7 @@ describe('useRunPrint', () => {
     await waitFor(() =>
       expect(api.putModelChoices).toHaveBeenCalledWith(
         'name-keychain',
-        expect.objectContaining({ printer_id: 1, printer: null }),
+        expect.objectContaining({ printer_id: 1, printer: 'linked-row' }),
       ),
     )
   })

@@ -942,6 +942,7 @@ def rack_chooser(
     rack: RackUsage | None,
     warnings: list[FilamentWarning],
     requirements: FilamentRequirements | None = None,
+    printer: str | None = None,
 ) -> ChooseRack:
     """The plate's ``choose_rack`` (spec 2026-10-01 §5). It reads the sliced file's
     requirements for ``plate_id`` and then, only when a group prints from the rack, a
@@ -980,7 +981,7 @@ def rack_chooser(
             # ``print_enqueue`` activity), and can show a hotend swapped in since
             # prepare_run's. An unchanged rack makes no new row
             # version (#1082), though the upsert still locks its rows.
-            await record_seen(rack, printer_id, status_read)
+            await record_seen(rack, printer, status_read)
             stage = "rack pick failed"
             picks = rank_rack(groups, status_read.nozzle_rack, algorithm, usage, manual)
             found = rack_warnings(groups, status_read.nozzle_rack, algorithm, picks, manual)
@@ -2540,7 +2541,7 @@ async def prepare_run(
         # Nothing is sliced, so no preset need resolve (#2671): any active printer the
         # file was sliced for prints it (`any_model` above).
         printer_status = report_status or await read_status(bambuddy_client(client), printer_id)
-        await _record_seen(rack, printer_id, printer_status)
+        await record_seen(rack, None if row is None else row.id, printer_status)
         return PreparedRun(
             plate_ids=plate_ids,
             printer_id=printer_id,
@@ -2571,7 +2572,7 @@ async def prepare_run(
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
     printer_status = report_status or await read_status(bambuddy_client(client), printer_id)
-    await _record_seen(rack, printer_id, printer_status)
+    await record_seen(rack, None if row is None else row.id, printer_status)
     if refuse_manual_pick and request.rack_position is not None:
         # Only a manual pick needs the file judged, which reads its 3MF (#1752).
         _check_manual_pick(
@@ -2590,14 +2591,6 @@ async def prepare_run(
         printer="" if row is None else row.id,
         path=path,
     )
-
-
-async def _record_seen(
-    rack: RackUsage | None, printer_id: int, printer_status: PrinterStatus | None
-) -> None:
-    """`record_seen`, keyed by the Bambuddy printer: a LAN-only row (0) has none."""
-    if printer_id:
-        await record_seen(rack, printer_id, printer_status)
 
 
 #: How a disagreeing printer's refusal ends.
@@ -2648,8 +2641,8 @@ async def _named_printer(
     Bambuddy printer, or none (a row only the LAN reaches, #4516), is refused, so a
     disagreeing pair never prints on the Bambuddy printer."""
     if printer is None and sent is None and settings.printer_id is None:
-        # The default printer when it has no Bambuddy id (#4971); one that has one is
-        # ``printer_id``, as the previous build reads it.
+        # The default printer when it links no Bambuddy printer (#4971, #5167); one that
+        # links one gives ``printer_id``, the Bambuddy printer read through the registry.
         printer = settings.default_printer
     if printers is None or printer is None:
         printer_id = sent or settings.printer_id
@@ -3001,6 +2994,7 @@ async def queue_plate(
         await rack_chooser(
             client,
             printer_id=planned.printer_id,
+            printer=planned.printer or None,
             plate_id=plate.plate_id,
             spools=plate.spools,
             algorithm=planned.rack_algorithm,
@@ -3024,7 +3018,7 @@ async def queue_plate(
         nozzle_rack_choice=choice.nozzle_rack_choice if choice is not None else None,
     )
     picks = list(choice.picks) if choice is not None else []
-    await save_picks(rack, planned.printer_id, [item], picks, copies=planned.copies)
+    await save_picks(rack, planned.printer or None, [item], picks, copies=planned.copies)
     return QueuedPlate(
         item_id=item,
         # Group ids repeat across plates, so each pick names its plate.

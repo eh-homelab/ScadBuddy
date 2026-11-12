@@ -36,7 +36,8 @@ describe('Remembered choices (#322)', () => {
     const table = await screen.findByRole('table', { name: 'Remembered choices' })
     expect(within(table).getByText('Cool Plate')).toBeInTheDocument()
 
-    await user.click(within(table).getByRole('button', { name: `Forget plate for Printer ${GARAGE}` }))
+    // #5167 — the server names every registry printer.
+    await user.click(within(table).getByRole('button', { name: 'Forget plate for Garage' }))
     await waitFor(() => expect(within(table).queryByText('Cool Plate')).toBeNull())
     expect((await api.getRemembered()).printer_plates).toEqual([
       { printer: null, bambuddy_printer_id: 1, name: null, bed_type: 'Textured PEI Plate' },

@@ -59,9 +59,7 @@ class Usages:
         self.calls: list[str] = []
         self._usage = usage or {}
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str, serials: Iterable[str]) -> None:
         self.calls.append("seen")
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -71,7 +69,7 @@ class Usages:
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -112,6 +110,7 @@ def chooser(
     return rack_chooser(
         reads,
         printer_id=1,
+        printer="p1",
         plate_id=plate_id,
         spools=SPOOLS,
         algorithm=algorithm,

@@ -24,6 +24,8 @@ async function pick(user: ReturnType<typeof userEvent.setup>, label: string, val
 }
 
 const MODEL: OptionsSubject = { key: 'name-keychain', noun: 'model' }
+/** #5167 — the Settings printer's registry id, the per-printer scope's key. */
+const R1 = printOptionsFixture.default_printer as string
 
 function Harness({
   printerId,
@@ -109,7 +111,7 @@ describe('PrintOptionsDisclosure', () => {
         HttpResponse.json({
           ...printOptionsFixture,
           global_options: { timelapse: true, use_ams: false },
-          printers: { '1': { timelapse: false } },
+          printers: { [R1]: { timelapse: false } },
           models: { 'name-keychain': { quantity: 4 } },
         }),
       ),
@@ -213,7 +215,7 @@ describe('PrintOptionsDisclosure', () => {
   it('keeps what a scope already remembered when a second option is saved to it', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
-        HttpResponse.json({ ...printOptionsFixture, printers: { '1': { timelapse: true } } }),
+        HttpResponse.json({ ...printOptionsFixture, printers: { [R1]: { timelapse: true } } }),
       ),
     )
     const puts: unknown[] = []
@@ -224,7 +226,7 @@ describe('PrintOptionsDisclosure', () => {
         return HttpResponse.json({
           defaults: printOptionsFixture.defaults,
           global_options: {},
-          printers: { '1': body.options },
+          printers: { [R1]: body.options },
           models: {},
         })
       }),
@@ -242,13 +244,13 @@ describe('PrintOptionsDisclosure', () => {
     expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
   })
 
-  it("keys a LAN-only printer's scope by its registry id, not the Settings printer (#4971)", async () => {
+  it("keys a chosen printer's scope by its registry id, not the Settings printer (#4971, #5167)", async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
         HttpResponse.json({
           ...printOptionsFixture,
           printer_id: 1,
-          printers: { '1': { timelapse: true }, 'lan-row': { bed_levelling: 'off' } },
+          printers: { [R1]: { timelapse: true }, 'lan-row': { bed_levelling: 'off' } },
         }),
       ),
     )
@@ -260,7 +262,7 @@ describe('PrintOptionsDisclosure', () => {
         return HttpResponse.json({
           defaults: printOptionsFixture.defaults,
           global_options: {},
-          printers: { '1': { timelapse: true }, 'lan-row': body.options },
+          printers: { [R1]: { timelapse: true }, 'lan-row': body.options },
           models: {},
         })
       }),
@@ -344,7 +346,7 @@ describe('PrintOptionsDisclosure', () => {
   it('forgets a scope', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
-        HttpResponse.json({ ...printOptionsFixture, printers: { '1': { timelapse: true } } }),
+        HttpResponse.json({ ...printOptionsFixture, printers: { [R1]: { timelapse: true } } }),
       ),
     )
     const user = userEvent.setup()
@@ -362,7 +364,7 @@ describe('PrintOptionsDisclosure', () => {
   it('disables the per-printer scope when no printer is known and says why', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
-        HttpResponse.json({ ...printOptionsFixture, printer_id: null }),
+        HttpResponse.json({ ...printOptionsFixture, printer_id: null, default_printer: null }),
       ),
     )
     const user = userEvent.setup()
@@ -379,12 +381,13 @@ describe('PrintOptionsDisclosure', () => {
         HttpResponse.json({
           ...printOptionsFixture,
           printer_id: 1,
-          printers: { '1': { timelapse: true }, '9': { timelapse: false } },
+          printers: { [R1]: { timelapse: true }, 'row-9': { timelapse: false } },
         }),
       ),
     )
     const user = userEvent.setup()
-    render(<Harness printerId={9} />)
+    // #5167 — the chosen printer's scope is its registry id.
+    render(<Harness printerId={9} registryPrinter="row-9" />)
     await open(user)
 
     expect(within(row('Timelapse')).getByText(/Off · from this printer/)).toBeInTheDocument()
@@ -412,7 +415,7 @@ describe('PrintOptionsDisclosure', () => {
   it('saves to the model when This printer is selected but unavailable', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
-        HttpResponse.json({ ...printOptionsFixture, printer_id: null }),
+        HttpResponse.json({ ...printOptionsFixture, printer_id: null, default_printer: null }),
       ),
     )
     const puts: unknown[] = []

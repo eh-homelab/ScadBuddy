@@ -237,8 +237,8 @@ class PrintSource(Protocol):
         printer: str | None = None,
     ) -> None:
         """After a print into a project: what the next Generate into it lays its file
-        out for (#317), its nozzle plan too (#2166), and the registry printer of one with
-        no Bambuddy id (#4971)."""
+        out for (#317), its nozzle plan too (#2166), keyed by the registry printer
+        (#4971, #5167)."""
         ...
 
 
@@ -779,14 +779,14 @@ class PrintPipeline:
         nozzle_plan: NozzlePlan | None = None,
         printer: str | None = None,
     ) -> None:
-        """``printer`` is the registry printer, kept only beside a ``printer_id`` of 0
-        (a printer with no Bambuddy id, #4971)."""
+        """``printer`` is the registry printer, the target's key (#4971, #5167). Without
+        it, the store keeps the registry printer that links ``printer_id``."""
         assert self.uploads is not None, "a source that remembers needs the uploads"
         await self.uploads.remember_project_target(
             project_id,
             ProjectTarget(
                 printer_id=printer_id,
-                printer=(printer or None) if not printer_id else None,
+                printer=printer or None,
                 nozzle_diameter=nozzle_size,
                 nozzle_plan=nozzle_plan.model_dump() if nozzle_plan is not None else None,
             ),

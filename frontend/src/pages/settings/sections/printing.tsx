@@ -1,7 +1,8 @@
 import { Input } from '@/components/ui/input'
 import { ChoiceSelect } from '../../../components/settings/form'
 import { useSettingsAgentField } from '../agentFields'
-import { useBambuddyResources } from '../bambuddyResources'
+import { api } from '../../../api/client'
+import { useAsync } from '../../../lib/useAsync'
 import { FieldRow } from '../controls'
 import { RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
@@ -13,18 +14,25 @@ export const area: AreaId = 'printing'
 export const title = 'Printing defaults'
 export const order = 10
 
-/** The printer a print starts on, and how long finished print runs and operations are kept. */
+/**
+ * The printer a print starts on, and how long finished print runs and operations are kept.
+ * #5167 — the printer is a registry printer, a LAN-only one too, saved as `default_printer`.
+ */
 export function Component() {
-  const { targets } = useBambuddyResources()
+  const registry = useAsync(() => api.listPrinters(), [])
   const form = useBackendSettings(id, (s) => fieldsOf(id, s))
   const { value, setField, errors } = form
-  const printers = targets.data?.printers ?? []
+  const printers = (registry.data ?? []).filter((printer) => printer.kind === 'physical')
+  const current = value('default_printer')
+  // A default the list does not hold (the list still loading, or a printer gone) stays a
+  // choice, so the select never shows a value it does not offer.
+  const unlisted = current !== '' && !printers.some((printer) => printer.id === current)
 
-  useSettingsAgentField('printer_id', {
-    value: () => value('printer_id'),
-    set: (next) => setField('printer_id', next),
-    allowed: () => ['', ...printers.map((printer) => String(printer.id))],
-    listed: () => printers.map((printer) => ({ value: String(printer.id), name: printer.name })),
+  useSettingsAgentField('default_printer', {
+    value: () => value('default_printer'),
+    set: (next) => setField('default_printer', next),
+    allowed: () => ['', ...printers.map((printer) => printer.id)],
+    listed: () => printers.map((printer) => ({ value: printer.id, name: printer.name })),
   })
 
   return (
@@ -32,14 +40,15 @@ export function Component() {
       <FieldRow id="printer" label="Printer">
         <ChoiceSelect
           id="printer"
-          value={value('printer_id')}
-          onValueChange={(next) => setField('printer_id', next)}
+          value={current}
+          onValueChange={(next) => setField('default_printer', next)}
           choices={[
             { value: '', label: 'None' },
             ...printers.map((printer) => ({
-              value: String(printer.id),
+              value: printer.id,
               label: `${printer.name}${printer.model ? ` (${printer.model})` : ''}`,
             })),
+            ...(unlisted ? [{ value: current, label: registry.data ? 'A printer that is gone' : 'Loading…' }] : []),
           ]}
         />
       </FieldRow>

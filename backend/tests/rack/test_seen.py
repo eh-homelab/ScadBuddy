@@ -14,35 +14,33 @@ from tests.rack.helpers import mounted, serial, slot, status
 
 class Seen:
     def __init__(self, error: Exception | None = None) -> None:
-        self.calls: list[tuple[int | None, list[str]]] = []
+        self.calls: list[tuple[str, list[str]]] = []
         self.error = error
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str, serials: Iterable[str]) -> None:
         if self.error is not None:
             raise self.error
-        self.calls.append((printer_id, sorted(serials)))
+        self.calls.append((printer, sorted(serials)))
 
 
 async def test_the_racks_hotends_are_recorded_and_the_left_hotend_is_not() -> None:
     store = Seen()
     left = mounted().model_copy(update={"id": 1, "serial_number": serial(1)})
-    await record_seen(store, 1, status(mounted(), left, *(slot(p) for p in (2, 3, 4, 5, 6))))  # type: ignore[arg-type]
-    assert store.calls == [(1, sorted([serial(0), *(serial(p + 15) for p in (2, 3, 4, 5, 6))]))]
+    await record_seen(store, "p1", status(mounted(), left, *(slot(p) for p in (2, 3, 4, 5, 6))))  # type: ignore[arg-type]
+    assert store.calls == [("p1", sorted([serial(0), *(serial(p + 15) for p in (2, 3, 4, 5, 6))]))]
 
 
 async def test_no_status_or_no_store_records_nothing() -> None:
     store = Seen()
-    await record_seen(store, 1, None)  # type: ignore[arg-type]
-    await record_seen(None, 1, status(slot(2)))
+    await record_seen(store, "p1", None)  # type: ignore[arg-type]
+    await record_seen(None, "p1", status(slot(2)))
     assert store.calls == []
 
 
 async def test_a_failed_write_is_logged_by_type_only(caplog: pytest.LogCaptureFixture) -> None:
     store = Seen(psycopg.OperationalError(f"duplicate key (serial)=({serial(17)})"))
     with caplog.at_level(logging.DEBUG):
-        await record_seen(store, 1, status(slot(2)))  # type: ignore[arg-type]
+        await record_seen(store, "p1", status(slot(2)))  # type: ignore[arg-type]
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
     assert record.getMessage() == RACK_SEEN_FALLBACK
     assert record.__dict__["error"] == "OperationalError"

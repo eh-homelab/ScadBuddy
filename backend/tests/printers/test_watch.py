@@ -170,7 +170,7 @@ async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
     rack = RackUsageStore(pg_conninfo)
     try:
         hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
-        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, pid, [hotend])
         assert (await rack.usage([HOTEND]))[HOTEND].pending == 1
         lan = Lan(
             subscribes=True,
@@ -199,7 +199,7 @@ async def test_a_start_the_printer_moved_on_from_settles_untimed(
     rack = RackUsageStore(pg_conninfo)
     try:
         hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
-        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, pid, [hotend])
         lan = Lan(
             subscribes=True,
             deltas=[

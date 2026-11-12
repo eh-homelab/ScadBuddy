@@ -47,6 +47,7 @@ from tests.api.test_print_run_choices import (
 from tests.api.test_send import configure, upload_route
 from tests.bambuddy.conftest import recording
 from tests.rack.helpers import INVENTED_SERIALS, invented_status, serial
+from tests.support.printers import linked_printer
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import WorkflowReaper
 
@@ -223,7 +224,7 @@ def test_the_check_lists_each_positions_open_picks(client: TestClient, model: st
     invented_rack_route()
     asyncio.run(
         rack_usage(client).record_picks(
-            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))]
+            51, None, [PickedHotend(group_id=0, position=2, serial=serial(17))]
         )
     )
 
@@ -274,9 +275,7 @@ class BrokenUsage(RackUsageStore):
     def __init__(self) -> None:
         pass
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str, serials: Iterable[str]) -> None:
         return None
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -285,7 +284,7 @@ class BrokenUsage(RackUsageStore):
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -967,7 +966,7 @@ def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
     configure(client)
     invented_rack_route()
     store = rack_usage(client)
-    asyncio.run(store.seen(1, [serial(17)]))
+    asyncio.run(store.seen(linked_printer(client, 1), [serial(17)]))
     blue = PickedSpool(
         slot_id=1,
         spool_id=7,
@@ -978,7 +977,7 @@ def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
     )
     asyncio.run(
         store.record_picks(
-            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
+            51, None, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
         )
     )
     asyncio.run(
