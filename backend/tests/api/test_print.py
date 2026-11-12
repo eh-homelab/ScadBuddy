@@ -19,6 +19,7 @@ from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored
 from tests.api.test_send import BASE
 from tests.bambuddy.conftest import recording
+from tests.support.printers import linked_printer
 
 API = f"{BASE}/api/v1"
 
@@ -43,7 +44,8 @@ def presets_routes() -> None:
 #: The spool-first dialog's own remembered choices (spec 2026-09-27 §7), unset: what a
 #: PUT that names only the printer and spools reads back with.
 NO_DIALOG_CHOICES: dict[str, object] = {
-    # #4971: the registry printer, only for a printer with no Bambuddy id.
+    # #5167: the registry printer; a PUT that names only `printer_id` reads back with the
+    # registry printer that links it.
     "printer": None,
     "nozzles": [],
     "tier": None,
@@ -72,14 +74,26 @@ def test_the_models_printer_and_spools_are_remembered(
         **NO_DIALOG_CHOICES,
     }
 
-    assert client.put(f"/api/v1/print/models/{model}/choices", json=choices_a).json() == choices_a
+    # #5167: a choice keeps the registry printer that links the Bambuddy one.
+    read_a = {**choices_a, "printer": linked_printer(client, 2)}
+    read_b = {**choices_b, "printer": linked_printer(client, 3)}
+
+    assert client.put(f"/api/v1/print/models/{model}/choices", json=choices_a).json() == read_a
     assert (
-        client.put("/api/v1/print/models/some-other-model/choices", json=choices_b).json()
-        == choices_b
+        client.put("/api/v1/print/models/some-other-model/choices", json=choices_b).json() == read_b
     )
 
     stored = read_stored(settings.database_url)
-    assert stored["model_print_choices"] == {model: choices_a, "some-other-model": choices_b}
+    assert stored["model_print_choices"] == {
+        model: _as_stored(read_a),
+        "some-other-model": _as_stored(read_b),
+    }
+
+
+def _as_stored(choices: dict[str, object]) -> dict[str, object]:
+    """A choices row as the store keeps it: the registry printer, no ``printer_id``
+    (#5167)."""
+    return {key: value for key, value in choices.items() if key != "printer_id"}
 
 
 def test_a_built_ins_choices_are_its_own(client: TestClient, settings: Settings) -> None:
@@ -95,23 +109,26 @@ def test_a_built_ins_choices_are_its_own(client: TestClient, settings: Settings)
         **NO_DIALOG_CHOICES,
     }
 
+    read_builtin = {**builtin_choices, "printer": linked_printer(client, 2)}
+    read_mine = {**mine_choices, "printer": linked_printer(client, 3)}
+
     assert (
         client.put("/api/v1/print/models/builtin:keychain/choices", json=builtin_choices).json()
-        == builtin_choices
+        == read_builtin
     )
     assert (
-        client.put("/api/v1/print/models/keychain/choices", json=mine_choices).json()
-        == mine_choices
+        client.put("/api/v1/print/models/keychain/choices", json=mine_choices).json() == read_mine
     )
 
     stored = read_stored(settings.database_url)
     assert stored["model_print_choices"] == {
-        "builtin:keychain": builtin_choices,
-        "keychain": mine_choices,
+        "builtin:keychain": _as_stored(read_builtin),
+        "keychain": _as_stored(read_mine),
     }
 
 
 def test_remembering_nothing_forgets_the_models_choices(client: TestClient, model: str) -> None:
+    linked_printer(client, 2)
     client.put(
         f"/api/v1/print/models/{model}/choices",
         json={"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]},
