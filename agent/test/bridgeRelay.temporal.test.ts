@@ -41,10 +41,16 @@ const anonymous: Principal = { id: 'anonymous:session-1', kind: 'anonymous', tie
 type Replica = { hub: TabHub; relay: TemporalTabRelay; queue: string; worker: Worker; running: Promise<void> }
 
 /**
- * The owner-row and session-tab writes that have settled, by `<method> <first arg> <second arg>`
- * (#5987). The hub and the relay write those rows in the background, so a test awaits the write
- * itself, then reads the row once: a `vi.waitFor` poll gave up after its 1 s default on a loaded
- * runner, before the write had landed.
+ * How long a test waits for one background write (`Writes.settled`): shorter than the 20 s
+ * `testTimeout`, so a write that never comes fails with its own key, not "Test timed out" (#6088).
+ */
+const WRITE_WAIT_MS = 10_000
+
+/**
+ * The owner-row, session-tab and payload-key writes that have settled, by `<method> <first arg>
+ * <second arg>` (#5987). The hub and the relay write those rows in the background, so a test awaits
+ * the write itself, then reads the row once: a `vi.waitFor` poll gave up after its 1 s default on a
+ * loaded runner, before the write had landed.
  */
 class Writes {
   readonly #done = new Map<string, number>()
@@ -56,14 +62,27 @@ class Writes {
     else this.#done.set(key, (this.#done.get(key) ?? 0) + 1)
   }
 
-  /** The next write of `key` not yet awaited, once it has settled (succeeded or failed). */
+  /**
+   * The next write of `key` not yet awaited, once it has settled (succeeded or failed). Rejects,
+   * naming `key`, when it has not settled within `WRITE_WAIT_MS`.
+   */
   settled(key: string): Promise<void> {
     const done = this.#done.get(key) ?? 0
     if (done > 0) {
       this.#done.set(key, done - 1)
       return Promise.resolve()
     }
-    return new Promise((resolve) => this.#waiting.set(key, [...(this.#waiting.get(key) ?? []), resolve]))
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#waiting.set(key, (this.#waiting.get(key) ?? []).filter((w) => w !== waiter))
+        reject(new Error(`the write "${key}" did not settle within ${WRITE_WAIT_MS} ms`))
+      }, WRITE_WAIT_MS)
+      const waiter = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      this.#waiting.set(key, [...(this.#waiting.get(key) ?? []), waiter])
+    })
   }
 }
 
@@ -115,20 +134,23 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     let client: Client
     /** The BridgeCall workflows started, by ID. */
     let started: string[] = []
-    /** This test's owner-row and session-tab writes. */
+    /** This test's owner-row, session-tab and payload-key writes. */
     let writes = new Writes()
 
     async function replica(name: string, options: { ackTimeoutMs?: number; sealed?: boolean } = {}): Promise<Replica> {
       const queue = `agent-tools.${name}-${randomUUID().slice(0, 8)}`
+      // This test's tracker: a write that lands after the next test began settles here, not there.
+      const recorded = writes
       const relay = new TemporalTabRelay({
-        owners: recordingWrites(new PostgresTabOwnerStore(db.sql), ['claim', 'release'], writes),
+        owners: recordingWrites(new PostgresTabOwnerStore(db.sql), ['claim', 'release'], recorded),
         hostQueue: queue,
         ...(options.sealed === false
           ? {}
           : {
               client: {
                 client: recording(client),
-                dropKey: (subject: string) => dropPayloadKey(db.sql, keys, subject),
+                dropKey: (subject: string) =>
+                  dropPayloadKey(db.sql, keys, subject).finally(() => recorded.settle(`dropKey ${subject}`)),
               },
             }),
         ...(options.ackTimeoutMs !== undefined ? { ackTimeoutMs: options.ackTimeoutMs } : {}),
@@ -137,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const hub = new TabHub({
         pairings: new PostgresPairingStore(db.sql),
         relay,
-        sessionTabs: recordingWrites(new PostgresSessionTabStore(db.sql), ['set'], writes),
+        sessionTabs: recordingWrites(new PostgresSessionTabStore(db.sql), ['set'], recorded),
         callTimeoutMs: 2_000,
         log: () => {},
       })
@@ -503,7 +525,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         for (const data of datas) expect(data).not.toContain(SECRET)
       }
       // Each call's key went with its answer: the history cannot be opened again.
-      await vi.waitFor(async () => expect(await db.sql`SELECT subject FROM ai_payload_keys WHERE subject = ANY(${started})`).toEqual([]))
+      for (const id of started) await writes.settled(`dropKey ${id}`)
+      expect(await db.sql`SELECT subject FROM ai_payload_keys WHERE subject = ANY(${started})`).toEqual([])
     })
 
     it('refuses to send a call through Temporal unsealed', async () => {
