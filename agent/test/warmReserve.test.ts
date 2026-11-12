@@ -215,6 +215,30 @@ describe('WarmSessions.reserve and release', () => {
     expect(told).toEqual([])
   })
 
+  it('a disposer removes only its own registration, however often it is called', async () => {
+    const { warm, running } = cache(8)
+    const told: string[] = []
+    const listener = (id: string) => told.push(id)
+    warm.onClosed(listener)
+    const dispose = warm.onClosed(listener)
+    dispose()
+    dispose()
+    await warm.cut((await running('a')).entry, 'first')
+    expect(told).toEqual(['a'])
+  })
+
+  it('a registration disposed during a close is not told of it, while another of the same function is', async () => {
+    const { warm, running } = cache(8)
+    const told: string[] = []
+    const listener = (id: string) => told.push(id)
+    let disposeLater = () => {}
+    warm.onClosed(() => disposeLater())
+    warm.onClosed(listener)
+    disposeLater = warm.onClosed(listener)
+    await warm.cut((await running('a')).entry, 'first')
+    expect(told).toEqual(['a'])
+  })
+
   it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {
     const { warm, spawned, running } = cache(1)
     const cutOff = await running('a')
