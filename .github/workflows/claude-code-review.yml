@@ -181,6 +181,98 @@ jobs:
           "$dir/claude" --version
           echo "path=$dir/claude" >> "$GITHUB_OUTPUT"
 
+      # Install bun once for the three claude-code-action steps below (#5835).
+      # Left to itself, each of them runs oven-sh/setup-bun, which does not
+      # retry the download. In run 42581396648, GitHub releases answered 504 in
+      # the review step and in the merge-gate classification. The action then
+      # ran its always() step "Post buffered inline comments" with no bun, and
+      # that step failed with `bun: command not found`. This step installs the
+      # bun version that the pinned action asks for (read from the action's
+      # action.yml, so a bump of the pin moves it too). It uses the retry
+      # policy of the Claude Code step above, and it checks the release's
+      # SHASUMS256.txt. If it fails, the output is empty and each action
+      # installs bun as before.
+      - name: Install Bun
+        id: bun_install
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 600))
+          dir="$RUNNER_TEMP/bun"
+          mkdir -p "$dir"
+
+          # The version the pinned action installs (`bun-version: x.y.z` in
+          # its action.yml). One action SHA in this job, so one match.
+          mapfile -t found < <(grep -hoE '^[[:space:]]*bun-version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' \
+            "$(dirname "$RUNNER_WORKSPACE")"/_actions/anthropics/claude-code-action/*/action.yml \
+            2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u || true)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::warning::Could not read the action's bun version (found ${#found[@]}); the action installs it itself."
+            exit 0
+          fi
+          version="${found[0]}"
+          base="https://github.com/oven-sh/bun/releases/download/bun-v$version"
+
+          # fetch URL FILE: retries 429, 408, 5xx and connection failures until
+          # the deadline; any other status fails at once. A copy of the Claude
+          # Code step's fetch, because steps share no shell functions.
+          fetch() {
+            local url="$1" out="$2" hdr="$dir/headers" delay=5 attempt=0 code wait ra when
+            while :; do
+              attempt=$((attempt + 1))
+              code="$(curl -sS -L --connect-timeout 20 --max-time 300 -D "$hdr" -o "$out" \
+                -w '%{http_code}' "$url")" || code=000
+              [ "$code" = 200 ] && return 0
+              case "$code" in
+                429 | 408 | 5?? | 000) ;;
+                *) echo "::warning::$url answered HTTP $code"; return 1 ;;
+              esac
+              wait=$((delay + RANDOM % delay))
+              if [ "$code" = 429 ]; then
+                # Seconds, or an HTTP date (RFC 9110 §10.2.3).
+                ra="$(grep -i '^retry-after:' "$hdr" | tail -n 1 | cut -d: -f2- | tr -d '\r' || true)"
+                ra="${ra# }"
+                if [[ "$ra" =~ ^[0-9]+$ ]]; then
+                  wait=$((ra + RANDOM % 5))
+                elif [ -n "$ra" ] && when="$(date -d "$ra" +%s 2>/dev/null)"; then
+                  wait=$((when - $(date +%s) + RANDOM % 5))
+                  [ "$wait" -ge 1 ] || wait=1
+                fi
+              fi
+              if [ $((SECONDS + wait)) -ge "$deadline" ]; then
+                echo "::warning::$url: HTTP $code on attempt $attempt; out of time to retry"
+                return 1
+              fi
+              echo "$url: HTTP $code on attempt $attempt; retrying in ${wait}s"
+              sleep "$wait"
+              delay=$((delay * 2 > 60 ? 60 : delay * 2))
+            done
+          }
+
+          # Bun names its arm64 Linux build "aarch64".
+          case "$(uname -m)" in
+            x86_64) asset=bun-linux-x64 ;;
+            aarch64) asset=bun-linux-aarch64 ;;
+            *) echo "::warning::No bun build for $(uname -m)"; exit 0 ;;
+          esac
+          fetch "$base/SHASUMS256.txt" "$dir/SHASUMS256.txt" || exit 0
+          checksum="$(awk -v f="$asset.zip" '$2 == f { print $1 }' "$dir/SHASUMS256.txt")"
+          if ! [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::warning::No $asset.zip checksum in the bun $version SHASUMS256.txt"
+            exit 0
+          fi
+          fetch "$base/$asset.zip" "$dir/$asset.zip" || exit 0
+          if ! echo "$checksum  $dir/$asset.zip" | sha256sum -c --quiet -; then
+            echo "::warning::bun $version failed its checksum"
+            rm -f "$dir/$asset.zip"
+            exit 0
+          fi
+          unzip -q -o "$dir/$asset.zip" -d "$dir"
+          chmod +x "$dir/$asset/bun"
+          "$dir/$asset/bun" --version
+          echo "path=$dir/$asset/bun" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review
         id: review
         # The review step must never red the job on its own — it has succeeded as long
@@ -195,6 +287,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Empty when the install step failed: the action then installs itself.
           path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
+          # Empty when the bun install step failed: the action then installs
+          # bun itself (#5835).
+          path_to_bun_executable: ${{ steps.bun_install.outputs.path }}
           # Review bot-authored PRs too (weekly cache-refresh, image digest bumps);
           # the action otherwise hard-fails on non-human actors. Also covers the
           # actor this run itself carries as a workflow_dispatch call.
@@ -634,6 +729,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Empty when the install step failed: the action then installs itself.
           path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
+          # Empty when the bun install step failed: the action then installs
+          # bun itself (#5835).
+          path_to_bun_executable: ${{ steps.bun_install.outputs.path }}
           allowed_bots: "*"
           # Same tools, model and deny list as the review step: this is the same
           # reviewer continuing, not a new one with more reach.
@@ -732,6 +830,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Empty when the install step failed: the action then installs itself.
           path_to_claude_code_executable: ${{ steps.claude_install.outputs.path }}
+          # Empty when the bun install step failed: the action then installs
+          # bun itself (#5835).
+          path_to_bun_executable: ${{ steps.bun_install.outputs.path }}
           # Classify bot-authored PRs too (weekly cache-refresh, image digest bumps);
           # the action otherwise hard-fails on non-human actors and the gate then fails
           # closed with no verdict. Must match the review step's allowed_bots.
