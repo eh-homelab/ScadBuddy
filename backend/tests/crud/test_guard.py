@@ -19,6 +19,7 @@ from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.models import Service
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 
 CREDENTIALS = {
     "sbsvc_projects": Service("projects", frozenset({"crud.projects"})),
@@ -40,6 +41,9 @@ class _NoOutputs:
 
     async def model_3mf(self, output_id: str) -> bytes | None:
         return None
+
+    async def get(self, output_id: str) -> OutputMeta:
+        raise OutputNotFoundError(output_id)
 
 
 class Body(BaseModel):
@@ -158,6 +162,13 @@ def test_enforce_answers_an_internal_route_as_a_crud_one() -> None:
     )
     assert missing.status_code == 404
     assert "has no 3MF" in missing.json()["detail"]
+    # #6089: and so on `output_record`, which answers its own 404 for an unknown output.
+    record = client.get(
+        f"/api/v1/internal/outputs/{'0' * 32}",
+        headers={"authorization": "Bearer sbsvc_print_outputs"},
+    )
+    assert record.status_code == 404
+    assert record.json()["detail"] == f"no output with id {'0' * 32!r}"
 
 
 def test_a_validation_error_carries_the_header() -> None:
