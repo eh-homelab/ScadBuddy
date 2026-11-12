@@ -45,8 +45,8 @@ interface Props {
    */
   printerId?: number | null
   /**
-   * #4971 — the registry printer, which keys the per-printer scope of a printer with no
-   * Bambuddy id (a LAN-only one).
+   * #5167 — the registry printer, which keys the per-printer scope of any printer. With a
+   * `printerId` but no registry printer, no scope is keyed.
    */
   registryPrinter?: string | null
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
