@@ -26,12 +26,20 @@ CREDENTIALS = {
     "sbsvc_print": Service("print", frozenset({"crud.print"})),
     "sbsvc_render": Service("render", frozenset({"crud.render"})),
     "sbsvc_agent": Service("agent", frozenset({"api", "internal.workspace"})),
+    "sbsvc_print_outputs": Service("print", frozenset({"internal.outputs"})),
 }
 
 
 class Credentials:
     def resolve(self, token: str) -> Service | None:
         return CREDENTIALS.get(token)
+
+
+class _NoOutputs:
+    """An output store that holds nothing, so the handler answers 404 for any id."""
+
+    async def model_3mf(self, output_id: str) -> bytes | None:
+        return None
 
 
 class Body(BaseModel):
@@ -140,6 +148,16 @@ def test_enforce_answers_an_internal_route_as_a_crud_one() -> None:
         assert refused.json()["type"].endswith("/auth/forbidden"), token
         assert refused.json()["reason"] == "out_of_scope", token
         assert "WWW-Authenticate" not in refused.headers, token
+    # #6079: a credential with the class passes the gate and gets the handler's own answer.
+    app = client.app
+    assert isinstance(app, FastAPI)
+    app.dependency_overrides[internal._reader] = _NoOutputs
+    missing = client.get(
+        f"/api/v1/internal/outputs/{'0' * 32}/model.3mf",
+        headers={"authorization": "Bearer sbsvc_print_outputs"},
+    )
+    assert missing.status_code == 404
+    assert "has no 3MF" in missing.json()["detail"]
 
 
 def test_a_validation_error_carries_the_header() -> None:
