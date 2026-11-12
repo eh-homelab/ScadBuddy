@@ -219,7 +219,7 @@ def _person(kind: SessionKind = "login") -> Person:
         ("exchange", ANONYMOUS, False, None),
         # The render worker's credential reaches no route yet (#5298 adds `crud.render`).
         ("api", Service("render", frozenset({"crud.render"})), False, "out_of_scope"),
-        ("internal.outputs", Service("render", frozenset({"crud.render"})), False, "no_credential"),
+        ("internal.outputs", Service("render", frozenset({"crud.render"})), False, "out_of_scope"),
         ("api", ANONYMOUS, False, "signed_out"),
         ("api", _person(), True, None),
         ("api", _person(), False, "no_request_header"),
@@ -253,7 +253,7 @@ def _person(kind: SessionKind = "login") -> Person:
             "internal.library",
             Service("print", frozenset({"internal.outputs"})),
             False,
-            "no_credential",
+            "out_of_scope",
         ),
     ],
 )

@@ -139,7 +139,7 @@ def test_the_render_credential_reaches_nothing_else(client: TestClient, app: Fas
         _count(
             app,
             "scadbuddy_auth_would_refuse_total",
-            {"class": "internal.outputs", "reason": "no_credential"},
+            {"class": "internal.outputs", "reason": "out_of_scope"},
         )
         == 1
     )

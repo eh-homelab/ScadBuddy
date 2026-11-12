@@ -267,9 +267,11 @@ def would_refuse(
     if route_cls in ("public", "transfer", "exchange"):
         return None
     if route_cls.startswith("internal."):
-        if isinstance(caller, Service) and route_cls in caller.scopes:
-            return None
-        return "no_credential"
+        # A live service credential without the class is a 403, as on a CRUD route
+        # (#5514): a 401 tells the client to exchange again, and it would loop.
+        if not isinstance(caller, Service):
+            return "no_credential"
+        return None if route_cls in caller.scopes else "out_of_scope"
     if route_cls.startswith("crud."):
         # A live service credential of another caller, or without the class, is a 403
         # as `crud/guard.py` answers it in `off`; only no live credential is a 401.
