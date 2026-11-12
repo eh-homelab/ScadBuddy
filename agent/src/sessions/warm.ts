@@ -253,8 +253,10 @@ export class WarmSessions {
   private idleMs: number
   private readonly now: () => number
   private readonly log: (message: string) => void
-  /** Told each session whose process here has closed and left no other (workspace/directory.ts drops its copy). */
-  /** One entry per registration, so a disposer removes exactly its own (#6098). */
+  /**
+   * Told each session whose process here has closed and left no other (workspace/directory.ts drops its copy).
+   * One entry per registration, so a disposer removes exactly its own (#6098).
+   */
   private readonly closedListeners: { readonly listener: (sessionId: string) => void }[] = []
   private readonly start: (run: HarnessRun) => WarmQuery
   /** By session, least recently used first. */
