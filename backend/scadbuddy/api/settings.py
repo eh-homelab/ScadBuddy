@@ -286,6 +286,10 @@ class PrintOptionsState(PrintOptionsView):
 
     printer_id: int | None = None
     default_printer: str | None = None
+    #: Registry printer id -> the Bambuddy printer it links (#6106). The print dialog
+    #: finds a Bambuddy printer's key in ``printers`` with it, and needs no registry
+    #: list for that.
+    bambuddy_links: dict[str, int] = Field(default_factory=dict)
 
 
 class PrintOptionsUpdate(BaseModel):
@@ -800,6 +804,7 @@ def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
         **_options_view(settings).model_dump(),
         printer_id=settings.printer_id,
         default_printer=settings.default_printer,
+        bambuddy_links=settings.bambuddy_links,
     )
 
 

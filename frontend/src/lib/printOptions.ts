@@ -138,6 +138,21 @@ export function resolveOptions(...layers: (PrintOptions | undefined | null)[]): 
   return merged as PrintOptions
 }
 
+/**
+ * #6106 — the registry printer that links the Bambuddy printer `printerId`, from the
+ * print options read's `bambuddy_links` (registry id to Bambuddy id). It needs no
+ * registry list, so a printer's remembered options apply while `GET /printers` loads or
+ * when it fails. Null with no printer, or when no registry printer links it.
+ */
+export function linkedRegistryPrinter(
+  links: Record<string, number> | null | undefined,
+  printerId: number | null | undefined,
+): string | null {
+  if (printerId == null || !links) return null
+  for (const [row, linked] of Object.entries(links)) if (linked === printerId) return row
+  return null
+}
+
 export function optionValue(options: PrintOptions | undefined, name: OptionName): OptionValue {
   const value = options?.[name]
   return isSet(value as OptionValue | undefined) ? (value as OptionValue) : null

@@ -3960,7 +3960,17 @@ export const handlers = [
   ),
 
   // Takes no body: the server tests what it has stored.
-  http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),
+  // #6106 — the read also names each registry printer's Bambuddy link, as the server's does.
+  http.get(`${base}/settings/print-options`, () =>
+    HttpResponse.json({
+      ...state.printOptions,
+      bambuddy_links: Object.fromEntries(
+        printersState().flatMap((row) =>
+          row.bambuddy_printer_id == null ? [] : [[row.id, row.bambuddy_printer_id]],
+        ),
+      ),
+    }),
+  ),
 
   // Mirrors the server: one scope is replaced wholesale, and an all-unset overlay
   // removes it rather than storing an empty object.

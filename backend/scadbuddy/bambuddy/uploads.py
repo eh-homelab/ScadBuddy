@@ -658,8 +658,9 @@ class BambuddyUploadStore:
     def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
         with self._pool.connection() as conn:
             # The registry printer: the one named, else the one that links the Bambuddy
-            # printer (#5167). A target with neither is not remembered.
-            conn.execute(
+            # printer (#5167). A target with neither is not remembered, and the project
+            # forgets its earlier target, as an overwrite would (#6106).
+            kept = conn.execute(
                 "INSERT INTO project_print_targets"
                 " (project_id, printer, nozzle_diameter, nozzle_plan)"
                 " SELECT %(project)s, p.id, %(nozzle)s, %(plan)s FROM printers AS p"
@@ -678,6 +679,10 @@ class BambuddyUploadStore:
                     "plan": Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
                 },
             )
+            if kept.rowcount == 0:
+                conn.execute(
+                    "DELETE FROM project_print_targets WHERE project_id = %s", (project_id,)
+                )
 
     def _folderless(self, name: str, parent_id: int | None) -> list[int]:
         with self._pool.connection() as conn:

@@ -1826,6 +1826,15 @@ describe('PrintPicker · Copies', () => {
     await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '4'))
   })
 
+  it('applies the printer’s remembered quantity when the registry list fails (#6106)', async () => {
+    await remember('printer', { quantity: 4 }, '1')
+    server.use(http.get('/api/v1/printers', () => problem(503, 'Service Unavailable')))
+    renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '4'))
+  })
+
   it('lets the model’s remembered quantity beat the printer’s', async () => {
     await remember('printer', { quantity: 4 }, '1')
     await remember('model', { quantity: 5 }, 'name-keychain')

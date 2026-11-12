@@ -1035,3 +1035,19 @@ def test_the_storefront_settings_are_stored(settings: Settings) -> None:
     finally:
         store.close()
     assert (s.storefront_renders_per_minute, s.storefront_requests_enabled) == (5, True)
+
+
+def test_registry_printer_reads_an_inverse_built_once() -> None:
+    """#6106: the Bambuddy-to-registry map is built on the first read and kept, and a
+    copy with other links reads its own links, never the map of the one it copied."""
+    settings = StoredSettings(bambuddy_links={"a": 3, "b": 4})
+    assert settings.registry_printer(3) == "a"
+    built = settings._linked_by
+    assert settings.registry_printer(4) == "b"
+    assert settings.registry_printer(9) is None
+    assert settings._linked_by is built
+    moved = settings.model_copy(update={"bambuddy_links": {"c": 3}})
+    assert moved.registry_printer(3) == "c"
+    assert moved.registry_printer(4) is None
+    assert settings.registry_printer(3) == "a"
+    assert "_linked_by" not in settings.model_dump()

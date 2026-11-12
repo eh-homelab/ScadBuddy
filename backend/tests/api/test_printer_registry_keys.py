@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.printers.component import PRINTERS, Printers
 from tests.api.conftest import read_stored
 
@@ -55,8 +56,9 @@ def test_the_rack_algorithm_is_kept_by_registry_id(client: TestClient) -> None:
         )
         assert refused.status_code == 404, refused.text
     # A forget of a Bambuddy id no registry printer links has nothing to remove.
+    # The answer echoes the id, as the bed-type route does (#6106).
     assert _algorithm(client, "9", None) == {
-        "printer_id": None,
+        "printer_id": 9,
         "printer": None,
         "algorithm": "least_used",
     }
@@ -113,6 +115,30 @@ def test_the_default_printer_is_kept_by_registry_id(client: TestClient, settings
     for refused in ({"default_printer": "nope"}, {"printer_id": 7}):
         answer = client.put("/api/v1/settings", json=refused)
         assert answer.status_code == 422, answer.text
+
+
+def test_the_print_options_name_each_bambuddy_link(client: TestClient) -> None:
+    """#6106: the dialog finds a Bambuddy printer's key with the read's links, so it needs
+    no registry list. A LAN-only printer links nothing."""
+    _, linked = _rows(client)
+    assert client.get("/api/v1/settings/print-options").json()["bambuddy_links"] == {linked: 4}
+
+
+def test_a_printer_id_no_printer_links_is_refused_before_the_save(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6106: ``SettingsStore.save`` raises :class:`UnknownPrinterError` (a
+    ``ValueError``) for a ``printer_id`` no registry printer links. ``PUT /settings``
+    refuses it first with 422, so the save never runs and never answers 500."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+
+    def save(*_: object, **__: object) -> None:
+        raise AssertionError("PUT /settings called the save for an unlinked printer_id")
+
+    monkeypatch.setattr(state.settings_store, "save", save)
+    answer = client.put("/api/v1/settings", json={"printer_id": 7})
+    assert answer.status_code == 422, answer.text
+    assert answer.json()["detail"] == "no printer links Bambuddy printer 7"
 
 
 def test_a_subjects_remembered_printer_is_kept_by_registry_id(client: TestClient) -> None:
