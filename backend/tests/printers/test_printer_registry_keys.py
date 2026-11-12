@@ -7,7 +7,6 @@ rewrites the Bambuddy keys that the builds before it wrote."""
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
     ModelPrintChoices,
+    RackAlgorithmSupersededError,
     SettingsPatch,
     SettingsStore,
     StoredSettings,
@@ -422,7 +422,8 @@ def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
     assert stored["printer_rack_algorithms"] == {LINKED: "new"}
     assert stored["printer_rack_algorithm_versions"] == {LINKED: 1_700_000_000_000}
 
-    # A later save, with the clock's version, is taken (#6110).
+    # The migrated version still orders saves (#6110): an older one is refused, and a
+    # later one, as the clock gives every save after the roll, is taken.
     later = SettingsStore(
         Settings(
             data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
@@ -430,14 +431,18 @@ def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
     )
     later.open()
     try:
-        now_ms = int(time.time() * 1000)
-        assert later.set_printer_rack_algorithm(LINKED, "oldest_first", now_ms) == "oldest_first"
+        with pytest.raises(RackAlgorithmSupersededError):
+            later.set_printer_rack_algorithm(LINKED, "newest_first", 1_699_999_999_999)
+        assert (
+            later.set_printer_rack_algorithm(LINKED, "oldest_first", 1_700_000_000_001)
+            == "oldest_first"
+        )
     finally:
         later.close()
     with psycopg.connect(pg_conninfo) as conn:
         saved: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
     assert saved["printer_rack_algorithms"] == {LINKED: "oldest_first"}
-    assert saved["printer_rack_algorithm_versions"] == {LINKED: now_ms}
+    assert saved["printer_rack_algorithm_versions"] == {LINKED: 1_700_000_000_001}
 
 
 def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> None:
