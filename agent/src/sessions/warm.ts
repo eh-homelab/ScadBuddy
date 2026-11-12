@@ -776,13 +776,20 @@ export class WarmSessions {
         this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       this.log(`warm: closed session ${id}'s process: ${reason}`)
-      if (!this.slots.has(id)) for (const listener of this.closedListeners) listener(id)
+      // A copy, so a listener that disposes itself here never shifts the next one
+      // out of this close; one disposed meanwhile is not told (#6087 review).
+      if (!this.slots.has(id))
+        for (const listener of [...this.closedListeners]) if (this.closedListeners.includes(listener)) listener(id)
     })
   }
 
-  /** `listener` is told each session whose process here closes with no newer one spawned for it. */
-  onClosed(listener: (sessionId: string) => void): void {
+  /** `listener` is told each session whose process here closes with no newer one spawned for it, until the returned disposer is called. */
+  onClosed(listener: (sessionId: string) => void): () => void {
     this.closedListeners.push(listener)
+    return () => {
+      const at = this.closedListeners.indexOf(listener)
+      if (at !== -1) this.closedListeners.splice(at, 1)
+    }
   }
 
   /**

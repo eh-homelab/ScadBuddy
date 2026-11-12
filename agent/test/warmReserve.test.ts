@@ -176,6 +176,45 @@ describe('WarmSessions.reserve and release', () => {
     }
   })
 
+  it('onClosed tells each listener of a close until its disposer is called', async () => {
+    const { warm, running } = cache(8)
+    const kept: string[] = []
+    const disposed: string[] = []
+    warm.onClosed((id) => kept.push(id))
+    const dispose = warm.onClosed((id) => disposed.push(id))
+    await warm.cut((await running('a')).entry, 'first')
+    dispose()
+    dispose()
+    await warm.cut((await running('b')).entry, 'second')
+    expect(kept).toEqual(['a', 'b'])
+    expect(disposed).toEqual(['a'])
+  })
+
+  it('a listener that disposes itself while told of a close leaves the next listener told', async () => {
+    const { warm, running } = cache(8)
+    const after: string[] = []
+    const once: string[] = []
+    const dispose = warm.onClosed((id) => {
+      once.push(id)
+      dispose()
+    })
+    warm.onClosed((id) => after.push(id))
+    await warm.cut((await running('a')).entry, 'first')
+    await warm.cut((await running('b')).entry, 'second')
+    expect(once).toEqual(['a'])
+    expect(after).toEqual(['a', 'b'])
+  })
+
+  it('a listener disposed by an earlier one during a close is not told of it', async () => {
+    const { warm, running } = cache(8)
+    const told: string[] = []
+    let disposeLater = () => {}
+    warm.onClosed(() => disposeLater())
+    disposeLater = warm.onClosed((id) => told.push(id))
+    await warm.cut((await running('a')).entry, 'first')
+    expect(told).toEqual([])
+  })
+
   it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {
     const { warm, spawned, running } = cache(1)
     const cutOff = await running('a')
