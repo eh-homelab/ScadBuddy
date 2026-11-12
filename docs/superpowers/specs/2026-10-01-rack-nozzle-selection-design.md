@@ -192,6 +192,13 @@ cannot count a print twice. `rack_nozzle_seen` is the one upsert:
 `ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id`, which
 moves the hotend's printer and never touches `first_seen_at`.
 
+As built (#4971, #5167): both `rack_nozzle_seen` and `rack_nozzle_picks` key the
+printer by `printer` (uuid, the registry printer's id, `REFERENCES printers (id) ON
+DELETE SET NULL`). The contract step #5167 dropped both `printer_id` columns, so the
+tables below show the design, not the schema. The upsert is now
+`ON CONFLICT (serial) DO UPDATE SET printer = excluded.printer`: it moves `printer`
+and still never touches `first_seen_at`.
+
 For `rack_nozzle_picks` a conflict is never expected: Bambuddy mints a new queue item
 id per `POST /queue/`, and the write runs once per item. `DO NOTHING` is kept so a
 replayed run cannot fail a print that is already queued. `record_picks` returns the
@@ -203,12 +210,12 @@ bug that writes twice still surfaces (#1015).
 | Column | Type | Notes |
 |---|---|---|
 | `serial` | text | the hotend's own serial, unique across printers |
-| `printer_id` | int | the printer it was last seen on |
+| `printer_id` | int | the printer it was last seen on (now `printer` uuid, #5167) |
 | `first_seen_at` | timestamptz | first time any printer's print flow saw it |
 
 Use and age follow the hotend, not the printer: a hotend moved to another H2C
 keeps its `first_seen_at` and its print history, and the write updates
-`printer_id` only.
+`printer_id` only (now `printer`, #5167).
 
 `rack_nozzle_picks`, primary key `(queue_item_id, group_id)`: what was picked.
 
@@ -216,7 +223,7 @@ keeps its `first_seen_at` and its print history, and the write updates
 |---|---|---|
 | `queue_item_id` | int | |
 | `group_id` | int | |
-| `printer_id` | int | |
+| `printer_id` | int | now `printer` uuid, the registry id (#5167) |
 | `serial` | text | the hotend picked for this group |
 | `picked_at` | timestamptz | |
 
@@ -634,7 +641,8 @@ Unknown 1 does not gate the build: it ships with an empty table (above).
   - an unparsable group diameter giving no pick and a `rack-left-to-bambuddy`
     warning;
   - a serial seen on printer 2 after printer 1 keeping its `first_seen_at` and
-    history, with `printer_id` updated to 2;
+    history, with its printer updated to printer 2 (`printer`, the registry id,
+    since #5167);
   - a `used_in_plate: false` CF filament not making its group abrasive;
   - a group of PLA and PLA-CF counted as abrasive;
   - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
