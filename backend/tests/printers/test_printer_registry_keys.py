@@ -7,6 +7,7 @@ rewrites the Bambuddy keys that the builds before it wrote."""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -392,7 +393,7 @@ def test_the_leftovers_migration_drops_every_bambuddy_key_an_old_pod_wrote(
 
 
 def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
-    pg_conninfo: str,
+    pg_conninfo: str, tmp_path: Path
 ) -> None:
     """#6108: the leftovers migration merges `printer_rack_algorithms` and
     `printer_rack_algorithm_versions` each on its own. An unversioned save writes the
@@ -420,6 +421,23 @@ def test_the_leftovers_migration_merges_the_algorithm_and_its_version_apart(
 
     assert stored["printer_rack_algorithms"] == {LINKED: "new"}
     assert stored["printer_rack_algorithm_versions"] == {LINKED: 1_700_000_000_000}
+
+    # A later save, with the clock's version, is taken (#6110).
+    later = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
+    later.open()
+    try:
+        now_ms = int(time.time() * 1000)
+        assert later.set_printer_rack_algorithm(LINKED, "oldest_first", now_ms) == "oldest_first"
+    finally:
+        later.close()
+    with psycopg.connect(pg_conninfo) as conn:
+        saved: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+    assert saved["printer_rack_algorithms"] == {LINKED: "oldest_first"}
+    assert saved["printer_rack_algorithm_versions"] == {LINKED: now_ms}
 
 
 def test_the_leftovers_migration_keeps_a_stored_default(pg_conninfo: str) -> None:
