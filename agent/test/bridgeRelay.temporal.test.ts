@@ -40,6 +40,67 @@ const anonymous: Principal = { id: 'anonymous:session-1', kind: 'anonymous', tie
 
 type Replica = { hub: TabHub; relay: TemporalTabRelay; queue: string; worker: Worker; running: Promise<void> }
 
+/**
+ * How long a test waits for one background write (`Writes.settled`): shorter than the 20 s
+ * `testTimeout`, so a write that never comes fails with its own key, not "Test timed out" (#6088).
+ */
+const WRITE_WAIT_MS = 10_000
+
+/**
+ * The owner-row, session-tab and payload-key writes that have settled, by `<method> <first arg>
+ * <second arg>` (#5987). The hub and the relay write those rows in the background, so a test awaits
+ * the write itself, then reads the row once: a `vi.waitFor` poll gave up after its 1 s default on a
+ * loaded runner, before the write had landed.
+ */
+class Writes {
+  readonly #done = new Map<string, number>()
+  readonly #waiting = new Map<string, (() => void)[]>()
+
+  settle(key: string): void {
+    const next = this.#waiting.get(key)?.shift()
+    if (next) next()
+    else this.#done.set(key, (this.#done.get(key) ?? 0) + 1)
+  }
+
+  /**
+   * The next write of `key` not yet awaited, once it has settled (succeeded or failed). Rejects,
+   * naming `key`, when it has not settled within `WRITE_WAIT_MS`.
+   */
+  settled(key: string): Promise<void> {
+    const done = this.#done.get(key) ?? 0
+    if (done > 0) {
+      this.#done.set(key, done - 1)
+      return Promise.resolve()
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#waiting.set(key, (this.#waiting.get(key) ?? []).filter((w) => w !== waiter))
+        reject(new Error(`the write "${key}" did not settle within ${WRITE_WAIT_MS} ms`))
+      }, WRITE_WAIT_MS)
+      const waiter = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      this.#waiting.set(key, [...(this.#waiting.get(key) ?? []), waiter])
+    })
+  }
+}
+
+/** `store`, with each call to one of `methods` settled into `writes`. */
+function recordingWrites<T extends object>(store: T, methods: readonly string[], writes: Writes): T {
+  return new Proxy(store, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property)
+      if (typeof value !== 'function') return value
+      // Bound to the store itself: its private fields are not on the proxy.
+      const method = (value as (...args: unknown[]) => unknown).bind(target)
+      if (typeof property !== 'string' || !methods.includes(property)) return method
+      return (...args: unknown[]) =>
+        (method(...args) as Promise<unknown>).finally(() => writes.settle(`${property} ${String(args[0])} ${String(args[1])}`))
+    },
+  })
+}
+
 /** A tab on `hub`; `answer` decides each call's outcome (undefined: never answers). */
 async function tab(
   hub: TabHub,
@@ -73,18 +134,23 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     let client: Client
     /** The BridgeCall workflows started, by ID. */
     let started: string[] = []
+    /** This test's owner-row, session-tab and payload-key writes. */
+    let writes = new Writes()
 
     async function replica(name: string, options: { ackTimeoutMs?: number; sealed?: boolean } = {}): Promise<Replica> {
       const queue = `agent-tools.${name}-${randomUUID().slice(0, 8)}`
+      // This test's tracker: a write that lands after the next test began settles here, not there.
+      const recorded = writes
       const relay = new TemporalTabRelay({
-        owners: new PostgresTabOwnerStore(db.sql),
+        owners: recordingWrites(new PostgresTabOwnerStore(db.sql), ['claim', 'release'], recorded),
         hostQueue: queue,
         ...(options.sealed === false
           ? {}
           : {
               client: {
                 client: recording(client),
-                dropKey: (subject: string) => dropPayloadKey(db.sql, keys, subject),
+                dropKey: (subject: string) =>
+                  dropPayloadKey(db.sql, keys, subject).finally(() => recorded.settle(`dropKey ${subject}`)),
               },
             }),
         ...(options.ackTimeoutMs !== undefined ? { ackTimeoutMs: options.ackTimeoutMs } : {}),
@@ -93,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const hub = new TabHub({
         pairings: new PostgresPairingStore(db.sql),
         relay,
-        sessionTabs: new PostgresSessionTabStore(db.sql),
+        sessionTabs: recordingWrites(new PostgresSessionTabStore(db.sql), ['set'], recorded),
         callTimeoutMs: 2_000,
         log: () => {},
       })
@@ -128,13 +194,18 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await r.running
     }
 
-    /** The owner rows are written in the background, as a tab attaches: wait for `queue`'s. */
+    /** The queue in `tabId`'s owner row, if there is one. */
+    const ownerQueue = async (tabId: string) =>
+      (await db.sql<{ queue: string }[]>`SELECT queue FROM ai_tab_owners WHERE tab_id = ${tabId}`)[0]?.queue
+
+    /** The owner rows are written in the background, as a tab attaches: wait for `queue`'s claim. */
     async function owned(tabId: string, queue: string): Promise<void> {
-      await vi.waitFor(async () => {
-        const [row] = await db.sql<{ queue: string }[]>`SELECT queue FROM ai_tab_owners WHERE tab_id = ${tabId}`
-        expect(row?.queue).toBe(queue)
-      })
+      await writes.settled(`claim ${tabId} ${queue}`)
+      expect(await ownerQueue(tabId)).toBe(queue)
     }
+
+    /** `queue`'s release of `tabId`, written in the background, has settled. */
+    const released = (tabId: string, queue: string) => writes.settled(`release ${tabId} ${queue}`)
 
     beforeAll(async () => {
       ;[env, { db, drop }] = await Promise.all([localTemporal(), throwawayDatabase()])
@@ -148,6 +219,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
     beforeEach(async () => {
       await db.sql`TRUNCATE ai_browser_pairings, ai_session_tabs, ai_tab_owners`
       started = []
+      writes = new Writes()
     })
     afterEach(async () => {
       // Each call's workflow runs on its caller's worker, which stops below: one still open (a
@@ -280,7 +352,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       expect(tasks.length).toBeGreaterThan(0)
       for (const t of tasks) expect(seconds(t.workflowTaskScheduledEventAttributes?.startToCloseTimeout)).toBe(BRIDGE_WORKFLOW_TASK_TIMEOUT_MS)
       // The dead replica's row is dropped, so the next call does not wait for it again.
-      await vi.waitFor(async () => expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0))
+      await released(TAB, b.queue)
+      expect(await ownerQueue(TAB)).toBeUndefined()
     })
 
     it('reaches the new owner when the tab reconnects to another replica mid-session', async () => {
@@ -296,8 +369,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const onC = await tab(c.hub, () => ({ ok: true, result: 'from c' }))
       await owned(TAB, c.queue)
       onB.conn.close()
-      await new Promise((r) => setTimeout(r, 200))
-      await owned(TAB, c.queue)
+      // B's release has run, and left C's claim alone.
+      await released(TAB, b.queue)
+      expect(await ownerQueue(TAB)).toBe(c.queue)
       expect(await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })).toEqual({
         ok: true,
         result: 'from c',
@@ -356,7 +430,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const onB = await tab(b.hub, () => ({ ok: true, result: 'from b' }))
       await owned(TAB, b.queue)
       onB.conn.close()
-      await vi.waitFor(async () => expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0))
+      await released(TAB, b.queue)
+      expect(await ownerQueue(TAB)).toBeUndefined()
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser' } })
@@ -450,7 +525,8 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         for (const data of datas) expect(data).not.toContain(SECRET)
       }
       // Each call's key went with its answer: the history cannot be opened again.
-      await vi.waitFor(async () => expect(await db.sql`SELECT subject FROM ai_payload_keys WHERE subject = ANY(${started})`).toEqual([]))
+      for (const id of started) await writes.settled(`dropKey ${id}`)
+      expect(await db.sql`SELECT subject FROM ai_payload_keys WHERE subject = ANY(${started})`).toEqual([])
     })
 
     it('refuses to send a call through Temporal unsealed', async () => {
@@ -475,8 +551,12 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
         RETURNING id`
       return row!.id
     }
-    const storedTab = async (session: string) =>
-      (await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`)[0]?.tab_id
+    /** The session's pairing with `tabId`, written in the background, has settled: it is the stored tab now. */
+    async function stored(session: string, tabId: string): Promise<void> {
+      await writes.settled(`set ${session} ${tabId}`)
+      const [row] = await db.sql<{ tab_id: string }[]>`SELECT tab_id FROM ai_session_tabs WHERE session_id = ${session}`
+      expect(row?.tab_id).toBe(tabId)
+    }
 
     it("runs a durable session's call on a replica its messages never reached, on the tab it paired", async () => {
       const a = await replica('a')
@@ -485,7 +565,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(TAB, b.queue)
       const session = await chatSession()
       b.hub.pairSession(session, TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(TAB))
+      await stored(session, TAB)
       expect(await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
         ok: true,
         result: 'from b',
@@ -502,9 +582,9 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       await owned(OTHER_TAB, b.queue)
       const session = await chatSession()
       a.hub.pairSession(session, TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(TAB))
+      await stored(session, TAB)
       b.hub.pairSession(session, OTHER_TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(OTHER_TAB))
+      await stored(session, OTHER_TAB)
       expect(await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
         ok: true,
         result: 'T2 on b',
@@ -521,7 +601,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const session = await chatSession()
       b.hub.pairSession(session, TAB)
       b.hub.pairSession(session, OTHER_TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(OTHER_TAB))
+      await stored(session, OTHER_TAB)
       // That tab is connected nowhere: not the old one's answer.
       const outcome = await a.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser' } })
@@ -536,11 +616,11 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const session = await chatSession()
       // T1 (on A), then T2 (on B), then T1 again.
       a.hub.pairSession(session, TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(TAB))
+      await stored(session, TAB)
       b.hub.pairSession(session, OTHER_TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(OTHER_TAB))
+      await stored(session, OTHER_TAB)
       a.hub.pairSession(session, TAB)
-      await vi.waitFor(async () => expect(await storedTab(session)).toBe(TAB))
+      await stored(session, TAB)
       // A runs it on its own tab; B reaches it through Temporal.
       for (const r of [a, b]) {
         expect(await r.hub.call({ principal: browser, sessionId: session }, 'snapshot', {}, { signal: signal() })).toEqual({
