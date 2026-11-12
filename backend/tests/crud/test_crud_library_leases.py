@@ -100,7 +100,6 @@ async def test_a_lease_taken_while_the_apis_removal_holds_the_lock_waits(
     client: CrudSyncClient,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The removal outlasts several of the route's lock waits: the lease keeps waiting,
     as the SQL take did, and is taken once the removal ends."""
@@ -122,24 +121,28 @@ async def test_a_lease_taken_while_the_apis_removal_holds_the_lock_waits(
     monkeypatch.setattr(logger, "disabled", False)
     heard = _Heard()
     logger.addHandler(heard)
+    # setLevel, not an assignment to `level`: only setLevel clears the loggers'
+    # isEnabledFor cache (#6096).
+    level = logger.level
+    logger.setLevel(logging.INFO)
 
     def waits() -> int:
         return sum(record.getMessage() == LEASE_WAITS for record in heard.records)
 
     try:
-        with caplog.at_level(logging.INFO, logger=logger.name):
-            async with api.removing():
-                task = asyncio.create_task(render())
-                # Two of the route's lock waits, however late the first send arrives on
-                # a loaded runner: a fixed sleep could end before the first one did.
-                async with asyncio.timeout(10):
-                    while waits() < 2:
-                        await asyncio.sleep(0.05)
-                # Not taken while the removal runs: it would have checked for leases already.
-                assert not leased.is_set()
-                assert not task.done()
-            await asyncio.wait_for(leased.wait(), 10)
+        async with api.removing():
+            task = asyncio.create_task(render())
+            # Two of the route's lock waits, however late the first send arrives on
+            # a loaded runner: a fixed sleep could end before the first one did.
+            async with asyncio.timeout(10):
+                while waits() < 2:
+                    await asyncio.sleep(0.05)
+            # Not taken while the removal runs: it would have checked for leases already.
+            assert not leased.is_set()
+            assert not task.done()
+        await asyncio.wait_for(leased.wait(), 10)
     finally:
+        logger.setLevel(level)
         logger.removeHandler(heard)
     assert await asyncio.to_thread(api.leased, checkout) == [JOB]
     done.set()
