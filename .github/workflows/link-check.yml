@@ -68,13 +68,18 @@ jobs:
           fail: true
       # The pages behind the PayPal links excluded above, each once and without its
       # fragment, so a page that moved or answers 404 still fails the check (#6084).
-      # The list comes from the files themselves, so a new such link is covered.
+      # The list comes from the files lychee reads above, so a new such link is
+      # covered. `:(glob)` makes `**/` match zero or more directories, as lychee's
+      # globs do; without it, git's pathspec skips docs/*.md.
       - name: Collect the excluded PayPal pages
         id: paypal_pages
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          git ls-files -z -- 'docs/**/*.md' README.md '*CLAUDE.md' '**/SKILL.md' \
+          git ls-files -z -- ':(glob)docs/**/*.md' README.md CLAUDE.md ':(glob)**/SKILL.md' \
+            backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md agent-durable/CLAUDE.md \
+            tools/go/CLAUDE.md workers/rust/CLAUDE.md e2e-stack/CLAUDE.md models/CLAUDE.md \
+            deploy/CLAUDE.md plugins/CLAUDE.md \
             | xargs -0 grep -hoE 'https://developer\.paypal\.com/docs/api/[^#)> ]*#' \
             | sed 's/#$//' | sort -u > paypal-pages.txt || true
           cat paypal-pages.txt
@@ -88,6 +93,8 @@ jobs:
             --no-progress
             --accept '100..=103,200..=299,429'
             paypal-pages.txt
+          # Its own report, so the first pass's lychee/out.md stays.
+          output: lychee/paypal.md
           fail: true
       - name: Open an issue
         if: failure() && (steps.lychee.outcome == 'failure' || steps.lychee_paypal.outcome == 'failure')
