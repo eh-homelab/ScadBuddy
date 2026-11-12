@@ -783,7 +783,14 @@ export class WarmSessions {
     })
   }
 
-  /** `listener` is told each session whose process here closes with no newer one spawned for it, until the returned disposer is called. */
+  /**
+   * `listener` is told each session whose process here closes with no newer one
+   * spawned for it, until the returned disposer is called. Each call registers it
+   * once more, and each registration is told once per close. A disposer removes one
+   * registration. While another registration of the same function stays, a disposal
+   * during a close does not stop that close's calls to it: the dispatch tells each
+   * registration it copied whose function is still registered (#6094).
+   */
   onClosed(listener: (sessionId: string) => void): () => void {
     this.closedListeners.push(listener)
     return () => {
