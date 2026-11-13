@@ -32,7 +32,7 @@ from typing import IO, Any, Literal, Self
 import httpx
 from fastapi import status
 from opentelemetry.trace import Span, SpanKind
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from scadbuddy.bambuddy.errors import (
     REJECTED_PROBLEM,
@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.errors import (
     map_transport,
     not_configured,
     scrubbed_detail,
+    upstream_detail,
 )
 from scadbuddy.bambuddy.models import (
     Archive,
@@ -93,6 +94,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
 from scadbuddy.core.tracing import detached_span, span
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.makerworld.models import (
+    BambuddyMakerWorldImported,
+    BambuddyMakerWorldResolved,
+    BambuddyMakerWorldStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +113,11 @@ DEFAULT_UPLOAD_TIMEOUT = 180.0
 #: under a megabyte, so past this Bambuddy is answering something else (#1006).
 MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
+#: A MakerWorld import (#6119): Bambuddy downloads the 3MF from MakerWorld inside the one
+#: request, which ran past 120 s on prod on 2026-11-13 (the session #6119 cites).
+MAKERWORLD_IMPORT_TIMEOUT = 600.0
+#: Read by `BambuddyClient._parsed`, not mapped by `_send`: a link or id Bambuddy refuses.
+_REFUSED_LINK = frozenset({400})
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
 TRASH_PAGE = 500
@@ -183,6 +194,9 @@ Operation = Literal[
     "media.thumbnail",
     "media.timelapse",
     "maintenance.printer",
+    "makerworld.import",
+    "makerworld.resolve",
+    "makerworld.status",
     "printers.available_filaments",
     "printers.camera.snapshot",
     "printers.camera.stream",
@@ -1609,6 +1623,84 @@ class BambuddyClient:
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())
+
+    # --- MakerWorld (#6119) ----------------------------------------------------
+    # Bambuddy's ``backend/app/api/routes/makerworld.py`` (maziggy/bambuddy at
+    # v1.3.2b1-daily.20261112): status and resolve need ``makerworld:view`` (Read Status
+    # for a key), import ``makerworld:import`` (Manage Library), by ``core/auth.py``
+    # ``_APIKEY_SCOPE_BY_PERMISSION``. The download also needs a Bambu Cloud token: for an
+    # API key its owner's, and only when the key has cloud access.
+
+    @staticmethod
+    def _parsed[M: BaseModel](response: httpx.Response, model: type[M], *, what: str) -> M:
+        """``response`` read as ``model``. A 400 is Bambuddy refusing the link or id
+        (``_map_service_error``'s ``ProviderUrlError``, an unknown source type): the
+        caller's to fix, so a 422 with Bambuddy's own words."""
+        if response.status_code == status.HTTP_400_BAD_REQUEST:
+            detail = upstream_detail(response)
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Bambuddy rejected the request to {what}" + (f": {detail}" if detail else ""),
+                type_=REJECTED_PROBLEM,
+                bambuddy_status=response.status_code,
+            )
+        try:
+            return model.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy's answer was not the expected shape when asked to {what}",
+                type_=REJECTED_PROBLEM,
+            ) from error
+
+    async def makerworld_status(self) -> BambuddyMakerWorldStatus:
+        what = "read its MakerWorld status"
+        response = await self._send(
+            "GET",
+            "/makerworld/status",
+            scope=Scope.READ_STATUS,
+            operation="makerworld.status",
+            passthrough=_REFUSED_LINK,
+            what=what,
+        )
+        return self._parsed(response, BambuddyMakerWorldStatus, what=what)
+
+    async def makerworld_resolve(self, url: str) -> BambuddyMakerWorldResolved:
+        what = "resolve a MakerWorld link"
+        response = await self._send(
+            "POST",
+            "/makerworld/resolve",
+            scope=Scope.READ_STATUS,
+            operation="makerworld.resolve",
+            passthrough=_REFUSED_LINK,
+            what=what,
+            json={"url": url},
+        )
+        return self._parsed(response, BambuddyMakerWorldResolved, what=what)
+
+    async def makerworld_import(
+        self, model_id: int, *, profile_id: int | None, folder_id: int | None
+    ) -> BambuddyMakerWorldImported:
+        """Bambuddy downloads the profile's 3MF into its library, in ``folder_id`` (its own
+        ``MakerWorld`` folder without one). It dedupes by the model and profile's source
+        URL: a repeat answers the first file with ``was_existing`` and downloads nothing."""
+        what = f"import MakerWorld model {model_id}"
+        response = await self._send(
+            "POST",
+            "/makerworld/import",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="makerworld.import",
+            passthrough=_REFUSED_LINK,
+            what=what,
+            json={
+                "model_id": model_id,
+                "source_type": "makerworld",
+                "profile_id": profile_id,
+                "folder_id": folder_id,
+            },
+            timeout=MAKERWORLD_IMPORT_TIMEOUT,
+        )
+        return self._parsed(response, BambuddyMakerWorldImported, what=what)
 
     # --- the connection test (#322) -------------------------------------------
 

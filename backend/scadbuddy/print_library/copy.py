@@ -408,6 +408,23 @@ async def _copy_bb_to_sb(
     return "copied", copied, folder_id, None, digest
 
 
+async def copy_file_to_native(
+    client: BambuddyClient,
+    native: NativeLibrary,
+    source_id: int,
+    *,
+    root_id: int | None,
+    path: str,
+    locks: TargetLocks,
+) -> Outcome:
+    """One Bambuddy file into the native library under ``root_id`` and ``path`` (made
+    where missing), as a ``bb_to_sb`` copy files it: skipped for a live native file of
+    the same SHA-256, under the same locks (#6119, the MakerWorld import). The caller
+    releases and closes ``locks``."""
+    row = PlannedFile(source_id=source_id, path=path, name="")
+    return await _copy_bb_to_sb(client, _NativeTarget(native, root_id), row, locks)
+
+
 def _media_type(name: str, native_type: str) -> str:
     lower = name.lower()
     if lower.endswith(".3mf"):

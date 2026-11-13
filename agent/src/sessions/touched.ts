@@ -503,6 +503,13 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const id = str(field(result, 'copy_id'))
     return id ? setting(`library_copy:${id}`) : []
   },
+  // #6119: the library file a MakerWorld import answers (native or Bambuddy's), and on native
+  // Bambuddy's copy too; nothing while it still runs (no ids yet) or when nothing new was made.
+  import_makerworld_model: (_input, result) => {
+    if (field(result, 'was_existing') !== false) return []
+    const made = [...new Set([bambuddyId(field(result, 'library_file_id')), bambuddyId(field(result, 'bambuddy_library_file_id'))])]
+    return made.flatMap((id) => (id ? [{ type: libraryFileType(id), id, action: 'created' as const }] : []))
+  },
   // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
   delete_library_files: (_input, result) => libraryFiles(field(result, 'deleted'), 'deleted'),
   restore_library_files: (_input, result) =>
