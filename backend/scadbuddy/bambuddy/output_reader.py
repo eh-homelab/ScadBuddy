@@ -11,18 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
 from fastapi import status
 from pydantic import BaseModel, Field
-from temporalio import activity
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.part_settings import PartSettings, PartSettingsMap, by_colour
 from scadbuddy.bambuddy.project_file import cached_defaults, output_stem
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.wire import PREFIX
@@ -277,24 +277,6 @@ class SlicedBlobs(Protocol):
     def stream(self, key: str) -> AsyncGenerator[bytes]: ...
 
 
-async def _beating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``; inside an activity, heartbeat first and every
-    `TRANSFER_URL_HEARTBEAT` until it ends, as `workflows/print_activities.py`
-    `heartbeating` does (that module imports this one)."""
-    if not activity.in_activity():
-        return await work
-    activity.heartbeat()
-    task = asyncio.create_task(work)
-    try:
-        while True:
-            done, _ = await asyncio.wait({task}, timeout=TRANSFER_URL_HEARTBEAT)
-            if done:
-                return task.result()
-            activity.heartbeat()
-    finally:
-        task.cancel()
-
-
 class RemoteBlobs:
     """`SlicedBlobs` through the API's internal blob route (`api/internal_blobs.py`), as
     `RemoteOutputs` reads outputs: the print worker holds no store and no key to sign
@@ -318,14 +300,15 @@ class RemoteBlobs:
         only. Any other refusal, such as the API's 503 ``not_configured``, is an
         `ApiError`. The LAN upload retries neither."""
         try:
-            response = await _beating(
+            response = await heartbeating(
                 self._crud.request(
                     "POST",
                     TRANSFER_URLS,
                     json={"key": key},
                     budget=TRANSFER_URL_BUDGET,
                     timeout=TRANSFER_URL_TIMEOUT,
-                )
+                ),
+                TRANSFER_URL_HEARTBEAT,
             )
         except CrudRefusedError as error:
             if error.problem.get("reason") == TRANSFER_REFUSED:

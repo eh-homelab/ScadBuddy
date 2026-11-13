@@ -1285,7 +1285,11 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   strips print-host credential keys (`printhost_apikey`, `printhost_password`,
   `printhost_user`, and any key naming an API key, password, secret or token, at any
   depth) whenever it parses a preset, and never stores, forwards or writes them into a
-  slicer file (`core/credentials.py` `strip_credentials`). The print worker, which holds
+  slicer file (`core/credentials.py` `strip_credentials`). The API strips the kept
+  presets an older build stored at its start, with no Bambuddy call
+  (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files that
+  older builds put in the content store keep the keys until the content sweep collects
+  them. The print worker, which holds
   the Bambuddy key, can still read Bambuddy's local presets, including any such keys, in
   the bytes Bambuddy sends. What protects them is the Bambuddy key's scope. Any other
   key is 403

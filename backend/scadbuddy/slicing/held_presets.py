@@ -27,6 +27,11 @@ A native slice flattens a kept document over the image's tree (`slicing/presets.
 and its key carries the built file's digest, so an edit, once kept, slices again. A
 preset the copy lacks (imported since the last refresh) is not offered on a native run
 until the next.
+
+Rows kept by a build before #5298 Task 32 may still hold print-host credential keys in
+their documents. The API strips them at its start (:func:`strip_kept_logged`, run by
+`slicing/component.py`), with no Bambuddy call, so they go even with no ``bambuddy_url``
+or with Bambuddy down.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -69,6 +75,22 @@ class HeldRow:
 
 def setting_sha256(setting: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(setting, sort_keys=True).encode()).hexdigest()
+
+
+#: How many kept rows the start's strip (:meth:`HeldPresetStore.strip_kept`) reads at a
+#: time.
+STRIP_BATCH = 100
+
+
+def restripped(preset: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """A kept row's ``preset`` parsed as :class:`LocalPresetDetail`, which strips its
+    print-host credential keys (`core/credentials.py`), with the ``sha256`` a refresh
+    would write for it (:func:`setting_sha256`); ``None`` when parsing removed nothing,
+    so a clean row is never written."""
+    detail = LocalPresetDetail.model_validate(preset)
+    if detail.setting == preset.get("setting", {}):
+        return None
+    return detail.model_dump(mode="json"), setting_sha256(detail.setting)
 
 
 def held_row(detail: LocalPresetDetail) -> HeldRow:
@@ -121,6 +143,37 @@ class HeldPresetStore:
         """Forget every kept preset."""
         await asyncio.to_thread(self._forget_unlisted, [])
 
+    def strip_kept(self, stop: threading.Event, batch: int = STRIP_BATCH) -> int:
+        """Rewrite each kept row whose document still holds a print-host credential key
+        without it (:func:`restripped`), ``batch`` rows a transaction, in id order, until
+        every row is read or ``stop`` is set; how many rows were written. A row a refresh
+        rewrote since it was read is left as the refresh wrote it. A second run writes
+        nothing."""
+        after: int | None = None
+        written = 0
+        while not stop.is_set():
+            with self._pool.connection() as conn:
+                found = conn.execute(
+                    "SELECT id, preset FROM held_local_presets"
+                    " WHERE %(after)s::bigint IS NULL OR id > %(after)s"
+                    " ORDER BY id LIMIT %(batch)s",
+                    {"after": after, "batch": batch},
+                ).fetchall()
+                for row in found:
+                    stripped = restripped(row["preset"])
+                    if stripped is None:
+                        continue
+                    preset, sha256 = stripped
+                    written += conn.execute(
+                        "UPDATE held_local_presets SET preset = %s, sha256 = %s"
+                        " WHERE id = %s AND preset = %s",
+                        (Jsonb(preset), sha256, row["id"], Jsonb(row["preset"])),
+                    ).rowcount
+            if len(found) < batch:
+                break
+            after = found[-1]["id"]
+        return written
+
     def _rows(self) -> list[HeldRow]:
         with self._pool.connection() as conn:
             found = conn.execute(
@@ -162,6 +215,22 @@ class HeldPresetStore:
                     setting_sha256(detail.setting),
                 ),
             )
+
+
+async def strip_kept_logged(store: HeldPresetStore, stop: threading.Event) -> None:
+    """The API's start step that strips the kept rows of an older build
+    (:meth:`HeldPresetStore.strip_kept`), in the background. It never fails the start: an
+    error is logged by its type, and the next start runs it again."""
+    try:
+        written = await asyncio.to_thread(store.strip_kept, stop)
+    except Exception as error:
+        logger.warning(
+            "could not strip credential keys from the kept local presets; the next start retries",
+            extra={"error": type(error).__name__},
+        )
+        return
+    if written:
+        logger.info("stripped credential keys from kept local presets", extra={"count": written})
 
 
 async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -> int:

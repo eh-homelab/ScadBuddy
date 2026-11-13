@@ -58,6 +58,7 @@ from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
 from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
@@ -90,7 +91,7 @@ from scadbuddy.rack.usage import (
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.spools.native import NativeSpoolStore, spool_uses
-from scadbuddy.workflows.print_activities import heartbeating, raised_as
+from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
     LAN_PRINT_ACTIVITY,
