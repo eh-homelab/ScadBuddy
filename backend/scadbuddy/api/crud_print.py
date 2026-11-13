@@ -1802,7 +1802,8 @@ async def held_preset_documents(
     ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
     secret or token, at any depth). ScadBuddy strips these keys whenever it parses a
     preset, and never stores, forwards or writes them into a slicer file; no slice reads
-    them. The API strips the kept presets an older build stored at its start
+    them. The API strips the kept presets an older build stored at its start and
+    after each refresh
     (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files
     that older builds put in the content store keep the keys until the content sweep
     collects them. The print worker, which holds the Bambuddy key, can still read Bambuddy's local

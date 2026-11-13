@@ -1286,7 +1286,7 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   `printhost_user`, and any key naming an API key, password, secret or token, at any
   depth) whenever it parses a preset, and never stores, forwards or writes them into a
   slicer file (`core/credentials.py` `strip_credentials`). The API strips the kept
-  presets an older build stored at its start, with no Bambuddy call
+  presets an older build stored at its start and after each refresh, with no Bambuddy call
   (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files that
   older builds put in the content store keep the keys until the content sweep collects
   them. The print worker, which holds

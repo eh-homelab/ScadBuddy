@@ -160,7 +160,16 @@ class HeldPresetStore:
                     {"after": after, "batch": batch},
                 ).fetchall()
                 for row in found:
-                    stripped = restripped(row["preset"])
+                    try:
+                        stripped = restripped(row["preset"])
+                    except ValueError as error:
+                        # A row no build can parse is left for the next refresh to
+                        # rewrite; the rows after it are still stripped.
+                        logger.warning(
+                            "a kept local preset could not be read to strip it",
+                            extra={"preset_id": row["id"], "error": type(error).__name__},
+                        )
+                        continue
                     if stripped is None:
                         continue
                     preset, sha256 = stripped
@@ -285,4 +294,7 @@ async def refresh_held(store: HeldPresetStore, load: Callable[[], StoredSettings
         return "skipped"
     async with client_for(settings) as client:
         await refresh_held_presets(store, client)
+    # A row an older build's refresh kept with its keys during a roll, after this build's
+    # strip at start passed it, or every row when that strip failed: stripped here too.
+    await asyncio.to_thread(store.strip_kept, threading.Event())
     return "refreshed"

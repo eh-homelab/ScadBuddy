@@ -344,7 +344,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   whenever it parses a preset, and never stores, forwards or writes them into a slicer
   file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
   `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build
-  stored at its start, with no Bambuddy call (`slicing/held_presets.py`
+  stored at its start and after each refresh, with no Bambuddy call (`slicing/held_presets.py`
   `strip_kept_logged`); one window remains: preset files that older builds put in the
   content store keep the keys until the content sweep collects them; the print worker, which holds the Bambuddy key,
   can still read Bambuddy's local presets, including any such keys, in the bytes Bambuddy

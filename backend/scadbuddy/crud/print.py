@@ -1524,9 +1524,10 @@ _refuse(RemoteNativeSpools, "NativeSpoolStore", NATIVE_SPOOLS_API_ONLY)
 
 
 #: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the
-#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), and its clear at
-#: the API's start (`slicing/component.py`).
-HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear")
+#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), its clear at
+#: the API's start (`slicing/component.py`), and the strip of credential keys at that
+#: start and after each refresh (`strip_kept`).
+HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear", "strip_kept")
 
 
 class RemoteHeldPresets(HeldPresetStore):
