@@ -162,7 +162,7 @@ def lan_linked(printers: PrinterStore, reports: PrinterReportStore, **patch: Any
 
 def reported_ago(reports: PrinterReportStore, printer_id: str, ago: timedelta) -> None:
     """The printer last heard from ``ago``: its row aged in place, since a write of an
-    older report is skipped (`PrinterReportStore.put_in`, #5298 Task 30)."""
+    older report is skipped (`PrinterReportStore.advance_in`, #5298 Task 30)."""
     with reports.pool.connection() as conn:
         conn.execute(
             "UPDATE printer_reports SET seen_at = %s WHERE printer_id = %s",

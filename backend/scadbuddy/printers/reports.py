@@ -54,7 +54,7 @@ FUTURE_TOLERANCE = timedelta(seconds=30)
 
 def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:
     """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
-    is not written (`PrinterReportStore.put_in`). A ``stored`` time more than
+    is not written (`PrinterReportStore.advance_in`). A ``stored`` time more than
     `FUTURE_TOLERANCE` past ``now`` (the database's clock) guards nothing: it came from a
     clock that ran ahead, and the next report repairs the row, as before the guard."""
     return stored is not None and seen_at < stored and stored <= now + FUTURE_TOLERANCE

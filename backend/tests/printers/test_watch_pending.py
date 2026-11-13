@@ -245,7 +245,7 @@ async def test_a_failure_is_logged_to_be_found_never_with_the_report(
     watches, _ = _watch(log, [refused, bug])
     report = LanReport(serial="s", received_at=datetime.now(UTC), print={"secret": "S3CR3T"})
     with caplog.at_level(logging.WARNING):
-        assert await watches._write(PRINTER, report, "k1", set()) == "unwritten"
+        assert await watches._write(PRINTER, report, "k1", set()) == "refused"
         assert await watches._write(PRINTER, report, "k2", set()) == "unwritten"
     first, second = [r for r in caplog.records if r.getMessage() == WATCH_WRITE_FAILED]
     assert (first.status, first.problem_type, first.reason) == (422, "https://x/problem", "bad")  # type: ignore[attr-defined]
@@ -324,6 +324,29 @@ async def test_an_owed_report_refused_or_never_run_on_its_resend_is_dropped(
     await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
     keys = [key for _, key in store.puts]
     assert len(keys) == 3 and keys[0] == keys[1] != keys[2]
+
+
+@pytest.mark.parametrize(
+    ("answer", "kept"),
+    [
+        (CrudRefusedError(422, {"type": "x", "reason": "bad"}), False),
+        (CrudRefusedError(429, {"type": "x", "reason": "busy"}), True),
+    ],
+    ids=["4xx-dropped", "429-kept"],
+)
+async def test_a_first_write_refused_with_a_4xx_is_dropped_and_the_touch_runs(
+    answer: Exception, kept: bool
+) -> None:
+    """claude-review on #6125: a first write refused with a 4xx other than 429 is dropped
+    (logged and counted), so the next quiet tick touches the row instead of sending it
+    again; a 429 is passing, so the report waits and is sent again first."""
+    log: list[Any] = []
+    watches, _ = _watch(log, [answer, None])
+    await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    puts = [entry for entry in log if entry[0] == "put"]
+    assert len(puts) == (2 if kept else 1)
+    if kept:
+        assert log.index(puts[1]) < log.index(("touch", None))
 
 
 def test_a_report_older_than_the_row_is_stale() -> None:

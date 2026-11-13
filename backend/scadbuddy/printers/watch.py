@@ -75,11 +75,14 @@ HEARD_EVERY = 10.0
 WATCH_WRITE_FAILED = "a printer watch could not write its report"
 
 #: How a report's write ended (`WatchActivities._write`): written; sent and its answer
-#: lost, so it may have landed and is sent again under its key; or not written at all.
-WriteOutcome = Literal["written", "owed", "unwritten"]
+#: lost, so it may have landed and is sent again under its key; not written, so it is
+#: written again at the next quiet tick; or refused (a 4xx other than 429), so it is
+#: dropped: sending it again would be refused again and hold back the touch.
+WriteOutcome = Literal["written", "owed", "unwritten", "refused"]
 WRITTEN: WriteOutcome = "written"
 OWED: WriteOutcome = "owed"
 UNWRITTEN: WriteOutcome = "unwritten"
+REFUSED: WriteOutcome = "refused"
 #: How many times an owed report is sent again under its key before it is given up: its
 #: print end is then left to ``lan_wait``, the run's follow or the pick's age, and the
 #: report itself, or a newer one, is written under a new key. Bounded, so an API whose
@@ -248,7 +251,7 @@ class WatchActivities:
                     announced = self._announce(printer_id, sent, announced)
                 if report is not None:
                     pending = report
-                elif owed is None and outcome != WRITTEN and pending is None:
+                elif owed is None and outcome in (UNWRITTEN, OWED) and pending is None:
                     pending = sent
                 return
             target = report if report is not None else pending
@@ -365,7 +368,8 @@ class WatchActivities:
     ) -> WriteOutcome:
         """``report`` written under the Idempotency-Key ``key``: `WRITTEN`, `OWED` when
         its answer was lost and it may have landed (send it again under ``key``), or
-        `UNWRITTEN` when it never ran or was refused. A failed write is logged and
+        `UNWRITTEN` when it never ran or the API answered 429 or a 5xx, or `REFUSED` when
+        the API refused it with any other 4xx (dropped). A failed write is logged and
         counted, and the watch goes on: a stalled API never fails the attempt, which
         would redial the printer. On the print worker each call is bounded
         (`crud/print.py` `WATCH_CALL_BUDGET`). A job start it shows goes to the nudge, in
@@ -385,7 +389,11 @@ class WatchActivities:
             # Only a lost answer may have landed: a route's 5xx means the write raised
             # and its ledger recorded nothing, and a passing failure never ran it.
             landed = isinstance(error, CrudUnavailableError) and error.failure == "transport"
-            return OWED if landed else UNWRITTEN
+            if landed:
+                return OWED
+            if isinstance(error, CrudRefusedError) and error.status != 429:
+                return REFUSED
+            return UNWRITTEN
         if advance.started is not None and self.nudge is not None:
             # A task of its own (#6034), held in ``nudges`` until it ends: the loop's next
             # heartbeat and report, and the settle below, never wait for it.

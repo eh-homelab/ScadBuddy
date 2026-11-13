@@ -343,8 +343,9 @@ class Metrics:
         self.printer_watch_write_failed = Counter(
             "scadbuddy_printer_watch_write_failed",
             "LAN reports the printer watch could not write, or touches it could not make "
-            "(#5298). The watch goes on: an unwritten report is written at the next quiet "
-            "tick, and the row's seen_at ages until a write succeeds.",
+            "(#5298), and owed reports given up after their resends. The watch goes on: an "
+            "unwritten report is written at the next quiet tick, a refused one (a 4xx other "
+            "than 429) is dropped, and the row's seen_at ages until a write succeeds.",
             registry=r,
         )
         self.queue_wait = Histogram(
