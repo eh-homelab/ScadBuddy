@@ -6,7 +6,9 @@ link by queue item: ``OrderStore.run_archives``). Once the attempt's print settl
 attempt copies what the archives say: their ids, the printer's start and end, the seconds
 and grams summed (:func:`mirror_archives`). That runs when the print's outcome is heard
 (``printing.py`` ``listen_for_prints``) and again whenever the attempt's archives are read
-(``GET …/fulfilments/{f}/archives``), so a link Bambuddy made late is still copied.
+(``GET …/fulfilments/{f}/archives``), so a link Bambuddy made late is still copied. An
+attempt by hand that names its archives copies them when it is recorded or edited too
+(``api/orders.py`` ``record_fulfilment``, ``update_fulfilment``, #6132).
 
 An archive's ``finish_`` photo and its timelapse are offered as one-click copies into the
 attempt's attachments (§6.2, #4251): the bytes are pulled once through the seam into the claim
