@@ -253,6 +253,10 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "print.outcome",
         "operation.changed",
         "flow_run.changed",
+        # #265: a flow's definition, and the dialog's background slice.
+        "flow.changed",
+        "preview_slice.progress",
+        "preview_slice.settled",
         "library.changed",
         "library.removed",
         "font.installed",

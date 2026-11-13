@@ -8,8 +8,8 @@ import { isSignedOut, noteSignedOut, SIGNED_OUT_CLOSE, whenSignedIn } from './si
  * #266 — the UI's realtime channel, `WS /api/v1/ws` (backend `api/realtime.py`).
  *
  * One socket per tab. A caller follows a *topic* (`job:<id>`, `model:<slug>`,
- * `print:<output id>`, `printer:<printer id>`, `models`, `outputs`, `libraries`, `fonts`,
- * `settings`, `printers`) and is
+ * `print:<output id>`, `printer:<printer id>`, `preview-slice:<slicer>:<job id>`, `models`,
+ * `outputs`, `libraries`, `fonts`, `settings`, `printers`, `flows`) and is
  * told when something under it changed; it then re-reads through the REST call it
  * already makes. Events carry ids, never content, so a lost or repeated one costs
  * one fetch and never shows stale data.

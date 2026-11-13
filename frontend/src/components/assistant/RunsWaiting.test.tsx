@@ -1,7 +1,8 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
-import { ATTENTION_POLL_MS, RunsWaitingContext, type RunWaiting } from '../../agent/attention'
+import { RunsWaitingContext, type RunWaiting } from '../../agent/attention'
+import { fakeRealtime } from '../../lib/realtime.fake'
 import { setFlowDetails } from '../../mocks/features/flows'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -54,16 +55,29 @@ describe('RunsWaiting', () => {
     expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['swap waits for you on a call'])
   })
 
-  it('reads the display names again on the badge\'s poll, so a rename shows while it is open', async () => {
+  it('reads the display names again on the flows topic, so a rename shows while it is open (#265)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
+      const realtime = fakeRealtime()
       setFlowDetails('swap', { display_name: 'Nightly swap' })
       shown([{ id: 'run-1', name: 'swap', waiting: 1 }])
       const list = screen.getByRole('list', { name: 'Flow runs waiting for you' })
       expect(await within(list).findByRole('link', { name: 'Nightly swap' })).toBeInTheDocument()
+      expect(realtime.following()).toEqual(['flows'])
       setFlowDetails('swap', { display_name: 'Renamed swap' })
-      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await realtime.signal('flows', 'flow.changed')
       await waitFor(() => expect(within(list).getByRole('link', { name: 'Renamed swap' })).toBeInTheDocument())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('follows no topic while no run waits (#265)', () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const realtime = fakeRealtime()
+      shown([])
+      expect(realtime.following()).toEqual([])
     } finally {
       vi.useRealTimers()
     }

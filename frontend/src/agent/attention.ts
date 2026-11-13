@@ -1,6 +1,7 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { isDoneSummary, PendingInputSchema } from './chat/protocol'
+import { PENDING_CHANGES_PATH, subscribePendingChanges } from '../lib/pendingChanges'
 import { fetchNotingSignedOut } from '../lib/signedOut'
 
 /**
@@ -28,8 +29,9 @@ export const ATTENTION_POLL_MS = 15_000
  * have changed (agent routes/pendingInput.ts `PENDING_CHANGES_PATH`), so a new request is read
  * within moments rather than on the next poll, which a background tab's throttled timers stretch.
  * The poll stays: it covers an agent without the stream (a 503 closes the EventSource for good).
+ * #265: the tab's one stream, shared with each view of a flow run's queue (`lib/pendingChanges.ts`).
  */
-export const PENDING_CHANGES_PATH = '/api/v1/ai/pending-input/changes'
+export { PENDING_CHANGES_PATH }
 
 /** How long one read may take; a proxy that accepts and never answers counts as no answer. */
 export const ATTENTION_TIMEOUT_MS = 8_000
@@ -296,15 +298,12 @@ export function useAttention(enabled: boolean): Attention {
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', refresh)
-    const changes = typeof EventSource === 'undefined' ? undefined : new EventSource(PENDING_CHANGES_PATH)
-    const onChange = () => {
+    const unfollow = subscribePendingChanges(() => {
       if (inflight.current === generation.current) changedDuring.current = true
       else refresh()
-    }
-    changes?.addEventListener('changed', onChange)
+    })
     return () => {
-      changes?.removeEventListener('changed', onChange)
-      changes?.close()
+      unfollow()
       clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', refresh)

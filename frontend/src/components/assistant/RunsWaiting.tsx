@@ -1,10 +1,12 @@
 import { useContext } from 'react'
 import { Link } from 'react-router'
-import { ATTENTION_POLL_MS, RunsWaitingContext } from '../../agent/attention'
+import { RunsWaitingContext } from '../../agent/attention'
 import { api } from '../../api/client'
-import { flowRunPath } from '../../lib/flows'
+import { FLOWS_TOPIC, flowRunPath } from '../../lib/flows'
 import { useAsync } from '../../lib/useAsync'
-import { usePollWhile } from '../../lib/usePollWhileUnavailable'
+
+const TOPICS = [FLOWS_TOPIC]
+const NONE: string[] = []
 
 /**
  * #2482 — the flow runs started from the browser whose own calls wait for you, each
@@ -12,14 +14,14 @@ import { usePollWhile } from '../../lib/usePollWhileUnavailable'
  * are in no session's list, so the panel it opens shows them here. Read from the badge's
  * own poll (`RunsWaitingContext`), never a second one. Nothing when none waits.
  * #3186 — each by its flow's display name, from the flows list (the badge's poll is the
- * agent's, which has no display names), its name until then. The list is read again at
- * the badge's own interval while a run waits, so a rename shows without a remount.
+ * agent's, which has no display names), its name until then. #265: while a run waits,
+ * the list is read again on each change on the `flows` topic, so a rename shows without
+ * a remount.
  */
 export function RunsWaiting() {
   const waiting = useContext(RunsWaitingContext) ?? []
   const any = waiting.length > 0
-  const flows = useAsync(() => (any ? api.listFlows({ archived: true }) : Promise.resolve([])), [any])
-  usePollWhile(any, () => flows.refresh(), ATTENTION_POLL_MS)
+  const flows = useAsync(() => (any ? api.listFlows({ archived: true }) : Promise.resolve([])), [any], any ? TOPICS : NONE)
   const titles = new Map((flows.data ?? []).flatMap((f) => (f.display_name ? [[f.name, f.display_name] as const] : [])))
   if (!any) return null
   return (

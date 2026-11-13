@@ -18,7 +18,7 @@ import type {
 import { choicesView } from '../choices'
 import * as fixtures from '../fixtures'
 import { mockSettings } from '../handlers'
-import { emitRealtime } from '../realtime'
+import { announcePreviewSlice, emitRealtime } from '../realtime'
 import { demoToolpath } from '../toolpath'
 import { acceptOperation } from './operations'
 
@@ -292,6 +292,8 @@ function readSlice(jobId: number) {
   if (!job) return problem(404, `there is no background slice ${jobId}`)
   job.reads += 1
   if (job.reads < 3) {
+    // #265: the dialog reads again on the next event, as the backend's follow sends it.
+    announcePreviewSlice('native', jobId)
     return HttpResponse.json({
       job_id: jobId,
       status: 'running',
