@@ -792,6 +792,14 @@ async def test_an_outward_turn_tool_waits_for_approval(
     request = {"run_id": run_id, "call_id": call_id, "approved": True}
     env = ActivityEnvironment(client=outward.client)
     await env.run(decide.run, request, await env.run(decide.check, request))
+    # #6118: the approval is bound to the `<server>__<tool>` and its arguments, as the
+    # agent's `turn:` activity hashes them again before it runs the call. Without it the
+    # agent finds no approval and refuses: "none is recorded for this call".
+    decision = await outward.store.get_decision(request_id(parked, call_id))
+    assert decision is not None
+    assert decision.input_hash == input_hash(
+        HASH_KEY, "scadbuddy_http__http_request", {"method": "POST"}
+    )
     run = await outward.finished(run_id)
     assert run.result == "result: 'POST done'"
     assert served.calls == [

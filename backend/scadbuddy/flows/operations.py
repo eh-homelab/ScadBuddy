@@ -117,6 +117,13 @@ LANDED_PROBE = timedelta(seconds=10)
 #: The harness tool an outward `tool(...)` call parks as (`flow_tools.approved_tool`):
 #: its input names the agent tool and its arguments.
 APPROVED_TOOL = "approved_tool"
+#: The harness tool an outward turn tool call (a plugin's, `scadbuddy_http__http_request`)
+#: parks as (`flow_tools.approved_turn_tool`): its input names the `<server>__<tool>` and its
+#: arguments, which the agent's `turn:<name>` activity hashes as `inputHash(name, args)`
+#: (agent/src/temporal/turnTools.ts `runTurnTool`) before it runs the call (#6118).
+APPROVED_TURN_TOOL = "approved_turn_tool"
+#: The harness tools whose approval binds the agent call they name.
+AGENT_CALLS = frozenset({APPROVED_TOOL, APPROVED_TURN_TOOL})
 
 
 async def reset_execution(
@@ -418,21 +425,21 @@ def flow_kinds(
 
     async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
-        name and arguments, which the agent hashes again from the call it is asked to
-        run. None for a ScadBuddy host function (the workflow runs it itself). A print
-        on a registry printer is bound to the pair its row links now (#4445), which must
-        be the `bound_hash` the run page showed (`shown`): else a 409, which says
-        whether the page showed another pair or none."""
+        name and arguments, or a turn tool's (#6118), which the agent hashes again from
+        the call it is asked to run. None for a ScadBuddy host function (the workflow
+        runs it itself). A print on a registry printer is bound to the pair its row links
+        now (#4445), which must be the `bound_hash` the run page showed (`shown`): else
+        a 409, which says whether the page showed another pair or none."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
                 continue
-            if parked.tool_name != APPROVED_TOOL or hash_key is None:
+            if parked.tool_name not in AGENT_CALLS or hash_key is None:
                 return None
             name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
             args = args if isinstance(args, dict) else {}
-            if named_printer(name, args) is not None:
+            if parked.tool_name == APPROVED_TOOL and named_printer(name, args) is not None:
                 # Bound to the registry printer's link as it is now (#4445), which the
                 # agent's gate checks again when the call runs.
                 registry = None if api is None else api()
