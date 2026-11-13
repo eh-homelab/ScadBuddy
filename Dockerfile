@@ -42,7 +42,7 @@ FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-11-02@sha256:c84e6f1e5962e446091f3c20e838429231043ba4d1fac9549cc62e26f8839ae3 AS base
+FROM openscad/openscad:dev.2026-11-09@sha256:3a040760d376ccbb3bff07e44a1be3c2570435f093f5fa4bf08e3991e7412b8c AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -721,7 +721,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.11.02
+ARG OPENSCAD_VERSION=2026.11.09
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
