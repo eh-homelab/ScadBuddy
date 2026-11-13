@@ -682,7 +682,8 @@ def token_source(caller: ServiceCaller, settings: Settings, kek: Kek | None) -> 
     exchange of ``SCADBUDDY_SERVICE_TOKEN_FILE`` (a projected token) or
     ``SCADBUDDY_SERVICE_BOOTSTRAP_FILE``, falling back to the view while the caller has a
     database URL; otherwise the view, as before. Both files set is refused by
-    `Settings` itself."""
+    `Settings` itself. The print worker does not take this with a proof: it takes
+    `exchange_source`, with no fallback (`worker.py` `build_print_deps`, #5298)."""
     view = TokenReader(caller, settings.database_url, kek)
     proof: Literal["k8s", "bootstrap"]
     if settings.service_token_file is not None:

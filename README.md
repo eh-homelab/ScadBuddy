@@ -867,7 +867,9 @@ hash, with no budget; a `client_id` sent beside any proof must name the caller i
 The counter
 `scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
 the API answers `404` (an older API pod during a roll) falls back to the view while the
-caller still has a database URL. The API's own in-process `projects` worker gets its
+caller still has a database URL, except on the print worker: with a proof it takes the
+exchange only (`exchange_source`), since the CRUD areas it waits for come only from an API
+that serves the exchange (#5298). The API's own in-process `projects` worker gets its
 credential minted in memory. `GET /api/v1/auth/service-credentials` returns each
 credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show them, or the
 `render` caller, yet), and the API also revokes every credential of a pod

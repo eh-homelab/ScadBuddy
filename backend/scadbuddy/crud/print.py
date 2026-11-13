@@ -1379,9 +1379,12 @@ class RemoteSpoolStore(SpoolStore):
         retried activity's `WriteKeys` key would never replay, and a refresh is a whole
         new answer, never a replay of an earlier one.
 
-        With a ``timeout`` the API never commits after this call gives up, as the SQL
-        store never does: the call is sent once, with no retry, and waits ``timeout``
-        seconds for its answer; the API's deadline is ``timeout`` less
+        With a ``timeout`` the API does not commit after this call gives up, as the SQL
+        store never does, as long as the request reaches the route and its last insert
+        and commit end within `DEADLINE_MARGIN`: a longer wait in front of the handler,
+        or a slower commit, can still commit after the raise. The call is sent once,
+        with no retry, and waits ``timeout`` seconds for its answer; the API's deadline
+        is ``timeout`` less
         `DEADLINE_MARGIN` from its receipt, so it rolls back (409 ``past-deadline``,
         raised here as `TimeoutError`) before this call stops waiting. A call that gets
         no answer waits out its ``timeout`` before it raises, so the API is past its
