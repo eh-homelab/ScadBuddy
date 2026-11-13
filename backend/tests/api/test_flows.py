@@ -716,3 +716,38 @@ def test_a_denial_reaches_the_parked_print(client: TestClient, pg_conninfo: str)
         assert conn.execute("SELECT outcome FROM workflow_run_decisions").fetchall() == [
             ("denied",)
         ]
+
+
+def test_a_checker_that_did_not_answer_is_503_not_a_type_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6123: the checker's worker, killed under load, said nothing about the script.
+    Every route that checks one answers 503 to try again, never 422 "no longer
+    type-checks"; a script with a real type error is still 422."""
+    from scadbuddy.api import flow_script as flow_script_routes
+    from scadbuddy.api import flows as flow_routes
+    from scadbuddy.flows.typecheck import CheckerUnavailableError
+
+    definition = register(client, script("return 1"))
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise CheckerUnavailableError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(flow_routes, "check_script", unavailable)
+        patched.setattr(flow_script_routes, "check_script", unavailable)
+        answers = [
+            start(client, definition["id"], "k1"),
+            client.post("/api/v1/workflows", json={"name": "swap", "script": script("return 2")}),
+            client.post(f"/api/v1/workflows/names/swap/versions/{definition['commit']}/restore"),
+            client.post("/api/v1/workflow-script/check", json={"script": script("return 2")}),
+        ]
+    for answer in answers:
+        assert answer.status_code == 503, answer.text
+        assert answer.json()["type"] == "https://scadbuddy.dev/problems/flow-checker-unavailable"
+        assert answer.headers["Retry-After"]
+    assert start(client, definition["id"], "k1").status_code == 202
+    refused = client.post(
+        "/api/v1/workflows", json={"name": "swap", "script": script("await sleep('x')")}
+    )
+    assert refused.status_code == 422

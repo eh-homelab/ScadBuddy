@@ -99,7 +99,12 @@ from scadbuddy.flows.operations import (
 )
 from scadbuddy.flows.print_binding import NativeCheck, PrinterLookup, bind_call
 from scadbuddy.flows.store import GrantStateError, author_principal
-from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
+from scadbuddy.flows.typecheck import (
+    MAX_SCRIPT_BYTES,
+    CheckerUnavailableError,
+    ScriptProblem,
+    check_script,
+)
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.component import OrdersDep
@@ -121,6 +126,8 @@ router = APIRouter(tags=["flows"])
 FLOW_NAMESPACE = uuid.UUID("5b6f1d0e-6a8f-4f0e-9a51-0c1f1e57f10f")
 FLOWS_UNAVAILABLE = "https://scadbuddy.dev/problems/flows-unavailable"
 SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
+#: The type checker never answered (#6123): nothing is known about the script.
+CHECKER_UNAVAILABLE = "https://scadbuddy.dev/problems/flow-checker-unavailable"
 SCRIPT_MISSING = "https://scadbuddy.dev/problems/flow-script-missing"
 FLOW_ARCHIVED = "https://scadbuddy.dev/problems/flow-archived"
 FLOW_DELETED = "https://scadbuddy.dev/problems/flow-deleted"
@@ -414,6 +421,26 @@ def _client(flows: Flows) -> Client:
     return flows.client
 
 
+def checker_unavailable() -> ApiError:
+    """The type checker's worker died on every attempt (#6123): a 503 to try again,
+    never a 422 that says the script is wrong."""
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "The flow type checker did not answer. Try again shortly.",
+        type_=CHECKER_UNAVAILABLE,
+        headers={"Retry-After": "5"},
+    )
+
+
+async def _checked(
+    script: str, inputs_schema: dict[str, Any] | None, *, stored: bool = False
+) -> list[ScriptProblem]:
+    try:
+        return await check_script(script, inputs_schema, stored=stored)
+    except CheckerUnavailableError:
+        raise checker_unavailable() from None
+
+
 def _script_problems(problems: list[ScriptProblem], detail: str) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -432,7 +459,7 @@ def _script_problems(problems: list[ScriptProblem], detail: str) -> ApiError:
 async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
     if len(body.script.encode()) > MAX_SCRIPT_BYTES:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "The script is over 64 KiB.")
-    if problems := await check_script(body.script, body.inputs_schema):
+    if problems := await _checked(body.script, body.inputs_schema):
         raise _script_problems(problems, "The script does not type-check.")
     with _versioned():
         return await flows.definitions.register(
@@ -574,7 +601,7 @@ async def restore_flow_version(
     with _versioned():
         script = await flows.definitions.source(name, commit)
         inputs_schema = await flows.definitions.inputs_schema(name, commit)
-    if problems := await check_script(script, inputs_schema):
+    if problems := await _checked(script, inputs_schema):
         raise _script_problems(problems, "That version no longer type-checks.")
     with _versioned():
         return await flows.definitions.restore(
@@ -715,7 +742,7 @@ async def start_flow_run(
         return RunAnswer(id=existing.id, status=existing.status, repeated=True)
     _refuse_hidden(definition)
     client = _client(flows)
-    if problems := await check_script(definition.script, definition.inputs_schema, stored=True):
+    if problems := await _checked(definition.script, definition.inputs_schema, stored=True):
         raise _script_problems(problems, "The flow no longer type-checks.")
     options = body or RunCreate()
     if (
