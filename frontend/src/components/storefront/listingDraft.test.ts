@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultsFor, emptyDraft, fixColour, nearestFilaments, sellMedia, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultsFor, emptyDraft, fixColour, nearestFilaments, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -111,6 +111,26 @@ describe('colourProblems (#6131)', () => {
 
   it('lists the filaments nearest the colour first', () => {
     expect(nearestFilaments('#1B6CA8', [YELLOW, CORAL, NAVY, BLUE]).map((f) => f.id)).toEqual(['blue', 'navy', 'coral', 'yellow'])
+  })
+})
+
+describe('a colour the customer chooses stays out of the title (#6131)', () => {
+  const offered: ListingDraft = { ...emptyDraft('name-keychain', 'c'.repeat(40)), title: 'Owl Pencil Cup – Navy', params: { body_color: { kind: 'choice', choices: [] } }, colours: ['navy', 'coral'] }
+
+  it('names the colours on offer that the title holds, whole words and case aside', () => {
+    expect(titleColours(offered, keychainSchema, [NAVY, CORAL])).toEqual(['Navy'])
+    expect(titleColours({ ...offered, title: 'Navyish owl in coral' }, keychainSchema, [NAVY, CORAL])).toEqual(['Coral'])
+  })
+
+  it('leaves a locked colour in the title: that product is sold in it', () => {
+    const locked: ListingDraft = { ...offered, params: {}, fixed: { body_color: '#1F2A44' } }
+    expect(titleColours(locked, keychainSchema, [NAVY, CORAL])).toEqual([])
+  })
+
+  it('takes the colours out with the separators they leave', () => {
+    expect(withoutWords('Owl Pencil Cup – Navy', ['Navy'])).toBe('Owl Pencil Cup')
+    expect(withoutWords('Navy Owl (Coral)', ['Navy', 'Coral'])).toBe('Owl')
+    expect(withoutWords('Owl, navy, large', ['Navy'])).toBe('Owl, large')
   })
 })
 

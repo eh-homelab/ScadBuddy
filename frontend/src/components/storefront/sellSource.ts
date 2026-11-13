@@ -1,6 +1,6 @@
 import { api, ApiError } from '../../api/client'
 import type { Filament, Job, ModelSummary, ParamValue } from '../../api/types'
-import { defaultsFor, emptyDraft, sellMedia, type ListingDraft } from './listingDraft'
+import { defaultsFor, emptyDraft, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
  * #6131 (design 2026-11-13 §2, §3) — "Sell on storefront": the listing the Storefront page
@@ -72,13 +72,14 @@ export async function sellListing(sell: string, filaments: readonly Filament[], 
   if (took !== null && took > SLOW_RENDER_SECONDS) {
     notes.push(`This design took ${Math.round(took)} s to render. The store's preview and price give up after about ${SLOW_RENDER_SECONDS} s, so customers may not get one.`)
   }
-  return {
-    draft: {
-      ...emptyDraft(slug, commit),
-      title: (name ?? model?.name ?? slug).slice(0, 200),
-      ...defaultsFor(schema, filaments, values),
-      media_ids: sellMedia(model?.media ?? []),
-    },
-    notes,
+  const fallback = model?.name ?? slug
+  const draft: ListingDraft = {
+    ...emptyDraft(slug, commit),
+    title: (name ?? fallback).slice(0, 200),
+    ...defaultsFor(schema, filaments, values),
+    media_ids: sellMedia(model?.media ?? []),
   }
+  // A colour the customer chooses never goes in the title (the owner's rule).
+  const title = withoutWords(draft.title, titleColours(draft, schema, filaments))
+  return { draft: { ...draft, title: title || fallback.slice(0, 200) }, notes }
 }

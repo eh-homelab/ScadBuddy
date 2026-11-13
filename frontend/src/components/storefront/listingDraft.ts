@@ -162,6 +162,35 @@ export function nearestFilaments(colour: string, filaments: readonly Filament[])
   return [...filaments].sort((a, b) => distance(a) - distance(b))
 }
 
+function wordPattern(word: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu')
+}
+
+/**
+ * #6131 — the names of the colours a customer can choose that `title` holds (whole words,
+ * case aside). The owner's rule: a colour the customer picks never goes in a listing's
+ * title ("Owl Pencil Cup – Navy" was refused). Only while the listing offers a colour; a
+ * locked colour is the product's own and may stay.
+ */
+export function titleColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
+  if (!shownParams(schema).some((param) => param.type === 'color' && draft.params[param.name])) return []
+  const names = filaments.flatMap((filament) => (draft.colours.includes(filament.id) && filament.colour_name ? [filament.colour_name] : []))
+  return [...new Set(names)].filter((name) => wordPattern(name).test(draft.title))
+}
+
+/** `title` without each of `words` (whole words, case aside), and without the separators they leave. */
+export function withoutWords(title: string, words: readonly string[]): string {
+  let next = title
+  for (const word of words) next = next.replace(new RegExp(wordPattern(word).source, 'giu'), '')
+  return next
+    .replace(/\(\s*\)|\[\s*\]/g, '')
+    .replace(/\s*([,–—-])\s*(?=[,–—-]|$)/g, '')
+    .replace(/^\s*[,–—-]\s*/, '')
+    .replace(/\s+,/g, ',')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 /**
  * #6131 — the model media a customer can see: images only. A file kept as another type
  * (a hand-uploaded `.glb` is stored as `application/octet-stream`) never shows.

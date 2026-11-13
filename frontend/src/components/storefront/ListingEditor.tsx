@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, emptyDraft, fixColour, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, type ListingDraft } from './listingDraft'
+import { colourProblems, emptyDraft, fixColour, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §4) — one storefront listing in
@@ -368,6 +368,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
   const offered = params.filter((param) => draft.params[param.name])
   const locked = params.filter((param) => !draft.params[param.name])
   const offersColour = offered.some((param) => param.type === 'color')
+  const inTitle = titleColours(draft, schema, filaments)
   /** The locked parameters' rows: folded to one line until asked for, since most products need none changed. */
   const [showLocked, setShowLocked] = useState(false)
   return (
@@ -380,6 +381,14 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-title`}>Title</Label>
           <Input id={`${id}-title`} value={draft.title} maxLength={200} onChange={(event) => onChange({ ...draft, title: event.target.value })} />
+          {inTitle.length > 0 && (
+            <p className="flex flex-wrap items-center gap-2 text-xs text-warn" data-testid="title-colours">
+              Leave {inTitle.join(' and ')} out of the title: the customer chooses the colour.
+              <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => onChange({ ...draft, title: withoutWords(draft.title, inTitle) })}>
+                Take it out
+              </Button>
+            </p>
+          )}
         </div>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-description`}>Description</Label>

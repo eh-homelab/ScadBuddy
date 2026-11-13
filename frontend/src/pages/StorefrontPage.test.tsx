@@ -400,15 +400,19 @@ describe('StorefrontPage (#5282)', () => {
       expect(saved?.media_ids).toEqual(['thumbnail'])
     })
 
-    it('takes the output’s name for a saved output, and the current version for one outside the history', async () => {
+    it('takes the output’s name, less a colour the customer chooses, and the current version for one outside the history', async () => {
       serveJob({ model_version: 'f'.repeat(40) })
       server.use(
+        // A plate whose default is the price book's yellow: offered, so its name leaves the title.
+        http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+          HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).map((p) => (p.name === 'body_color' ? { ...p, initial: '#F9D72C' } : p)) }),
+        ),
         http.get('/api/v1/outputs/:id', ({ params }) =>
           HttpResponse.json({
             id: params['id'],
             slug: KEYCHAIN,
             model_version: 'f'.repeat(40),
-            name: 'Navy tag',
+            name: 'Name tag – Sunflower Yellow',
             job_id: 'j2',
             created_at: '2026-11-13T10:00:00Z',
             bbox_mm: { x: 1, y: 1, z: 1 },
@@ -418,7 +422,7 @@ describe('StorefrontPage (#5282)', () => {
         ),
       )
       renderPage(<StorefrontPage />, { route: '/storefront?sell=output:o1' })
-      expect(await screen.findByLabelText('Title')).toHaveValue('Navy tag')
+      expect(await screen.findByLabelText('Title')).toHaveValue('Name tag')
       expect(await screen.findByTestId('listing-design')).toHaveTextContent(`version ${versionIds.raised.slice(0, 7)} (current)`)
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
     })

@@ -116,6 +116,17 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.queryByTestId('colour-problems')).not.toBeInTheDocument()
   })
 
+  it('says to leave a colour the customer chooses out of the title, and takes it out', async () => {
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} />)
+    // The keychain's default colours are on offer: Ocean and Coral.
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Name tag – Ocean' } })
+    expect(screen.getByTestId('title-colours')).toHaveTextContent('Leave Ocean out of the title')
+    await user.click(screen.getByRole('button', { name: 'Take it out' }))
+    expect(last(seen).title).toBe('Name tag')
+    expect(screen.queryByTestId('title-colours')).not.toBeInTheDocument()
+  })
+
   it('locks a numeric select at one of its options, as a number', async () => {
     const seen: ListingDraft[] = []
     const holeSide = (keychainSchema.parameters ?? []).find((p) => p.name === 'hole_side') as Param

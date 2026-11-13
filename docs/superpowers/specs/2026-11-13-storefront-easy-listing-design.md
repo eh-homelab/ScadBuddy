@@ -89,7 +89,11 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
 
 - Template and commit: the job's or output's `model_version` when the template's history has
   it, else the current version, with a note that says so.
-- Title: the output's name, else the model's name.
+- Title: the output's name, else the model's name. A colour the customer can choose never goes
+  in a listing's title (the owner refused "Owl Pencil Cup – Navy"): while the listing offers a
+  colour, the names of its filaments' colours are taken out of the title, with the separators
+  they leave (`titleColours`, `withoutWords`). A title typed with one gets a warning under it
+  and "Take it out". A locked colour may stay: that product is sold in it.
 - Pictures: every model media item that is an image (`kind` `image`, an `image/*` content
   type, not missing). Videos and anything else are left unticked.
 - Parameters (the smart defaults; also used for a blank listing):
