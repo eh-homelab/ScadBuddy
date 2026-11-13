@@ -1281,11 +1281,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   slice's row was swept since (6 h after it finished: a run's later plates start after
   the earlier ones print). So the print worker can read any live sliced output (a run's,
   the print dialog's or an order quote's); a print-run hold on its file would narrow that
-  to the run's own. The slicer's inputs share kind `slice` but are refused. No
-  print-host credential (`printhost_apikey`, `printhost_password`, `printhost_user`, or
-  any key naming an API key, password, secret or token) reaches the print worker or a
-  slicer file: the kept presets' documents and every preset file are served and written
-  without them. Any other key is 403
+  to the run's own. The slicer's inputs share kind `slice` but are refused. ScadBuddy
+  strips print-host credential keys (`printhost_apikey`, `printhost_password`,
+  `printhost_user`, and any key naming an API key, password, secret or token, at any
+  depth) whenever it parses a preset, and never stores, forwards or writes them into a
+  slicer file (`core/credentials.py` `strip_credentials`). The print worker, which holds
+  the Bambuddy key, can still read Bambuddy's local presets, including any such keys, in
+  the bytes Bambuddy sends. What protects them is the Bambuddy key's scope. Any other
+  key is 403
   `transfer-refused`, which the print reports as "The sliced file is no longer stored.
   Print again to slice it again.", without a retry. A blob store that fails the read is
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does

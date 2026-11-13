@@ -13,12 +13,12 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.slicing.presets import (
     apply_overrides,
     build_presets,
     native_preset_key,
     needs_bambuddy,
-    strip_credentials,
 )
 from scadbuddy.slicing.profiles import Flat, ProfileError, Profiles, flatten
 from tests.conftest import SLICER_PROFILES_DIR
@@ -293,6 +293,49 @@ def test_strip_credentials_keeps_the_host_and_drops_every_credential() -> None:
     assert stripped["print_host"] == "octopi.local"
     assert stripped["printhost_authorization_type"] == "key"
     assert stripped["layer_height"] == "0.2"
+
+
+def test_strip_credentials_reaches_nested_objects_and_lists() -> None:
+    document = {
+        "host": {"print_host": "octopi.local", "printhost_apikey": "k-123"},
+        "hosts": [{"auth": {"password": "p-123", "user": "pi"}}, "plain", ["x"]],
+        "layer_height": "0.2",
+    }
+    assert strip_credentials(document) == {
+        "host": {"print_host": "octopi.local"},
+        "hosts": [{"auth": {"user": "pi"}}, "plain", ["x"]],
+        "layer_height": "0.2",
+    }
+
+
+@respx.mock
+async def test_a_local_preset_answer_parses_without_its_credentials(
+    client: BambuddyClient,
+) -> None:
+    """Stripped at parse (`LocalPresetDetail`), so no caller, on the API or the print
+    worker, holds the keys past `BambuddyClient.local_preset`."""
+    respx.get(f"{API}/local-presets/3").respond(
+        200,
+        json={
+            "id": 3,
+            "name": "My Printer",
+            "preset_type": "printer",
+            "source": "orcaslicer",
+            "setting": {
+                "type": "machine",
+                "printhost_apikey": "k-123",
+                "print_host": "octopi.local",
+                "extra": {"hosts": [{"name": "octopi", "client_secret": "s-123"}]},
+            },
+        },
+    )
+    row = await client.local_preset(3)
+    assert row.setting == {
+        "type": "machine",
+        "print_host": "octopi.local",
+        "extra": {"hosts": [{"name": "octopi"}]},
+    }
+    assert "k-123" not in row.model_dump_json() and "s-123" not in row.model_dump_json()
 
 
 @respx.mock

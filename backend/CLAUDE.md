@@ -340,9 +340,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   always the internal route's, `READ_TTL`, only for a key the content index holds live as
   a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
   merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
-  inputs), else 403 `transfer-refused`; no print-host credential reaches the print worker
-  or a slicer file (`presets.py` `strip_credentials`, applied to the kept presets'
-  documents route and every preset file); a backend that
+  inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  whenever it parses a preset, and never stores, forwards or writes them into a slicer
+  file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
+  `LocalPresetDetail`, nested keys too); the print worker, which holds the Bambuddy key,
+  can still read Bambuddy's local presets, including any such keys, in the bytes Bambuddy
+  sends, and what protects them is the Bambuddy key's scope; a backend that
   fails the read is 503 `store_unavailable`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256

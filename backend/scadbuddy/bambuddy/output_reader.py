@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
 from fastapi import status
 from pydantic import BaseModel, Field
+from temporalio import activity
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.part_settings import PartSettings, PartSettingsMap, by_colour
@@ -248,12 +249,20 @@ class RemoteOutputs:
 BLOB_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 #: The print worker's route that mints a read URL (`api/crud_print.py` `transfer_url`).
 TRANSFER_URLS = f"/api/v1{PREFIX}/print/transfer-urls"
-#: The CRUD client's retry budget, and each try's timeout, for the read URL. Their sum
-#: (15 s) stays under the LAN upload's heartbeat timeout (`workflows/printing.py`
-#: `HEARTBEAT`, 30 s), which nothing beats while the URL is asked for: an outage then
-#: ends the attempt as `CrudUnavailableError`, not as a heartbeat timeout.
-TRANSFER_URL_BUDGET = 10.0
-TRANSFER_URL_TIMEOUT = 5.0
+#: The CRUD client's retry budget for the read URL, and each try's timeout. The route
+#: stats the blob, which on the Bambuddy store is a Bambuddy call that a watched camera
+#: can slow past several seconds, so a try waits 20 s for the answer (5 s to connect),
+#: and tries go on for 60 s. While it waits the activity heartbeats every
+#: `TRANSFER_URL_HEARTBEAT`, so a slow API or Bambuddy never meets the LAN upload's
+#: heartbeat timeout (`workflows/printing.py` `HEARTBEAT`, 30 s). The bound: the last try
+#: starts within the budget and a hung answer ends at its 20 s read timeout, about 80 s
+#: in all; httpx times each phase apart (pool, connect, write, read), so a try that also
+#: stalls in the pool and the write takes at most 65 s, 125 s in all. Either is far inside
+#: the upload's `LAN_UPLOAD_TIMEOUT` (10 min). Past it the attempt ends as
+#: `CrudUnavailableError`, which the upload's retry policy tries again.
+TRANSFER_URL_BUDGET = 60.0
+TRANSFER_URL_TIMEOUT = httpx.Timeout(20.0, connect=5.0)
+TRANSFER_URL_HEARTBEAT = 10.0
 
 
 class BlobMissingAnswerError(LookupError):
@@ -266,6 +275,24 @@ class SlicedBlobs(Protocol):
     sends to the printer."""
 
     def stream(self, key: str) -> AsyncGenerator[bytes]: ...
+
+
+async def _beating[T](work: Coroutine[Any, Any, T]) -> T:
+    """Await ``work``; inside an activity, heartbeat first and every
+    `TRANSFER_URL_HEARTBEAT` until it ends, as `workflows/print_activities.py`
+    `heartbeating` does (that module imports this one)."""
+    if not activity.in_activity():
+        return await work
+    activity.heartbeat()
+    task = asyncio.create_task(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=TRANSFER_URL_HEARTBEAT)
+            if done:
+                return task.result()
+            activity.heartbeat()
+    finally:
+        task.cancel()
 
 
 class RemoteBlobs:
@@ -291,12 +318,14 @@ class RemoteBlobs:
         only. Any other refusal, such as the API's 503 ``not_configured``, is an
         `ApiError`. The LAN upload retries neither."""
         try:
-            response = await self._crud.request(
-                "POST",
-                TRANSFER_URLS,
-                json={"key": key},
-                budget=TRANSFER_URL_BUDGET,
-                timeout=TRANSFER_URL_TIMEOUT,
+            response = await _beating(
+                self._crud.request(
+                    "POST",
+                    TRANSFER_URLS,
+                    json={"key": key},
+                    budget=TRANSFER_URL_BUDGET,
+                    timeout=TRANSFER_URL_TIMEOUT,
+                )
             )
         except CrudRefusedError as error:
             if error.problem.get("reason") == TRANSFER_REFUSED:

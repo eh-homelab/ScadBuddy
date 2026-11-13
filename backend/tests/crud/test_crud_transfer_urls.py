@@ -8,6 +8,7 @@ no longer stored."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 from collections.abc import AsyncIterator
@@ -21,8 +22,9 @@ import httpx
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI
+from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.api import crud_areas, crud_print, internal_blobs
+from scadbuddy.api import crud_areas, crud_print, crud_render, internal_blobs
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.gate import AuthGate
@@ -49,6 +51,7 @@ from scadbuddy.slicing.transfer_token import transfer_key, verify
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat
 from scadbuddy.worker import PRINT_CRUD_AREAS
+from scadbuddy.workflows.printing import HEARTBEAT, LAN_UPLOAD_TIMEOUT
 
 KEK_TEXT = base64.b64encode(b"\x32" * 32).decode()
 KEK = kek_from_base64(KEK_TEXT)
@@ -209,6 +212,18 @@ async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path, name: st
     assert response.json()["reason"] == TRANSFER_REFUSED
 
 
+def test_the_render_worker_cannot_put_or_mark_a_slice_key() -> None:
+    """The render worker's pod runs template Python, so its credential must not mark a
+    slicer's input as an output, nor put one: `crud_render` refuses a ``slice-`` key for
+    every index write (``put``, ``swap``, ``mark`` and both deletes call this check). The
+    routes themselves need Postgres: `tests/crud/test_crud_blob_index.py`."""
+    with pytest.raises(ApiError) as refused:
+        crud_render._worker_writable("piece-" + "a" * 64, KEY)
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
+    crud_render._worker_writable("piece-" + "a" * 64)
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -236,15 +251,49 @@ async def test_a_backend_that_fails_the_read_is_store_unavailable(
 
 
 async def test_remote_blobs_retries_store_unavailable_as_a_passing_failure(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unlike ``not_configured``, the client retries it within its budget, then raises
     `CrudUnavailableError`, which the LAN upload's retry policy tries again."""
+    monkeypatch.setattr(output_reader, "TRANSFER_URL_BUDGET", 0.5)
     content = _Content({}, failure=ClientError({"Error": {"Code": "SlowDown"}}, "HeadObject"))
     with pytest.raises(CrudUnavailableError) as raised:
         await _read(_blobs(_app(tmp_path, content)), KEY)
     assert raised.value.problem["reason"] == STORE_UNAVAILABLE
     assert len(content.asked) > 1
+
+
+def test_the_read_urls_wait_outlasts_a_slow_store_and_stays_bounded() -> None:
+    """A slow Bambuddy ``stat`` still answers within a try (N8 of the Task 32 review: a
+    5 s try timed every try out), and the whole wait stays far inside the upload's
+    start-to-close timeout; the heartbeat, not the budget, keeps it under `HEARTBEAT`."""
+    timeout = output_reader.TRANSFER_URL_TIMEOUT
+    assert timeout.read is not None and timeout.read >= 20
+    assert HEARTBEAT.total_seconds() > output_reader.TRANSFER_URL_HEARTBEAT
+    phases = [timeout.pool, timeout.connect, timeout.write, timeout.read]
+    worst = output_reader.TRANSFER_URL_BUDGET + sum(p or 0 for p in phases)
+    assert worst < LAN_UPLOAD_TIMEOUT.total_seconds()
+
+
+async def test_the_read_urls_wait_heartbeats_the_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside the LAN upload the wait for the URL heartbeats first and while a slow API
+    answers, so it never ends the attempt as a heartbeat timeout."""
+    monkeypatch.setattr(output_reader, "TRANSFER_URL_HEARTBEAT", 0.05)
+    content = _live(KEY)
+    slow_stat = content.stat
+
+    async def stat(key: str) -> BlobStat | None:
+        await asyncio.sleep(0.3)
+        return await slow_stat(key)
+
+    content.stat = stat  # type: ignore[method-assign]
+    beats: list[Any] = []
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    assert await env.run(_read, _blobs(_app(tmp_path, content)), KEY) == SLICED
+    assert len(beats) >= 3
 
 
 async def test_remote_blobs_raises_another_callers_refusal_as_api_error(tmp_path: Path) -> None:

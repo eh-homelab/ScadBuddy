@@ -146,6 +146,7 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
@@ -179,7 +180,6 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
-from scadbuddy.slicing.presets import strip_credentials
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
 from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse

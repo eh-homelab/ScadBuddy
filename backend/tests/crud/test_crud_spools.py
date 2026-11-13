@@ -177,7 +177,7 @@ def _hosted(preset_id: int) -> LocalPresetDetail:
 
 
 async def test_the_documents_route_never_serves_a_print_host_credential() -> None:
-    """The print worker never receives a print-host credential key (#5298 Task 32)."""
+    """The documents route never forwards a print-host credential key (#5298 Task 32)."""
 
     class Held:
         async def documents(self, ids: list[int]) -> dict[int, LocalPresetDetail]:

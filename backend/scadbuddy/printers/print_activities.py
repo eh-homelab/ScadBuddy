@@ -257,8 +257,10 @@ class LanActivities:
     async def lan_upload(self, input: LanUploadInput) -> LanUploaded:
         """The sliced 3MF, spooled as it downloads (heartbeating per chunk), then sent to
         the printer as ``input.remote_name`` in `UPLOAD_DIR`. Nothing starts here, so an
-        attempt that fails is safe to try again under the same name."""
-        _, lan = await self._printer(input.printer)
+        attempt that fails is safe to try again under the same name. The printer's read
+        (a CRUD call on the print worker) and the read URL's wait heartbeat, so a slow API
+        or Bambuddy never ends the attempt as a heartbeat timeout (#5298 Task 32)."""
+        _, lan = await heartbeating(self._printer(input.printer))
         with tempfile.SpooledTemporaryFile(max_size=SPOOL_IN_MEMORY) as spool:
             size = 0
             try:

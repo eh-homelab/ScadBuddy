@@ -107,7 +107,7 @@ live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark
 other key (unknown, gone, of another kind such as a ``workspace`` file, or a slicer's
 input of kind ``slice``: the laid-out copy and the preset files) is 403
 ``transfer-refused``. The inputs are left out as defence in depth: the preset files are
-written with every print-host credential key stripped (`slicing/presets.py`
+written with every print-host credential key stripped (`core/credentials.py`
 `strip_credentials`), and an input is no file the print worker prints. The rule follows
 the blob's own life, not its `native_slices` row's: the slice sweep deletes a row 6 h
 after it finished, but a LAN run of several plates or copies reads each file again when it starts
@@ -184,6 +184,7 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
@@ -222,7 +223,6 @@ from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.slicing.models import TransferUrl
-from scadbuddy.slicing.presets import strip_credentials
 from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
 from scadbuddy.slicing.transfer import (
     READ_TTL,
@@ -1798,9 +1798,13 @@ async def held_preset_documents(
     slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list)]
 ) -> dict[int, LocalPresetDetail]:
     """The kept local presets' documents, each with every print-host credential key
-    removed (`slicing/presets.py` `strip_credentials`: ``printhost_apikey``,
+    removed (`core/credentials.py` `strip_credentials`: ``printhost_apikey``,
     ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
-    secret or token). The print worker never receives these keys; no slice reads them."""
+    secret or token, at any depth). ScadBuddy strips these keys whenever it parses a
+    preset, and never stores, forwards or writes them into a slicer file; no slice reads
+    them. The print worker, which holds the Bambuddy key, can still read Bambuddy's local
+    presets, including any such keys, in the bytes Bambuddy sends. What protects them is
+    the Bambuddy key's scope."""
     documents = await slicing.held.documents(id)
     return {
         found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
