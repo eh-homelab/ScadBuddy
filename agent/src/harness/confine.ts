@@ -1,4 +1,5 @@
 import { lstat, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { GuardVerdict, InputGuard } from './permissions.js'
 
@@ -31,6 +32,17 @@ import type { GuardVerdict, InputGuard } from './permissions.js'
 // (`projectDirName`). The session id is the one the run gives Claude Code (`sessionId` on the
 // first turn, `resume` after: the same id, test/nativeBuiltins.sdk.test.ts). Everything else in
 // the config dir stays refused: config, transcripts, credentials, other sessions' results.
+//
+// A resumed turn has a second config dir (#6117). To resume from a SessionStore, the Agent SDK
+// (`@anthropic-ai/claude-agent-sdk` 0.3.314, the `agent/package.json` pin, `sdk.mjs`) writes the
+// transcript into `join(os.tmpdir(), "claude-resume-" + crypto.randomUUID())` and runs Claude
+// Code with CLAUDE_CONFIG_DIR set there, so Claude Code saves its results under
+// `<temp dir>/claude-resume-<uuid>/projects/<encoded cwd>/<session id>/tool-results/`. Read and
+// Grep may reach that directory too: the real path of the target must be under the real temp
+// dir, its first segment exactly `claude-resume-` and a lower-case v4 UUID, then the same names
+// as above, this session's id only. The rest of that dir (the transcript copy, the copied
+// `.credentials.json` and `.claude.json`, other sessions' and other projects' results) stays
+// refused.
 
 /** Each tool's path inputs, and whether the tool needs one. */
 const PATHS: Readonly<Record<string, { field: string; required: boolean }>> = {
@@ -238,6 +250,12 @@ const READS_TOOL_RESULTS: ReadonlySet<string> = new Set(['Read', 'Grep'])
 /** A session id the harness gives Claude Code: a UUID (sdk.d.ts `sessionId`: "Must be a valid UUID"). */
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * The config dir the Agent SDK makes to resume from a SessionStore: `claude-resume-` and a
+ * `crypto.randomUUID()` (lower case, version 4), straight under `os.tmpdir()` (SDK 0.3.314).
+ */
+const RESUME_DIR = /^claude-resume-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
 /** Longer names are cut and given a hash (2.1.314). */
 const MAX_PROJECT_DIR_NAME = 200
 
@@ -319,11 +337,31 @@ export function confineGuard(root: string | undefined, toolResults?: ToolResults
     const cwd = await realRoot
     return path.join(await realpath(toolResults.configDir), 'projects', projectDirName(cwd), toolResults.sessionId, 'tool-results')
   }
+  // A resumed turn's config dir (#6117): `<real temp dir>/claude-resume-<uuid>`, any uuid, with
+  // the same names below it. Matched on the target's real path, so a link anywhere on the way
+  // (the resume dir itself too) moves it out of the pattern, and the path is refused.
+  let realTmp: Promise<string | undefined> | undefined
+  const inResumeResults = async (real: string): Promise<boolean> => {
+    if (toolResults === undefined || !SESSION_ID.test(toolResults.sessionId)) return false
+    realTmp ??= realpath(tmpdir()).catch(() => undefined)
+    const tmp = await realTmp
+    if (tmp === undefined || !inside(tmp, real)) return false
+    realRoot ??= realpath(root)
+    const [resume, projects, project, session, results] = path.relative(tmp, real).split(path.sep)
+    return (
+      RESUME_DIR.test(resume ?? '') &&
+      projects === 'projects' &&
+      project === projectDirName(await realRoot) &&
+      session === toolResults.sessionId &&
+      results === 'tool-results'
+    )
+  }
   const inToolResults = async (toolName: string, value: string): Promise<boolean> => {
     if (!READS_TOOL_RESULTS.has(toolName) || fromHome(value) || value.split(/[/\\]/).includes('..')) return false
     realResults ??= resultsDir().catch(() => undefined)
     const dir = await realResults
-    return dir !== undefined && inside(dir, await realOf(path.resolve(root, value)))
+    const real = await realOf(path.resolve(root, value))
+    return (dir !== undefined && inside(dir, real)) || (await inResumeResults(real))
   }
   return async (toolName, input) => {
     const spec = PATHS[toolName]

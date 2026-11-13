@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, symlink, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -360,6 +361,135 @@ describe("this session's tool-results directory (#5542)", () => {
 
   it('opens nothing without a session id, or with one that is not a UUID', async () => {
     const { config, root, project, dir } = await setup()
+    expect(await confineGuard(root)('Read', { file_path: path.join(dir, 'toolu_1.json') })).toMatchObject({ deny: expect.stringContaining('outside it') })
+    await mkdir(path.join(project, 'tool-results'), { recursive: true })
+    const dot = confineGuard(root, { configDir: config, sessionId: '.' })
+    expect(await dot('Read', { file_path: path.join(project, 'tool-results', 'x') })).toMatchObject({ deny: expect.stringContaining('outside it') })
+  })
+})
+
+describe("a resumed turn's tool-results directory (#6117)", () => {
+  // Agent SDK 0.3.314 sdk.mjs: a resume from a SessionStore copies the transcript into
+  // `join(os.tmpdir(), "claude-resume-" + crypto.randomUUID())` and runs Claude Code with
+  // CLAUDE_CONFIG_DIR there, so Claude Code saves an oversized result under that directory.
+  const SESSION = '3c4d5e6f-0000-4000-8000-00000000abcd'
+  const OTHER = '7a6b5c4d-0000-4000-8000-00000000dcba'
+  const setup = async () => {
+    const paths = { stateDir: await mkdtemp(path.join(os.tmpdir(), 'resume-state-')) }
+    await ensureStateDirs(paths)
+    const config = claudeConfigDir(paths)
+    const root = await mkdtemp(path.join(os.tmpdir(), 'resume.cwd_'))
+    const name = projectDirName(await realpath(root))
+    const tmp = await realpath(os.tmpdir())
+    const resume = path.join(tmp, `claude-resume-${randomUUID()}`)
+    const project = path.join(resume, 'projects', name)
+    const dir = path.join(project, SESSION, 'tool-results')
+    await mkdir(dir, { recursive: true })
+    await writeFile(path.join(dir, 'toolu_1.json'), '{"big":true}')
+    const other = path.join(project, OTHER, 'tool-results')
+    await mkdir(other, { recursive: true })
+    await writeFile(path.join(other, 'toolu_2.json'), '{"theirs":true}')
+    await writeFile(path.join(project, `${SESSION}.jsonl`), '{"transcript":true}')
+    await writeFile(path.join(resume, '.credentials.json'), '{}')
+    await writeFile(path.join(resume, '.claude.json'), '{}')
+    await writeFile(path.join(paths.stateDir, 'secret'), 'kek')
+    return { paths, config, name, tmp, root, resume, project, dir, other, guard: confineGuard(root, { configDir: config, sessionId: SESSION }) }
+  }
+
+  it('lets Read and Grep reach a file in it, and Grep the directory itself', async () => {
+    const { dir, guard } = await setup()
+    expect(await guard('Read', { file_path: path.join(dir, 'toolu_1.json') })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: path.join(dir, 'toolu_1.json') })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: dir })).toBeUndefined()
+    expect(await guard('Grep', { pattern: 'big', path: `${dir}/` })).toBeUndefined()
+  })
+
+  it('refuses every tool that writes there, and Glob', async () => {
+    const { dir, guard } = await setup()
+    const file = path.join(dir, 'toolu_1.json')
+    for (const [tool, input] of [
+      ['Write', { file_path: file, content: 'x' }],
+      ['Write', { file_path: path.join(dir, 'new.json'), content: 'x' }],
+      ['Edit', { file_path: file, old_string: 'big', new_string: 'small' }],
+      ['NotebookEdit', { notebook_path: path.join(dir, 'n.ipynb'), new_source: 'x' }],
+      ['Glob', { pattern: '*.json', path: dir }],
+    ] as const) {
+      expect(await guard(tool, input), `${tool} ${JSON.stringify(input)}`).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it("refuses another session's results, the transcript, the credentials and the rest of the resume dir", async () => {
+    const { paths, name, tmp, resume, project, other, guard } = await setup()
+    // The same layout under a directory that is not `claude-resume-<uuid>` straight under the temp dir.
+    const lookalikes: string[] = []
+    for (const base of [
+      path.join(tmp, 'claude-resume-not-a-uuid'),
+      path.join(tmp, `claude-resume-${randomUUID().toUpperCase()}`),
+      path.join(tmp, `claude-resume-${randomUUID()}x`),
+      path.join(tmp, `xclaude-resume-${randomUUID()}`),
+      path.join(paths.stateDir, `claude-resume-${randomUUID()}`),
+    ]) {
+      const d = path.join(base, 'projects', name, SESSION, 'tool-results')
+      await mkdir(d, { recursive: true })
+      await writeFile(path.join(d, 'toolu_3.json'), '{}')
+      lookalikes.push(path.join(d, 'toolu_3.json'))
+    }
+    // Another working directory's project in the same resume dir.
+    const elsewhere = path.join(resume, 'projects', '-somewhere-else', SESSION, 'tool-results')
+    await mkdir(elsewhere, { recursive: true })
+    await writeFile(path.join(elsewhere, 'toolu_4.json'), '{}')
+    for (const target of [
+      path.join(other, 'toolu_2.json'),
+      other,
+      path.join(project, `${SESSION}.jsonl`),
+      project,
+      path.join(project, SESSION),
+      path.join(resume, '.credentials.json'),
+      path.join(resume, '.claude.json'),
+      path.join(resume, 'projects'),
+      resume,
+      tmp,
+      path.join(elsewhere, 'toolu_4.json'),
+      ...lookalikes,
+    ]) {
+      expect(await guard('Read', { file_path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+      expect(await guard('Grep', { pattern: 'x', path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it('refuses a climb with `..` and a link that points out', async () => {
+    const { paths, resume, project, dir, guard } = await setup()
+    await symlink(path.join(paths.stateDir, 'secret'), path.join(dir, 'link.json'))
+    await symlink(path.join(resume, '.credentials.json'), path.join(dir, 'creds.json'))
+    await symlink(path.join(project, OTHER, 'tool-results'), path.join(dir, 'dirlink'))
+    for (const target of [
+      path.join(dir, 'link.json'),
+      path.join(dir, 'creds.json'),
+      path.join(dir, 'dirlink', 'toolu_2.json'),
+      path.join(dir, 'dirlink'),
+      `${dir}/../../${OTHER}/tool-results/toolu_2.json`,
+      `${dir}/../tool-results/toolu_1.json`,
+      `${dir}/../../../../.credentials.json`,
+    ]) {
+      expect(await guard('Read', { file_path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+      expect(await guard('Grep', { pattern: 'x', path: target }), target).toMatchObject({ deny: expect.stringContaining('outside it') })
+    }
+  })
+
+  it('refuses it when the resume dir is a link to another directory', async () => {
+    const { paths, name, tmp, guard } = await setup()
+    const real = path.join(paths.stateDir, 'fake-resume')
+    const d = path.join(real, 'projects', name, SESSION, 'tool-results')
+    await mkdir(d, { recursive: true })
+    await writeFile(path.join(d, 'toolu_5.json'), '{}')
+    const link = path.join(tmp, `claude-resume-${randomUUID()}`)
+    await symlink(real, link)
+    const target = path.join(link, 'projects', name, SESSION, 'tool-results', 'toolu_5.json')
+    expect(await guard('Read', { file_path: target })).toMatchObject({ deny: expect.stringContaining('outside it') })
+  })
+
+  it('opens nothing without a session id, or with one that is not a UUID', async () => {
+    const { config, root, dir, project } = await setup()
     expect(await confineGuard(root)('Read', { file_path: path.join(dir, 'toolu_1.json') })).toMatchObject({ deny: expect.stringContaining('outside it') })
     await mkdir(path.join(project, 'tool-results'), { recursive: true })
     const dot = confineGuard(root, { configDir: config, sessionId: '.' })

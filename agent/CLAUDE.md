@@ -393,7 +393,10 @@ opens every one and seals it again byte for byte).
     Claude Code expands to HOME after the seam for Glob and Grep, measured on 2.1.310; with
     no working directory the file tools are not offered). `Read` and `Grep` may also reach the
     session's own `tool-results` directory in the Claude Code config dir, where Claude Code
-    saves an oversized tool result (#5542, `projectDirName`). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    saves an oversized tool result (#5542, `projectDirName`), and, in a resumed turn, the same
+    directory under the SDK's resume config dir `<os.tmpdir()>/claude-resume-<randomUUID>`
+    (#6117, read from SDK 0.3.314 `sdk.mjs`; the rest of that dir, its transcript and copied
+    credentials included, stays refused). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
     2026-11-01). Where the deployment sets `SCADBUDDY_SANDBOX_*` (all five or none, `config.ts`
     `sandbox`), every turn gets the session's own `Bash` and `PowerShell` instead
