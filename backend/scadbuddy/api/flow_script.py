@@ -8,10 +8,11 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from scadbuddy.api.flows import checker_unavailable
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.host_interface import HostInterface, host_interface
-from scadbuddy.flows.typecheck import ScriptProblem, check_script
+from scadbuddy.flows.typecheck import CheckerUnavailableError, ScriptProblem, check_script
 
 router = APIRouter(tags=["flows"])
 
@@ -41,7 +42,11 @@ class ScriptCheckResult(BaseModel):
 async def check_flow_script(body: ScriptCheck) -> ScriptCheckResult:
     """The check `POST /workflows` runs before it registers a version, and nothing else:
     no version, no commit."""
-    return ScriptCheckResult(problems=await check_script(body.script, body.inputs_schema))
+    try:
+        problems = await check_script(body.script, body.inputs_schema)
+    except CheckerUnavailableError:
+        raise checker_unavailable() from None
+    return ScriptCheckResult(problems=problems)
 
 
 @router.get(
