@@ -16,6 +16,12 @@ export function parseNumber(text: string): number {
 }
 
 /** The code points of `text`: the backend counts a name's length so, not in UTF-16 units. */
+/** A value as the customer reads it: a switch is "Yes" or "No", never "true" or "false" (#6141). */
+export function valueText(value: ParamValue): string {
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  return String(value)
+}
+
 export function textLength(text: string): number {
   return Array.from(text).length
 }

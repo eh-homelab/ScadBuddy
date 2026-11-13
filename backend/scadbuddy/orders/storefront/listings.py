@@ -65,6 +65,7 @@ from scadbuddy.orders.storefront.wire import (
     PublicParam,
     PublicText,
     TextBound,
+    shown_label,
 )
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_value
@@ -785,11 +786,14 @@ def _public_param(
     listing filaments the price book still has, casefolded)."""
     parameter = by_name.get(name)
     shown = {
-        "label": (parameter.caption if parameter is not None else None) or name,
+        "label": shown_label(name, bound.label, parameter.caption if parameter else None),
         "group": parameter.group if parameter is not None else "",
         "colour": parameter is not None and parameter.type == "color",
     }
     fields = {**bound.model_dump(), **shown}
+    if isinstance(bound, TextBound) and parameter is not None:
+        initial = parameter.initial
+        fields["placeholder"] = initial if isinstance(initial, str) and initial.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
         fields["choices"] = [
             c for c in bound.choices if isinstance(c, str) and c.casefold() in colours

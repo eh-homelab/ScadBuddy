@@ -63,6 +63,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftView,
     Listing,
     PublicShippingOption,
+    shown_label,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -168,14 +169,21 @@ def _inputs(item: OrderItem, offered: list[str] | None) -> dict[str, Any] | None
 
 
 def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, str]]:
-    """Each published template commit's parameter captions, by (slug, commit): what a
-    draft item's values are called on the page."""
+    """Each published template commit's parameter labels, by (slug, commit): what a
+    draft item's values are called on the page (`shown_label`)."""
     found: dict[tuple[str, str], dict[str, str]] = {}
     for listing in listings:
         if listing.snapshot is None:
             continue
+        bounds = listing.params
         found.setdefault((listing.slug, listing.commit), {}).update(
-            {p.name: p.caption for p in listing.snapshot.schema_.parameters if p.caption}
+            {
+                p.name: shown_label(
+                    p.name, bounds[p.name].label if p.name in bounds else None, p.caption
+                )
+                for p in listing.snapshot.schema_.parameters
+                if p.caption or (p.name in bounds and bounds[p.name].label)
+            }
         )
     return found
 

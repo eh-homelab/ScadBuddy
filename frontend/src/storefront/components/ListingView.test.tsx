@@ -16,6 +16,34 @@ describe('ListingView', () => {
     expect(onChange).toHaveBeenLastCalledWith('base_colour', '#1B6CA8')
   })
 
+  it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {
+    const onChange = vi.fn()
+    const listing = {
+      ...KEYCHAIN,
+      params: { ring: { kind: 'choice' as const, label: 'Keyring hole', group: '', colour: false, choices: [true, false] } },
+    }
+    render(<ListingView listing={listing} values={{}} onChange={onChange} />)
+    expect(screen.queryByText('true')).toBeNull()
+    expect(screen.queryByText('false')).toBeNull()
+    await userEvent.click(screen.getByRole('radio', { name: 'No' }))
+    expect(onChange).toHaveBeenLastCalledWith('ring', false)
+    expect(screen.getByRole('radio', { name: 'Yes' })).toBeInTheDocument()
+  })
+
+  it('shows the design’s default text as the placeholder, or none (#6137)', () => {
+    const listing = {
+      ...KEYCHAIN,
+      params: {
+        name: { kind: 'text' as const, label: 'Name', group: '', colour: false, max_length: 20, placeholder: 'Stella' },
+        motto: { kind: 'text' as const, label: 'Motto', group: '', colour: false, max_length: 20, placeholder: null },
+      },
+    }
+    render(<ListingView listing={listing} values={{}} onChange={() => undefined} />)
+    expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Stella')
+    expect(screen.getByLabelText('Motto')).not.toHaveAttribute('placeholder')
+    expect(screen.queryByPlaceholderText("The shop's text")).toBeNull()
+  })
+
   it('says a design with no colour left cannot be ordered', () => {
     render(<ListingView listing={TAG} values={{}} onChange={() => undefined} headingLevel={2} />)
     expect(screen.getByRole('heading', { level: 2, name: 'Luggage tag' })).toBeInTheDocument()

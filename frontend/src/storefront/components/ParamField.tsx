@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem } from '../params'
+import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem, valueText } from '../params'
 
 interface Props {
   param: PublicParam
@@ -45,7 +45,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
         >
           {param.choices.map((choice, index) => {
             const filament = param.colour && typeof choice === 'string' ? filamentOf(filaments, choice) : undefined
-            const name = filament ? filamentName(filament) : String(choice)
+            const name = filament ? filamentName(filament) : valueText(choice)
             return (
               <ToggleGroupItem
                 key={String(choice)}
@@ -87,7 +87,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           className={INPUT}
           type="text"
           value={typeof value === 'string' ? value : ''}
-          placeholder="The shop's text"
+          placeholder={param.kind === 'text' ? (param.placeholder ?? undefined) : undefined}
           aria-describedby={hintId}
           aria-invalid={problem ? true : undefined}
           onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}

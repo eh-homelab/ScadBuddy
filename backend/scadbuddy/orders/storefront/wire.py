@@ -13,8 +13,9 @@ commit's defaults.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -40,10 +41,38 @@ LISTING_COMMIT = r"^[0-9a-f]{40}$"
 MAX_TEXT_LENGTH = 200
 
 
-class NumberBound(BaseModel):
-    """A number the customer picks between ``min`` and ``max``, on ``step`` when set."""
+#: The most a listing's own label for a parameter may hold.
+MAX_LABEL_LENGTH = 200
+#: A template caption's note of the extruder that prints a colour: the shop's, not the
+#: customer's (#6137).
+EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*\d+\s*\)", re.IGNORECASE)
 
+
+def shown_label(name: str, label: str | None, caption: str | None) -> str:
+    """What the customer reads for parameter ``name``: the listing's own ``label``, else
+    the template's ``caption`` without its extruder note, else the name (#6137)."""
+    if label:
+        return label
+    if caption:
+        return " ".join(EXTRUDER_NOTE.sub("", caption).split()) or caption
+    return name
+
+
+class _Bound(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    #: The listing's own name for the parameter, which the customer reads instead of the
+    #: template's caption (#6137).
+    label: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_LABEL_LENGTH)
+        ]
+        | None
+    ) = None
+
+
+class NumberBound(_Bound):
+    """A number the customer picks between ``min`` and ``max``, on ``step`` when set."""
 
     kind: Literal["number"]
     min: float
@@ -51,21 +80,17 @@ class NumberBound(BaseModel):
     step: float | None = Field(default=None, gt=0)
 
 
-class ChoiceBound(BaseModel):
+class ChoiceBound(_Bound):
     """One of ``choices``. For a ``// color`` parameter, each choice is the colour of one
     of the listing's filaments. An empty list is refused when the listing is saved (422
     ``listing_choice_empty``), with a sentence that names the parameter."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["choice"]
     choices: list[ParamValue]
 
 
-class TextBound(BaseModel):
+class TextBound(_Bound):
     """Free text of at most ``max_length`` characters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["text"]
     max_length: int = Field(ge=1, le=MAX_TEXT_LENGTH)
@@ -156,9 +181,9 @@ class ListingOrder(BaseModel):
 
 
 class _Shown(BaseModel):
-    """What the page shows beside a bound: the schema's label (its caption, else its
-    name) and group, and whether it is a ``// color`` parameter, whose choices are the
-    colours of the listing's filaments. The schema has no help text to show."""
+    """What the page shows beside a bound: its label (`shown_label`) and the schema's
+    group, and whether it is a ``// color`` parameter, whose choices are the colours of
+    the listing's filaments. The schema has no help text to show."""
 
     label: str
     group: str = ""
@@ -166,17 +191,21 @@ class _Shown(BaseModel):
 
 
 class PublicNumber(NumberBound, _Shown):
-    pass
+    label: str
 
 
 class PublicChoice(ChoiceBound, _Shown):
+    label: str
     #: A colour's choices are the listing filaments the price book still has, so none
     #: may be left.
     choices: list[ParamValue]
 
 
 class PublicText(TextBound, _Shown):
-    pass
+    label: str
+    #: The template's default text, which the design uses when the field is left blank
+    #: (#6137); null when it has none.
+    placeholder: str | None = None
 
 
 PublicParam = Annotated[PublicNumber | PublicChoice | PublicText, Field(discriminator="kind")]

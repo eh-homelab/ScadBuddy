@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { keepOffered, parseNumber } from './params'
+import { keepOffered, parseNumber, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -29,5 +29,14 @@ describe('keepOffered', () => {
     }
     expect(keepOffered(latest, { name: 'Ada', size: 50, base_colour: '#E8532F' })).toEqual({ name: 'Ada', base_colour: '#E8532F' })
     expect(keepOffered(latest, { name: 'Adalind' })).toEqual({})
+  })
+})
+
+describe('valueText', () => {
+  it('says yes or no for a switch, and shows any other value as it is', () => {
+    expect(valueText(true)).toBe('Yes')
+    expect(valueText(false)).toBe('No')
+    expect(valueText(12.5)).toBe('12.5')
+    expect(valueText('Ada')).toBe('Ada')
   })
 })
