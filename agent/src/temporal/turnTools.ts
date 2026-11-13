@@ -1,5 +1,5 @@
 import { Context } from '@temporalio/activity'
-import { context as otelContext } from '@opentelemetry/api'
+import { context as otelContext, type Span } from '@opentelemetry/api'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { TURN_TOOL_PREFIX } from './names.js'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
@@ -26,6 +26,7 @@ import {
   type ApprovalRecords,
   callBlocks,
   durableSession,
+  flowCallAttributes,
   flowResult,
   GRANT_REVOKED,
   NOT_APPROVED,
@@ -642,8 +643,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         // Under the call's span in the turn's trace, with the queue it ran on, as a ScadBuddy tool's ToolCall runs (toolActivities.ts).
         const traceparent = ((raw ?? {}) as Partial<ToolCallArgs>).traceparent
         const attributes = { 'scadbuddy.tool': name, 'scadbuddy.task_queue': context.info.taskQueue }
-        return await withSpan(`agent.tool/${name}`, { parent: contextFrom(traceparent, otelContext.active()), attributes }, () =>
-          runTurnTool(deps, name, asCall.toolUseId, raw, asCall),
+        return await withSpan(`agent.tool/${name}`, { parent: contextFrom(traceparent, otelContext.active()), attributes }, (span) =>
+          runTurnTool(deps, name, asCall.toolUseId, raw, asCall, span),
         )
       } catch (err) {
         // A refusal or a failed call is a result the model reads, as a ScadBuddy tool's ToolCall answers it.
@@ -652,7 +653,12 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       }
     }
     const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
-    return runTurnTool(deps, name, toolUseId, raw, undefined)
+    const flow = flowOf(context.info.workflowExecution?.workflowId)
+    if (flow === undefined) return runTurnTool(deps, name, toolUseId, raw, undefined)
+    // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
+    return withSpan(`agent.tool/${name}`, { attributes: flowCallAttributes(name, flow, toolUseId, context.info.taskQueue) }, (span) =>
+      runTurnTool(deps, name, toolUseId, raw, undefined, span),
+    )
   }
 }
 
@@ -686,6 +692,7 @@ async function runTurnTool(
   toolUseId: string,
   raw: unknown,
   asCall: { session: string; toolUseId: string } | undefined,
+  span?: Span,
 ): Promise<unknown> {
   {
     const context = Context.current()
@@ -703,8 +710,9 @@ async function runTurnTool(
     return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const startedAt = new Date()
-      const record = (tier: RiskTier, outcome: 'ok' | 'error' | 'refused', detail?: string) =>
-        audit?.record({
+      const record = (tier: RiskTier, outcome: 'ok' | 'error' | 'refused', detail?: string) => {
+        span?.setAttributes({ 'scadbuddy.tier': tier, 'scadbuddy.outcome': outcome })
+        return audit?.record({
           kind: 'tool_call',
           action: name,
           surface: 'harness',
@@ -721,6 +729,7 @@ async function runTurnTool(
           startedAt,
           finishedAt: new Date(),
         })
+      }
       // Its server's switch first: a server switched off is not listed (turnServers.ts).
       const { parts, server: named } = serverOf(set, name)
       const offName = `mcp__${named.name}__${parts.tool}`

@@ -1,3 +1,4 @@
+import { SpanStatusCode } from '@opentelemetry/api'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { createHash } from 'node:crypto'
@@ -20,6 +21,7 @@ import { defineTool, json, runToolWithOutcome, ToolError, type Tool, type ToolCo
 import { BACKEND, services } from './helpers/mcp.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
+import { exportedText, flushTracing, resetTracing, testTracing } from './support/tracing.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), run in
 // @temporalio/testing's MockActivityEnvironment (spec §8).
@@ -381,6 +383,37 @@ describe('flow runs in tool activities', () => {
       }),
     ])
     expect(h.touched).toEqual([])
+  })
+
+  // #6123 item 3: a flow's call is no session's ToolCall, yet it is traced as one is.
+  it("traces each call as agent.tool/<name>, naming the run, its tier and outcome, its error scrubbed", async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const h = harness({ flows: flowRuns() })
+    await env(FLOW, 'tool-call_1').run(h.activities.whoami!, {})
+    await failure(env(FLOW, 'tool-call_2').run(h.activities.boom!, {}))
+    await failure(env(FLOW, 'tool-call_3').run(h.activities.send!, { to: 'printer' }))
+    await flushTracing()
+    const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === `agent.tool/${name}`)
+    expect(named('whoami')?.attributes).toMatchObject({
+      'scadbuddy.tool': 'whoami',
+      'scadbuddy.tier': 'read',
+      'scadbuddy.outcome': 'ok',
+      'scadbuddy.task_queue': 'agent-tools',
+      'scadbuddy.flow_run_id': RUN,
+      'scadbuddy.tool_use_id': 'call_1',
+    })
+    expect(named('whoami')?.status.code).not.toBe(SpanStatusCode.ERROR)
+    // Its backend request is a child of the call's span, as a session's call's is.
+    const request = spans.getFinishedSpans().find((s) => s.name.startsWith('GET '))
+    expect(request?.parentSpanContext?.spanId).toBe(named('whoami')?.spanContext().spanId)
+    expect(named('boom')?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(named('boom')?.status.code).toBe(SpanStatusCode.ERROR)
+    expect(named('send')?.attributes).toMatchObject({ 'scadbuddy.tier': 'outward', 'scadbuddy.outcome': 'refused' })
+    expect(named('send')?.status.code).toBe(SpanStatusCode.ERROR)
+    // The tool's own error text is the call's, never the span's.
+    expect(exportedText(spans)).not.toContain('it broke')
+    expect(exportedText(spans)).not.toContain('needs an approval')
   })
 
   it('refuses a gated call with no approval recorded for it, and runs it once one is', async () => {
