@@ -115,7 +115,7 @@ zip"). A refused file blocks submit until the customer removes it (`model_file_r
 409) **(call)**. A file still being checked does not block submit. Each link and purchase
 link is shown back as escaped text only, never an anchor (the owner's ruling).
 
-A staged file of a cart not submitted within `storefront_staging_ttl_hours` (default 72) is
+A staged file of a cart not submitted within 72 hours (`model_requests.STAGING_TTL`) is
 deleted by the sweep, and the line reads "This file expired; upload it again" **(call)**:
 an abandoned cart must not keep up to 1 GiB in the bucket for the 30-day cart TTL.
 
@@ -136,9 +136,10 @@ All schema changes are new migration files (root `CLAUDE.md`, "Migrations").
 
 ### 5.1 The request item
 
-An own-model request is an `ItemKind` `request` item (storefront spec §4.2) with a new column
-`order_items.request_kind`: `design` (every existing row) or `own_model`, null for other
-kinds. `order_items.colour_preferences` (jsonb, nullable) records what the customer asked:
+An own-model request is an `ItemKind` `request` item (storefront spec §4.2) with a row in
+the side table `order_item_model_requests` (`item_id`, `colour_preferences`); a design request
+has none. As built (PR 1) this is a side table, not columns on `order_items`, so no
+`OrderItem` read changes. `colour_preferences` (jsonb) records what the customer asked:
 `{"shop_choice": true}` or `{"filaments": [<price book id>, …]}`, at most 8.
 
 ### 5.2 Staging uploads: `storefront_uploads`
@@ -267,11 +268,12 @@ that origin to `connect-src` once read **(call)**.
 
 ### 6.5 The sweep
 
-A new housekeeping activity `housekeeping_sweep_storefront_uploads` (both Schedules, behind
-its patch), 200 rows a run:
+The storefront drafts sweep (`housekeeping_sweep_storefront_drafts`, both Schedules) runs it
+after the carts (`model_requests.sweep_staged`), 200 rows of each kind a run; as built it is no
+new activity, so no workflow patch is needed:
 
 - a row never claimed, an hour past `expires_at`;
-- a row claimed by a source of a cart not submitted, past `storefront_staging_ttl_hours`;
+- a row claimed by a source of a cart not submitted, 72 hours after its claim;
 - a row whose source is gone (a swept cart, a removed line).
 
 Each: delete the staging object and its preview, then the row. An object under `staging/`
