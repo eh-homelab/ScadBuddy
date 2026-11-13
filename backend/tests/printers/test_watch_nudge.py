@@ -53,7 +53,14 @@ class Reports:
         self.running: str | None = None
         self.written: list[dict[str, Any]] = []
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
         self.written.append(report)
         before = self.running
         self.running, ended = advance_print(before, report)

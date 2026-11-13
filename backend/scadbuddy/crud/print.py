@@ -1166,16 +1166,12 @@ class RemoteRackUsage(RackUsageStore):
         url = f"{BASE}/rack{path}?{urlencode({'id': unique}, doseq=True)}"
         return {int(found) for found in (await self._client.request("GET", url)).json()}
 
-    async def seen(
-        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
-    ) -> None:
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
         """Natural: an upsert by serial."""
         unique = _unique(serials)
-        if unique and (printer_id is not None or printer is not None):
+        if unique:
             await self._client.request(
-                "POST",
-                f"{BASE}/rack/seen",
-                json={"printer_id": printer_id, "printer": printer, "serials": unique},
+                "POST", f"{BASE}/rack/seen", json={"printer": printer, "serials": unique}
             )
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -1202,7 +1198,7 @@ class RemoteRackUsage(RackUsageStore):
     async def record_picks(
         self,
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         *,
         copies: int = 1,
@@ -1211,7 +1207,7 @@ class RemoteRackUsage(RackUsageStore):
             return 0
         body = {
             "queue_item_id": queue_item_id,
-            "printer_id": printer_id,
+            "printer": printer,
             "picks": [pick.model_dump(mode="json") for pick in picks],
             "copies": copies,
         }
@@ -1251,16 +1247,14 @@ class RemoteRackUsage(RackUsageStore):
         self,
         run_id: str,
         subtask_name: str,
-        printer_id: int | None,
+        printer: str | None,
         picks: Sequence[PickedHotend],
-        printer: str | None = None,
     ) -> int:
         if not picks:
             return 0
         body = {
             "run_id": run_id,
             "subtask_name": subtask_name,
-            "printer_id": printer_id,
             "printer": printer,
             "picks": [pick.model_dump(mode="json") for pick in picks],
         }

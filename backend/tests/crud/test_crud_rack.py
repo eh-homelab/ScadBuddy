@@ -111,10 +111,10 @@ async def test_nothing_to_ask_asks_nothing() -> None:
         assert await remote.usage(["", ""]) == {}
         assert await remote.picked_items([]) == set()
         assert await remote.recorded_archives([]) == set()
-        assert await remote.record_picks(1, 2, []) == 0
+        assert await remote.record_picks(1, None, []) == 0
         assert await remote.record_lan_picks(RUN, FIRST, None, []) == 0
-        await remote.seen(None, [A])
-        await remote.seen(3, [""])
+        await remote.seen(None, [""])
+        await remote.seen("00000000-0000-4000-8000-0000000000ff", ["", ""])
     finally:
         await client.aclose()
 
@@ -198,12 +198,14 @@ def _picked_ago(conninfo: str, seconds: int) -> None:
 async def test_the_reads_answer_as_the_sql_store(
     remote: RemoteRackUsage, sql: RackUsageStore, printer: str
 ) -> None:
-    await sql.seen(3, [A, B], printer)
-    await sql.record_picks(11, 3, [_picked(A, GREEN), _picked(B, BLACK, group_id=1)], copies=2)
+    await sql.seen(printer, [A, B])
+    await sql.record_picks(
+        11, printer, [_picked(A, GREEN), _picked(B, BLACK, group_id=1)], copies=2
+    )
     await sql.record_prints(
         archive_id=21, queue_item_id=11, settled_at=datetime.now(UTC), print_seconds=60, grams=4.0
     )
-    await sql.record_lan_picks(RUN, FIRST, None, [_picked(C, GREEN)], printer)
+    await sql.record_lan_picks(RUN, FIRST, printer, [_picked(C, GREEN)])
 
     assert await remote.usage([A, B, C, "TEST-HOTEND-99"]) == await sql.usage(
         [A, B, C, "TEST-HOTEND-99"]
@@ -220,9 +222,9 @@ async def test_the_reads_answer_as_the_sql_store(
 async def test_seen_sent_twice_leaves_what_one_left(
     remote: RemoteRackUsage, store: SettingsStore, printer: str
 ) -> None:
-    await remote.seen(3, [A, B, ""], printer)
+    await remote.seen(printer, [A, B, ""])
     once = _all_rows(store)
-    await remote.seen(3, [A, B], printer)
+    await remote.seen(printer, [A, B])
     assert _all_rows(store) == once
     assert {row["serial"] for row in once[0]} == {A, B}
     assert {str(row["printer"]) for row in once[0]} == {printer}
@@ -237,7 +239,7 @@ async def test_each_keyed_write_answers_its_rows_once_per_key(
     its own, which ``ON CONFLICT`` keeps from changing the rows."""
     picks = {
         "queue_item_id": 11,
-        "printer_id": 3,
+        "printer": None,
         "picks": [_picked(A, GREEN, BLACK).model_dump(mode="json")],
         "copies": 1,
     }
@@ -274,7 +276,7 @@ async def test_a_retried_activity_answers_what_its_lost_write_wrote(
     retry whose write differs is sent again under a key of its own."""
 
     async def record(item: int) -> int:
-        return await RemoteRackUsage(crud).record_picks(item, 3, [_picked(A, GREEN)])
+        return await RemoteRackUsage(crud).record_picks(item, None, [_picked(A, GREEN)])
 
     assert await ActivityEnvironment().run(record, 11) == 1
     assert await ActivityEnvironment().run(record, 11) == 1
@@ -284,7 +286,11 @@ async def test_a_retried_activity_answers_what_its_lost_write_wrote(
 
 @pytest.mark.requires_postgres
 async def test_a_lan_start_s_picks_are_one_write_per_key(
-    remote: RemoteRackUsage, crud: CrudClient, sql: RackUsageStore, store: SettingsStore
+    remote: RemoteRackUsage,
+    crud: CrudClient,
+    sql: RackUsageStore,
+    store: SettingsStore,
+    printer: str,
 ) -> None:
     """Resent with its key, a LAN start's picks answer the same and write once: the pick's
     time does not move. Picked again under a new key (a retried start, ranked again), the
@@ -292,7 +298,6 @@ async def test_a_lan_start_s_picks_are_one_write_per_key(
     body = {
         "run_id": RUN,
         "subtask_name": FIRST,
-        "printer_id": None,
         "printer": None,
         "picks": [
             _picked(A, GREEN, BLACK).model_dump(mode="json"),
@@ -313,9 +318,11 @@ async def test_a_lan_start_s_picks_are_one_write_per_key(
     assert empty.value.status == 422
     assert _all_rows(store) == once
 
-    assert await remote.record_lan_picks(RUN, FIRST, 3, [_picked(C, BLACK)]) == 1
+    assert await remote.record_lan_picks(RUN, FIRST, printer, [_picked(C, BLACK)]) == 1
     picks = _rows(store, "rack_nozzle_picks")
-    assert [(row["serial"], row["group_id"], row["printer_id"]) for row in picks] == [(C, 0, 3)]
+    assert [(row["serial"], row["group_id"], str(row["printer"])) for row in picks] == [
+        (C, 0, printer)
+    ]
     spools = _rows(store, "rack_nozzle_pick_spools")
     assert [(row["group_id"], row["slot_id"]) for row in spools] == [(0, 2)]
     assert (await sql.usage([A, C]))[C].pending == 1
@@ -327,9 +334,9 @@ async def test_the_settles_behave_as_the_sql_path(
 ) -> None:
     """A run's settle and the watch's settle of a start, as `RackUsageStore`'s: timed
     from the pick, grams the group's, and a start settled already writes nothing."""
-    await remote.record_lan_picks(RUN, FIRST, None, [_picked(A, GREEN, BLACK)], printer)
+    await remote.record_lan_picks(RUN, FIRST, printer, [_picked(A, GREEN, BLACK)])
     await remote.record_lan_picks(
-        RUN, SECOND, None, [_picked(B, GREEN), _picked(C, BLACK, group_id=1)], printer
+        RUN, SECOND, printer, [_picked(B, GREEN), _picked(C, BLACK, group_id=1)]
     )
     _picked_ago(pg_conninfo, 600)
 
@@ -351,7 +358,7 @@ async def test_the_settles_behave_as_the_sql_path(
 async def test_a_settle_resent_under_its_key_answers_the_same(
     crud: CrudClient, printer: str, sql: RackUsageStore
 ) -> None:
-    await sql.record_lan_picks(RUN, FIRST, None, [_picked(A, GREEN)], printer)
+    await sql.record_lan_picks(RUN, FIRST, printer, [_picked(A, GREEN)])
     ended = {
         "printer": printer,
         "subtask_name": FIRST,

@@ -1344,7 +1344,7 @@ async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
 
 
 class RackSeen(BaseModel):
-    printer_id: int | None = None
+    #: The registry printer (#5167); none for a printer the registry does not hold.
     printer: UUID | None = None
     serials: list[str]
 
@@ -1366,7 +1366,7 @@ class RackUsageRow(BaseModel):
 
 class RackPicks(BaseModel):
     queue_item_id: int
-    printer_id: int
+    printer: UUID | None = None
     picks: list[PickedHotend]
     copies: int = 1
 
@@ -1382,7 +1382,6 @@ class RackPrints(BaseModel):
 class RackLanPicks(BaseModel):
     run_id: str
     subtask_name: str
-    printer_id: int | None = None
     printer: UUID | None = None
     #: A start with no attributable pick saves none (`save_lan_picks`), so none is sent.
     picks: list[PickedHotend] = Field(min_length=1)
@@ -1440,7 +1439,7 @@ async def _rack_once(
 async def rack_seen(body: RackSeen, rack: RackUsageDep) -> None:
     """Natural: an upsert by serial, which never moves ``first_seen_at``."""
     printer = None if body.printer is None else str(body.printer)
-    await rack.seen(body.printer_id, body.serials, printer)
+    await rack.seen(printer, body.serials)
 
 
 @router.post("/rack/usage", name="crud_print_rack_usage")
@@ -1474,13 +1473,14 @@ async def rack_picks(
     """A Bambuddy queue item's picks and their spools, in one transaction. ``ON CONFLICT
     DO NOTHING`` keeps the state, but the answer counts the rows written, so once per
     ``Idempotency-Key``."""
+    printer = None if body.printer is None else str(body.printer)
     return await _rack_once(
         rack,
         idempotency_key,
         RACK_PICKS_ROUTE,
         body,
         lambda conn: RackUsageStore.record_picks_in(
-            conn, body.queue_item_id, body.printer_id, body.picks, body.copies
+            conn, body.queue_item_id, printer, body.picks, body.copies
         ),
     )
 
@@ -1521,7 +1521,7 @@ async def rack_lan_picks(
         RACK_LAN_PICKS_ROUTE,
         body,
         lambda conn: RackUsageStore.record_lan_picks_in(
-            conn, body.run_id, body.subtask_name, body.printer_id, printer, body.picks
+            conn, body.run_id, body.subtask_name, printer, body.picks
         ),
     )
 

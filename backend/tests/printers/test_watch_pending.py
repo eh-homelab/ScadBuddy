@@ -23,7 +23,14 @@ from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
-from scadbuddy.printers.reports import FUTURE_TOLERANCE, PrintEnd, PrinterReportStore, stale
+from scadbuddy.printers.reports import (
+    FUTURE_TOLERANCE,
+    Advance,
+    JobStart,
+    PrintEnd,
+    PrinterReportStore,
+    stale,
+)
 from scadbuddy.printers.watch import (
     OWED_RESENDS,
     WATCH_OWED_GIVEN_UP,
@@ -37,28 +44,30 @@ FINISH = {"gcode_state": "FINISH", "subtask_name": "sub-1"}
 
 
 class Store:
-    """A report store answering each ``put`` from ``script`` (an end, None, or an error to
-    raise), and logging every put and touch with its key to ``log``."""
+    """A report store answering each write (``advance``) from ``script`` (an end, None, or
+    an error to raise), and logging every write and touch with its key to ``log``."""
 
     def __init__(self, log: list[Any], script: list[Any]) -> None:
         self.log = log
         self.script = script
         self.puts: list[tuple[dict[str, Any], str | None]] = []
 
-    def put(
+    def advance(
         self,
         printer_id: str,
         report: dict[str, Any],
         seen_at: datetime,
         *,
         idempotency_key: str | None = None,
-    ) -> PrintEnd | None:
+    ) -> Advance:
         self.puts.append((report, idempotency_key))
         self.log.append(("put", idempotency_key))
         answer = self.script.pop(0) if self.script else None
         if isinstance(answer, BaseException):
             raise answer
-        return cast(PrintEnd | None, answer)
+        if isinstance(answer, Advance):
+            return answer
+        return Advance(ended=cast(PrintEnd | None, answer))
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         self.log.append(("touch", None))
@@ -150,6 +159,25 @@ async def test_a_lost_answer_is_sent_again_under_its_key_and_its_end_settled() -
     ]
 
 
+async def test_a_lost_answer_s_start_is_nudged_once_its_resend_answers_it() -> None:
+    """#4699 phase 3 with an owed report: the first write's answer, with the start it
+    showed, is lost; the resend under its key replays that start, which goes to the
+    nudge once."""
+    log: list[Any] = []
+    lost = CrudUnavailableError("no answer", "transport")
+    running = {"gcode_state": "RUNNING", "subtask_name": "sub-1"}
+    watches, store = _watch(log, [lost, Advance(started="sub-1")])
+    nudged: list[str] = []
+
+    async def nudge(printer_id: str, start: JobStart) -> None:
+        nudged.append(start.subtask_name)
+
+    watches.nudge = nudge
+    await _follow_until(watches, Lan([running]), lambda: bool(nudged))
+    assert nudged == ["sub-1"]
+    assert store.puts[0] == store.puts[1]
+
+
 async def test_a_write_that_never_ran_is_sent_again_under_a_new_key() -> None:
     log: list[Any] = []
     unreached = CrudUnavailableError("no connection", "unreached")
@@ -179,7 +207,7 @@ async def test_a_cancel_passes_through_a_write_and_a_touch() -> None:
     release = threading.Event()
 
     class Blocked:
-        def put(self, *args: Any, **kwargs: Any) -> None:
+        def advance(self, *args: Any, **kwargs: Any) -> None:
             release.wait(5)
 
         def touch(self, *args: Any) -> None:
@@ -193,7 +221,7 @@ async def test_a_cancel_passes_through_a_write_and_a_touch() -> None:
     report = LanReport(serial="s", received_at=datetime.now(UTC), print={})
     try:
         for call in (
-            watches._write(PRINTER, report, "k"),
+            watches._write(PRINTER, report, "k", set()),
             watches._touch(PRINTER, datetime.now(UTC)),
         ):
             task = asyncio.ensure_future(call)
@@ -217,8 +245,8 @@ async def test_a_failure_is_logged_to_be_found_never_with_the_report(
     watches, _ = _watch(log, [refused, bug])
     report = LanReport(serial="s", received_at=datetime.now(UTC), print={"secret": "S3CR3T"})
     with caplog.at_level(logging.WARNING):
-        assert await watches._write(PRINTER, report, "k1") == "unwritten"
-        assert await watches._write(PRINTER, report, "k2") == "unwritten"
+        assert await watches._write(PRINTER, report, "k1", set()) == "unwritten"
+        assert await watches._write(PRINTER, report, "k2", set()) == "unwritten"
     first, second = [r for r in caplog.records if r.getMessage() == WATCH_WRITE_FAILED]
     assert (first.status, first.problem_type, first.reason) == (422, "https://x/problem", "bad")  # type: ignore[attr-defined]
     assert first.exc_info is None and second.exc_info is None

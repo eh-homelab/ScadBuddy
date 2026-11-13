@@ -105,7 +105,7 @@ async def test_a_stalled_api_makes_a_reports_write_give_up_within_the_bound() ->
             None,
             write_failed=failed,
         )
-        assert await watches._write(PRINTER, _report(), "k1") == OWED
+        assert await watches._write(PRINTER, _report(), "k1", set()) == OWED
     finally:
         blocking.close()
         await crud.aclose()
@@ -154,7 +154,7 @@ async def test_a_stalled_settle_gives_up_within_the_bound_and_the_write_stands()
             settle_failed=settle_failed,
             write_failed=write_failed,
         )
-        assert await watches._write(PRINTER, _report(), "k1") == WRITTEN
+        assert await watches._write(PRINTER, _report(), "k1", set()) == WRITTEN
     finally:
         blocking.close()
         await crud.aclose()

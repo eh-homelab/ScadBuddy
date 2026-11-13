@@ -397,13 +397,13 @@ class RackUsageStore:
         self, queue_item_id: int, printer: str | None, picks: list[PickedHotend], copies: int
     ) -> int:
         with self._ready().connection() as conn:
-            return self.record_picks_in(conn, queue_item_id, printer_id, picks, copies)
+            return self.record_picks_in(conn, queue_item_id, printer, picks, copies)
 
     @staticmethod
     def record_picks_in(
         conn: Connection[DictRow],
         queue_item_id: int,
-        printer_id: int,
+        printer: str | None,
         picks: Sequence[PickedHotend],
         copies: int,
     ) -> int:
@@ -543,14 +543,13 @@ class RackUsageStore:
         picks: list[PickedHotend],
     ) -> int:
         with self._ready().connection() as conn:
-            return self.record_lan_picks_in(conn, run_id, subtask, printer_id, printer, picks)
+            return self.record_lan_picks_in(conn, run_id, subtask, printer, picks)
 
     @staticmethod
     def record_lan_picks_in(
         conn: Connection[DictRow],
         run_id: str,
         subtask: str,
-        printer_id: int | None,
         printer: str | None,
         picks: Sequence[PickedHotend],
     ) -> int:
