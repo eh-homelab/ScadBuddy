@@ -32,7 +32,7 @@
     "@opentelemetry/instrumentation-http": "0.300.0",
     "@opentelemetry/resources": "3.0.0",
     "@opentelemetry/sdk-node": "0.300.0",
-    "@opentelemetry/sdk-trace": "3.0.0",
+    "@opentelemetry/sdk-trace": "3.1.0",
     "@temporalio/activity": "1.25.0",
     "@temporalio/client": "1.25.0",
     "@temporalio/common": "1.25.0",
