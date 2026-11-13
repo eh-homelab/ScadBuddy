@@ -179,6 +179,7 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
+from scadbuddy.slicing.presets import strip_credentials
 from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
 from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
@@ -1549,7 +1550,13 @@ class RemoteHeldPresets(HeldPresetStore):
             return {}
         url = f"{BASE}/held-presets/documents?{urlencode({'id': unique}, doseq=True)}"
         body = (await self._client.request("GET", url)).json()
-        return {int(found): LocalPresetDetail.model_validate(doc) for found, doc in body.items()}
+        # The route already strips them; an older API's answer is stripped here.
+        return {
+            int(found): LocalPresetDetail.model_validate(
+                {**doc, "setting": strip_credentials(doc.get("setting") or {})}
+            )
+            for found, doc in body.items()
+        }
 
 
 _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)

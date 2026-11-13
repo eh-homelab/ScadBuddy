@@ -248,6 +248,12 @@ class RemoteOutputs:
 BLOB_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 #: The print worker's route that mints a read URL (`api/crud_print.py` `transfer_url`).
 TRANSFER_URLS = f"/api/v1{PREFIX}/print/transfer-urls"
+#: The CRUD client's retry budget, and each try's timeout, for the read URL. Their sum
+#: (15 s) stays under the LAN upload's heartbeat timeout (`workflows/printing.py`
+#: `HEARTBEAT`, 30 s), which nothing beats while the URL is asked for: an outage then
+#: ends the attempt as `CrudUnavailableError`, not as a heartbeat timeout.
+TRANSFER_URL_BUDGET = 10.0
+TRANSFER_URL_TIMEOUT = 5.0
 
 
 class BlobMissingAnswerError(LookupError):
@@ -285,7 +291,13 @@ class RemoteBlobs:
         only. Any other refusal, such as the API's 503 ``not_configured``, is an
         `ApiError`. The LAN upload retries neither."""
         try:
-            response = await self._crud.request("POST", TRANSFER_URLS, json={"key": key})
+            response = await self._crud.request(
+                "POST",
+                TRANSFER_URLS,
+                json={"key": key},
+                budget=TRANSFER_URL_BUDGET,
+                timeout=TRANSFER_URL_TIMEOUT,
+            )
         except CrudRefusedError as error:
             if error.problem.get("reason") == TRANSFER_REFUSED:
                 logger.debug("the API refused a read URL of %s", key)

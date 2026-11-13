@@ -33,14 +33,16 @@ from scadbuddy.store.s3 import S3ContentBackend
 TRANSFER_TTL = timedelta(hours=2)
 #: How long the print worker's read URL is good for: one read, started at once.
 READ_TTL = timedelta(minutes=10)
-#: The only blob kind the print worker may get a read URL for: every native slice's file.
+#: The only blob kind the print worker may get a read URL for. Kind ``slice`` holds every
+#: native slice's file, and also the slicer's inputs (the laid-out copy and the preset
+#: files), so the kind alone does not admit a key: :data:`SLICED_OUTPUT_META` does.
 SLICE_KIND: BlobKind = "slice"
-#: The index ``meta`` the internal PUT route gives a slicer's output, and the mark the
-#: print worker's read URL needs: the slicer's inputs (the laid-out copy, and the preset
-#: files, where a Bambuddy local machine preset is copied verbatim and so can carry Bambu
-#: Studio's ``printhost_apikey``/``printhost_password``) are of kind ``slice`` too, with
-#: no mark.
+#: The index ``meta`` :meth:`Transfers.finish_put` merges into a slicer's output, and the
+#: mark the print worker's read URL needs. The slicer's inputs get no mark. A later put of
+#: the same key keeps it (`store/index.py` `put_in`).
 SLICED_OUTPUT_META: dict[str, str] = {"output": "sliced"}
+#: A `BlobIndex.mark` cutoff that every row passes.
+_EVER = datetime.max.replace(tzinfo=UTC)
 #: The reason of the 403 for any other key: unknown, gone, of another kind, or a
 #: slicer's input.
 TRANSFER_REFUSED = "transfer-refused"
@@ -186,8 +188,23 @@ class Transfers:
     async def finish_put(self, put: PendingPut, *, sha256: str, size: int) -> str:
         """The key the PUT to ``put`` was stored under, once the worker's reported
         sha256 and size are the ones the route stored and the key is stored still (the
-        `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`)."""
-        return await self.finish_pending(put.pending_key, sha256=sha256, size=size)
+        `slice` kind is swept, and nothing holds it until the caller's `BlobRefs.add`).
+
+        The key is marked a slicer's output (:data:`SLICED_OUTPUT_META`), the one mark
+        the print worker's read URL needs. Only the slice record step calls this, for the
+        ``sliced_3mf`` PUT: the worker's ``slicedata`` PUT is never finished, so never
+        marked. Inputs and outputs of the same bytes share one key, so an output PUT of an
+        input's bytes marks that input; only a compromised slicer worker could send one,
+        and it already holds those bytes (accepted)."""
+        key = await self.finish_pending(put.pending_key, sha256=sha256, size=size)
+        await asyncio.to_thread(
+            self.content.index.mark,
+            [key],
+            backend=self.content.name,
+            cutoff=_EVER,
+            **SLICED_OUTPUT_META,
+        )
+        return key
 
     async def finish_pending(self, pending_key: str, *, sha256: str, size: int) -> str:
         """`finish_put` by the pending key alone (the agent's workspace files, #4789)."""

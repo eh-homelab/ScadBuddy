@@ -1,7 +1,8 @@
 """A LAN print's read URL of a native slice's sliced 3MF, minted by the API (#5298 Task
 32): ``POST …/print/transfer-urls`` answers the internal blob route's URL, signed under the
-API's KEK, only for a key the content index holds live as a ``slice`` blob, whether or not
-its `native_slices` row still stands; any other key, and any other caller, is 403. The
+API's KEK, only for a key the content index holds live as a slicer's output (kind
+``slice`` with `SLICED_OUTPUT_META`), whether or not its `native_slices` row still stands;
+any other key (a slicer's input among them), and any other caller, is 403. The
 print worker's `RemoteBlobs` asks the route, signs nothing, and reads a refusal as a file
 no longer stored."""
 
@@ -106,7 +107,7 @@ class _Content:
 
 
 def _live(*keys: str, kind: BlobKind = SLICE_KIND, marked: bool = True) -> _Content:
-    """``keys`` stored live as ``kind``; ``marked``, as the internal PUT route marks a
+    """``keys`` stored live as ``kind``; ``marked``, as `Transfers.finish_put` marks a
     slicer's output (`SLICED_OUTPUT_META`), else as a slicer's input is stored."""
     meta = dict(SLICED_OUTPUT_META) if marked else {}
     return _Content({key: (kind, SLICED) for key in keys}, meta=meta)
@@ -201,8 +202,7 @@ async def test_a_live_blob_of_another_kind_is_refused(tmp_path: Path, kind: Blob
 @pytest.mark.parametrize("name", ["input.3mf", "machine.json", "process.json", "filament_1.json"])
 async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path, name: str) -> None:
     """The slicer's laid-out copy and preset files are stored as kind ``slice`` with no
-    mark (`workflows/slicing_activities.py`); a machine preset can carry Bambu Studio's
-    ``printhost_apikey``, so none of them gets a read URL."""
+    mark (`workflows/slicing_activities.py`), so none of them gets a read URL."""
     key = "slice-" + name.encode().hex().ljust(64, "0")[:64]
     response = await _ask(_app(tmp_path, _live(key, marked=False)), key)
     assert response.status_code == 403

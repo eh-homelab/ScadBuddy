@@ -102,15 +102,15 @@ provider's records and a settle take an ``Idempotency-Key`` and run with their l
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
 ``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
 `RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
-live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark the
-internal PUT route gives what the slicer uploads (`SLICED_OUTPUT_META`). Any other key
-(unknown, gone, of another kind such as a ``workspace`` file, or a slicer's input of kind
-``slice``: the laid-out copy and the preset files) is 403 ``transfer-refused``. The
-inputs are left out because a preset file can hold a secret: a Bambuddy local machine
-preset is copied into ``machine.json`` verbatim, and Bambu Studio's machine settings can
-carry ``printhost_apikey`` and ``printhost_password``. The rule follows the blob's own
-life, not its `native_slices` row's: the slice sweep deletes a row 6 h after it
-finished, but a LAN run of several plates or copies reads each file again when it starts
+live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark
+`Transfers.finish_put` gives the slicer's ``sliced_3mf`` (`SLICED_OUTPUT_META`). Any
+other key (unknown, gone, of another kind such as a ``workspace`` file, or a slicer's
+input of kind ``slice``: the laid-out copy and the preset files) is 403
+``transfer-refused``. The inputs are left out as defence in depth: the preset files are
+written with every print-host credential key stripped (`slicing/presets.py`
+`strip_credentials`), and an input is no file the print worker prints. The rule follows
+the blob's own life, not its `native_slices` row's: the slice sweep deletes a row 6 h
+after it finished, but a LAN run of several plates or copies reads each file again when it starts
 the next one, up to days later, until the content sweep collects it. Its cost: the print
 worker can read any live sliced output (a run's, the print dialog's or an order
 quote's). A hold of the run on its file (a print-run holder in `blob_refs`, released
@@ -222,6 +222,7 @@ from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.slicing.models import TransferUrl
+from scadbuddy.slicing.presets import strip_credentials
 from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
 from scadbuddy.slicing.transfer import (
     READ_TTL,
@@ -1796,7 +1797,15 @@ async def held_presets(slicing: SlicingDep) -> list[HeldPresetRow]:
 async def held_preset_documents(
     slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list)]
 ) -> dict[int, LocalPresetDetail]:
-    return await slicing.held.documents(id)
+    """The kept local presets' documents, each with every print-host credential key
+    removed (`slicing/presets.py` `strip_credentials`: ``printhost_apikey``,
+    ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
+    secret or token). The print worker never receives these keys; no slice reads them."""
+    documents = await slicing.held.documents(id)
+    return {
+        found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
+        for found, doc in documents.items()
+    }
 
 
 @router.post("/native-slices/start", name="crud_print_start_native_slice")

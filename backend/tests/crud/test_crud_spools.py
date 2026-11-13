@@ -160,6 +160,54 @@ async def test_nothing_to_ask_asks_nothing() -> None:
         blocking.close()
 
 
+#: A kept machine preset's document with Bambu Studio's print-host fields.
+_HOSTED = {
+    "print_host": "octopi.local",
+    "printhost_apikey": "k-123",
+    "printhost_password": "p-123",
+    "printhost_user": "pi",
+    "upload_token": "t-123",
+    "printable_height": "300",
+}
+_CREDENTIALS = {"printhost_apikey", "printhost_password", "printhost_user", "upload_token"}
+
+
+def _hosted(preset_id: int) -> LocalPresetDetail:
+    return _preset(preset_id).model_copy(update={"preset_type": "printer", "setting": _HOSTED})
+
+
+async def test_the_documents_route_never_serves_a_print_host_credential() -> None:
+    """The print worker never receives a print-host credential key (#5298 Task 32)."""
+
+    class Held:
+        async def documents(self, ids: list[int]) -> dict[int, LocalPresetDetail]:
+            return {found: _hosted(found) for found in ids}
+
+    slicing = SimpleNamespace(held=Held())
+    answer = await crud_print.held_preset_documents(slicing, [7])  # type: ignore[arg-type]
+    setting = answer[7].setting
+    assert not _CREDENTIALS & set(setting)
+    assert setting["print_host"] == "octopi.local" and setting["printable_height"] == "300"
+
+
+async def test_the_remote_documents_drop_a_print_host_credential() -> None:
+    """An answer that still carries one (an older API) is stripped by the worker too."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"7": _hosted(7).model_dump(mode="json")}, headers=CRUD_HEADERS
+        )
+
+    client, blocking = _stand_in(answer)
+    try:
+        setting = (await RemoteHeldPresets(client).documents([7]))[7].setting
+    finally:
+        await client.aclose()
+        blocking.close()
+    assert not _CREDENTIALS & set(setting)
+    assert setting["print_host"] == "octopi.local"
+
+
 async def test_the_routes_refusals_are_raised_as_the_sql_stores_raise() -> None:
     def answer(request: httpx.Request) -> httpx.Response:
         reason = SLICE_SUBJECT if request.url.path.endswith("/start") else PAST_DEADLINE

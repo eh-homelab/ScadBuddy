@@ -1277,13 +1277,15 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
   the API's KEK and good for 10 minutes, on every `store_backend`, so the pod reaches the
   API only. The API mints one only for a key its content index holds live as a slicer's
-  output (kind `slice` with the mark the internal PUT route gives it), whether or not the
+  output (kind `slice` with the mark the slice's record step gives it), whether or not the
   slice's row was swept since (6 h after it finished: a run's later plates start after
   the earlier ones print). So the print worker can read any live sliced output (a run's,
   the print dialog's or an order quote's); a print-run hold on its file would narrow that
-  to the run's own. The slicer's inputs share kind `slice` but are refused: a preset file
-  copies a Bambuddy local machine preset verbatim, and Bambu Studio's machine settings
-  can carry `printhost_apikey` and `printhost_password`. Any other key is 403
+  to the run's own. The slicer's inputs share kind `slice` but are refused. No
+  print-host credential (`printhost_apikey`, `printhost_password`, `printhost_user`, or
+  any key naming an API key, password, secret or token) reaches the print worker or a
+  slicer file: the kept presets' documents and every preset file are served and written
+  without them. Any other key is 403
   `transfer-refused`, which the print reports as "The sliced file is no longer stored.
   Print again to slice it again.", without a retry. A blob store that fails the read is
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does

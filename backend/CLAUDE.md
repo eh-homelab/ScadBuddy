@@ -338,9 +338,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   GET or the internal blob routes, a token MACed under a KEK-derived key; never log one;
   the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
   always the internal route's, `READ_TTL`, only for a key the content index holds live as
-  a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which the internal PUT route
-  sets; its row swept or not; never the slicer's inputs, whose preset files can carry a
-  local machine preset's `printhost_apikey`), else 403 `transfer-refused`; a backend that
+  a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
+  merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
+  inputs), else 403 `transfer-refused`; no print-host credential reaches the print worker
+  or a slicer file (`presets.py` `strip_credentials`, applied to the kept presets'
+  documents route and every preset file); a backend that
   fails the read is 503 `store_unavailable`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
