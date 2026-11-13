@@ -8,7 +8,8 @@ the internal route's, to a pending key the API stores the body under and records
 The print worker's LAN print reads a native slice's sliced 3MF by a GET URL the API mints
 for it (`POST /api/v1/internal/crud/print/transfer-urls`, #5298 Task 32): always the
 internal route's (`internal_get`, good for `READ_TTL`), never a presigned one, so the print
-pod reaches the API only, and only for a key a completed `native_slices` row names."""
+pod reaches the API only, and only for a key the content index holds live as a `SLICE_KIND`
+blob (the route's module docstring says why, and what it costs)."""
 
 from __future__ import annotations
 
@@ -25,13 +26,15 @@ from pydantic import BaseModel, ConfigDict
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer_token import Method, TransferToken, sign
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import BlobMissingError
+from scadbuddy.store.content_models import BlobKind, BlobMissingError
 from scadbuddy.store.s3 import S3ContentBackend
 
 TRANSFER_TTL = timedelta(hours=2)
 #: How long the print worker's read URL is good for: one read, started at once.
 READ_TTL = timedelta(minutes=10)
-#: The reason of the 403 for a key no completed `native_slices` row names.
+#: The only blob kind the print worker may get a read URL for: every native slice's file.
+SLICE_KIND: BlobKind = "slice"
+#: The reason of the 403 for any other key: unknown, gone, or of another kind.
 TRANSFER_REFUSED = "transfer-refused"
 TRANSFER_HEADER = "X-ScadBuddy-Transfer"
 INTERNAL_BLOBS = "/api/v1/internal/blobs"

@@ -100,13 +100,20 @@ transaction here (plan D6). A failure, a start's uses and a slice's start are na
 provider's records and a settle take an ``Idempotency-Key`` and run with their ledger row.
 
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
-``transfer-urls``, #5298 Task 32), for `crud/print.py`'s caller `bambuddy/output_reader.py`
-`RemoteBlobs`: the worker holds no key to sign one. Only a key a completed
-`native_slices` row names as its sliced file gets one (`NativeSliceStore.names_blob`), any
-other is 403 ``transfer-refused``: the token reads one blob, and the print worker reads
-only the slices its runs made. The URL is the internal blob route's
-(`slicing/transfer.py` `Transfers.internal_get`, good for `READ_TTL`), signed under the
-API's KEK, on every backend. A read that mints, so natural: it takes no
+``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
+`RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
+live, as a blob of kind ``slice`` gets one (`SLICE_KIND`); any other key (unknown, gone,
+or of another kind, such as a ``workspace`` file) is 403 ``transfer-refused``. The rule
+follows the blob's own life, not its `native_slices` row's: the slice sweep deletes a
+row 6 h after it finished, but a LAN run of several plates or copies reads each file
+again when it starts the next one, up to days later, until the content sweep collects
+it. Its cost: the print worker can read any live ``slice`` blob, any completed slice's
+file (a run's, the print dialog's or an order quote's) and the slicer's input copies and
+preset files, never another kind. A hold of the run on its file (a print-run holder in
+`blob_refs`, released where each run ends) would bind the key to the run; no such hold
+exists yet. The URL is the internal blob route's (`slicing/transfer.py`
+`Transfers.internal_get`, good for `READ_TTL`), signed under the API's KEK, on every
+backend: the token reads that one key. A read that mints, so natural: it takes no
 ``Idempotency-Key``. Its answer carries a bearer token (``no-store``, as every CRUD
 answer): never logged.
 
@@ -210,7 +217,12 @@ from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
-from scadbuddy.slicing.transfer import READ_TTL, TRANSFER_REFUSED
+from scadbuddy.slicing.transfer import (
+    READ_TTL,
+    SLICE_KIND,
+    TRANSFER_REFUSED,
+    TransferUnavailableError,
+)
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
@@ -1803,15 +1815,21 @@ class TransferUrlAsk(BaseModel):
 
 @router.post("/transfer-urls", name="crud_print_transfer_url")
 async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
-    """A read URL of ``key``, only if a completed native slice names it (see the module
-    docstring). Without a content store, an internal URL or a KEK on the API it is 503
-    ``not_configured``, which the worker does not retry."""
-    if not await slicing.store.names_blob(body.key):
+    """A read URL of ``key``, only if the content index holds it live as a ``slice`` blob
+    (see the module docstring). Without a content store, an internal URL or a KEK on the
+    API it is 503 ``not_configured``, which the worker does not retry."""
+    try:
+        transfers = slicing.transfers()
+    except RuntimeError as error:  # no content store
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None
+    stat = await transfers.content.stat(body.key)
+    if stat is None or stat.ref.kind != SLICE_KIND:
         raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
     try:
-        return slicing.transfers().internal_get(body.key, READ_TTL)
-    except RuntimeError as error:
-        # No content store (`Slicing.transfers`), or a `TransferUnavailableError`.
+        return transfers.internal_get(body.key, READ_TTL)
+    except TransferUnavailableError as error:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
         ) from None

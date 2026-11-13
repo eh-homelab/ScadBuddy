@@ -1276,9 +1276,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
   (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
   the API's KEK and good for 10 minutes, on every `store_backend`, so the pod reaches the
-  API only. The API mints one only for a key a completed native slice names, and answers
-  any other key 403 `transfer-refused`, which fails the print without a retry; the worker
-  signs nothing. The worker does not `LISTEN`. It waits until the API
+  API only. The API mints one only for a key its content index holds live as a `slice`
+  blob, whether or not the slice's row was swept since (6 h after it finished: a run's
+  later plates start after the earlier ones print). So the print worker can read any live
+  `slice` blob (any completed slice's file, a run's, the print dialog's or an order
+  quote's, and the slicer's input copies and preset files), never another kind; a
+  print-run hold on its file would narrow that to the run's own. Any other key is 403
+  `transfer-refused`, which the print reports as "The sliced file is no longer stored.
+  Print again to slice it again.", without a retry; the worker signs nothing. The worker does not `LISTEN`. It waits until the API
   lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
   `lan-imports`, `printers`, `rack`, `spools` and `transfer-urls`) before it serves. Its

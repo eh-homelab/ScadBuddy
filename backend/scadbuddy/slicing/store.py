@@ -300,21 +300,6 @@ class NativeSliceStore:
             (slice_id, subject),
         )
 
-    async def names_blob(self, key: str) -> bool:
-        """Whether a completed slice's row names ``key`` as its sliced file: the only key
-        the print worker may be given a transfer URL for (#5298 Task 32)."""
-
-        def run() -> bool:
-            with self._pool.connection() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM native_slices WHERE sliced_blob_key = %s"
-                    " AND status = 'completed' LIMIT 1",
-                    (key,),
-                ).fetchone()
-            return row is not None
-
-        return await asyncio.to_thread(run)
-
     async def reusable(self, input_sha256: str, preset_key: str) -> NativeSlice | None:
         """The newest completed slice of these bytes and presets."""
         return await self._one(

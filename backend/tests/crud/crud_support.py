@@ -88,7 +88,6 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.store import NativeSliceStore
-from scadbuddy.slicing.transfer import Transfers
 from scadbuddy.spools.component import SPOOLS
 from scadbuddy.spools.native import NativeSpoolStore
 from scadbuddy.spools.spool_providers import NativeProvider
@@ -453,7 +452,6 @@ def print_crud_app(
     links: PrintLinkStore | None = None,
     catalogue: Any = None,
     rack: RackUsageStore | None = None,
-    transfers: Transfers | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
@@ -465,15 +463,8 @@ def print_crud_app(
     print records go to the watcher's store on ``store``'s pool, matched against
     ``catalogue`` (none when not given), and the rack hotends' usage goes through
     ``rack`` (no rack route answers without one), and the spools, native spools, kept
-    presets and native slices through the API's own stores on ``store``'s pool. A
-    transfer URL is minted by ``transfers`` (none answers without one)."""
+    presets and native slices through the API's own stores on ``store``'s pool."""
     app = FastAPI(dependencies=[Depends(auth_check)])
-
-    def mint() -> Transfers:
-        if transfers is None:
-            raise RuntimeError("no content store")
-        return transfers
-
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
@@ -491,7 +482,7 @@ def print_crud_app(
             providers=[NativeProvider(NativeSpoolStore(store.pool))],
         ),
         SLICING: SimpleNamespace(
-            store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool), transfers=mint
+            store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
         ),
     }
     app.state.scadbuddy = SimpleNamespace(

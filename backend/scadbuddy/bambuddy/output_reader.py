@@ -10,6 +10,7 @@ and :class:`RemoteOutputs` through the API's internal routes (``api/internal.py`
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -29,6 +30,8 @@ from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputNotFoundErr
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer import TRANSFER_REFUSED
 from scadbuddy.store.content import ContentStore, template_title
+
+logger = logging.getLogger(__name__)
 
 #: The API's internal routes the remote reader calls (``api/internal.py``).
 INTERNAL_OUTPUTS = "/api/v1/internal/outputs"
@@ -248,7 +251,8 @@ TRANSFER_URLS = f"/api/v1{PREFIX}/print/transfer-urls"
 
 
 class BlobMissingAnswerError(LookupError):
-    """The API has no blob under the key (its own 404)."""
+    """The API has no blob under the key (its own 404), or no live sliced file to mint a
+    read URL of (its 403 ``transfer-refused``)."""
 
 
 class SlicedBlobs(Protocol):
@@ -262,9 +266,10 @@ class RemoteBlobs:
     """`SlicedBlobs` through the API's internal blob route (`api/internal_blobs.py`), as
     `RemoteOutputs` reads outputs: the print worker holds no store and no key to sign
     with. Each read first asks the API for a URL of its one key (``POST
-    …/print/transfer-urls``, #5298 Task 32), which the API mints only for a key a
-    completed native slice names. The URL's header carries a bearer token, never logged;
-    the URL is fetched with ``client``, which sends no service credential."""
+    …/print/transfer-urls``, #5298 Task 32), which the API mints only for a key its
+    content index holds live as a ``slice`` blob. The URL's header carries a bearer
+    token, never logged; the URL is fetched with ``client``, which sends no service
+    credential."""
 
     def __init__(self, crud: CrudClient, *, client: httpx.AsyncClient | None = None) -> None:
         self._crud = crud
@@ -274,19 +279,17 @@ class RemoteBlobs:
         await self._client.aclose()
 
     async def _url(self, key: str) -> TransferUrl:
-        """The API's read URL of ``key``. A refusal is an `ApiError`, which the LAN
-        upload does not retry: a 403 ``transfer-refused`` (no completed native slice
-        names the key), or the API's 503 ``not_configured``."""
+        """The API's read URL of ``key``. A 403 ``transfer-refused`` (the API holds no live
+        sliced file under the key: the content sweep took it) is `BlobMissingAnswerError`,
+        which the LAN upload reports as a file no longer stored, the key logged at DEBUG
+        only. Any other refusal, such as the API's 503 ``not_configured``, is an
+        `ApiError`. The LAN upload retries neither."""
         try:
             response = await self._crud.request("POST", TRANSFER_URLS, json={"key": key})
         except CrudRefusedError as error:
             if error.problem.get("reason") == TRANSFER_REFUSED:
-                raise ApiError(
-                    error.status,
-                    f"The API refused to read the sliced file {key}: no completed native"
-                    " slice names it. Print again to slice it again.",
-                    reason=TRANSFER_REFUSED,
-                ) from None
+                logger.debug("the API refused a read URL of %s", key)
+                raise BlobMissingAnswerError(key) from None
             raise ApiError(
                 error.status, str(error.problem.get("detail") or "transfer URL refused")
             ) from None

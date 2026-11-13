@@ -1557,8 +1557,7 @@ _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
 
 #: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities
 #: on the ``library`` worker (`workflows/slicing_activities.py`), the dialog's read
-#: (`slicing/preview.py`), the sweeps (`slicing/start.py`, from `main.py`) and the
-#: transfer URL route's allow rule (`api/crud_print.py` `transfer_url`, #5298 Task 32).
+#: (`slicing/preview.py`) and the sweeps (`slicing/start.py`, from `main.py`).
 NATIVE_SLICES_API_ONLY = (
     "running",
     "prepared",
@@ -1569,7 +1568,6 @@ NATIVE_SLICES_API_ONLY = (
     "get",
     "reusable",
     "sweep",
-    "names_blob",
 )
 
 

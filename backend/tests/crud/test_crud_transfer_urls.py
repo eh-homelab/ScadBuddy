@@ -1,14 +1,16 @@
 """A LAN print's read URL of a native slice's sliced 3MF, minted by the API (#5298 Task
 32): ``POST …/print/transfer-urls`` answers the internal blob route's URL, signed under the
-API's KEK, only for a key a completed `native_slices` row names; any other key, and any
-other caller, is 403. The print worker's `RemoteBlobs` asks the route and signs nothing."""
+API's KEK, only for a key the content index holds live as a ``slice`` blob, whether or not
+its `native_slices` row still stands; any other key, and any other caller, is 403. The
+print worker's `RemoteBlobs` asks the route, signs nothing, and reads a refusal as a file
+no longer stored."""
 
 from __future__ import annotations
 
 import base64
 import inspect
-from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -28,25 +30,21 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy.output_reader import TRANSFER_URLS, BlobMissingAnswerError, RemoteBlobs
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64
-from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient
-from scadbuddy.crud.print import NATIVE_SLICES_API_ONLY, RemoteNativeSlices
-from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.models import TransferUrl
-from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     READ_TTL,
+    SLICE_KIND,
     TRANSFER_HEADER,
     TRANSFER_REFUSED,
     Transfers,
 )
 from scadbuddy.slicing.transfer_token import transfer_key, verify
 from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content_models import BlobKind, BlobRef, BlobStat
 from scadbuddy.worker import PRINT_CRUD_AREAS
-from tests.conftest import UNUSED_TEMPORAL_ADDRESS
-from tests.crud.crud_support import served_print_crud
 
 KEK_TEXT = base64.b64encode(b"\x32" * 32).decode()
 KEK = kek_from_base64(KEK_TEXT)
@@ -73,59 +71,56 @@ class _Token:
     def invalidate(self, token: str) -> None: ...
 
 
-class _Slices:
-    """`NativeSliceStore.names_blob` over the keys of completed slices."""
+class _Content:
+    """The content index's `stat` (what the route's allow rule reads) and `get` (what the
+    internal GET route streams), over ``blobs``: key to kind and bytes. No
+    `native_slices` row exists here: the rule follows the blob, not the row."""
 
-    def __init__(self, completed: set[str]) -> None:
-        self.completed = completed
+    def __init__(self, blobs: dict[str, tuple[BlobKind, bytes]]) -> None:
+        self.blobs = blobs
         self.asked: list[str] = []
 
-    async def names_blob(self, key: str) -> bool:
+    async def stat(self, key: str) -> BlobStat | None:
         self.asked.append(key)
-        return key in self.completed
+        if key not in self.blobs:
+            return None
+        kind, data = self.blobs[key]
+        ref = BlobRef(sha256="0" * 64, kind=kind, backend="s3", backend_id=key, size=len(data))
+        return BlobStat(key=key, ref=ref, slug=None, meta={}, touched_at=datetime.now(UTC))
+
+    async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
+        yield self.blobs[ref.backend_id][1]
 
 
-class _Stat:
-    def __init__(self, size: int) -> None:
-        self.ref = SimpleNamespace(size=size)
-
-
-class _Content:
-    """The two calls the internal GET route makes of the content store."""
-
-    def __init__(self, blobs: dict[str, bytes]) -> None:
-        self.blobs = blobs
-
-    async def stat(self, key: str) -> _Stat | None:
-        return _Stat(len(self.blobs[key])) if key in self.blobs else None
-
-    async def get(self, ref: Any) -> AsyncIterator[bytes]:
-        yield SLICED
+def _live(*keys: str, kind: BlobKind = SLICE_KIND) -> _Content:
+    return _Content({key: (kind, SLICED) for key in keys})
 
 
 def _app(
-    tmp_path: Path,
-    slices: _Slices,
-    *,
-    transfers: Transfers | None,
-    blobs: dict[str, bytes] | None = None,
+    tmp_path: Path, content: _Content, *, configured: bool = True, now: datetime | None = None
 ) -> FastAPI:
-    """The print routes, the areas and the internal blob routes, the API's KEK in a file."""
+    """The print routes, the areas and the internal blob routes over ``content``, the
+    API's KEK in a file; ``configured`` False is an API with no content store."""
     key_file = tmp_path / "kek"
     key_file.write_text(KEK_TEXT)
+    transfers = Transfers(
+        cast(ContentStore, content),
+        cast(Any, None),
+        internal_base_url=INTERNAL,
+        secret=transfer_key(KEK),
+        **({} if now is None else {"now": lambda: now}),
+    )
 
     def mint() -> Transfers:
-        if transfers is None:
+        if not configured:
             raise RuntimeError("no content store")
         return transfers
 
     app = FastAPI(dependencies=[Depends(auth_check)])
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="off", secret_key_file=key_file),
-        store=SimpleNamespace(content=_Content(blobs or {})),
-        components=SimpleNamespace(
-            get=lambda key: {SLICING: SimpleNamespace(store=slices, transfers=mint)}[key]
-        ),
+        store=SimpleNamespace(content=content),
+        components=SimpleNamespace(get=lambda key: {SLICING: SimpleNamespace(transfers=mint)}[key]),
     )
     app.include_router(crud_print.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
@@ -133,17 +128,6 @@ def _app(
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: None, credentials=lambda: _Credentials())  # type: ignore[arg-type,return-value]
     return app
-
-
-def _transfers(now: datetime | None = None) -> Transfers:
-    # `internal_get` reads neither the content store nor the puts.
-    return Transfers(
-        cast(ContentStore, None),
-        cast(Any, None),
-        internal_base_url=INTERNAL,
-        secret=transfer_key(KEK),
-        **({} if now is None else {"now": lambda: now}),
-    )
 
 
 def _crud(app: FastAPI, caller: str = "print") -> CrudClient:
@@ -173,42 +157,41 @@ async def _read(blobs: RemoteBlobs, key: str) -> bytes:
     return b"".join([chunk async for chunk in blobs.stream(key)])
 
 
-# -- with no database --------------------------------------------------------------------
-
-
 def test_the_area_is_served_and_awaited() -> None:
     assert "transfer-urls" in PRINT_CRUD_AREAS
     # Appended, so an older API's list is a prefix of a newer one's.
     assert CRUD_AREAS["print"][-1] == "transfer-urls"
 
 
-def test_the_allow_rule_is_the_apis_alone() -> None:
-    assert "names_blob" in NATIVE_SLICES_API_ONLY
-    assert "names_blob" in vars(RemoteNativeSlices)
-
-
 async def test_an_unknown_key_is_refused(tmp_path: Path) -> None:
-    slices = _Slices(set())
-    response = await _ask(_app(tmp_path, slices, transfers=_transfers()), KEY)
+    content = _live()
+    response = await _ask(_app(tmp_path, content), KEY)
     assert response.status_code == 403
     assert response.json()["reason"] == TRANSFER_REFUSED
     assert TRANSFER_HEADER not in response.text and "url" not in response.json()
-    assert slices.asked == [KEY]
+    assert content.asked == [KEY]
+
+
+@pytest.mark.parametrize("kind", ["workspace", "piece", "media", "asset", "library"])
+async def test_a_live_blob_of_another_kind_is_refused(tmp_path: Path, kind: BlobKind) -> None:
+    key = f"{kind}-" + "c" * 64
+    response = await _ask(_app(tmp_path, _live(key, kind=kind)), key)
+    assert response.status_code == 403
+    assert response.json()["reason"] == TRANSFER_REFUSED
 
 
 async def test_another_callers_credential_is_refused(tmp_path: Path) -> None:
-    slices = _Slices({KEY})
-    response = await _ask(_app(tmp_path, slices, transfers=_transfers()), KEY, "projects")
+    content = _live(KEY)
+    response = await _ask(_app(tmp_path, content), KEY, "projects")
     assert response.status_code == 403
     assert response.json()["reason"] == "wrong_caller"
     # Refused before the allow rule is asked.
-    assert slices.asked == []
+    assert content.asked == []
 
 
-async def test_a_known_slices_key_gets_the_internal_routes_url(tmp_path: Path) -> None:
+async def test_a_live_slice_gets_the_internal_routes_url(tmp_path: Path) -> None:
     now = datetime(2026, 11, 13, 12, 0, 0, 500_000, tzinfo=UTC)
-    app = _app(tmp_path, _Slices({KEY}), transfers=_transfers(now))
-    response = await _ask(app, KEY)
+    response = await _ask(_app(tmp_path, _live(KEY), now=now), KEY)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     url = TransferUrl.model_validate(response.json())
@@ -224,8 +207,16 @@ async def test_a_known_slices_key_gets_the_internal_routes_url(tmp_path: Path) -
     assert token.expires_at == url.expires_at
 
 
+async def test_a_swept_rows_live_slice_still_gets_a_url(tmp_path: Path) -> None:
+    """A LAN run's later plate, past the slice sweep (6 h after the slice finished): no
+    `native_slices` row names the key any more, but its blob is live in the content index
+    until the content sweep takes it, and that is what the rule reads (review finding 1).
+    The app has no slice store at all, so no row could answer."""
+    assert await _read(_blobs(_app(tmp_path, _live(KEY))), KEY) == SLICED
+
+
 async def test_the_url_reads_the_blob_through_the_internal_route(tmp_path: Path) -> None:
-    app = _app(tmp_path, _Slices({KEY}), transfers=_transfers(), blobs={KEY: SLICED})
+    app = _app(tmp_path, _live(KEY))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
         minted = TransferUrl.model_validate((await _ask(app, KEY)).json())
         read = await client.get(minted.url, headers=minted.headers)
@@ -237,37 +228,30 @@ async def test_the_url_reads_the_blob_through_the_internal_route(tmp_path: Path)
 
 
 async def test_an_api_with_no_content_store_is_not_configured(tmp_path: Path) -> None:
-    response = await _ask(_app(tmp_path, _Slices({KEY}), transfers=None), KEY)
+    response = await _ask(_app(tmp_path, _live(KEY), configured=False), KEY)
     assert response.status_code == 503
     assert response.json()["reason"] == "not_configured"
 
 
-async def test_remote_blobs_reads_through_the_minted_url(tmp_path: Path) -> None:
-    app = _app(tmp_path, _Slices({KEY}), transfers=_transfers(), blobs={KEY: SLICED})
-    assert await _read(_blobs(app), KEY) == SLICED
-
-
-async def test_remote_blobs_raises_a_refusal_it_does_not_retry(tmp_path: Path) -> None:
-    slices = _Slices(set())
-    with pytest.raises(ApiError) as raised:
-        await _read(_blobs(_app(tmp_path, slices, transfers=_transfers())), KEY)
-    assert raised.value.status == 403
-    assert raised.value.extensions["reason"] == TRANSFER_REFUSED
-    assert KEY in raised.value.detail
+async def test_remote_blobs_reads_a_refusal_as_a_file_no_longer_stored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The LAN upload reports `BlobMissingAnswerError` in plain words (410, "no longer
+    stored"); the key is only in a DEBUG line."""
+    content = _live()
+    caplog.set_level("DEBUG", logger=output_reader.__name__)
+    with pytest.raises(BlobMissingAnswerError):
+        await _read(_blobs(_app(tmp_path, content)), KEY)
     # Asked once: a refusal is not sent again.
-    assert slices.asked == [KEY]
+    assert content.asked == [KEY]
+    [record] = [r for r in caplog.records if r.name == output_reader.__name__]
+    assert record.levelname == "DEBUG" and KEY in record.getMessage()
 
 
 async def test_remote_blobs_raises_the_apis_not_configured(tmp_path: Path) -> None:
     with pytest.raises(ApiError) as raised:
-        await _read(_blobs(_app(tmp_path, _Slices({KEY}), transfers=None)), KEY)
+        await _read(_blobs(_app(tmp_path, _live(KEY), configured=False)), KEY)
     assert raised.value.status == 503
-
-
-async def test_remote_blobs_reads_a_missing_blob_as_gone(tmp_path: Path) -> None:
-    app = _app(tmp_path, _Slices({KEY}), transfers=_transfers(), blobs={})
-    with pytest.raises(BlobMissingAnswerError):
-        await _read(_blobs(app), KEY)
 
 
 async def test_remote_blobs_signs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,66 +289,3 @@ async def test_remote_blobs_signs_nothing(monkeypatch: pytest.MonkeyPatch) -> No
     assert str(read.url) == minted["url"] and read.headers["X-Read"] == "t"
     # The service credential stays with the API: the read URL never gets it.
     assert "authorization" not in read.headers
-
-
-# -- over the routes, on the API's own slices --------------------------------------------
-
-
-@pytest.fixture
-def store(tmp_path: Path, pg_conninfo: str) -> Iterator[SettingsStore]:
-    opened = SettingsStore(
-        Settings(
-            data_dir=tmp_path,
-            database_url=pg_conninfo,
-            temporal_address=UNUSED_TEMPORAL_ADDRESS,
-            auth_mode="enforce",
-        )
-    )
-    opened.open()
-    try:
-        yield opened
-    finally:
-        opened.close()
-
-
-@pytest.mark.requires_postgres
-async def test_only_a_completed_slices_key_is_named(store: SettingsStore) -> None:
-    slices = NativeSliceStore(store.pool)
-    row = await slices.start(
-        workflow_id="slice-5298-transfer",
-        subject="output:a",
-        library_file_id=5298,
-        plate_id=1,
-        preset_key="k",
-    )
-    # Running: no sliced file yet.
-    assert not await slices.names_blob(KEY)
-    await slices.finish(row.id, status="completed", sliced_blob_key=KEY, failure=None, warnings=[])
-    assert await slices.names_blob(KEY)
-    assert not await slices.names_blob("slice-" + "b" * 64)
-    # An execution that runs it again clears its file first.
-    await slices.running(row.id)
-    assert not await slices.names_blob(KEY)
-
-
-@pytest.mark.requires_postgres
-async def test_the_route_answers_on_the_apis_slices(store: SettingsStore) -> None:
-    slices = NativeSliceStore(store.pool)
-    row = await slices.start(
-        workflow_id="slice-5298-route",
-        subject="output:a",
-        library_file_id=5298,
-        plate_id=1,
-        preset_key="k",
-    )
-    await slices.finish(row.id, status="completed", sliced_blob_key=KEY, failure=None, warnings=[])
-    async with served_print_crud(store, transfers=_transfers()) as crud:
-        answered = await crud.request("POST", TRANSFER_URLS, json={"key": KEY})
-        url = TransferUrl.model_validate(answered.json())
-        assert url.url == f"{INTERNAL}{INTERNAL_BLOBS}/{KEY}"
-        blobs = RemoteBlobs(crud)
-        with pytest.raises(ApiError) as raised:
-            await blobs._url("slice-" + "b" * 64)
-        assert raised.value.status == 403
-        await blobs.aclose()
-    assert url.expires_at - datetime.now(UTC) <= READ_TTL + timedelta(seconds=1)

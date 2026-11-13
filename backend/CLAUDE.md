@@ -337,8 +337,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `transfer.py` and `transfer_token.py` (the slicer worker's transfer URLs: presigned S3
   GET or the internal blob routes, a token MACed under a KEK-derived key; never log one;
   the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
-  always the internal route's, `READ_TTL`, only for a key a completed `native_slices` row
-  names, `NativeSliceStore.names_blob`, else 403 `transfer-refused`, #5298 Task 32),
+  always the internal route's, `READ_TTL`, only for a key the content index holds live as
+  a `slice` blob (`SLICE_KIND`; any slice's file, its row swept or not, never another
+  kind), else 403 `transfer-refused`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
   and presets, which the dialog and the run share; the dialog's Reslice gives a
