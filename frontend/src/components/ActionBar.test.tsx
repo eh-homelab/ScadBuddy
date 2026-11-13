@@ -89,6 +89,12 @@ describe("Generate's menu", () => {
     getJobColours.mockRestore()
   })
 
+  it('links "Sell on storefront…" to the listing filled in from the render on screen (#6131)', async () => {
+    const { user } = setup()
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    expect(screen.getByRole('menuitem', { name: /Sell on storefront/ })).toHaveAttribute('href', `/storefront?sell=job%3A${job.id}`)
+  })
+
   it('offers "Add to order…" once an output exists, opening its dialog (#4249)', async () => {
     const { user, unmount } = setup()
     await user.click(screen.getByRole('button', { name: 'More to generate' }))
@@ -165,8 +171,10 @@ describe("Generate's menu", () => {
       const { user } = setup()
       screen.getByRole('button', { name: 'More to generate' }).focus()
       await user.keyboard('{Enter}')
-      const item = screen.getByRole('menuitem', { name: /Rendered image/ })
-      for (const key of ['{ArrowDown}', '{ArrowUp}', '{Home}', '{End}']) {
+      // The enabled items: "Add to order…" waits for an output and is skipped.
+      const image = screen.getByRole('menuitem', { name: /Rendered image/ })
+      const sell = screen.getByRole('menuitem', { name: /Sell on storefront/ })
+      for (const [key, item] of [['{ArrowDown}', sell], ['{ArrowUp}', image], ['{End}', sell], ['{Home}', image]] as const) {
         await user.keyboard(key)
         expect(item).toHaveFocus()
       }

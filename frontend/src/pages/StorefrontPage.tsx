@@ -1,9 +1,11 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
-import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
+import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
+import { sellListing, type SellListing } from '../components/storefront/sellSource'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import type { ParamValue } from '../storefront/api/client'
 import { useAsync } from '../lib/useAsync'
@@ -26,15 +28,24 @@ interface Open {
   draft: ListingDraft
   /** What was last saved (`savedKey`), to tell whether the draft needs saving before a publish. */
   saved: string | null
+  /**
+   * #6131 — whether a new listing's parameters, filaments and pictures are set: by "Sell
+   * on storefront", or by the smart defaults once its template's schema loads. A template
+   * changed in the editor clears it, so the new one's defaults fill in.
+   */
+  filled: boolean
+  /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
+  notes: string[]
 }
 
-function fresh(): Open {
-  return { key: Symbol('listing'), id: null, updatedAt: null, published: false, draft: emptyDraft(), saved: null }
+/** A new listing: blank, or the one "Sell on storefront" filled in. */
+function fresh(sold?: SellListing): Open {
+  return { key: Symbol('listing'), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
 }
 
 function opened(listing: StorefrontListing, key: symbol = Symbol('listing')): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing) }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [] }
 }
 
 /** What page-wide actions (the order, the design-request switch) are busy and refused under. */
@@ -99,14 +110,49 @@ export function StorefrontPage() {
     const current = versions.data.find((v) => v.current) ?? versions.data[0]
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
+  // #6131 — the smart defaults (design 2026-11-13 §3), once the price book has answered.
   useEffect(() => {
-    if (!open || open.id !== null || !schema.data) return
-    const { params, fixed } = open.draft
-    if (Object.keys(params).length > 0 || Object.keys(fixed).length > 0) return
-    const defaults = defaultsFor(schema.data)
-    if (Object.keys(defaults.params).length === 0 && Object.keys(defaults.fixed).length === 0) return
-    setOpen({ ...open, draft: { ...open.draft, ...defaults } })
-  }, [open, schema.data])
+    if (!open || open.filled || !schema.data || !(book.data || book.error)) return
+    setOpen({ ...open, filled: true, draft: { ...open.draft, ...defaultsFor(schema.data, filaments), media_ids: sellMedia(media) } })
+  }, [open, schema.data, book.data, book.error, filaments, media])
+
+  // #6131 — "Sell on storefront" (`?sell=job:<id>` or `?sell=output:<id>`) opens the
+  // listing filled in, unsaved; the assistant's link (`?listing=<id>`) opens a listing.
+  // Each parameter leaves the address once read, so a reload makes nothing twice.
+  const [search, setSearch] = useSearchParams()
+  const sell = search.get('sell')
+  const listingParam = search.get('listing')
+  const [selling, setSelling] = useState(false)
+  const sold = useRef<string | null>(null)
+  useEffect(() => {
+    if (!sell || sold.current === sell || !models.data || !(book.data || book.error)) return
+    sold.current = sell
+    setSearch((cur) => {
+      const next = new URLSearchParams(cur)
+      next.delete('sell')
+      return next
+    }, { replace: true })
+    setSelling(true)
+    setError(null)
+    sellListing(sell, book.data?.filaments ?? [], models.data)
+      .then((made) => {
+        setOpen(fresh(made))
+        setValues({})
+      })
+      .catch((caught: unknown) => setError({ key: PAGE, text: `Could not fill in the listing: ${message(caught)}` }))
+      .finally(() => setSelling(false))
+  }, [sell, models.data, book.data, book.error, setSearch])
+  useEffect(() => {
+    if (!listingParam || !listings.data) return
+    const row = listings.data.find((l) => l.id === listingParam)
+    setSearch((cur) => {
+      const next = new URLSearchParams(cur)
+      next.delete('listing')
+      return next
+    }, { replace: true })
+    if (row) setOpen(opened(row))
+    else setError({ key: PAGE, text: 'That listing is gone.' })
+  }, [listingParam, listings.data, setSearch])
 
   // A version without some of the listing's parameters: they go, or the editor could
   // neither show nor unlock them and publish would refuse the listing.
@@ -132,7 +178,8 @@ export function StorefrontPage() {
 
   function changed(next: ListingDraft) {
     if (!open) return
-    setOpen({ ...open, draft: next })
+    // Another template's defaults fill in once its schema loads.
+    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug })
   }
 
   /** `run` as `key`'s action: busy while it runs, and its refusal kept as `key`'s. */
@@ -257,6 +304,10 @@ export function StorefrontPage() {
   const anyBusy = busy.size > 0
   const shownError = error && (error.key === PAGE || error.key === open?.key) ? error.text : null
   const requestsOn = requests ?? settings.data?.storefront_requests_enabled ?? false
+  /** #6131 — why Publish and Save draft wait, said beside them. */
+  const missing = !draft ? null : !draft.commit ? 'Choose a design and its version to publish.' : !draft.title.trim() ? 'Give the product a title to publish.' : null
+  /** #6131 — a published listing with unsaved changes: saving it takes it off the store. */
+  const liveChanged = open !== null && open.published && draft !== undefined && open.saved !== savedKey(listingInput(draft, schema.data, filaments))
 
   return (
     <div className="h-full overflow-y-auto" data-testid="storefront-page">
@@ -293,7 +344,7 @@ export function StorefrontPage() {
                 Could not load the listings: {listings.error.message}
               </p>
             )}
-            {listings.data && rows.length === 0 && <p className="text-sm text-muted-foreground">No listings yet. Make one with New listing.</p>}
+            {listings.data && rows.length === 0 && <p className="text-sm text-muted-foreground">No listings yet. Open a design and choose Generate’s “Sell on storefront…”, or make one here with New listing.</p>}
             <ol className="flex flex-col gap-1">
               {rows.map((row, index) => (
                 <li
@@ -344,23 +395,24 @@ export function StorefrontPage() {
           </section>
 
           <section aria-label="Listing" className="flex min-w-0 flex-col gap-3">
+            {selling && <p className="text-sm text-muted-foreground">Filling in the listing…</p>}
             {open && draft ? (
               <>
-                <ListingEditor
-                  draft={draft}
-                  onChange={changed}
-                  models={models.data ?? []}
-                  versions={versions.data}
-                  schema={schema.data}
-                  filaments={filaments}
-                  media={media}
-                />
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" disabled={openBusy || !draft.title || !draft.commit} onClick={() => void onSave()}>
-                    Save
-                  </Button>
-                  <Button disabled={openBusy || !draft.title || !draft.commit} onClick={() => void onPublish()}>
+                {open.notes.map((note) => (
+                  <p key={note} role="note" className="rounded-md border border-warn/50 bg-warn/5 p-2 text-[13px]">
+                    {note}
+                  </p>
+                ))}
+                {liveChanged && (
+                  <p className="text-[13px] text-muted-foreground">Saving a draft takes this listing off the store until you publish it again.</p>
+                )}
+                {missing && <p className="text-[13px] text-muted-foreground">{missing}</p>}
+                <div className="flex flex-wrap gap-2" data-testid="listing-actions">
+                  <Button disabled={openBusy || missing !== null} onClick={() => void onPublish()}>
                     Publish
+                  </Button>
+                  <Button variant="outline" disabled={openBusy || missing !== null} onClick={() => void onSave()}>
+                    Save draft
                   </Button>
                   {open.published && (
                     <Button variant="outline" disabled={openBusy} onClick={() => void onUnpublish()}>
@@ -373,6 +425,15 @@ export function StorefrontPage() {
                     </Button>
                   )}
                 </div>
+                <ListingEditor
+                  draft={draft}
+                  onChange={changed}
+                  models={models.data ?? []}
+                  versions={versions.data}
+                  schema={schema.data}
+                  filaments={filaments}
+                  media={media}
+                />
               </>
             ) : (
               <p className="text-sm text-muted-foreground">Choose a listing, or make a new one.</p>

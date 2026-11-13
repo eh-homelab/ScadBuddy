@@ -58,6 +58,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { ChevronDownIcon, ChevronUpIcon } from 'lucide-react'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 import { LIBRARY_ROOT, libraryPath } from '../lib/libraryPath'
+import { sellPath } from './storefront/sellSource'
 
 /** #1289 — the most colours the breakdown draws (backend `MAX_BREAKDOWN_COLOURS`). */
 const MAX_BREAKDOWN_COLOURS = 16
@@ -643,6 +644,7 @@ export function ActionBar({
             : undefined
         }
         onOrder={output ? () => setOrderOpen(true) : undefined}
+        sellTo={job ? sellPath({ job: job.id }) : undefined}
       />
       {blockedReason && (
         <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-xs text-destructive">
@@ -911,8 +913,11 @@ function GenerateMenu({
   onImage,
   onColours,
   onOrder,
+  sellTo,
 }: {
   disabled: boolean
+  /** #6131 — "Sell on storefront…": the Storefront page's listing filled in from this render. */
+  sellTo?: string | undefined
   onImage: () => void
   /** #4249 — once an output of the values on screen exists; it becomes a line item. */
   onOrder?: (() => void) | undefined
@@ -968,6 +973,14 @@ function GenerateMenu({
           Add to order…
           <span className="text-xs text-muted-foreground">{onOrder ? 'This output as a line item of an order' : 'Generate first'}</span>
         </DropdownMenuItem>
+        {sellTo && (
+          <DropdownMenuItem asChild data-testid="generate-sell" className="flex-col items-start gap-0">
+            <Link to={sellTo}>
+              Sell on storefront…
+              <span className="text-xs text-muted-foreground">A store listing of these settings</span>
+            </Link>
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )

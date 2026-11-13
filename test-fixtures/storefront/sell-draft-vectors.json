@@ -1,0 +1,49 @@
+[
+  {
+    "name": "the navy owl: text offered, a changed colour locked, a default colour offered once matched, geometry locked",
+    "schema": {
+      "groups": ["Text", "Shape", "Colours"],
+      "parameters": [
+        { "name": "label", "type": "string", "group": "Text", "caption": "Name", "initial": "Owl", "max_length": 400 },
+        { "name": "style", "type": "string", "group": "Text", "caption": "Style", "initial": "round", "options": [{ "name": "Round", "value": "round" }, { "name": "Square", "value": "square" }] },
+        { "name": "font", "type": "font", "group": "Text", "caption": "Typeface", "initial": "Liberation Sans" },
+        { "name": "size", "type": "slider", "group": "Shape", "caption": "Size", "initial": 40, "min": 20, "max": 80, "step": 1 },
+        { "name": "hole", "type": "boolean", "group": "Shape", "caption": "Hole", "initial": true },
+        { "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#FFFFFF" },
+        { "name": "eyes", "type": "color", "group": "Colours", "caption": "Eyes", "initial": "#000000" },
+        { "name": "secret", "type": "number", "group": "Hidden", "caption": "Secret", "initial": 3 }
+      ]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": null, "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-navy", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Navy", "colour": "#1F2A44", "cost_per_kg": "20", "density_g_cm3": null, "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-black", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Black", "colour": "#000000", "cost_per_kg": "20", "density_g_cm3": null, "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": { "label": "Hoot", "size": 55, "body": "#1f2a44", "style": "square" },
+    "expected": {
+      "params": { "label": { "kind": "text", "max_length": 200 }, "eyes": { "kind": "choice", "choices": [] } },
+      "fixed": { "style": "square", "font": "Liberation Sans", "size": 55, "hole": true, "body": "#1f2a44" },
+      "colours": ["f-navy", "f-black"]
+    }
+  },
+  {
+    "name": "a blank listing: the template's defaults; a colour with no filament is locked",
+    "schema": {
+      "groups": ["Size", "Colours"],
+      "parameters": [
+        { "name": "width", "type": "number", "group": "Size", "caption": "Width", "initial": 10 },
+        { "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#FFFFFF" },
+        { "name": "trim", "type": "color", "group": "Colours", "caption": "Trim", "initial": "#FF0000" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": null, "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [] } },
+      "fixed": { "width": 10, "trim": "#FF0000" },
+      "colours": ["f-white"]
+    }
+  }
+]

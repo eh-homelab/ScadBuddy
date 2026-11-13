@@ -100,6 +100,14 @@ same way, `vite.config.ts`).
   the edge's HttpOnly cookie; the page never sees it. Mocks
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
 
+- "Sell on storefront" (#6131, design 2026-11-13): Generate's menu (`/storefront?sell=job:<id>`)
+  and a History row (`?sell=output:<id>`) open the back office's Storefront page with the
+  listing filled in, unsaved (`components/storefront/sellSource.ts`); `?listing=<id>` opens a
+  saved one. The smart defaults are `listingDraft.ts` `defaultsFor` (free text offered, a
+  colour offered only at its default, the rest locked), pinned by
+  `test-fixtures/storefront/sell-draft-vectors.json`; a
+  colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
+
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`
   ("Mark sent", "Send again" through a preview). The list and "Mark sent" go through the

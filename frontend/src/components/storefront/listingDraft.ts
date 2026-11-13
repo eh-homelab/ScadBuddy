@@ -66,21 +66,108 @@ export function schemaBound(param: Param): ListingBound {
   return { kind: 'text', max_length: Math.min(param.max_length ?? MAX_TEXT_LENGTH, MAX_TEXT_LENGTH) }
 }
 
-/** Whether a new listing offers `param`: a ranged number, a select, a switch or free text. */
-function offeredAtFirst(param: Param): boolean {
-  if (NUMBERS.has(param.type)) return param.min != null && param.max != null
-  return param.type === 'select' || param.type === 'boolean' || param.type === 'string'
+/** Whether `a` and `b` are one colour, as publish compares them: case aside. */
+function sameColour(a: ParamValue | null | undefined, b: ParamValue | null | undefined): boolean {
+  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase()
 }
 
-/** A new listing's parameters, from the commit's schema. */
-export function defaultsFor(schema: CustomizerSchema): Pick<ListingDraft, 'params' | 'fixed'> {
+/** The first of `filaments` whose colour is `colour`. */
+function filamentOf(colour: ParamValue | null | undefined, filaments: readonly Filament[]): Filament | undefined {
+  return filaments.find((filament) => sameColour(filament.colour, colour))
+}
+
+/**
+ * #6131 (design 2026-11-13 §3) — a listing's parameters and filaments from the commit's
+ * schema and the values the person was looking at (none for a blank listing): free text
+ * is the customer's, the rest locked at its value. A colour is offered when its value is
+ * the template's default and a filament has it: a customer who picks none gets the
+ * default (`orders/storefront/inputs.py` `listing_values`), so a colour the person changed
+ * stays locked and sells as seen. Every colour's filament joins the listing, since
+ * publish refuses a colour that is not a listing filament's.
+ * `test-fixtures/storefront/sell-draft-vectors.json` pins these rules, so another copy of
+ * them (the assistant's tool, design §6) can be checked against the same cases.
+ */
+export function defaultsFor(
+  schema: CustomizerSchema,
+  filaments: readonly Filament[],
+  values: Readonly<Record<string, ParamValue>> = {},
+): Pick<ListingDraft, 'params' | 'fixed' | 'colours'> {
   const params: Record<string, ListingBound> = {}
   const fixed: Record<string, ParamValue> = {}
+  const colours: string[] = []
   for (const param of shownParams(schema)) {
-    if (offeredAtFirst(param)) params[param.name] = schemaBound(param)
-    else if (param.initial != null) fixed[param.name] = param.initial
+    const value = values[param.name] ?? param.initial ?? undefined
+    if (param.type === 'string' && !(param.options ?? []).length) {
+      params[param.name] = schemaBound(param)
+      continue
+    }
+    if (param.type === 'color') {
+      const filament = filamentOf(value, filaments)
+      if (filament && !colours.includes(filament.id)) colours.push(filament.id)
+      if (filament && sameColour(value, param.initial)) {
+        params[param.name] = { kind: 'choice', choices: [] }
+        continue
+      }
+    }
+    if (value !== undefined) fixed[param.name] = value
   }
-  return { params, fixed }
+  return { params, fixed, colours }
+}
+
+/** A colour of the listing that none of its filaments has: publish would refuse it. */
+export interface ColourProblem {
+  name: string
+  label: string
+  colour: string
+}
+
+/**
+ * #6131 — every colour publish would refuse (422 `listing_colour_unknown`): a locked
+ * colour, or an offered one's default, that none of the listing's filaments has.
+ */
+export function colourProblems(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): ColourProblem[] {
+  const listed = filaments.filter((filament) => draft.colours.includes(filament.id))
+  return shownParams(schema).flatMap((param) => {
+    if (param.type !== 'color') return []
+    const value = draft.params[param.name] ? param.initial : (draft.fixed[param.name] ?? param.initial)
+    if (typeof value !== 'string' || filamentOf(value, listed)) return []
+    return [{ name: param.name, label: param.caption || param.name, colour: value }]
+  })
+}
+
+/** `draft` with `filament` on the listing and the colour `name` locked at it. */
+export function fixColour(draft: ListingDraft, name: string, filament: Filament): ListingDraft {
+  const { [name]: _offered, ...params } = draft.params
+  return {
+    ...draft,
+    params,
+    fixed: { ...draft.fixed, [name]: filament.colour },
+    colours: draft.colours.includes(filament.id) ? draft.colours : [...draft.colours, filament.id],
+  }
+}
+
+function rgb(colour: string): [number, number, number] | null {
+  const hex = /^#?([0-9a-f]{6})$/i.exec(colour.trim())?.[1]
+  if (!hex) return null
+  return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)]
+}
+
+/** The filaments nearest `colour` first (by RGB distance); one whose colour is not `#rrggbb` last. */
+export function nearestFilaments(colour: string, filaments: readonly Filament[]): Filament[] {
+  const target = rgb(colour)
+  const distance = (filament: Filament) => {
+    const other = rgb(filament.colour)
+    return target && other ? Math.hypot(target[0] - other[0], target[1] - other[1], target[2] - other[2]) : Infinity
+  }
+  return [...filaments].sort((a, b) => distance(a) - distance(b))
+}
+
+/**
+ * #6131 — the model media a customer can see: images only. A file kept as another type
+ * (a hand-uploaded `.glb` is stored as `application/octet-stream`) never shows.
+ */
+export function sellMedia(media: readonly MediaView[]): string[] {
+  return media.filter((item) => item.kind === 'image' && !item.missing && item.content_type.startsWith('image/')).map((item) => item.id)
 }
 
 /** The value a locked parameter has: the listing's, else the schema's default. */
