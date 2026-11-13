@@ -378,11 +378,11 @@ describe('StorefrontPage (#5282)', () => {
       const { user } = renderPage(<StorefrontPage />, { route: '/storefront?sell=job:j1' })
       expect(await screen.findByLabelText('Title')).toHaveValue('Name Keychain')
       // The design and the version the render read.
-      expect(screen.getByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
       // The slow render is said before publishing (#6120).
       expect(screen.getByRole('note')).toHaveTextContent('took 150 s to render')
       // The changed colour is locked at its filament; the text colour has none.
-      const problems = screen.getByTestId('colour-problems')
+      const problems = await screen.findByTestId('colour-problems')
       expect(problems).toHaveTextContent('Text is #E8532F')
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
       expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
@@ -419,7 +419,7 @@ describe('StorefrontPage (#5282)', () => {
       )
       renderPage(<StorefrontPage />, { route: '/storefront?sell=output:o1' })
       expect(await screen.findByLabelText('Title')).toHaveValue('Navy tag')
-      expect(screen.getByTestId('listing-design')).toHaveTextContent(`version ${versionIds.raised.slice(0, 7)} (current)`)
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`version ${versionIds.raised.slice(0, 7)} (current)`)
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
     })
 
