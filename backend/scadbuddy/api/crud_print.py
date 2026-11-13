@@ -102,20 +102,26 @@ provider's records and a settle take an ``Idempotency-Key`` and run with their l
 A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
 ``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
 `RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
-live, as a blob of kind ``slice`` gets one (`SLICE_KIND`); any other key (unknown, gone,
-or of another kind, such as a ``workspace`` file) is 403 ``transfer-refused``. The rule
-follows the blob's own life, not its `native_slices` row's: the slice sweep deletes a
-row 6 h after it finished, but a LAN run of several plates or copies reads each file
-again when it starts the next one, up to days later, until the content sweep collects
-it. Its cost: the print worker can read any live ``slice`` blob, any completed slice's
-file (a run's, the print dialog's or an order quote's) and the slicer's input copies and
-preset files, never another kind. A hold of the run on its file (a print-run holder in
-`blob_refs`, released where each run ends) would bind the key to the run; no such hold
-exists yet. The URL is the internal blob route's (`slicing/transfer.py`
-`Transfers.internal_get`, good for `READ_TTL`), signed under the API's KEK, on every
-backend: the token reads that one key. A read that mints, so natural: it takes no
-``Idempotency-Key``. Its answer carries a bearer token (``no-store``, as every CRUD
-answer): never logged.
+live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark the
+internal PUT route gives what the slicer uploads (`SLICED_OUTPUT_META`). Any other key
+(unknown, gone, of another kind such as a ``workspace`` file, or a slicer's input of kind
+``slice``: the laid-out copy and the preset files) is 403 ``transfer-refused``. The
+inputs are left out because a preset file can hold a secret: a Bambuddy local machine
+preset is copied into ``machine.json`` verbatim, and Bambu Studio's machine settings can
+carry ``printhost_apikey`` and ``printhost_password``. The rule follows the blob's own
+life, not its `native_slices` row's: the slice sweep deletes a row 6 h after it
+finished, but a LAN run of several plates or copies reads each file again when it starts
+the next one, up to days later, until the content sweep collects it. Its cost: the print
+worker can read any live sliced output (a run's, the print dialog's or an order
+quote's). A hold of the run on its file (a print-run holder in `blob_refs`, released
+where each run ends) would bind the key to the run; no such hold exists yet (#6122). The
+URL is the internal blob route's (`slicing/transfer.py` `Transfers.internal_get`, good
+for `READ_TTL`), signed under the API's KEK, on every backend: the token reads that one
+key. A backend that fails the key's read (an S3 error other than a missing object, a
+Bambuddy that does not answer) is 503 ``store_unavailable``, logged by the error's type
+only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A read
+that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
+token (``no-store``, as every CRUD answer): never logged.
 
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
@@ -220,6 +226,8 @@ from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
 from scadbuddy.slicing.transfer import (
     READ_TTL,
     SLICE_KIND,
+    SLICED_OUTPUT_META,
+    STORE_UNAVAILABLE,
     TRANSFER_REFUSED,
     TransferUnavailableError,
 )
@@ -1815,8 +1823,8 @@ class TransferUrlAsk(BaseModel):
 
 @router.post("/transfer-urls", name="crud_print_transfer_url")
 async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
-    """A read URL of ``key``, only if the content index holds it live as a ``slice`` blob
-    (see the module docstring). Without a content store, an internal URL or a KEK on the
+    """A read URL of ``key``, only if the content index holds it live as a slicer's
+    output (see the module docstring). Without a content store, an internal URL or a KEK on the
     API it is 503 ``not_configured``, which the worker does not retry."""
     try:
         transfers = slicing.transfers()
@@ -1824,8 +1832,23 @@ async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
         ) from None
-    stat = await transfers.content.stat(body.key)
-    if stat is None or stat.ref.kind != SLICE_KIND:
+    try:
+        stat = await transfers.content.stat(body.key)
+    except psycopg.Error:
+        raise  # the CRUD guard's: a passing one is 503 ``database-unavailable``
+    except Exception as error:
+        # The backend's own text may name the bucket or the object: kept out.
+        logger.warning("the content store did not read a transfer key: %s", type(error).__name__)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The blob store did not answer. Try again.",
+            reason=STORE_UNAVAILABLE,
+        ) from None
+    if (
+        stat is None
+        or stat.ref.kind != SLICE_KIND
+        or any(stat.meta.get(k) != v for k, v in SLICED_OUTPUT_META.items())
+    ):
         raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
     try:
         return transfers.internal_get(body.key, READ_TTL)

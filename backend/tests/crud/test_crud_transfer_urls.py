@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI
 
 from scadbuddy.api import crud_areas, crud_print, internal_blobs
@@ -30,13 +31,15 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy.output_reader import TRANSFER_URLS, BlobMissingAnswerError, RemoteBlobs
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64
-from scadbuddy.crud.client import CrudClient
+from scadbuddy.crud.client import CrudClient, CrudUnavailableError
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     READ_TTL,
     SLICE_KIND,
+    SLICED_OUTPUT_META,
+    STORE_UNAVAILABLE,
     TRANSFER_HEADER,
     TRANSFER_REFUSED,
     Transfers,
@@ -76,24 +79,37 @@ class _Content:
     internal GET route streams), over ``blobs``: key to kind and bytes. No
     `native_slices` row exists here: the rule follows the blob, not the row."""
 
-    def __init__(self, blobs: dict[str, tuple[BlobKind, bytes]]) -> None:
+    def __init__(
+        self,
+        blobs: dict[str, tuple[BlobKind, bytes]],
+        *,
+        meta: dict[str, Any] | None = None,
+        failure: Exception | None = None,
+    ) -> None:
         self.blobs = blobs
+        self.meta = meta or {}
+        self.failure = failure
         self.asked: list[str] = []
 
     async def stat(self, key: str) -> BlobStat | None:
         self.asked.append(key)
+        if self.failure is not None:
+            raise self.failure
         if key not in self.blobs:
             return None
         kind, data = self.blobs[key]
         ref = BlobRef(sha256="0" * 64, kind=kind, backend="s3", backend_id=key, size=len(data))
-        return BlobStat(key=key, ref=ref, slug=None, meta={}, touched_at=datetime.now(UTC))
+        return BlobStat(key=key, ref=ref, slug=None, meta=self.meta, touched_at=datetime.now(UTC))
 
     async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
         yield self.blobs[ref.backend_id][1]
 
 
-def _live(*keys: str, kind: BlobKind = SLICE_KIND) -> _Content:
-    return _Content({key: (kind, SLICED) for key in keys})
+def _live(*keys: str, kind: BlobKind = SLICE_KIND, marked: bool = True) -> _Content:
+    """``keys`` stored live as ``kind``; ``marked``, as the internal PUT route marks a
+    slicer's output (`SLICED_OUTPUT_META`), else as a slicer's input is stored."""
+    meta = dict(SLICED_OUTPUT_META) if marked else {}
+    return _Content({key: (kind, SLICED) for key in keys}, meta=meta)
 
 
 def _app(
@@ -149,8 +165,10 @@ async def _ask(app: FastAPI, key: str, caller: str = "print") -> httpx.Response:
         )
 
 
-def _blobs(app: FastAPI) -> RemoteBlobs:
-    return RemoteBlobs(_crud(app), client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app)))
+def _blobs(app: FastAPI, caller: str = "print") -> RemoteBlobs:
+    return RemoteBlobs(
+        _crud(app, caller), client=httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+    )
 
 
 async def _read(blobs: RemoteBlobs, key: str) -> bytes:
@@ -178,6 +196,66 @@ async def test_a_live_blob_of_another_kind_is_refused(tmp_path: Path, kind: Blob
     response = await _ask(_app(tmp_path, _live(key, kind=kind)), key)
     assert response.status_code == 403
     assert response.json()["reason"] == TRANSFER_REFUSED
+
+
+@pytest.mark.parametrize("name", ["input.3mf", "machine.json", "process.json", "filament_1.json"])
+async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path, name: str) -> None:
+    """The slicer's laid-out copy and preset files are stored as kind ``slice`` with no
+    mark (`workflows/slicing_activities.py`); a machine preset can carry Bambu Studio's
+    ``printhost_apikey``, so none of them gets a read URL."""
+    key = "slice-" + name.encode().hex().ljust(64, "0")[:64]
+    response = await _ask(_app(tmp_path, _live(key, marked=False)), key)
+    assert response.status_code == 403
+    assert response.json()["reason"] == TRANSFER_REFUSED
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ClientError(
+            {"Error": {"Code": "SlowDown", "Message": "s3://secret-bucket/slice-x said no"}},
+            "HeadObject",
+        ),
+        httpx.ConnectError("bambuddy.lan:8000 secret refused"),
+    ],
+)
+async def test_a_backend_that_fails_the_read_is_store_unavailable(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, failure: Exception
+) -> None:
+    """An S3 error other than a missing object, or a Bambuddy that does not answer: a 503
+    with a fixed reason, never the backend's text, and logged by the error's type only."""
+    caplog.set_level("WARNING", logger=crud_print.__name__)
+    content = _Content({KEY: (SLICE_KIND, SLICED)}, meta=dict(SLICED_OUTPUT_META), failure=failure)
+    response = await _ask(_app(tmp_path, content), KEY)
+    assert response.status_code == 503
+    assert response.json()["reason"] == STORE_UNAVAILABLE
+    assert "secret" not in response.text
+    [record] = [r for r in caplog.records if r.name == crud_print.__name__]
+    assert type(failure).__name__ in record.getMessage()
+    assert "secret" not in record.getMessage() and record.exc_info is None
+
+
+async def test_remote_blobs_retries_store_unavailable_as_a_passing_failure(
+    tmp_path: Path,
+) -> None:
+    """Unlike ``not_configured``, the client retries it within its budget, then raises
+    `CrudUnavailableError`, which the LAN upload's retry policy tries again."""
+    content = _Content({}, failure=ClientError({"Error": {"Code": "SlowDown"}}, "HeadObject"))
+    with pytest.raises(CrudUnavailableError) as raised:
+        await _read(_blobs(_app(tmp_path, content)), KEY)
+    assert raised.value.problem["reason"] == STORE_UNAVAILABLE
+    assert len(content.asked) > 1
+
+
+async def test_remote_blobs_raises_another_callers_refusal_as_api_error(tmp_path: Path) -> None:
+    """Only ``transfer-refused`` reads as a file no longer stored; a ``wrong_caller`` 403
+    stays the API's problem."""
+    content = _live(KEY)
+    with pytest.raises(ApiError) as raised:
+        await _read(_blobs(_app(tmp_path, content), "projects"), KEY)
+    assert not isinstance(raised.value, BlobMissingAnswerError)
+    assert raised.value.status == 403
+    assert content.asked == []
 
 
 async def test_another_callers_credential_is_refused(tmp_path: Path) -> None:

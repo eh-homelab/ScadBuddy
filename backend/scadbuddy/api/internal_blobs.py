@@ -29,6 +29,7 @@ from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     PENDING_PREFIX,
+    SLICED_OUTPUT_META,
     TRANSFER_HEADER,
     WORKSPACE_PENDING_PREFIX,
     TransferPuts,
@@ -105,6 +106,9 @@ async def put_blob(
             body,
             name="file.sealed" if workspace else "sliced.3mf",
             scope=BlobScope(folder="work"),
+            # A slicer's output, marked apart from the slicer's inputs of kind ``slice``:
+            # the print worker's read URL is minted for this mark only (#5298 Task 32).
+            meta=None if workspace else dict(SLICED_OUTPUT_META),
         )
     await asyncio.to_thread(
         TransferPuts(state.projection.pool).record,

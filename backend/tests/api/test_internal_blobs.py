@@ -31,6 +31,7 @@ from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     PENDING_PREFIX,
+    SLICED_OUTPUT_META,
     TRANSFER_HEADER,
     TRANSFER_TTL,
     PendingPut,
@@ -225,6 +226,8 @@ def test_put_then_finish_put(blob_client: TestClient) -> None:
     stat = blob_client.portal.call(content.stat, key)
     assert stat is not None
     assert blob_client.portal.call(content.read, stat.ref) == b"hello"
+    # A slicer's output, marked for the print worker's read URL (#5298 Task 32).
+    assert stat.meta == SLICED_OUTPUT_META
 
 
 def test_a_second_put_to_the_same_pending_key_upserts(blob_client: TestClient) -> None:

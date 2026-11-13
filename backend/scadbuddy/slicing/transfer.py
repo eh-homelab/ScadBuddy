@@ -8,8 +8,9 @@ the internal route's, to a pending key the API stores the body under and records
 The print worker's LAN print reads a native slice's sliced 3MF by a GET URL the API mints
 for it (`POST /api/v1/internal/crud/print/transfer-urls`, #5298 Task 32): always the
 internal route's (`internal_get`, good for `READ_TTL`), never a presigned one, so the print
-pod reaches the API only, and only for a key the content index holds live as a `SLICE_KIND`
-blob (the route's module docstring says why, and what it costs)."""
+pod reaches the API only, and only for a key the content index holds live as a slicer's
+output: a `SLICE_KIND` blob with `SLICED_OUTPUT_META` (the route's module docstring says
+why, and what it costs)."""
 
 from __future__ import annotations
 
@@ -34,8 +35,19 @@ TRANSFER_TTL = timedelta(hours=2)
 READ_TTL = timedelta(minutes=10)
 #: The only blob kind the print worker may get a read URL for: every native slice's file.
 SLICE_KIND: BlobKind = "slice"
-#: The reason of the 403 for any other key: unknown, gone, or of another kind.
+#: The index ``meta`` the internal PUT route gives a slicer's output, and the mark the
+#: print worker's read URL needs: the slicer's inputs (the laid-out copy, and the preset
+#: files, where a Bambuddy local machine preset is copied verbatim and so can carry Bambu
+#: Studio's ``printhost_apikey``/``printhost_password``) are of kind ``slice`` too, with
+#: no mark.
+SLICED_OUTPUT_META: dict[str, str] = {"output": "sliced"}
+#: The reason of the 403 for any other key: unknown, gone, of another kind, or a
+#: slicer's input.
 TRANSFER_REFUSED = "transfer-refused"
+#: The reason of the 503 when the content store's backend does not answer the read of
+#: the key: a passing failure, which the CRUD client retries as it does any 5xx but
+#: ``not_configured``.
+STORE_UNAVAILABLE = "store_unavailable"
 TRANSFER_HEADER = "X-ScadBuddy-Transfer"
 INTERNAL_BLOBS = "/api/v1/internal/blobs"
 #: The internal PUT route takes only a key with this prefix: a token never writes a

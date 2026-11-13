@@ -267,7 +267,7 @@ class RemoteBlobs:
     `RemoteOutputs` reads outputs: the print worker holds no store and no key to sign
     with. Each read first asks the API for a URL of its one key (``POST
     …/print/transfer-urls``, #5298 Task 32), which the API mints only for a key its
-    content index holds live as a ``slice`` blob. The URL's header carries a bearer
+    content index holds live as a slicer's output. The URL's header carries a bearer
     token, never logged; the URL is fetched with ``client``, which sends no service
     credential."""
 
