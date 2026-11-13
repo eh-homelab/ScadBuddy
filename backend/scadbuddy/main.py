@@ -115,6 +115,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.model_requests import sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.deposits import sync_deposits
@@ -1292,16 +1293,24 @@ def _sweep_storefront(
 
 async def _sweep_storefront_drafts_logged(state: AppState) -> None:
     """#5282: the storefront carts idle past ``storefront_draft_ttl_days``, then the
-    visitors idle as long with no order, and the visitors' renders past a day."""
+    visitors idle as long with no order, the visitors' renders past a day, and the
+    storefront's staging uploads (#6133, `model_requests.sweep_staged`)."""
     try:
         drafts, visitors, renders = await asyncio.to_thread(_sweep_storefront, state)
+        # After the carts: a swept cart's staged files are then claims with no source.
+        staged = await sweep_staged(state)
     except Exception:
         logger.exception("could not sweep the idle storefront carts")
         raise
-    if drafts or visitors or renders:
+    if drafts or visitors or renders or staged:
         logger.info(
             "swept idle storefront carts",
-            extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
+            extra={
+                "drafts": len(drafts),
+                "visitors": visitors,
+                "renders": renders,
+                "staged": staged,
+            },
         )
 
 

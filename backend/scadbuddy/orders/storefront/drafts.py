@@ -50,6 +50,7 @@ from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestI
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
+from scadbuddy.orders.storefront.model_requests import draft_sources
 from scadbuddy.orders.storefront.renders import checked_choice
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
@@ -94,7 +95,7 @@ def item_not_found() -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "item_not_found", "There is no such item.")
 
 
-def _draft_changed() -> ApiError:
+def draft_changed() -> ApiError:
     """409 ``draft_changed``: the draft moved under the write (submitted, or swept)."""
     return problem(
         status.HTTP_409_CONFLICT, "draft_changed", "Your order has changed. Load it again."
@@ -108,7 +109,7 @@ def requests_disabled() -> ApiError:
     )
 
 
-def _draft_full() -> ApiError:
+def draft_full() -> ApiError:
     """422 ``draft_full``: the draft holds `MAX_DRAFT_ITEMS` items already."""
     return problem(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -248,6 +249,11 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
 
     rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
+    sources = (
+        await asyncio.to_thread(draft_sources, state, order.id)
+        if any(item.kind == "request" for item in rows)
+        else {}
+    )
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -279,6 +285,8 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 labels=_labels(item, inputs, captions),
                 notes=item.notes if item.kind == "request" else None,
                 attachments=attachments,
+                own_model=sources.get(item.id, (False, []))[0],
+                sources=sources.get(item.id, (False, []))[1],
             )
         )
     return DraftView(
@@ -295,11 +303,12 @@ def _stored(state: AppState, key: str, route: str, asked: Any) -> Replay | None:
         return stored(conn, "storefront", key, route, asked)
 
 
-def request_sent(state: AppState, key: str) -> bool:
-    """Whether ``key`` holds a committed design request: its retry is answered even
-    once "Ask for a design" is off (`add_request`)."""
+def request_sent(state: AppState, key: str, route: str | None = None) -> bool:
+    """Whether ``key`` holds a committed write of ``route`` (a design request's by
+    default): its retry is answered even once "Ask for a design" is off
+    (`add_request`)."""
     with state.projection.pool.connection() as conn:
-        return has_reply(conn, "storefront", key, REQUEST_ROUTE)
+        return has_reply(conn, "storefront", key, route or REQUEST_ROUTE)
 
 
 async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
@@ -317,8 +326,13 @@ async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
 
     order = await asyncio.to_thread(find)
     if order is None:
-        raise _draft_changed()
+        raise draft_changed()
     return await _view(state, order)
+
+
+async def answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
+    """`_answer`, for the other draft writes (`model_requests.add_model_request`)."""
+    return await _answer(state, visitor_id, reply)
 
 
 async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
@@ -367,7 +381,7 @@ async def add_listing_item(
             items = orders.lifecycle.add_items(draft.id, by, [entry], cart_of=visitor.id, conn=conn)
             # Under the order's lock, which the add took: a full draft takes nothing.
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))
@@ -382,7 +396,7 @@ async def add_listing_item(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)
 
 
@@ -427,7 +441,7 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
     except LifecycleError as error:
         if error.not_found:
             raise item_not_found() from None
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)
 
 
@@ -537,7 +551,7 @@ async def add_request(
                 draft.id, by, [entry], cart_of=visitor.id, conn=conn
             )
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             for file, blob in zip(checked, kept, strict=True):
                 attachment = orders.lifecycle.add_attachment(
                     draft.id,
@@ -574,5 +588,5 @@ async def add_request(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)

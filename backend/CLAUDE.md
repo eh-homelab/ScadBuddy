@@ -996,7 +996,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
   order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
-  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run, then
+  the staging uploads of a customer's own models (#6133, `model_requests.sweep_staged`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -1374,6 +1375,27 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+- A customer's own models (#6133, spec 2026-11-13; migration
+  `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
+  CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
+  never pass through ScadBuddy (#5295): `presign_uploads` writes one `storefront_uploads` row
+  per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
+  `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
+  signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
+  uploads (each the visitor's, unclaimed, and a `HEAD` of exactly its declared size; no byte
+  read) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  for) and its `order_item_sources` (files `checking`; links as text only, typed by
+  `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
+  `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
+  print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
+  requests' `UploadAllowance` and Turnstile action `model`; the page's CSP names the bucket
+  in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
+  `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
+  `sweep_staged` (in the storefront drafts sweep) deletes each staging object with its row: a
+  slot never claimed an hour past its expiry, a claim whose source is gone, a claimed file of
+  a cart not submitted within 72 h (its source reads `refused`, `EXPIRED`), and a staging
+  object no row names past a day. `S3ContentBackend.sweep_unrecorded` never touches
+  `staging/`.
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

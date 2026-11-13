@@ -12,6 +12,23 @@ LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 #: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``item_not_found`` before a lookup.
 ITEM_ID: Final = LISTING_ID
+#: A customer's own models (#6133, spec 2026-11-13 §6.1). Each file goes straight to the
+#: store's staging area by a presigned PUT, at most `MAX_MODEL_FILE_BYTES` (256 MiB: 2.7
+#: times the largest real MakerWorld 3MF seen, 98 MB), at most `MAX_MODEL_FILES` files and
+#: `MAX_PRINT_LINKS` links a request and `MAX_MODEL_REQUEST_BYTES` declared in all; at most
+#: `MAX_PURCHASE_LINKS` things to buy per item (the owner's cap).
+MAX_MODEL_FILE_BYTES: Final = 256 * 1024 * 1024
+MAX_MODEL_FILES: Final = 20
+MAX_PRINT_LINKS: Final = 10
+MAX_PURCHASE_LINKS: Final = 5
+MAX_MODEL_REQUEST_BYTES: Final = 1024 * 1024 * 1024
+#: The longest file name of an upload slot, and of a link's note, in characters.
+MAX_UPLOAD_NAME: Final = 200
+MAX_LINK_NOTE: Final = 500
+#: The most colours a customer may ask for (the price book's filaments, by id).
+MAX_COLOUR_CHOICES: Final = 8
+#: An upload slot's id (``uuid4().hex``). Both sides refuse any other before a lookup.
+UPLOAD_ID: Final = re.compile(r"[0-9a-f]{32}")
 #: A design revision's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``revision_not_found`` before a lookup.
 REVISION_ID: Final = LISTING_ID
@@ -127,7 +144,7 @@ SESSION_HEADER: Final = "X-ScadBuddy-Store-Session"
 _INTERNAL_PROBLEMS: Final = frozenset({VISITOR_ID_PROBLEM, STORE_CLIENT_PROBLEM})
 #: The forms that take the bot check (spec §5.8), each the widget's ``action``: a token
 #: made for one form does not pass another's check. Each has a route.
-TurnstileAction = Literal["submit", "request", "sign_up", "sign_in"]
+TurnstileAction = Literal["submit", "request", "model", "sign_up", "sign_in"]
 #: The header the page sends the widget's token in.
 TURNSTILE_HEADER: Final = "X-Turnstile-Token"
 #: Cloudflare's bound on a token's length

@@ -47,6 +47,14 @@ its caps and under this process's upload gate as it arrives (`storefront/uploads
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
 
+Area ``models`` (#6133, `orders/storefront/model_requests.py`): a customer's own models.
+``POST …/uploads`` (``Idempotency-Key`` required) answers a presigned PUT per file into the
+store's staging area; ``POST …/draft/models`` claims the uploads it names (a ``HEAD`` each,
+no byte read) and adds a request item with its files and links as text; ``GET
+…/uploads/config`` is the origin of those PUTs, for the edge's page CSP. Both writes are
+404 ``requests_disabled`` while "Ask for a design" is off (unless the key holds a committed
+answer), and every route is 503 ``storefront_needs_s3`` on a store that is not S3.
+
 Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
 token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
 reads into the request's account; submit takes the account from there, never from a body,
@@ -119,6 +127,7 @@ from scadbuddy.orders.storefront.addresses import check_address
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
+    answer,
     get_draft,
     remove_item,
     request_sent,
@@ -131,6 +140,13 @@ from scadbuddy.orders.storefront.listings import (
     published_listing,
 )
 from scadbuddy.orders.storefront.mail import queue_mail
+from scadbuddy.orders.storefront.model_requests import (
+    MODELS_ROUTE,
+    UPLOADS_ROUTE,
+    add_model_request,
+    presign_uploads,
+    upload_origin,
+)
 from scadbuddy.orders.storefront.renders import (
     owned_job,
     render_estimate,
@@ -152,6 +168,7 @@ from scadbuddy.orders.storefront.wire import (
     CancelBody,
     CustomerOrderView,
     DraftView,
+    ModelRequestBody,
     PublicListing,
     PublicListings,
     RenderBody,
@@ -160,6 +177,8 @@ from scadbuddy.orders.storefront.wire import (
     StoreRender,
     SubmitBody,
     SubmittedOrder,
+    UploadSlots,
+    UploadSlotsBody,
 )
 from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
@@ -456,12 +475,12 @@ async def draft_submit(
     return await submit_draft(state, visitor, key, body, account)
 
 
-def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
-    """Whether "Ask for a design" is on, or ``key`` holds a committed request (a retry,
-    answered whatever changed since)."""
+def _requests_enabled(state: StateDep, key: str | None = None, route: str | None = None) -> bool:
+    """Whether "Ask for a design" is on, or ``key`` holds a committed request of ``route``
+    (a design request's by default; a retry, answered whatever changed since)."""
     if state.settings_store.snapshot().runtime.storefront_requests_enabled:
         return True
-    return key is not None and request_sent(state, key)
+    return key is not None and request_sent(state, key, route)
 
 
 class RequestsEnabled(BaseModel):
@@ -523,6 +542,79 @@ async def draft_request(
         return await add_request(state, visitor, key, text=upload.text, files=upload.files)
     finally:
         await upload.close()
+
+
+class UploadConfig(BaseModel):
+    """What the edge's page CSP needs for the browser's direct uploads (#6133)."""
+
+    origin: str
+
+
+@router.get("/uploads/config", name="crud_storefront_upload_config")
+async def upload_config(state: StateDep) -> UploadConfig:
+    """The origin of the store's presigned PUTs (`model_requests.upload_origin`); 503
+    ``storefront_needs_s3`` on a store that is not S3."""
+    return UploadConfig(origin=await upload_origin(state))
+
+
+@router.post(
+    "/uploads",
+    name="crud_storefront_uploads",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": _inlined(UploadSlotsBody)}},
+        }
+    },
+)
+async def uploads_route(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> UploadSlots:
+    """Upload slots for a "print my own model" request (#6133,
+    `orders/storefront/model_requests.py` `presign_uploads`): a presigned PUT per file,
+    straight to the store's staging area. 404 ``requests_disabled`` while "Ask for a
+    design" is off, unless the key holds a committed answer."""
+    key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state, key, UPLOADS_ROUTE):
+        raise requests_disabled()
+    body = await _body(
+        request, UploadSlotsBody, "draft_body_invalid", "This request is not a list of files."
+    )
+    return await presign_uploads(state, visitor, key, body)
+
+
+@router.post(
+    "/draft/models",
+    name="crud_storefront_draft_models",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": _inlined(ModelRequestBody)}},
+        }
+    },
+)
+async def draft_models(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """A "print my own model" request added to the visitor's draft (#6133,
+    `model_requests.add_model_request`): the uploads it names, claimed after a ``HEAD``
+    each, and its links as text. 404 ``requests_disabled`` as ``…/uploads``."""
+    key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state, key, MODELS_ROUTE):
+        raise requests_disabled()
+    body = await _body(
+        request, ModelRequestBody, "draft_body_invalid", "This request is not a model request."
+    )
+    reply = await add_model_request(state, visitor, key, body)
+    return await answer(state, visitor, reply)
 
 
 class PayCheckoutRead(BaseModel):

@@ -66,6 +66,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "turnstile",
         "accounts",
         "order",
+        "models",
     ],
     "agent": ["order-costs", "workspace-blob-refs"],
 }

@@ -25,6 +25,7 @@ from scadbuddy.storefront.static import (
     TURNSTILE_ORIGIN,
     StorefrontStatic,
 )
+from scadbuddy.storefront.upload_origin import bare_origin
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
     CRUD,
@@ -119,6 +120,40 @@ def test_only_the_pay_path_allows_paypal(dist: Path) -> None:
         csp = client.get(path).headers["content-security-policy"]
         assert csp == STOREFRONT_CSP, path
         assert "paypal" not in csp
+
+
+def test_every_page_may_put_to_the_upload_origin(dist: Path) -> None:
+    """#6133: the page PUTs a customer's model files straight to the store's bucket."""
+
+    async def bucket() -> str | None:
+        return "https://atl1.digitaloceanspaces.com"
+
+    app = StorefrontStatic(dist, upload_origin=bucket)
+    client = TestClient(Starlette(routes=[Mount("/", app=app)]))
+    for path in ("/", "/print-my-model", "/pay"):
+        csp = client.get(path).headers["content-security-policy"]
+        connect = directive(csp, "connect-src").split()
+        assert connect[:2] == ["connect-src", "'self'"], path
+        assert "https://atl1.digitaloceanspaces.com" in connect, path
+        assert "digitaloceanspaces" not in directive(csp, "script-src")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://atl1.digitaloceanspaces.com", "https://atl1.digitaloceanspaces.com"),
+        ("http://127.0.0.1:9000", "http://127.0.0.1:9000"),
+        ("https://b.example/path", None),
+        ("https://b.example?x=1", None),
+        ("javascript:alert(1)", None),
+        ("https://b.example; script-src *", None),
+        ("https://u@b.example", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_only_a_bare_origin_reaches_the_csp(value: str | None, expected: str | None) -> None:
+    assert bare_origin(value) == expected
 
 
 def test_the_pay_path_keeps_the_bot_check_origin_while_a_site_key_is_set(dist: Path) -> None:

@@ -190,6 +190,55 @@ async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Cl
     return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
 
 
+def _requests_off() -> ApiError:
+    return ApiError(
+        404,
+        "This shop does not take design requests.",
+        type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+    )
+
+
+@visitor_router.post("/uploads")
+async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """Upload slots for "Print my own model" (#6133, spec 2026-11-13 §6.2): a presigned
+    PUT per file, straight to the store, so no file byte passes the edge. Refused before
+    the CRUD call: 404 ``requests_disabled`` while "Ask for a design" is off, 428
+    ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`, the design
+    requests' own, so the two forms do not add up), then the bot check (action ``model``;
+    neither refusal spends the allowance). A passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
+    key = _request_key(request, visitor_id)
+    allowance: UploadAllowance = state.upload_allowance
+    held = allowance.start(client)
+    if isinstance(held, int):
+        raise ApiError(
+            429,
+            "You have sent a lot of files, or some are still sending. Try again later.",
+            type_=REQUEST_LIMITED,
+            headers={"Retry-After": str(held)},
+            retry_after=held,
+        )
+    try:
+        await require_turnstile(request, "model")
+        allowance.spend(held)
+        body = await _body(request, "draft_body_invalid")
+    finally:
+        allowance.finish(held)
+    return await crud.upload_slots(body, key=key, visitor_id=visitor_id, client=client)
+
+
+@visitor_router.post("/draft/models")
+async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the
+    browser filled and the links, as the visitor sent them. The bot check and the
+    allowance were the slots' (``POST /uploads``)."""
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "draft_body_invalid")
+    return await crud.add_models(body, key=key, visitor_id=visitor_id, client=client)
+
+
 @visitor_router.delete("/draft/items/{item_id}")
 async def remove_item(
     item_id: str, request: Request, crud: Crud, visitor_id: Visitor, client: Client
