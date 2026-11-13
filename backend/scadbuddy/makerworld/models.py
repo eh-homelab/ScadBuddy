@@ -138,3 +138,12 @@ class MakerWorldImported(BaseModel):
         description="Nothing new was downloaded or stored: Bambuddy had this profile already"
         " and, on native, ScadBuddy's library already held the same bytes"
     )
+    bambuddy_was_existing: bool = Field(
+        description="Bambuddy had this profile already and downloaded nothing: its library"
+        " file `bambuddy_library_file_id` is not new"
+    )
+    copied: bool = Field(
+        description="On native, this import stored a new file in ScadBuddy's library"
+        " (`library_file_id`); false when the library already held the same bytes, and"
+        " always false on bambuddy"
+    )

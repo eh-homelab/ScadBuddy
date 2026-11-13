@@ -53,6 +53,8 @@ async def import_model(
             bambuddy_library_file_id=imported.library_file_id,
             bambuddy_folder_id=imported.folder_id,
             was_existing=imported.was_existing,
+            bambuddy_was_existing=imported.was_existing,
+            copied=False,
         )
     held = locks()
     try:
@@ -79,6 +81,8 @@ async def import_model(
         bambuddy_library_file_id=imported.library_file_id,
         bambuddy_folder_id=imported.folder_id,
         was_existing=imported.was_existing and result == "skipped_same_hash",
+        bambuddy_was_existing=imported.was_existing,
+        copied=result == "copied",
     )
 
 

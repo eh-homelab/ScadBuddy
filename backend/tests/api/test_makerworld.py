@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from functools import partial
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -189,6 +190,8 @@ def test_import_on_native_files_the_file_in_scadbuddys_library_once(
     assert imported["filename"] == "Benchy.3mf"
     assert imported["profile_id"] == 77
     assert imported["was_existing"] is False
+    assert imported["bambuddy_was_existing"] is False
+    assert imported["copied"] is True
     assert seen == [
         {"model_id": 123, "source_type": "makerworld", "profile_id": 77, "folder_id": 31}
     ]
@@ -204,7 +207,32 @@ def test_import_on_native_files_the_file_in_scadbuddys_library_once(
     assert again.status_code == 200, again.text
     assert again.json()["library_file_id"] == imported["library_file_id"]
     assert again.json()["was_existing"] is True
+    assert again.json()["bambuddy_was_existing"] is True
+    assert again.json()["copied"] is False
     assert len(native.rows.files_by_sha256([DIGEST])) == 1
+
+
+@respx.mock
+def test_import_on_native_names_each_side_that_made_a_new_file(native_client: TestClient) -> None:
+    # Bambuddy reuses its file, but ScadBuddy's library does not hold it yet; then
+    # Bambuddy downloads it again, but ScadBuddy's library already holds the bytes.
+    answers = iter([_imported(was_existing=True), _imported()])
+    respx.post(f"{API}/makerworld/import").mock(
+        side_effect=lambda _: Response(200, json=next(answers))
+    )
+    _bambuddy_file()
+    body = {"model_id": 123, "profile_id": 77}
+    first = native_client.post("/api/v1/makerworld/import", json=body, headers=press())
+    assert first.status_code == 200, first.text
+    assert first.json()["was_existing"] is False
+    assert first.json()["bambuddy_was_existing"] is True
+    assert first.json()["copied"] is True
+    again = native_client.post("/api/v1/makerworld/import", json=body, headers=press())
+    assert again.status_code == 200, again.text
+    assert again.json()["library_file_id"] == first.json()["library_file_id"]
+    assert again.json()["was_existing"] is False
+    assert again.json()["bambuddy_was_existing"] is False
+    assert again.json()["copied"] is False
 
 
 @respx.mock
@@ -255,7 +283,33 @@ def test_import_on_bambuddy_answers_bambuddys_file(bambuddy_client: TestClient) 
         "bambuddy_library_file_id": 9,
         "bambuddy_folder_id": 31,
         "was_existing": False,
+        "bambuddy_was_existing": False,
+        "copied": False,
     }
+
+
+@respx.mock
+def test_an_import_tries_a_quick_failure_again(bambuddy_client: TestClient) -> None:
+    route = respx.post(f"{API}/makerworld/import").mock(
+        side_effect=[httpx.ConnectError("refused"), Response(200, json=_imported())]
+    )
+    answer = bambuddy_client.post(
+        "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
+    )
+    assert answer.status_code == 200, answer.text
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_an_import_never_tries_a_timed_out_download_again(bambuddy_client: TestClient) -> None:
+    route = respx.post(f"{API}/makerworld/import").mock(
+        side_effect=[httpx.ReadTimeout("slow"), Response(200, json=_imported())]
+    )
+    answer = bambuddy_client.post(
+        "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
+    )
+    assert answer.status_code == 504, answer.text
+    assert route.call_count == 1
 
 
 @respx.mock

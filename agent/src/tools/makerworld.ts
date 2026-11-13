@@ -54,7 +54,10 @@ export const makerworldTools: Tool[] = [
       "Import a MakerWorld print profile into the library: Bambuddy downloads its 3MF (with its Bambu Cloud sign-in) into Bambuddy's library, " +
       "and on library_backend native ScadBuddy copies it into its own library. Answers `library_file_id`, the file order_item_add (`library_file_id`) " +
       "and print_output take, with its `folder_id` in that library (`library` says which), and Bambuddy's copy as `bambuddy_library_file_id`. " +
-      'A repeat downloads nothing (`was_existing`). The download can take minutes: an answer with `status: running` is still importing; follow it with ' +
+      'A repeat downloads nothing (`was_existing`; `bambuddy_was_existing` for Bambuddy\'s side, `copied` when ScadBuddy\'s library stored a new file). ' +
+      'An import of a model and profile already imported, into another folder, makes no second file: it answers the earlier file in its earlier folder ' +
+      "(Bambuddy reuses its import of the profile, and ScadBuddy's library reuses a file of the same bytes); move_library_file moves it. " +
+      'The download can take minutes: an answer with `status: running` is still importing; follow it with ' +
       "get_operation until it ends, and do not import again meanwhile. Get `model_id` and `profile_id` from resolve_makerworld_url. " +
       FOLDERS +
       ' `folder_id` is refused (422) on library_backend bambuddy. A 409 for the API key scope can also be MakerWorld refusing the download (Bambuddy\'s reason is quoted).',

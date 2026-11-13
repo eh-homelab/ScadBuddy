@@ -40,6 +40,8 @@ const IMPORTED = {
   bambuddy_library_file_id: 9,
   bambuddy_folder_id: 31,
   was_existing: false,
+  bambuddy_was_existing: false,
+  copied: true,
 }
 
 it('status and resolve are read, import is outward', () => {

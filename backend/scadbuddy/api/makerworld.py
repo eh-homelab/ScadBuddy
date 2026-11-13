@@ -42,6 +42,8 @@ router = APIRouter(prefix="/makerworld", tags=["makerworld"])
 #: The Bambuddy files of a model whose bytes a resolve looks up in the native library: a
 #: model imported once per profile has a few.
 MAX_MATCHED = 20
+#: How many of those Bambuddy files a resolve reads at once.
+READS_AT_ONCE = 4
 
 
 @router.get(
@@ -100,17 +102,22 @@ async def _native_copies(
     client: BambuddyClient, native: NativeLibrary, bambuddy_ids: list[int]
 ) -> list[int]:
     """The live native files holding the bytes of these Bambuddy files, by SHA-256 (the
-    match a ``bb_to_sb`` copy makes). A Bambuddy file gone since its import is left out."""
-    digests: list[str] = []
-    for file_id in bambuddy_ids[:MAX_MATCHED]:
-        try:
-            found = await client.library_file(file_id)
-        except ApiError as error:
-            if error.status == status.HTTP_404_NOT_FOUND:
-                continue
-            raise
-        if found.file_hash is not None:
-            digests.append(found.file_hash)
+    match a ``bb_to_sb`` copy makes). A Bambuddy file gone since its import is left out.
+    The reads run ``READS_AT_ONCE`` at a time."""
+    reads = asyncio.Semaphore(READS_AT_ONCE)
+
+    async def digest(file_id: int) -> str | None:
+        async with reads:
+            try:
+                found = await client.library_file(file_id)
+            except ApiError as error:
+                if error.status == status.HTTP_404_NOT_FOUND:
+                    return None
+                raise
+        return found.file_hash
+
+    found = await asyncio.gather(*(digest(file_id) for file_id in bambuddy_ids[:MAX_MATCHED]))
+    digests = [d for d in found if d is not None]
     rows = await asyncio.to_thread(native.rows.files_by_sha256, digests)
     return [row.id for row in rows]
 
