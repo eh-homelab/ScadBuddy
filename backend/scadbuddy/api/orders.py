@@ -55,7 +55,7 @@ from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
-from scadbuddy.orders.archives import AttemptArchives, attempt_archives
+from scadbuddy.orders.archives import AttemptArchives, attempt_archives, mirror_archives
 from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
@@ -2843,33 +2843,60 @@ async def duplicate_item(
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
 
 
+async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> Fulfilment:
+    """A hand attempt with what its archives say copied onto it (#6132): job cost needs
+    its grams and seconds when the quote has none. Logged, never raised: the attempt is
+    recorded, and its archives are read again when they are shown."""
+    if not attempt.archive_ids or attempt.print_run_id is not None:
+        return attempt
+    try:
+        written, _ = await mirror_archives(orders.lifecycle, orders.integrations, attempt)
+    except Exception:
+        logger.warning("could not copy a hand attempt's print archives", exc_info=True)
+        return attempt
+    return written
+
+
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments",
     response_model=Fulfilment,
     status_code=status.HTTP_201_CREATED,
     summary="Record a fulfilment attempt",
+    description=(
+        "An attempt by hand. With `archive_id`, the archive's grams, seconds and print "
+        "times are copied onto the attempt at once when a Bambuddy is linked (#6132); a "
+        "failed read records the attempt without them."
+    ),
 )
 async def record_fulfilment(
     order_id: str, item_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
     check_path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.record_fulfilment(order_id, item_id, body, by))
+    attempt = await _run(lambda: orders.lifecycle.record_fulfilment(order_id, item_id, body, by))
+    return await _with_archive_facts(orders, attempt)
 
 
 @router.patch(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}",
     response_model=Fulfilment,
     summary="Edit an attempt not yet accepted",
+    description=(
+        "An edit keeps the attempt's archives. An attempt by hand with archives copies "
+        "their grams and seconds again when a Bambuddy is linked (#6132), as a read of "
+        "its archives does. Only the first copy writes their print times: after it, a time "
+        "the edit sets stays. A failed read keeps the edit."
+    ),
 )
 async def update_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
     check_path(order_id, item_id, fulfilment_id)
     by = current_actor()
-    return await _run(
+    attempt = await _run(
         lambda: orders.lifecycle.update_fulfilment(order_id, item_id, fulfilment_id, body, by)
     )
+    return await _with_archive_facts(orders, attempt)
 
 
 class ArchiveCopy(BaseModel):
