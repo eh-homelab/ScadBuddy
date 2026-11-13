@@ -1385,9 +1385,10 @@ class RemoteSpoolStore(SpoolStore):
         or a slower commit, can still commit after the raise. The call is sent once,
         with no retry, and waits ``timeout`` seconds for its answer; the API's deadline
         is ``timeout`` less `DEADLINE_MARGIN` from its receipt, so it rolls back (409
-        ``past-deadline``, raised here as `TimeoutError`) before this call stops waiting. A call that gets
-        no answer waits out its ``timeout`` before it raises, so the API is past its
-        deadline by then. Less than the margin left raises `TimeoutError` unsent."""
+        ``past-deadline``, raised here as `TimeoutError`) before this call stops
+        waiting. A call that gets no answer waits out its ``timeout`` before it raises,
+        so the API is past its deadline by then. Less than the margin left raises
+        `TimeoutError` unsent."""
         body: dict[str, Any] = {
             "provider": provider,
             "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
