@@ -1224,8 +1224,7 @@ class PrintWorkerDeps:
     library: LibraryReads | None = None
     #: The printer registry (#3823): each LAN printer's watch, on the follow queue. The
     #: registry, the reports and the access code come from the API's CRUD routes (#5298
-    #: Task 29); the KEK unseals a virtual printer's request and signs a LAN print's
-    #: transfer tokens.
+    #: Task 29); the KEK unseals a virtual printer's request.
     printers: PrinterStore | None = None
     reports: PrinterReportStore | None = None
     kek: Kek | None = None
@@ -1254,7 +1253,8 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     every use, and the runs, outcomes, operations, events, uploads, slices, background
     slices, project records, print links, sends, outputs' last prints, printer rows, LAN
     reports, access codes, the rack hotends' usage, the spools, ScadBuddy's own spools,
-    the kept presets and a native slice's start go through its CRUD routes. ``crud``, the
+    the kept presets, a native slice's start and a LAN print's read URL of its sliced file
+    go through its CRUD routes. ``crud``, the
     client of those routes, defaults to one with the worker's credential. With a proof
     (`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`) it is exchanged
     for that proof alone (`exchange_source`, no view fallback), whether or not
@@ -1333,9 +1333,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # activity rows, and counts each operation it ends (#2295).
     print_runs = RemotePrintRunStore(crud)
     operations = RemoteOperationStore(crud, "print")
-    # The worker's KEK opens no access code (the API does, plan D8): it still unseals a
-    # virtual printer's request (`bambuddy/virtual_printers.py`) and signs a LAN print's
-    # transfer tokens (`RemoteBlobs`, inventory Q31).
+    # The worker's KEK opens no access code (the API does, plan D8) and signs no transfer
+    # token (the API mints the URL, #5298 Task 32): it still unseals a virtual printer's
+    # request (`bambuddy/virtual_printers.py`).
     kek = settings_kek(settings.secret_key_file)
     # The registry and the LAN reports through the API (#5298 Task 29): a run's first
     # check makes or merges a row there (#4625), whose merge writes tables this worker's
@@ -1436,9 +1436,9 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             spools=spools,
         )
     )
-    # A LAN print's sliced blob, through the API's internal route with a token signed
-    # under the key (plan 2026-10-16 Task 9); a LAN print needs the key anyway.
-    blobs = RemoteBlobs(settings.api_internal_url, kek) if kek is not None else None
+    # A LAN print's sliced blob, through the API's internal route (plan 2026-10-16 Task 9)
+    # by a URL the API mints for a native slice's key (#5298 Task 32): no key here.
+    blobs = RemoteBlobs(crud)
     lan_printing = LanActivities(
         LanDeps(
             printers=printers,
@@ -1512,6 +1512,7 @@ PRINT_CRUD_AREAS = frozenset(
         "printers",
         "rack",
         "spools",
+        "transfer-urls",
     }
 )
 

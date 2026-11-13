@@ -3,7 +3,12 @@
 store credentials: a GET is S3's presigned URL of the object on `store_backend` s3, and
 the internal blob route (`api/internal_blobs.py`) on any other backend; every PUT is
 the internal route's, to a pending key the API stores the body under and records in
-`transfer_puts`. A URL's header carries a bearer token: never log one."""
+`transfer_puts`. A URL's header carries a bearer token: never log one.
+
+The print worker's LAN print reads a native slice's sliced 3MF by a GET URL the API mints
+for it (`POST /api/v1/internal/crud/print/transfer-urls`, #5298 Task 32): always the
+internal route's (`internal_get`, good for `READ_TTL`), never a presigned one, so the print
+pod reaches the API only, and only for a key a completed `native_slices` row names."""
 
 from __future__ import annotations
 
@@ -24,6 +29,10 @@ from scadbuddy.store.content_models import BlobMissingError
 from scadbuddy.store.s3 import S3ContentBackend
 
 TRANSFER_TTL = timedelta(hours=2)
+#: How long the print worker's read URL is good for: one read, started at once.
+READ_TTL = timedelta(minutes=10)
+#: The reason of the 403 for a key no completed `native_slices` row names.
+TRANSFER_REFUSED = "transfer-refused"
 TRANSFER_HEADER = "X-ScadBuddy-Transfer"
 INTERNAL_BLOBS = "/api/v1/internal/blobs"
 #: The internal PUT route takes only a key with this prefix: a token never writes a
@@ -109,7 +118,7 @@ class Transfers:
         self.secret = secret
         self.now = now
 
-    def _internal(self, method: Method, key: str) -> TransferUrl:
+    def _internal(self, method: Method, key: str, ttl: timedelta = TRANSFER_TTL) -> TransferUrl:
         if self.internal_base_url is None:
             raise TransferUnavailableError(
                 "the native slicer needs SCADBUDDY_API_INTERNAL_URL: the worker reaches the"
@@ -122,7 +131,7 @@ class Transfers:
             )
         # Whole seconds, as the token carries: the URL then says the instant the route
         # stops taking it, not up to a second after.
-        expires_at = (self.now() + TRANSFER_TTL).replace(microsecond=0)
+        expires_at = (self.now() + ttl).replace(microsecond=0)
         token = TransferToken(method=method, blob_key=key, expires_at=expires_at)
         return TransferUrl(
             url=f"{self.internal_base_url}{INTERNAL_BLOBS}/{key}",
@@ -130,12 +139,13 @@ class Transfers:
             expires_at=expires_at,
         )
 
-    def internal_get(self, key: str) -> TransferUrl:
+    def internal_get(self, key: str, ttl: timedelta = TRANSFER_TTL) -> TransferUrl:
         """The internal GET route's URL of ``key``, whether or not it is stored, on any
-        backend. Public for the route's tests, which run on moto's S3, where `mint_get`
-        presigns instead. A caller that needs ``key`` stored (a `BlobMissingError` now,
-        not a 404 from the worker later) uses `mint_get`."""
-        return self._internal("GET", key)
+        backend, good for ``ttl``. The print worker's read URL (`READ_TTL`), and the
+        route's tests', which run on moto's S3, where `mint_get` presigns instead. A
+        caller that needs ``key`` stored (a `BlobMissingError` now, not a 404 from the
+        worker later) uses `mint_get`."""
+        return self._internal("GET", key, ttl)
 
     async def mint_get(self, key: str) -> TransferUrl:
         """A URL that reads the stored ``key``: `BlobMissingError` if it is not."""

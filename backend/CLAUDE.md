@@ -334,8 +334,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `/opt/slicer-profiles` from the Dockerfile's `slicer-dist`; `Profiles.version` keys the
   slices), `presets.py` (a `SlicePlan` built into machine, process and filament files,
   `native_preset_key`), `slice_info.py` (grams and G-code from the sliced 3MF),
-  `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
-  the internal blob routes, a token MACed under a KEK-derived key; never log one),
+  `transfer.py` and `transfer_token.py` (the slicer worker's transfer URLs: presigned S3
+  GET or the internal blob routes, a token MACed under a KEK-derived key; never log one;
+  the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
+  always the internal route's, `READ_TTL`, only for a key a completed `native_slices` row
+  names, `NativeSliceStore.names_blob`, else 403 `transfer-refused`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
   and presets, which the dialog and the run share; the dialog's Reslice gives a
@@ -486,8 +489,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   printer merge runs on the API alone; the access code is opened there and answered to
   `crud.print` only, `no-store`, never logged; a report's write (`advance`, which answers
   the print it ended and the one it started, the nudge's start) and a virtual printer's
-  sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and
-  signs a LAN print's transfer tokens), and its rack hotends' usage (`RemoteRackUsage`, a
+  sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and,
+  with no proof, its sealed credential), and its rack hotends' usage (`RemoteRackUsage`, a
   `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
   route and one transaction on the API; every write but `seen` takes an
   `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
@@ -495,7 +498,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298
   Task 31: each write runs whole on the API under its lock; a provider's records and a
   run's settle take an `Idempotency-Key`; the refresh, tray links and the shelf's edits
-  are the API's), and it
+  are the API's), and a LAN print's read URL of a native slice's file (`RemoteBlobs`
+  asks the API, area `transfer-urls`, #5298 Task 32; it signs nothing), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning

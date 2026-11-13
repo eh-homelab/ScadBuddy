@@ -99,6 +99,17 @@ advisory lock), ``…/spools/refreshes/{provider}/failed``, ``…/native-spools/
 transaction here (plan D6). A failure, a start's uses and a slice's start are natural; a
 provider's records and a settle take an ``Idempotency-Key`` and run with their ledger row.
 
+A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
+``transfer-urls``, #5298 Task 32), for `crud/print.py`'s caller `bambuddy/output_reader.py`
+`RemoteBlobs`: the worker holds no key to sign one. Only a key a completed
+`native_slices` row names as its sliced file gets one (`NativeSliceStore.names_blob`), any
+other is 403 ``transfer-refused``: the token reads one blob, and the print worker reads
+only the slices its runs made. The URL is the internal blob route's
+(`slicing/transfer.py` `Transfers.internal_get`, good for `READ_TTL`), signed under the
+API's KEK, on every backend. A read that mints, so natural: it takes no
+``Idempotency-Key``. Its answer carries a bearer token (``no-store``, as every CRUD
+answer): never logged.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -197,7 +208,9 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
+from scadbuddy.slicing.transfer import READ_TTL, TRANSFER_REFUSED
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
@@ -1782,3 +1795,23 @@ async def start_native_slice(body: SliceStartAsk, slicing: SlicingDep) -> Native
         )
     except SliceSubjectError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=SLICE_SUBJECT) from None
+
+
+class TransferUrlAsk(BaseModel):
+    key: str
+
+
+@router.post("/transfer-urls", name="crud_print_transfer_url")
+async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
+    """A read URL of ``key``, only if a completed native slice names it (see the module
+    docstring). Without a content store, an internal URL or a KEK on the API it is 503
+    ``not_configured``, which the worker does not retry."""
+    if not await slicing.store.names_blob(body.key):
+        raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
+    try:
+        return slicing.transfers().internal_get(body.key, READ_TTL)
+    except RuntimeError as error:
+        # No content store (`Slicing.transfers`), or a `TransferUnavailableError`.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None

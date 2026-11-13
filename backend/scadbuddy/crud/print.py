@@ -897,9 +897,9 @@ class RemotePrinterStore(PrinterStore):
     every method the worker calls is a route under ``…/print/printers`` (areas
     ``printer-ensure`` and ``printers``). A row is made or merged on the API, which
     announces a merge. ``kek`` is the worker's own: the API opens the access code (plan
-    D8), but the worker still needs its KEK for a virtual printer's sealed request
-    (`bambuddy/virtual_printers.py`) and a LAN print's transfer tokens (`RemoteBlobs`),
-    so `bambuddy/print_run.py` `_registry_path` still reads it."""
+    D8) and mints a LAN print's read URL (#5298 Task 32), but the worker still needs its
+    KEK for a virtual printer's sealed request (`bambuddy/virtual_printers.py`), and
+    `bambuddy/print_run.py` `_registry_path` still reads it."""
 
     def __init__(
         self, client: CrudSyncClient, kek: Kek | None, *, previous_kek: Kek | None = None
@@ -1557,7 +1557,8 @@ _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
 
 #: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities
 #: on the ``library`` worker (`workflows/slicing_activities.py`), the dialog's read
-#: (`slicing/preview.py`) and the sweeps (`slicing/start.py`, from `main.py`).
+#: (`slicing/preview.py`), the sweeps (`slicing/start.py`, from `main.py`) and the
+#: transfer URL route's allow rule (`api/crud_print.py` `transfer_url`, #5298 Task 32).
 NATIVE_SLICES_API_ONLY = (
     "running",
     "prepared",
@@ -1568,6 +1569,7 @@ NATIVE_SLICES_API_ONLY = (
     "get",
     "reusable",
     "sweep",
+    "names_blob",
 )
 
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
@@ -23,11 +22,12 @@ from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.part_settings import PartSettings, PartSettingsMap, by_colour
 from scadbuddy.bambuddy.project_file import cached_defaults, output_stem
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
-from scadbuddy.core.secrets import Kek
+from scadbuddy.crud.client import CrudClient, CrudRefusedError
+from scadbuddy.crud.wire import PREFIX
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, OutputNotFoundError, OutputStore
-from scadbuddy.slicing.transfer import INTERNAL_BLOBS, TRANSFER_HEADER
-from scadbuddy.slicing.transfer_token import TransferToken, sign, transfer_key
+from scadbuddy.slicing.models import TransferUrl
+from scadbuddy.slicing.transfer import TRANSFER_REFUSED
 from scadbuddy.store.content import ContentStore, template_title
 
 #: The API's internal routes the remote reader calls (``api/internal.py``).
@@ -241,10 +241,10 @@ class RemoteOutputs:
         return OutputNaming.model_validate_json(_answer(response, JSON_MEDIA_TYPE).content)
 
 
-#: How long a `RemoteBlobs` read's token is good for: one read, started at once.
-BLOB_TOKEN_TTL = timedelta(minutes=10)
 #: A sliced 3MF streamed from the API: as long as an upload may take.
 BLOB_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
+#: The print worker's route that mints a read URL (`api/crud_print.py` `transfer_url`).
+TRANSFER_URLS = f"/api/v1{PREFIX}/print/transfer-urls"
 
 
 class BlobMissingAnswerError(LookupError):
@@ -260,33 +260,41 @@ class SlicedBlobs(Protocol):
 
 class RemoteBlobs:
     """`SlicedBlobs` through the API's internal blob route (`api/internal_blobs.py`), as
-    `RemoteOutputs` reads outputs: the print worker holds no store. Each read carries a
-    token for its one key (`slicing/transfer_token.py`), MACed under the KEK, which a
-    LAN print's worker holds anyway; never logged."""
+    `RemoteOutputs` reads outputs: the print worker holds no store and no key to sign
+    with. Each read first asks the API for a URL of its one key (``POST
+    …/print/transfer-urls``, #5298 Task 32), which the API mints only for a key a
+    completed native slice names. The URL's header carries a bearer token, never logged;
+    the URL is fetched with ``client``, which sends no service credential."""
 
-    def __init__(
-        self,
-        base_url: str,
-        kek: Kek,
-        *,
-        client: httpx.AsyncClient | None = None,
-        now: Callable[[], datetime] = lambda: datetime.now(UTC),
-    ) -> None:
-        self._secret = transfer_key(kek)
-        self._now = now
-        self._client = client or httpx.AsyncClient(
-            base_url=base_url.rstrip("/"), timeout=BLOB_TIMEOUT
-        )
+    def __init__(self, crud: CrudClient, *, client: httpx.AsyncClient | None = None) -> None:
+        self._crud = crud
+        self._client = client or httpx.AsyncClient(timeout=BLOB_TIMEOUT)
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _url(self, key: str) -> TransferUrl:
+        """The API's read URL of ``key``. A refusal is an `ApiError`, which the LAN
+        upload does not retry: a 403 ``transfer-refused`` (no completed native slice
+        names the key), or the API's 503 ``not_configured``."""
+        try:
+            response = await self._crud.request("POST", TRANSFER_URLS, json={"key": key})
+        except CrudRefusedError as error:
+            if error.problem.get("reason") == TRANSFER_REFUSED:
+                raise ApiError(
+                    error.status,
+                    f"The API refused to read the sliced file {key}: no completed native"
+                    " slice names it. Print again to slice it again.",
+                    reason=TRANSFER_REFUSED,
+                ) from None
+            raise ApiError(
+                error.status, str(error.problem.get("detail") or "transfer URL refused")
+            ) from None
+        return TransferUrl.model_validate_json(response.content)
+
     async def stream(self, key: str) -> AsyncGenerator[bytes]:
-        expires_at = (self._now() + BLOB_TOKEN_TTL).replace(microsecond=0)
-        token = sign(self._secret, TransferToken(method="GET", blob_key=key, expires_at=expires_at))
-        async with self._client.stream(
-            "GET", f"{INTERNAL_BLOBS}/{key}", headers={TRANSFER_HEADER: token}
-        ) as response:
+        url = await self._url(key)
+        async with self._client.stream("GET", url.url, headers=url.headers) as response:
             if not response.is_success:
                 await response.aread()
                 if _gone(response):

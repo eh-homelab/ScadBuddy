@@ -231,8 +231,8 @@ class LanActivities:
         if sliced.blob_key is not None:
             if self.d.blobs is None:
                 raise _failed(
-                    "This worker cannot read the native slicer's files: it needs"
-                    " SCADBUDDY_API_INTERNAL_URL and SCADBUDDY_SECRET_KEY_FILE.",
+                    "This worker cannot read the native slicer's files: the API has no"
+                    " content store (set store_backend to s3 or bambuddy).",
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             async with aclosing(self.d.blobs.stream(sliced.blob_key)) as chunks:
