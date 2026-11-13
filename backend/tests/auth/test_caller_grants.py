@@ -185,19 +185,24 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
                 "print_links",
                 "print_sends",
                 "output_last_prints",
+                # Its printer registry and reports (#5298 Task 29): a merge runs on the
+                # API, so the tables only a merge rewrote are gone from the list too.
+                "printers",
+                "printer_reports",
+                "settings",
+                "printer_bed_types",
+                "activity",
+                "project_print_targets",
             ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
                 conn.rollback()
-            # A native print's spool uses and the printer merge still read the runs, and
-            # the merge rewrites a project's printer.
+            # A native print's spool uses still read the runs, and the overlay a tray's
+            # spool; the merge's repoint of a tray's link is the API's.
             conn.execute("SELECT 1 FROM print_runs")
-            conn.execute("UPDATE project_print_targets SET printer = printer WHERE false")
+            conn.execute("SELECT 1 FROM tray_spool_links")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                conn.execute(
-                    "INSERT INTO project_print_targets (project_id, printer)"
-                    " VALUES (1, gen_random_uuid())"
-                )
+                conn.execute("UPDATE tray_spool_links SET printer_id = printer_id WHERE false")
             conn.rollback()
     finally:
         store.close()

@@ -332,9 +332,16 @@ class WriteKeys:
     a reuse of the object the last attempt stored): the ledger refuses the key for it
     (422), and `RemoteBlobIndex` sends that write again under a new key, as a write of
     its own. Outside an activity (a sweep on the worker's own timer), a new UUID per
-    write. Either way the client sends the key again on every retry of that call."""
+    write. Either way the client sends the key again on every retry of that call.
 
-    def __init__(self) -> None:
+    ``namespace`` names the store (``blob-index``, ``previews``, ...) and is part of the
+    key's material, so two stores counting writes in one activity attempt never send
+    one key for two requests. Adding it changed every key once: an attempt retried
+    across that deploy finds its earlier key refused (422) and sends the write again
+    under a new key, the same fallback as above."""
+
+    def __init__(self, namespace: str) -> None:
+        self.namespace = namespace
         self._ordinals: OrderedDict[tuple[str | None, str | None, str, int], int] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -348,7 +355,7 @@ class WriteKeys:
             self._ordinals[attempt] = ordinal + 1
             while len(self._ordinals) > WRITE_KEYS_KEPT:
                 self._ordinals.popitem(last=False)
-        return activity_key(ordinal)
+        return activity_key(ordinal, self.namespace)
 
 
 class RemoteBlobIndex:
@@ -357,7 +364,7 @@ class RemoteBlobIndex:
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
-        self._keys = WriteKeys()
+        self._keys = WriteKeys("blob-index")
 
     def _read(self, path: str, **query: Any) -> Any:
         return self._client.request("GET", _with(f"{BASE}/blob-index{path}", query)).json()

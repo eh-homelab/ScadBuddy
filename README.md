@@ -1253,10 +1253,16 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   `…/folderless`, `…/destination-touches`; a slice start, a background slice and its
   claim take an `Idempotency-Key`), and so does its copy lock, a lease on the API
   (`…/copy-leases/{key}`). Its print links, the queue items its runs queued and its
-  outputs' last prints go through them too (`…/links`, `…/sends`, `…/last-prints`). The
+  outputs' last prints go through them too (`…/links`, `…/sends`, `…/last-prints`), and
+  so do the printer registry and the printers' LAN reports (`…/printers`, `…/reports`):
+  a printer's access code is opened on the API and answered to the print worker's
+  credential alone (`…/printers/{id}/access-code`, `no-store`, logged without the code),
+  so the worker's KEK opens no access code; it still unseals a virtual printer's request
+  and signs a LAN print's blob reads. The
   worker does not `LISTEN`. It waits until the API
   lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
-  `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases` and `links`) before it serves. Its
+  `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
+  `lan-imports` and `printers`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
@@ -2168,8 +2174,9 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 `hot_path_native`), so there is no fifth switch and no restart beyond the ones noted:
 
 1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
-   render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API
-   and the print worker, which seals the printer's access code. Both count as native
+   render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API,
+   which seals the printer's access code and opens it for the print worker (#5298), and
+   on the print worker, which signs a LAN print's blob reads with it. Both count as native
    (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
    copy among them, live in Bambuddy's library: those reads are the store's calls, outside
    the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of

@@ -139,13 +139,17 @@ class CrudRefusedError(Exception):
         self.retry_after = retry_after
 
 
-def activity_key(ordinal: int) -> str:
+def activity_key(ordinal: int, namespace: str | None = None) -> str:
     """The key of the ``ordinal``-th write of the running activity: the same on every
     retry of the activity (D5), so the API answers a repeated write once. The run is
     part of it: a workflow's next run (a render key's next render, a continue-as-new)
-    numbers its activities from 1 again, and its writes are new ones."""
+    numbers its activities from 1 again, and its writes are new ones. ``namespace``
+    names the counter the ordinal is of (`crud/render.py` `WriteKeys`), so two stores
+    writing in one activity never send one key."""
     info = activity.info()
     material = f"{info.workflow_id}\0{info.workflow_run_id}\0{info.activity_id}\0{ordinal}"
+    if namespace is not None:
+        material = f"{namespace}\0{material}"
     return hashlib.sha256(material.encode()).hexdigest()
 
 

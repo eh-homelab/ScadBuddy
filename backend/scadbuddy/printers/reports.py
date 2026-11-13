@@ -99,7 +99,13 @@ class Advance:
 
 class PrinterReportStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
-        self.pool = pool
+        self._pool = pool
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`)."""
+        return self._pool
 
     def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
         """Write the report; the print it shows ended (`advance_print`), if any."""
@@ -110,23 +116,31 @@ class PrinterReportStore:
         from the registry (deleted while it was watched) or no longer LAN-linked (an
         attempt still running after the unlink) writes nothing, and ends and starts
         nothing."""
-        key = printer_uuid(printer_id)
-        if key is None:
+        if printer_uuid(printer_id) is None:
             return Advance()
         with self.pool.connection() as conn, conn.transaction():
-            old = conn.execute(
-                "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
-                (printer_id,),
-            ).fetchone()
-            before = None if old is None else old["running_subtask"]
-            running, ended = advance_print(before, report)
-            written = conn.execute(
-                "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
-                " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
-                " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
-                " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
-                (Jsonb(report), seen_at, running, printer_id),
-            ).rowcount
+            return self.advance_in(conn, printer_id, report, seen_at)
+
+    @staticmethod
+    def advance_in(
+        conn: Connection[DictRow], printer_id: str, report: dict[str, Any], seen_at: datetime
+    ) -> Advance:
+        """`advance` on ``conn``, in the caller's transaction."""
+        if printer_uuid(printer_id) is None:
+            return Advance()
+        old = conn.execute(
+            "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+            (printer_id,),
+        ).fetchone()
+        before = None if old is None else old["running_subtask"]
+        running, ended = advance_print(before, report)
+        written = conn.execute(
+            "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
+            " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
+            " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
+            " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
+            (Jsonb(report), seen_at, running, printer_id),
+        ).rowcount
         if not written:
             return Advance()
         return Advance(ended=ended, started=started_print(before, running))

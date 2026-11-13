@@ -41,10 +41,21 @@ Natural on the job (the printer, its ``subtask_name`` and start): a record sent 
 answers the first.
 
 A printer row a run's first check needs (`bambuddy/print_run.py` `_ensure_row`) is made
-or merged here (`POST /printers/ensure-bambuddy`, #5298 Task 29's route, taken early by
-#4625): a merge rewrites every table `printers/store.py` `PRINTER_REFERENCES` names, and
-those writes are the API's, never the worker's role's. Natural: decided under the
-registry's lock, so a call sent again finds the row and writes nothing.
+or merged here (`POST /printers/ensure-bambuddy`, area ``printer-ensure``, #5298 Task
+29's route, taken early by #4625): a merge rewrites every table `printers/store.py`
+`PRINTER_REFERENCES` names, and those writes are the API's, never the worker's role's.
+Natural: decided under the registry's lock (``pg_advisory_xact_lock`` on
+``scadbuddy:printers``), so a call sent again finds the row and writes nothing.
+
+The rest of the registry and the reports (Q22-Q26, area ``printers``, #5298 Task 29) are
+`PrinterStore`'s and `PrinterReportStore`'s, for `RemotePrinterStore` and
+`RemoteReports`: the reads, a printer's access code, a virtual printer's sync after a
+write, and the watch's reports. The access code is answered in plaintext to
+``crud.print`` only (plan D8), opened here under the API's KEK, and its answer is logged
+with the printer and the credential, never the code. A virtual printer's row and the
+listed marks answer what that write changed, and a report's ``put`` the print that write
+showed ended, so each takes an ``Idempotency-Key``: a resend answers the first write's
+answer. A ``touch`` never moves ``seen_at`` back, so it is natural.
 
 The uploads and slices (Q15, Q17) are `bambuddy/uploads.py` `BambuddyUploadStore`'s, for
 `RemoteUploadStore`. Each write but one is natural: a record is ``ON CONFLICT`` on the
@@ -75,6 +86,7 @@ only the API writes.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from collections import OrderedDict
@@ -86,6 +98,7 @@ from uuid import UUID
 from fastapi import Depends, Query, Request, status
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
@@ -125,9 +138,17 @@ from scadbuddy.bambuddy.uploads import (
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.secrets import SealError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.idempotency import MaybeIdempotencyKey, Replay, idempotent_write, required_key
 from scadbuddy.crud.operations import operations_router
+from scadbuddy.crud.print import (
+    ACCESS_CODE_UNREADABLE,
+    NO_ACCESS_CODE,
+    NO_SUCH_PRINTER,
+    SERIAL_TAKEN,
+)
+from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import PRINT_SECRETS, PrintSettings, print_projection
@@ -136,8 +157,16 @@ from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.print_watch.lan_store import StoreLanRecorder
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
-from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.store import printer_uuid
+from scadbuddy.printers.models import BambuddyView, PrinterRow
+from scadbuddy.printers.reports import PrinterReportStore
+from scadbuddy.printers.store import (
+    KekMissingError,
+    NoAccessCodeError,
+    PrinterNotFoundError,
+    SerialTakenError,
+    VirtualOutcome,
+    printer_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -613,6 +642,264 @@ async def record_lan_import(
     return await recorder.record(body)
 
 
+# -- the registry's reads, the access code, the virtual printers' sync and the reports
+# (Q22-Q26, area ``printers``) -----------------------------------------------------------
+
+
+class AccessCode(BaseModel):
+    code: str
+
+
+class VirtualWrite(BaseModel):
+    """`PrinterStore.upsert_virtual`'s arguments but the VP's id, which the path names."""
+
+    serial: str | None = None
+    name: str
+    model: str | None = None
+    mode: str
+    forwards_to: str | None = None
+    view: BambuddyView
+    may_adopt: bool = True
+
+
+class VirtualSynced(BaseModel):
+    row: PrinterRow
+    outcome: VirtualOutcome
+    changed: bool
+
+
+class Listed(BaseModel):
+    listed: list[int]
+
+
+class ListedChanged(BaseModel):
+    #: The rows whose ``bambuddy_active`` this write changed.
+    changed: list[str]
+
+
+class ReportWrite(BaseModel):
+    report: dict[str, Any]
+    seen_at: datetime
+
+
+class EndedPrint(BaseModel):
+    """`printers/reports.py` `PrintEnd`."""
+
+    subtask_name: str
+    timed: bool
+
+
+class ReportWritten(BaseModel):
+    #: The print this write showed ended, if any; a resend answers the first write's.
+    ended: EndedPrint | None
+    #: The print this write showed start (`printers/reports.py` `started_print`), for
+    #: the print watcher's LAN nudge (#4699 phase 3); a resend answers the first write's.
+    started: str | None = None
+
+
+class Seen(BaseModel):
+    seen_at: datetime
+
+
+class SeenReport(BaseModel):
+    report: dict[str, Any]
+    seen_at: datetime
+
+
+VIRTUAL_ROUTE = "PUT /printers/virtual/{vp_id}"
+LISTED_ROUTE = "POST /printers/virtual-listed"
+REPORT_ROUTE = "PUT /reports/{printer_id}"
+
+
+@router.get("/printers", name="crud_print_printers")
+async def list_printers(printers: PrintersDep) -> list[PrinterRow]:
+    return await asyncio.to_thread(printers.store.list)
+
+
+@router.get("/printers/by-serial", name="crud_print_printer_by_serial")
+async def printer_by_serial(serial: str, printers: PrintersDep) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.by_serial, serial)
+
+
+@router.get(
+    "/printers/by-bambuddy-id/{bambuddy_printer_id}", name="crud_print_printer_by_bambuddy_id"
+)
+async def printer_by_bambuddy_id(
+    bambuddy_printer_id: int, printers: PrintersDep
+) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.by_bambuddy_id, bambuddy_printer_id)
+
+
+@router.get("/printers/{printer_id}", name="crud_print_printer")
+async def get_printer(printer_id: str, printers: PrintersDep) -> PrinterRow | None:
+    return await asyncio.to_thread(printers.store.get, printer_id)
+
+
+@router.get("/printers/{printer_id}/access-code", name="crud_print_access_code")
+async def access_code(printer_id: str, request: Request, printers: PrintersDep) -> AccessCode:
+    """The printer's LAN access code in plaintext, to ``crud.print`` only (plan D8): the
+    watch and a LAN start dial the printer with it. The answer is ``no-store`` (the
+    CRUD router's headers), and the log names the printer and the credential, never the
+    code."""
+    principal = caller_of(request.scope)
+    assert isinstance(principal, Service)
+    try:
+        code = await asyncio.to_thread(printers.store.open_access_code, printer_id)
+    except PrinterNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, "There is no such printer.", reason=NO_SUCH_PRINTER
+        ) from None
+    except NoAccessCodeError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "This printer has no LAN access code.",
+            reason=NO_ACCESS_CODE,
+        ) from None
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The API has no SCADBUDDY_SECRET_KEY_FILE, so it cannot open an access code.",
+            reason=NOT_CONFIGURED,
+        ) from None
+    except SealError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This printer's access code was sealed under another key; link it again.",
+            reason=ACCESS_CODE_UNREADABLE,
+        ) from None
+    logger.info(
+        "released printer %s's access code to service credential %s",
+        printer_id,
+        principal.credential_id,
+    )
+    return AccessCode(code=code)
+
+
+@router.put("/printers/virtual/{vp_id}", name="crud_print_upsert_virtual")
+async def upsert_virtual(
+    vp_id: int,
+    body: VirtualWrite,
+    printers: PrintersDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> VirtualSynced:
+    """A virtual printer's row, under the registry's lock. Once per ``Idempotency-Key``:
+    a resend answers what the first write did, not ``already_linked``."""
+    key = required_key(idempotency_key)
+    store = printers.store
+
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        row, outcome, changed = store.upsert_virtual_in(
+            conn,
+            vp_id,
+            serial=body.serial,
+            name=body.name,
+            model=body.model,
+            mode=body.mode,
+            forwards_to=body.forwards_to,
+            view=body.view,
+            may_adopt=body.may_adopt,
+        )
+        return {"row": row.model_dump(mode="json"), "outcome": outcome, "changed": changed}
+
+    try:
+        answer = await asyncio.to_thread(
+            _once_on,
+            store.pool,
+            key,
+            VIRTUAL_ROUTE,
+            {"vp_id": vp_id, **body.model_dump(mode="json")},
+            write,
+        )
+    except SerialTakenError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "Another printer row holds this virtual printer's serial.",
+            reason=SERIAL_TAKEN,
+            existing_id=error.existing_id,
+        ) from None
+    return VirtualSynced.model_validate(answer)
+
+
+@router.post("/printers/virtual-listed", name="crud_print_mark_virtual_listed")
+async def mark_virtual_listed(
+    body: Listed, printers: PrintersDep, idempotency_key: MaybeIdempotencyKey = None
+) -> ListedChanged:
+    """Which virtual printers Bambuddy lists now. Once per ``Idempotency-Key``: a resend
+    answers the rows the first write changed."""
+    key = required_key(idempotency_key)
+    store = printers.store
+    answer = await asyncio.to_thread(
+        _once_on,
+        store.pool,
+        key,
+        LISTED_ROUTE,
+        body.model_dump(mode="json"),
+        lambda conn: {"changed": list(store.mark_virtual_listed_in(conn, body.listed))},
+    )
+    return ListedChanged.model_validate(answer)
+
+
+@router.get("/reports", name="crud_print_reports")
+async def all_reports(printers: PrintersDep) -> dict[str, SeenReport]:
+    seen = await asyncio.to_thread(printers.reports.all)
+    return {
+        printer_id: SeenReport(report=report, seen_at=seen_at)
+        for printer_id, (report, seen_at) in seen.items()
+    }
+
+
+@router.get("/reports/{printer_id}", name="crud_print_report")
+async def get_report(printer_id: str, printers: PrintersDep) -> SeenReport | None:
+    seen = await asyncio.to_thread(printers.reports.get, printer_id)
+    return None if seen is None else SeenReport(report=seen[0], seen_at=seen[1])
+
+
+@router.put("/reports/{printer_id}", name="crud_print_put_report")
+async def put_report(
+    printer_id: str,
+    body: ReportWrite,
+    printers: PrintersDep,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> ReportWritten:
+    """The watch's write. Only the write that shows a print ended answers that end, and
+    only the one that shows a print start answers that start, so once per
+    ``Idempotency-Key``: a resend after a lost answer answers the same end and start."""
+    # One ledger row per report written: the watch puts about once a `watch.py`
+    # `write_every` (1 s) while a printer reports, and at once on a shown change, so up
+    # to tens of thousands of rows a day per printer. `crud/idempotency.py` `prune` drops
+    # each after `RETENTION` (24 h), which bounds them.
+    key = required_key(idempotency_key)
+    reports = printers.reports
+
+    def write(conn: Connection[DictRow]) -> dict[str, Any]:
+        advance = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at)
+        ended = advance.ended
+        return {
+            "ended": None if ended is None else dataclasses.asdict(ended),
+            "started": advance.started,
+        }
+
+    answer = await asyncio.to_thread(
+        _once_on,
+        reports.pool,
+        key,
+        REPORT_ROUTE,
+        {"printer_id": printer_id, **body.model_dump(mode="json")},
+        write,
+    )
+    return ReportWritten.model_validate(answer)
+
+
+@router.post(
+    "/reports/{printer_id}/touch",
+    name="crud_print_touch_report",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def touch_report(printer_id: str, body: Seen, printers: PrintersDep) -> None:
+    """Natural: ``seen_at`` never moves back."""
+    await asyncio.to_thread(printers.reports.touch, printer_id, body.seen_at)
+
+
 @router.post("/events", name="crud_print_publish_event")
 async def publish_event(body: EventPost, events: EventsDep) -> Logged:
     kind = body.event.get("kind")
@@ -865,7 +1152,18 @@ def _once(
 ) -> Any:
     """``write``'s JSON answer, once per Idempotency-Key ``key``: the write and its
     ledger row in one transaction (plan D5)."""
-    with uploads.pool.connection() as conn:
+    return _once_on(uploads.pool, key, route, body, write)
+
+
+def _once_on(
+    pool: ConnectionPool[Connection[DictRow]],
+    key: str,
+    route: str,
+    body: dict[str, Any],
+    write: Callable[[Connection[DictRow]], Any],
+) -> Any:
+    """`_once` on ``pool``."""
+    with pool.connection() as conn:
         return idempotent_write(
             conn, "print", key, route, body, lambda: Replay(200, write(conn))
         ).body

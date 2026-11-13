@@ -42,46 +42,27 @@ _ALL = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _READ = ("SELECT",)
 
 #: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. It reads
-#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route). A
-#: printer merge (`printers/store.py` `_merge`, from `bambuddy/print_run.py` `_ensure_row`)
-#: runs on the API through `POST …/print/printers/ensure-bambuddy` since #4625, so the
-#: worker writes none of the tables `PRINTER_REFERENCES` names for it; the merge's grants
-#: below stay until #5298 Task 29 revokes them (an older pod may still merge in a rollout;
-#: its merge, lacking the machine-rate hook, lets `ON DELETE CASCADE` drop the gone
-#: synthetic row's machine-rate inputs instead of moving them).
-#: Never add a `PRINTER_REFERENCES` table here.
+#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route), and its
+#: printer registry, LAN reports and access codes go through the API's CRUD routes too
+#: (`crud/print.py` `RemotePrinterStore`, `RemoteReports`, #5298 Task 29). So a printer
+#: merge (`printers/store.py` `_merge`) runs on the API alone, and the worker writes none
+#: of the tables `PRINTER_REFERENCES` names for it. An existing role keeps what it held of
+#: `printers`, `printer_reports`, `settings`, `printer_bed_types`, `activity` and
+#: `project_print_targets`, and the merge's UPDATE and DELETE of `tray_spool_links`, until
+#: the revoke. Never add a table here for a merge.
 PRINT_GRANTS: Grants = {
-    # The merge's rewrite of a printer's stored choices and plates (`printers/store.py`
-    # `_merge`) until #5298 Task 29. The worker reads the settings through the API's CRUD
-    # route (`crud/print.py`, #5298), so `model_print_choices` is gone from the list; an
-    # existing role keeps it until the revoke.
-    "settings": ("SELECT", "UPDATE"),
-    "printer_bed_types": ("SELECT", "UPDATE", "DELETE"),
     # Whether the API has migrated (`wait_until_ready`).
     "scadbuddy_migrations": _READ,
-    # The merge's repoint of activity rows until #5298 Task 29. The runs' and operations'
-    # rows are the API's to write (#5298 Task 24).
-    "activity": ("SELECT", "INSERT", "UPDATE"),
-    # Read by a native print's spool uses (`spools/native.py`) and rewritten by the
-    # printer merge (`PrinterReference("print_runs", "printer")`) until #5298 Task 31.
-    # The runs themselves, their outcomes, the operations and the events go through the
+    # Read by a native print's spool uses (`spools/native.py`) until #5298 Task 31. The
+    # runs themselves, their outcomes, the operations and the events go through the
     # API's CRUD routes (`crud/print.py`, `crud/operations.py`, #5298 Task 24), and so do
     # the print links, the sends and the outputs' last prints (`RemotePrintLinks`,
     # `RemoteOutputPrints`, #5298 Task 28); an existing role keeps those grants until
     # the revoke.
     "print_runs": _ALL,
-    # Rewritten by the printer merge (`PrinterReference("project_print_targets",
-    # "printer")`) until #5298 Task 29. The uploads, slices, slice starts, background
-    # slices, project targets, folderless projects and destination touches go through
-    # the API's CRUD routes (`crud/print.py` `RemoteUploadStore`, #5298 Tasks 25, 26);
-    # an existing role keeps those grants until the revoke.
-    "project_print_targets": ("SELECT", "UPDATE"),
     # A native run's slice (`slicing/store.py` `start`) and held presets.
     "native_slices": ("SELECT", "INSERT", "UPDATE"),
     "held_local_presets": _READ,
-    # Printers and their reports (`printers/store.py`, `printers/reports.py`).
-    "printers": _ALL,
-    "printer_reports": _ALL,
     # The rack's nozzles (`rack/usage.py`).
     "rack_nozzle_seen": ("SELECT", "INSERT", "UPDATE"),
     "rack_nozzle_picks": _ALL,
@@ -92,7 +73,9 @@ PRINT_GRANTS: Grants = {
     "spool_provider_records": ("SELECT", "INSERT", "DELETE"),
     "spool_record_links": ("SELECT", "INSERT", "DELETE"),
     "spool_provider_refreshes": ("SELECT", "INSERT", "UPDATE"),
-    "tray_spool_links": ("SELECT", "UPDATE", "DELETE"),
+    # Read by the overlay; a tray's link is written on the API, and the merge's
+    # repoint (`spools/store.py` `repoint_tray_links`) runs there too (#5298 Task 29).
+    "tray_spool_links": _READ,
     "native_spools": ("SELECT", "UPDATE"),
     "native_spool_uses": ("SELECT", "INSERT", "UPDATE"),
 }
