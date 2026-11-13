@@ -45,7 +45,7 @@ from scadbuddy.crud.wire import CRUD_HEADERS, NOT_CONFIGURED
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.machine_rate import CostProfile, MachineRateInputs, MachineRateStore
 from scadbuddy.printers.models import BambuddyView, LanLink, PrinterCreate
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore
+from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
     KekMissingError,
     NoAccessCodeError,
@@ -163,6 +163,30 @@ def test_an_access_code_refusal_is_raised_as_the_sql_store_raises_it(
         assert str(error.value) == API_NEEDS_KEK
 
 
+@pytest.mark.parametrize(
+    ("body", "advance"),
+    [
+        ({"ended": None, "started": "plate_2"}, Advance(started="plate_2")),
+        (
+            {"ended": {"subtask_name": "plate_1", "timed": True}, "started": None},
+            Advance(ended=PrintEnd("plate_1", True)),
+        ),
+        # A ledger row written before the route answered the start (#4699 phase 3).
+        ({"ended": None}, Advance()),
+    ],
+)
+def test_a_report_write_answers_its_end_and_its_start(
+    body: dict[str, Any], advance: Advance
+) -> None:
+    """The watch's nudge reads the start from the route's answer (#4699 phase 3), so the
+    worker's `advance` is the route's, never the SQL store's."""
+    client = _answering(200, body)
+    try:
+        assert RemoteReports(client).advance(UNKNOWN, {}, datetime.now(UTC)) == advance
+    finally:
+        client.close()
+
+
 def test_a_name_that_is_no_printer_id_asks_nothing() -> None:
     client = _answering(500, {})
     try:
@@ -172,6 +196,7 @@ def test_a_name_that_is_no_printer_id_asks_nothing() -> None:
             remote.open_access_code("not-a-uuid")
         reports = RemoteReports(client)
         assert reports.put("not-a-uuid", {}, datetime.now(UTC)) is None
+        assert reports.advance("not-a-uuid", {}, datetime.now(UTC)) == Advance()
         assert reports.get("not-a-uuid") is None
     finally:
         client.close()
@@ -243,7 +268,6 @@ def test_the_reads_answer_as_the_sql_store(
     assert remote.by_serial("nobody") is None
     assert remote.by_bambuddy_id(4) == printers.by_bambuddy_id(4) == linked
     assert remote.by_bambuddy_id(5) is None
-    assert remote.resolve_bambuddy_id(linked.id) == 4
     assert remote_reports.get(lan) == reports.get(lan)
     assert remote_reports.get(linked.id) is None
     assert remote_reports.all() == reports.all()
@@ -360,13 +384,14 @@ def test_a_report_put_sent_again_with_its_key_answers_the_same_end(
     key = uuid.uuid4().hex
     url = f"{BASE}/reports/{pid}"
     first = crud.request("PUT", url, json=body, idempotency_key=key).json()
-    assert first == {"ended": {"subtask_name": "plate_1", "timed": True}}
+    assert first == {"ended": {"subtask_name": "plate_1", "timed": True}, "started": None}
     seen = reports.get(pid)
     assert crud.request("PUT", url, json=body, idempotency_key=key).json() == first
     assert reports.get(pid) == seen
     # Without the key's ledger the same write ends nothing: the print ended already.
     assert remote.put(pid, _report("FINISH"), start + timedelta(seconds=5)) is None
-    assert remote.put(pid, _report("RUNNING", "plate_2"), start) is None
+    # The write that shows a print start answers it, for the print watcher's nudge.
+    assert remote.advance(pid, _report("RUNNING", "plate_2"), start) == Advance(started="plate_2")
     assert remote.put(pid, _report("FAILED", "plate_2"), start) == PrintEnd("plate_2", True)
     with pytest.raises(CrudRefusedError) as refused:
         crud.request("PUT", url, json=body)

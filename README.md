@@ -1261,8 +1261,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   and signs a LAN print's blob reads. The
   worker does not `LISTEN`. It waits until the API
   lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
-  `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`
-  and `printers`) before it serves. Its
+  `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
+  `lan-imports` and `printers`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is

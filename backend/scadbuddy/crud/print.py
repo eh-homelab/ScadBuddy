@@ -118,7 +118,7 @@ from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.print_watch.lan import LanCapture, LanImport
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.models import BambuddyView, PrinterRow
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore
+from scadbuddy.printers.reports import Advance, PrintEnd, PrinterReportStore
 from scadbuddy.printers.store import (
     KekMissingError,
     NoAccessCodeError,
@@ -859,14 +859,18 @@ class RemotePrinterStore(PrinterStore):
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         raise ApiOnlyError("PrinterStore.pool is the API's; the worker has none")
 
-    def _row_or_none(self, path: str) -> PrinterRow | None:
-        body = self._client.request("GET", f"{BASE}/printers{path}").json()
+    def _row_or_none(self, path: str, timeout: float | None = None) -> PrinterRow | None:
+        body = self._client.request(
+            "GET", f"{BASE}/printers{path}", timeout=timeout, budget=timeout
+        ).json()
         return None if body is None else PrinterRow.model_validate(body)
 
-    def get(self, printer_id: str) -> PrinterRow | None:
+    def get(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None:
+        """``timeout`` bounds the whole read, retries included, as it bounds the SQL
+        store's (the print watcher's nudge, #6037)."""
         if printer_uuid(printer_id) is None:
             return None
-        return self._row_or_none(f"/{quote(printer_id, safe='')}")
+        return self._row_or_none(f"/{quote(printer_id, safe='')}", timeout)
 
     def by_serial(self, serial: str) -> PrinterRow | None:
         return self._row_or_none(f"/by-serial?{urlencode({'serial': serial})}")
@@ -984,9 +988,9 @@ PRINTERS_API_ONLY = (
     "delete",
 )
 #: The `PrinterStore` methods that only call others of its own, each of which the worker
-#: sends over a route: ``require`` and ``resolve_bambuddy_id`` (``get``) and
-#: ``ensure_bambuddy`` (``ensure_bambuddy_written``).
-PRINTERS_COMPOSED = ("require", "resolve_bambuddy_id", "ensure_bambuddy")
+#: sends over a route: ``require`` (``get``) and ``ensure_bambuddy``
+#: (``ensure_bambuddy_written``).
+PRINTERS_COMPOSED = ("require", "ensure_bambuddy")
 
 _refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
 
@@ -998,9 +1002,10 @@ def _report(printer_id: str) -> str:
 class RemoteReports(PrinterReportStore):
     """`printers/reports.py` `PrinterReportStore` (Q26) over ``…/print/reports`` (area
     ``printers``). Blocking, as the SQL store is: callers on the loop use a thread. No
-    pool. A `put` answers the print that ended on that write only, so each is sent with
-    an ``Idempotency-Key`` of its own, a new UUID, which the client sends again on each
-    retry: the route answers a resend the first write's end. The watch writes from one
+    pool. An `advance` (and `put`, its end alone) answers the print that ended and the
+    print that started on that write only, so each is sent with an ``Idempotency-Key``
+    of its own, a new UUID, which the client sends again on each retry: the route
+    answers a resend the first write's end and start. The watch writes from one
     loop for as long as its connection lasts, so an activity's ordinal would not name
     one write. `touch` is natural: it never moves ``seen_at`` back."""
 
@@ -1012,8 +1017,11 @@ class RemoteReports(PrinterReportStore):
         raise ApiOnlyError("PrinterReportStore.pool is the API's; the worker has none")
 
     def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
+        return self.advance(printer_id, report, seen_at).ended
+
+    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
         if printer_uuid(printer_id) is None:
-            return None
+            return Advance()
         answer = self._client.request(
             "PUT",
             _report(printer_id),
@@ -1021,7 +1029,9 @@ class RemoteReports(PrinterReportStore):
             idempotency_key=uuid.uuid4().hex,
         ).json()
         ended = answer["ended"]
-        return None if ended is None else PrintEnd(**ended)
+        return Advance(
+            ended=None if ended is None else PrintEnd(**ended), started=answer.get("started")
+        )
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         if printer_uuid(printer_id) is None:

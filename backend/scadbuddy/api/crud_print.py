@@ -628,6 +628,20 @@ async def ensure_bambuddy(body: EnsureBambuddy, printers: PrintersDep) -> Ensure
     return EnsuredPrinter(row=row, written=written)
 
 
+@router.post("/lan-imports", name="crud_print_record_lan_import")
+async def record_lan_import(
+    body: LanCapture, state: StateDep, auto_imports: AutoImportsDep
+) -> LanImport:
+    """A LAN-only printer's job, as the print worker read it (#4699 phase 4): matched to a
+    model, or put in the inbox, and recorded with its activity row. Natural on the job
+    (the printer, ``subtask_name`` and ``started_at``): sent again, it answers the record
+    as it is and writes nothing."""
+    if printer_uuid(body.job.printer_id) is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {body.job.printer_id}")
+    recorder = StoreLanRecorder(auto_imports.lan, state.catalogue.slugs, state.catalogue.exists)
+    return await recorder.record(body)
+
+
 # -- the registry's reads, the access code, the virtual printers' sync and the reports
 # (Q22-Q26, area ``printers``) -----------------------------------------------------------
 
@@ -678,6 +692,9 @@ class EndedPrint(BaseModel):
 class ReportWritten(BaseModel):
     #: The print this write showed ended, if any; a resend answers the first write's.
     ended: EndedPrint | None
+    #: The print this write showed start (`printers/reports.py` `started_print`), for
+    #: the print watcher's LAN nudge (#4699 phase 3); a resend answers the first write's.
+    started: str | None = None
 
 
 class Seen(BaseModel):
@@ -844,8 +861,9 @@ async def put_report(
     printers: PrintersDep,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> ReportWritten:
-    """The watch's write. Only the write that shows a print ended answers that end, so
-    once per ``Idempotency-Key``: a resend after a lost answer answers the same end."""
+    """The watch's write. Only the write that shows a print ended answers that end, and
+    only the one that shows a print start answers that start, so once per
+    ``Idempotency-Key``: a resend after a lost answer answers the same end and start."""
     # One ledger row per report written: the watch puts about once a `watch.py`
     # `write_every` (1 s) while a printer reports, and at once on a shown change, so up
     # to tens of thousands of rows a day per printer. `crud/idempotency.py` `prune` drops
@@ -854,8 +872,12 @@ async def put_report(
     reports = printers.reports
 
     def write(conn: Connection[DictRow]) -> dict[str, Any]:
-        ended = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at).ended
-        return {"ended": None if ended is None else dataclasses.asdict(ended)}
+        advance = PrinterReportStore.advance_in(conn, printer_id, body.report, body.seen_at)
+        ended = advance.ended
+        return {
+            "ended": None if ended is None else dataclasses.asdict(ended),
+            "started": advance.started,
+        }
 
     answer = await asyncio.to_thread(
         _once_on,
