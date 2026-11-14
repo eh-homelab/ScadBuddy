@@ -166,7 +166,7 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
   /** A support material: not the design's PLA, so its colour is the support setting's alone. */
   const SUPPORT = { ...CORAL, id: 'coral-pva', material: 'PVA' }
 
-  it('saves no support setting offered, and no support material's colour on offer', () => {
+  it('saves no support setting offered, and no support material’s colour on offer', () => {
     const draft: ListingDraft = {
       ...emptyDraft('tag', 'c'.repeat(40)),
       title: 'Tag',
@@ -182,7 +182,7 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
     expect(body.colours).toEqual([BLUE.id, SUPPORT.id])
   })
 
-  it('leaves a support material's colour in the title: no customer can choose it (#6140 review)', () => {
+  it('leaves a support material’s colour in the title: no customer can choose it (#6140 review)', () => {
     const draft: ListingDraft = {
       ...emptyDraft('tag', 'c'.repeat(40)),
       title: `Tag ${SUPPORT.colour_name} ${BLUE.colour_name}`,
