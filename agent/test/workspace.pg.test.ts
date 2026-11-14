@@ -190,6 +190,32 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect((await files.read({ kind: 'session', sessionId: child.id }, 'a.txt'))?.bytes.toString()).toBe('kept by the fork')
     })
 
+    it('puts the bytes again when a sweep deletes them while a write waits on them', async () => {
+      const digest = sha256(Buffer.from('raced'))
+      await db.sql`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${Buffer.from('raced')})`
+      let written: Promise<unknown> | undefined
+      await db.sql.begin(async (tx) => {
+        // A sweep's delete, holding the row until it commits.
+        await tx`DELETE FROM ai_session_file_bytes WHERE sha256 = ${digest}`
+        written = files.write(ws, 'raced.txt', Buffer.from('raced'))
+        // Until the write waits on that row's lock: only then does it take the path under test.
+        const waiting = async () => {
+          const [row] = await db.sql<{ n: number }[]>`
+            SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+              AND query LIKE '%FROM ai_session_file_bytes WHERE sha256 =%FOR KEY SHARE%'`
+          return (row?.n ?? 0) > 0
+        }
+        for (let i = 0; !(await waiting()); i += 1) {
+          if (i > 200) throw new Error('the write never waited on the deleted row')
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+      })
+      await written
+      expect((await files.read(ws, 'raced.txt'))?.bytes.toString()).toBe('raced')
+      expect(await db.sql`SELECT 1 FROM ai_session_file_bytes WHERE sha256 = ${digest}`).toHaveLength(1)
+    })
+
     it('never names bytes under a sha256 that is not theirs', async () => {
       await expect(db.sql`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${'0'.repeat(64)}, ${Buffer.from('x')})`).rejects.toThrow(/check/)
     })
