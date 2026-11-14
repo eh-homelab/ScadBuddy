@@ -10,6 +10,7 @@ in the transaction that writes the type; ``filament_id`` is that row.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -29,6 +30,8 @@ _Types = list[m.SpoolType]
 _Presets = list[m.TypePreset]
 _KValues = list[m.TypeKValue]
 
+#: The fields whose change rewrites a type's price book row.
+_PRICED = frozenset({"cost_per_kg", "material_id", "subtype_id", "brand_id", "rgba"})
 _TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
 _PRESET_COLUMNS = ", ".join(m.TypePreset.model_fields)
 _K_COLUMNS = ", ".join(m.TypeKValue.model_fields)
@@ -137,7 +140,7 @@ class SpoolTypeStore:
                     [data[name] for name in names],
                 ).fetchone()
                 assert row is not None
-                row = self._link_price_book(conn, row)
+                row = self._link_price_book(conn, row, changed=True)
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
@@ -169,7 +172,7 @@ class SpoolTypeStore:
                     [*values, type_id],
                 ).fetchone()
                 assert row is not None
-                row = self._link_price_book(conn, row)
+                row = self._link_price_book(conn, row, changed=bool(set(columns) & _PRICED))
         except errors.UniqueViolation:
             raise CatalogExistsError() from None
         except errors.ForeignKeyViolation:
@@ -286,14 +289,19 @@ class SpoolTypeStore:
             (type_id,),
         ).fetchone()
 
-    def _link_price_book(self, conn: Conn, row: dict[str, Any]) -> dict[str, Any]:
+    def _link_price_book(self, conn: Conn, row: dict[str, Any], *, changed: bool) -> dict[str, Any]:
         """Write the type's price book row in the same transaction, and ``filament_id``.
 
         Its identity is the type's material, subtype and brand names and the first seven
-        characters of its ``rgba`` (the book's colours are ``#RRGGBB``). Two types that
-        differ only in alpha therefore share one book row until the book is RGBA (#6209).
-        A type with no ``cost_per_kg`` writes nothing and keeps its ``filament_id``."""
-        if row["cost_per_kg"] is None:
+        characters of its ``rgba`` (the book's colours are ``#RRGGBB``). The row is found
+        by that identity, else inserted: a book row's identity is never rewritten, since
+        another type, or a person, may hold it. A row found keeps its label and takes the
+        type's cost. Two types that differ only in alpha therefore share one book row
+        until the book is RGBA (#6209). Nothing is written when ``changed`` is false (a
+        patch that touched neither cost nor identity, an archive), when the type has no
+        ``cost_per_kg`` (it keeps its ``filament_id``), and the book row of an archived
+        type stays live, for the quotes that price with it."""
+        if not changed or row["cost_per_kg"] is None:
             return row
         names = conn.execute(
             "SELECT (SELECT name FROM filament_materials WHERE id = %s) AS material,"
@@ -304,24 +312,10 @@ class SpoolTypeStore:
         assert names is not None
         colour = row["rgba"][:7]
         cost = f"{row['cost_per_kg']:.4f}"
-        found = self._orders.existing_filament(
+        target = self._orders.existing_filament(
             conn, names["material"], names["subtype"], names["brand"], colour
         )
-        target = found or row["filament_id"]
-        if target is not None and self._orders.filament(target, conn=conn) is not None:
-            self._orders.update_filament(
-                target,
-                FilamentPatch(
-                    material=names["material"],
-                    subtype=names["subtype"],
-                    brand=names["brand"],
-                    colour_name=row["colour_name"],
-                    colour=colour,
-                    cost_per_kg=cost,
-                ),
-                conn=conn,
-            )
-        else:
+        if target is None:
             target = self._orders.insert_filament(
                 FilamentInput(
                     material=names["material"],
@@ -333,6 +327,11 @@ class SpoolTypeStore:
                 ),
                 conn=conn,
             ).id
+        else:
+            book = self._orders.filament(target, conn=conn)
+            assert book is not None
+            if Decimal(book.cost_per_kg) != row["cost_per_kg"]:
+                self._orders.update_filament(target, FilamentPatch(cost_per_kg=cost), conn=conn)
         if target == row["filament_id"]:
             return row
         linked = conn.execute(

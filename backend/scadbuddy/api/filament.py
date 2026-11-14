@@ -22,6 +22,7 @@ from scadbuddy.filament.catalog import (
 )
 from scadbuddy.filament.component import FilamentDep
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
+from scadbuddy.orders.store import FilamentExistsError
 
 router = APIRouter(prefix="/filament", tags=["filament"])
 
@@ -66,7 +67,7 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 def _refused(exc: ValueError) -> ApiError:
     code = (
         status.HTTP_409_CONFLICT
-        if isinstance(exc, CatalogExistsError)
+        if isinstance(exc, CatalogExistsError | FilamentExistsError)
         else status.HTTP_422_UNPROCESSABLE_CONTENT
     )
     return ApiError(code, str(exc))
@@ -139,7 +140,13 @@ async def patch_catalog_row(
 
 # -- spool types ----------------------------------------------------------------------
 
-_TYPE_REFUSED = (CatalogExistsError, CatalogRefError, TypeTempError, TypeRowsDuplicateError)
+_TYPE_REFUSED = (
+    FilamentExistsError,
+    CatalogExistsError,
+    CatalogRefError,
+    TypeTempError,
+    TypeRowsDuplicateError,
+)
 
 
 def _no_type(type_id: UUID) -> ApiError:

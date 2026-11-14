@@ -369,7 +369,6 @@ class SpoolTypeCreate(_In):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
-    filament_id: Text | None = None
     note: Note | None = None
 
 
@@ -394,7 +393,6 @@ class SpoolTypePatch(_Patch):
     insert_type_id: UUID | None = None
     low_stock_pct: Percent | None = None
     cost_per_kg: Cost | None = None
-    filament_id: Text | None = None
     note: Note | None = None
     archived: bool | None = None
 

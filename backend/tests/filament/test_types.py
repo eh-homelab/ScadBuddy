@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -16,6 +17,7 @@ from scadbuddy.filament.models import (
     TypePreset,
 )
 from scadbuddy.filament.types import SpoolTypeStore, TypeTempError, effective, overridden
+from scadbuddy.orders.models import FilamentPatch
 from scadbuddy.orders.store import OrderStore
 from tests.conftest import PgPool
 
@@ -197,3 +199,61 @@ def test_list_hides_archived_types(pg_pool: PgPool) -> None:
     store.archive(made.id, True)
     assert store.list() == []
     assert [t.id for t in store.list(include_archived=True)] == [made.id]
+
+
+@pg
+def test_changing_a_type_colour_never_rewrites_a_shared_row(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    orders = OrderStore(pg_pool)
+    a = store.create(_body(pg_pool, code="A", rgba="#FFFFFFFF", cost_per_kg="10"))
+    b = store.create(_body(pg_pool, code="B", rgba="#FFFFFF80", cost_per_kg="10"))
+    assert a.filament_id == b.filament_id
+    shared = a.filament_id
+    assert shared is not None
+    changed = store.update(a.id, SpoolTypePatch(rgba="#FF0000"))
+    assert changed is not None
+    assert changed.filament_id != shared
+    kept = orders.filament(shared)
+    assert kept is not None
+    assert kept.colour == "#FFFFFF"
+    moved = store.get(b.id)
+    assert moved is not None
+    assert moved.filament_id == shared
+    fresh = orders.filament(changed.filament_id or "")
+    assert fresh is not None
+    assert fresh.colour == "#FF0000"
+
+
+@pg
+def test_a_patch_without_price_or_identity_leaves_the_row_alone(pg_pool: PgPool) -> None:
+    store = SpoolTypeStore(pg_pool)
+    orders = OrderStore(pg_pool)
+    made = store.create(_body(pg_pool, colour_name="Snow", cost_per_kg="10"))
+    assert made.filament_id is not None
+    book = orders.filament(made.filament_id)
+    assert book is not None
+    orders.update_filament(made.filament_id, FilamentPatch(colour_name="Mine"))
+    store.update(made.id, SpoolTypePatch(note="x"))
+    store.archive(made.id, True)
+    again = orders.filament(made.filament_id)
+    assert again is not None
+    assert again.colour_name == "Mine"
+    assert again.archived_at is None
+
+
+@pg
+def test_a_failure_after_the_price_book_write_rolls_back_the_type(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SpoolTypeStore(pg_pool)
+    real = OrderStore.insert_filament
+
+    def inserted_then_failed(self: OrderStore, *args: Any, **kwargs: Any) -> Any:
+        real(self, *args, **kwargs)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(OrderStore, "insert_filament", inserted_then_failed)
+    with pytest.raises(RuntimeError):
+        store.create(_body(pg_pool, cost_per_kg="10"))
+    assert store.list(include_archived=True) == []
+    assert OrderStore(pg_pool).filaments() == []
