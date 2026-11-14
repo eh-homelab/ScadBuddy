@@ -66,6 +66,11 @@ BATCH_PIXELS = 1 << 22
 # the plate's triangles all at once were the sum of every piece's; this bounds them.
 CHUNK_TRIANGLES = 1 << 18
 
+# The translucent layers a pixel keeps, nearest first (a k-buffer). A pixel behind four
+# see-through surfaces drops the ones farther back, so a template's mesh of many
+# overlapping translucent faces costs at most this many fragments a pixel.
+TRANSLUCENT_LAYERS = 4
+
 
 @dataclass(frozen=True)
 class PlateThumbnails:
@@ -186,7 +191,7 @@ def _rasterise(
                 axis=-1,
             )
             if alpha < 255:
-                canvas.blend(screen, base * lit[:, None], alpha / 255)
+                canvas.blend(screen, base * lit[:, None], alpha)
             else:
                 canvas.draw(screen, base * lit[:, None])
     return canvas.image()
@@ -230,8 +235,12 @@ class _Canvas:
         self.size = size
         self.depth = np.full(size * size, np.inf)
         self.colour = np.zeros((size * size, 3), dtype=np.uint8)
-        #: Translucent fragments in front of the opaque ones: pixel, depth, colour, alpha.
+        #: Translucent fragments in front of the opaque ones: pixel, depth, colour (8-bit)
+        #: and alpha byte. At most :data:`TRANSLUCENT_LAYERS` a pixel once pruned, plus
+        #: what arrived since the last prune, which never passes :data:`BATCH_PIXELS`
+        #: and one batch.
         self.layers: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+        self._unpruned = 0
 
     def draw(self, triangles: np.ndarray, colours: np.ndarray) -> None:
         for pixels, depth, owner in _fragments(triangles, self.size):
@@ -247,42 +256,65 @@ class _Canvas:
             self.depth[pixels] = depth[nearer]
             self.colour[pixels] = np.rint(np.clip(colours[owner], 0, 1) * 255).astype(np.uint8)
 
-    def blend(self, triangles: np.ndarray, colours: np.ndarray, alpha: float) -> None:
-        """Keeps every fragment of a translucent part that is in front of the opaque
-        ones, all of which are drawn first; :meth:`image` blends them. Its memory is the
-        translucent parts' fragments, not one per pixel."""
+    def blend(self, triangles: np.ndarray, colours: np.ndarray, alpha: int) -> None:
+        """Keeps the fragments of a translucent part (``alpha``, its byte) that are in
+        front of the opaque ones, all of which are drawn first; :meth:`image` blends
+        them. Each pixel keeps only its :data:`TRANSLUCENT_LAYERS` nearest, pruned
+        whenever :data:`BATCH_PIXELS` fragments have arrived, so memory is bounded by
+        the image, never by the mesh."""
         for pixels, depth, owner in _fragments(triangles, self.size):
             front = depth < self.depth[pixels]
+            count = int(front.sum())
             self.layers.append(
                 (
                     pixels[front],
-                    depth[front],
-                    np.clip(colours[owner[front]], 0, 1).astype(np.float32),
-                    np.full(int(front.sum()), alpha, dtype=np.float32),
+                    depth[front].astype(np.float32),
+                    np.rint(np.clip(colours[owner[front]], 0, 1) * 255).astype(np.uint8),
+                    np.full(count, alpha, dtype=np.uint8),
                 )
             )
+            self._unpruned += count
+            if self._unpruned > BATCH_PIXELS:
+                self._prune()
+
+    def _prune(self) -> None:
+        """Every kept fragment as one set, by pixel and nearest first, each pixel's
+        :data:`TRANSLUCENT_LAYERS` nearest only."""
+        pixels = np.concatenate([layer[0] for layer in self.layers])
+        depth = np.concatenate([layer[1] for layer in self.layers])
+        colour = np.concatenate([layer[2] for layer in self.layers])
+        alpha = np.concatenate([layer[3] for layer in self.layers])
+        self._unpruned = 0
+        if len(pixels) == 0:
+            self.layers = [(pixels, depth, colour, alpha)]
+            return
+        order = np.lexsort((depth, pixels))
+        pixels = pixels[order]
+        starts = np.flatnonzero(np.r_[True, pixels[1:] != pixels[:-1]])
+        rank = np.arange(len(pixels)) - np.repeat(starts, np.diff(np.r_[starts, len(pixels)]))
+        nearest = rank < TRANSLUCENT_LAYERS
+        kept = order[nearest]
+        self.layers = [(pixels[nearest], depth[kept], colour[kept], alpha[kept])]
 
     def image(self) -> np.ndarray:
         image = np.zeros((self.size * self.size, 4), dtype=np.uint8)
         image[:, :3] = self.colour
         image[np.isfinite(self.depth), 3] = 255
         if self.layers:
+            self._prune()
             self._composite(image)
         return image.reshape(self.size, self.size, 4)
 
     def _composite(self, image: np.ndarray) -> None:
-        """The translucent fragments over the opaque image, back to front in each pixel
-        ("over"): a fragment's colour counts by its alpha and by what lets through every
-        fragment in front of it, the product of their (1 - alpha)."""
-        pixels = np.concatenate([layer[0] for layer in self.layers])
+        """The kept translucent fragments over the opaque image (``over``): a
+        fragment's colour counts by its alpha and by what lets through every fragment
+        in front of it, the product of their (1 - alpha). :meth:`_prune` has sorted
+        them by pixel, nearest first."""
+        ((pixels, _, colour_bytes, alpha_bytes),) = self.layers
         if len(pixels) == 0:
             return
-        depth = np.concatenate([layer[1] for layer in self.layers])
-        colour = np.concatenate([layer[2] for layer in self.layers]).astype(np.float64)
-        alpha = np.concatenate([layer[3] for layer in self.layers]).astype(np.float64)
-        # By pixel, then nearest first.
-        order = np.lexsort((depth, pixels))
-        pixels, colour, alpha = pixels[order], colour[order], alpha[order]
+        colour = colour_bytes.astype(np.float64) / 255
+        alpha = alpha_bytes.astype(np.float64) / 255
         starts = np.flatnonzero(np.r_[True, pixels[1:] != pixels[:-1]])
         # What the fragments in front of each one let through: a cumulative product
         # within its pixel, as sums of logs (each alpha is below 1).

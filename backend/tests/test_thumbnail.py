@@ -625,3 +625,58 @@ def test_a_view_draws_a_translucent_part_see_through() -> None:
     clear = read_png(render_view(_red_inside_clear(128), "top", 128))
     solid = read_png(render_view(_red_inside_clear(255), "top", 128))
     assert clear[64, 64, 1] < solid[64, 64, 1] - 60
+
+
+def _kept(canvas: thumbnail._Canvas) -> int:
+    return sum(len(layer[0]) for layer in canvas.layers)
+
+
+def test_many_overlapping_translucent_faces_keep_a_bounded_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6243 security review: a template's mesh of many overlapping translucent faces must
+    not grow the buffer with the mesh. Each pixel keeps its `TRANSLUCENT_LAYERS` nearest,
+    pruned every `BATCH_PIXELS` fragments, and the image still renders."""
+    monkeypatch.setattr(thumbnail, "BATCH_PIXELS", 1 << 12)
+    size = 64
+    covered = size * size
+    canvas = thumbnail._Canvas(size)
+    # Sixty full-frame panes, nearest last: sixty fragments a pixel, far past the cap.
+    square = np.array(
+        [[[0, 0, 0], [size, 0, 0], [size, size, 0]], [[0, 0, 0], [size, size, 0], [0, size, 0]]],
+        dtype=np.float64,
+    )
+    bound = thumbnail.TRANSLUCENT_LAYERS * covered + thumbnail.BATCH_PIXELS + 2 * covered
+    peak = 0
+    for index in range(60):
+        pane = square.copy()
+        pane[..., 2] = 60 - index
+        canvas.blend(pane, np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]), 128)
+        peak = max(peak, _kept(canvas))
+    assert peak <= bound
+    assert peak < 60 * covered // 4
+
+    image = canvas.image()
+    assert _kept(canvas) == thumbnail.TRANSLUCENT_LAYERS * covered
+    # Four blue layers of a half alpha over nothing.
+    through = (1 - 128 / 255) ** thumbnail.TRANSLUCENT_LAYERS
+    assert abs(int(image[32, 32, 3]) - round((1 - through) * 255)) <= 1
+    assert tuple(image[32, 32, :3]) == (0, 0, 255)
+
+
+def test_a_part_of_many_translucent_faces_still_renders() -> None:
+    """The same through the public path: forty stacked translucent panes over a core."""
+    panes = [
+        trimesh.creation.box(extents=(30, 30, 0.2), transform=_translate(0, 0, 6 + index))
+        for index in range(40)
+    ]
+    stack = trimesh.util.concatenate(panes)
+    assert isinstance(stack, trimesh.Trimesh)
+    parts = [
+        ColourPart(1, "core", "#FF0000", trimesh.creation.box(extents=(10, 10, 10))),
+        ColourPart(2, "stack", "#FFFFFF", stack, alpha=60),
+    ]
+    image = read_png(render_view(parts, "top", 128))
+    assert image[64, 64, 3] == 255
+    # Four layers at 60/255 let a third of the core's red through: still reddish.
+    assert image[64, 64, 0] > image[64, 64, 1]
