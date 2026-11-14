@@ -37,6 +37,8 @@ function quotedSeed(quote: Quote | undefined): PrintRunRequest | null {
     ...(setup.prime_tower ? { prime_tower: setup.prime_tower } : {}),
     ...(setup.supports ? { supports: setup.supports } : {}),
     ...(setup.print_sequence ? { print_sequence: setup.print_sequence } : {}),
+    // #2998: the quote's slicer settings, which its print sends again.
+    ...(setup.process_overrides ? { process_overrides: setup.process_overrides } : {}),
     ...(quote.part_settings ? { part_settings: quote.part_settings as PartSettingsMap } : {}),
   } as PrintRunRequest
 }
@@ -49,6 +51,7 @@ type QuotedSetup = {
   prime_tower?: PrintRunRequest['prime_tower'] | null
   supports?: PrintRunRequest['supports'] | null
   print_sequence?: PrintRunRequest['print_sequence'] | null
+  process_overrides?: PrintRunRequest['process_overrides'] | null
 }
 
 /** The order states past acceptance, in which an item is made (§3.5). */

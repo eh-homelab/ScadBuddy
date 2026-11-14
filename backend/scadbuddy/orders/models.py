@@ -610,8 +610,9 @@ class Quote(BaseModel):
     printer: str | None = None
     machine_rate_breakdown: MachineRateBreakdown | None = None
     #: A slice quote's print setup (#4673, order operations spec §5.1), as it sliced:
-    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports` and
-    #: `print_sequence`, each in `PrintRunRequest`'s shape (`orders/quote.py`
+    #: `printer_id`, `printer`, `path`, `choices`, `prime_tower`, `supports`,
+    #: `print_sequence` and `process_overrides` (#2998; absent from one recorded before
+    #: it), each in `PrintRunRequest`'s shape (`orders/quote.py`
     #: `print_setup`). Null for a manual or archive quote, and one recorded before.
     choices: dict[str, Any] | None = None
     #: The spool per slot a slice quote sliced with (`PrintRunRequest.filament_plan`).

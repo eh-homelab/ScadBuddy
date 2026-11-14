@@ -693,9 +693,13 @@ class PrintActivities:
                     "run %s queued without a Bambuddy link: %s", input.run_id, error.detail
                 )
         result = finish_run(config, planned, input.outcomes, input.queued)
-        # #5627: what the copy was laid out with, for the print record.
+        # #5627: what the copy was laid out with, for the print record; #2998: and the
+        # process settings the request set, so a reprint sends them again.
         return result.model_copy(
-            update={"part_settings": normalised(input.input.request.part_settings)}
+            update={
+                "part_settings": normalised(input.input.request.part_settings),
+                "process_overrides": input.input.request.overrides() or None,
+            }
         )
 
     @activity.defn(name="print_succeed")

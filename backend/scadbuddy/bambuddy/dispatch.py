@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.process_overrides import without_host_side
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.rack.usage import PickedHotend
@@ -75,11 +76,13 @@ class SlicePlan(BaseModel):
     filament_presets: list[PresetRef]
     filament_colours: list[str]
     bed_type: str
-    #: The template's ``print_settings`` (#770), written over the process preset.
-    #: Accepted analyzer fixes never land here yet: their process-level target
-    #: (``derived_process_preset``) is unverified (``analyzers/model.py``); the verified
-    #: ones change the run's request (``analyzers/apply.py``). Once one does, an explicit
-    #: fix goes over these.
+    #: Process settings written over the process preset: the filament profiles' (#717),
+    #: the template's ``print_settings`` (#770), the print's shorthands (supports, prime
+    #: tower, print sequence), then the request's own ``process_overrides`` (#2998), each
+    #: over the ones before (``print_run.plan_run``). Accepted analyzer fixes never land
+    #: here yet: their process-level target (``derived_process_preset``) is unverified
+    #: (``analyzers/model.py``); the verified ones change the run's request
+    #: (``analyzers/apply.py``). Once one does, an explicit fix goes over these.
     process_overrides: dict[str, ProcessValue] = Field(default_factory=dict)
     #: Filament settings by slot (from 1), written into that slot's filament file: a
     #: filament profile's nozzle temperature (#2799). Only the native slicer has the
@@ -234,7 +237,10 @@ async def start_slice(
 
 
 def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
-    """What :func:`start_slice` posts for ``plan`` and ``plate_id``."""
+    """What :func:`start_slice` posts for ``plan`` and ``plate_id``. A host-side setting
+    (``process_overrides.HOST_SIDE_KEYS``) is dropped here too, whatever built the plan:
+    Bambuddy writes the overrides into the process its slicer sidecar runs (#2998)."""
+    overrides = without_host_side(plan.process_overrides, where="Bambuddy slice request")
     return SliceRequest(
         printer_preset=plan.printer_preset,
         process_preset=plan.process_preset,
@@ -242,7 +248,7 @@ def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
         plate=0 if plan.whole_file else plate_id,
-        process_overrides=plan.process_overrides or None,
+        process_overrides=overrides or None,
     )
 
 

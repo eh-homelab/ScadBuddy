@@ -1211,6 +1211,14 @@ describe('pricing tools (#4250)', () => {
     expect(line).toContain('without supports')
     expect(line).toContain('without a prime tower')
     expect(line).toContain('by object')
+    // #2998: any process setting goes as sent, omitted is the quote's, and the line names it.
+    expect(body).not.toHaveProperty('process_overrides')
+    const process_overrides = { skirt_loops: 0, wipe_tower_no_sparse_layers: true }
+    await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog, process_overrides }, ctx())
+    expect(body).toMatchObject({ process_overrides })
+    expect(
+      tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog, process_overrides } as never),
+    ).toContain('slicer settings skirt_loops=0, wipe_tower_no_sparse_layers=true')
     // #4673 PR 2: no choices or spools at all prints the accepted quote's whole setup.
     await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM }, ctx())
     expect(body).toEqual({})

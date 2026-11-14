@@ -148,6 +148,32 @@ async def test_build_presets_gives_one_file_per_slot(profiles: Profiles, plan: S
     assert second["filament_type"] == ["PETG"]
 
 
+async def test_build_presets_never_writes_a_host_side_setting(
+    profiles: Profiles, plan: SlicePlan
+) -> None:
+    """#2998: a plan that skipped request validation still slices with no command, file
+    path or print host; custom G-code stays."""
+    hostile = plan.model_copy(
+        update={
+            "process_overrides": {
+                "post_process": ["/bin/sh -c 'touch /tmp/pwned'"],
+                "Filename_Format": "../../escape.gcode",
+                "printhost_apikey": "k",
+                "machine_end_gcode": "M84",
+                "wall_loops": "4",
+            }
+        }
+    )
+
+    files = await build_presets(hostile, profiles, None)
+
+    process = json.loads(files.process)
+    assert "post_process" not in process
+    assert "Filename_Format" not in process
+    assert "printhost_apikey" not in process
+    assert process["machine_end_gcode"] == "M84" and process["wall_loops"] == "4"
+
+
 async def test_build_presets_writes_the_plate_type(profiles: Profiles, plan: SlicePlan) -> None:
     # The v02.08.02.61 CLI has no plate-type flag: a plate without its own takes the
     # process config's `curr_bed_type` (BambuStudio.cpp, the plate loop's "bed type").
@@ -368,7 +394,8 @@ async def test_a_local_printers_credentials_never_reach_a_preset_file(
         assert not CREDENTIALS & set(json.loads(document))
         assert b"k-123" not in document and b"p-123" not in document
     machine = json.loads(files.machine)
-    assert machine["print_host"] == "octopi.local"
+    # #2998: the print host goes too: no setting reaches a slicer that points it at one.
+    assert "print_host" not in machine
     assert "api_token" not in json.loads(files.process)
 
 
@@ -610,9 +637,11 @@ def test_a_process_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
     assert "/bambuddy-process=" + "ab" * 32 + "/colours=" in bambuddy
 
 
-def test_a_list_over_a_scalar_option_is_refused() -> None:
-    with pytest.raises(ProfileError, match=r"wall_loops.*list.*single value"):
-        apply_overrides({"wall_loops": "2"}, {"wall_loops": ["3", "3"]})
+def test_a_list_over_a_scalar_option_is_written_for_the_slicer_to_judge() -> None:
+    """#2998: no setting is refused before the slice; the check warns of it instead."""
+    assert apply_overrides({"wall_loops": "2"}, {"wall_loops": ["3", "3"]}) == {
+        "wall_loops": ["3", "3"]
+    }
 
 
 def test_a_list_over_an_option_the_preset_leaves_out_is_written_whole() -> None:

@@ -50,25 +50,24 @@ repository, and every save is a commit (main spec §4.2 and §4.3).
 ### Default slicer settings: `print_settings`
 
 A template that prints best with a process setting changed says so in `model.json`
-(issue #770; `PRINT_SETTING_KEYS` in `backend/scadbuddy/library/catalogue.py`):
+(issue #770; `print_settings` in `backend/scadbuddy/library/catalogue.py`):
 
 ```json
 "print_settings": {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1", "enable_support": "0"}
 ```
 
-- Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
-  `support_type`, `support_threshold_angle`, `support_on_build_plate_only`,
-  `brim_width`, `brim_type` and `print_sequence`. Any other key makes
-  the template fail to load, and the error names the key.
-- Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`),
-  and each must be one its key takes (`PRINT_SETTING_VALUES`, from Bambu Studio's
-  [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp)):
-  `"0"` or `"1"` for the four switches; `support_type` one of `normal(auto)`,
-  `tree(auto)`, `normal(manual)`, `tree(manual)`; `brim_type` one of `auto_brim`,
-  `brim_ears`, `outer_only`, `inner_only`, `outer_and_inner`, `no_brim`;
-  `print_sequence` `by layer` or `by object`; `brim_width` a non-negative number of
-  millimetres; `support_threshold_angle` whole degrees from vertical, `0` to `90`.
-  A bad value fails the load, as an unknown key does.
+- Any Bambu Studio process key (issue #2998: no allowlist). ScadBuddy refuses no key
+  and no value; the slicer judges them, and a slice it refuses fails the print.
+  The one exception: the host-side settings, which act on the machine that slices
+  (`post_process`, `filename_format`, `bed_custom_texture`, `bed_custom_model` and the
+  print host's, `print_host*`, `printhost_*`, `host_type`), are dropped with a warning
+  (`HOST_SIDE_KEYS` in `backend/scadbuddy/bambuddy/process_overrides.py`). Custom
+  G-code (`*_gcode`) is kept.
+- Write values as Bambu Studio's configs store them (`"1"` for a switch, `"tree(auto)"`,
+  `"5"`); the keys and the values each takes are Bambu Studio's
+  [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp).
+  A JSON number or boolean is stored as that string (`true` as `"1"`), and a list is
+  joined with commas.
 - **Supports (#1899).** A template whose overhangs cannot be designed away declares
   them: `"enable_support": "1"` with `"support_type": "tree(auto)"` (Bambu's default,
   and the one to reach for on an H2C) or `"normal(auto)"`, and optionally the angle and
@@ -79,16 +78,16 @@ A template that prints best with a process setting changed says so in `model.jso
   and `enable_support`, `support_type` and `support_on_build_plate_only` still go.
 - The print run sends them as the slice's `process_overrides`, over the process preset
   the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
-  `SlicePlan`). A print's own `print_sequence` (`print_output`, #907) goes over the
-  template's. A downloaded 3MF carries them in `project_settings.config` and lists
-  them in `different_settings_to_system`, so Bambu Studio shows them as changes to the
+  `SlicePlan`). A print's own `print_sequence` (`print_output`, #907) and its
+  `process_overrides` (#2998) go over the template's. A downloaded 3MF carries them in
+  `project_settings.config` and lists them in `different_settings_to_system`, so Bambu Studio shows them as changes to the
   system process (`backend/scadbuddy/bambuddy/download.py`, `with_presets`).
 - Set only what the geometry needs (a prime tower for thin two-colour layers, supports
   off for a flat part). This last point is ScadBuddy's judgement, not a source's rule.
 
 ### Settings per colour part: `part_print_settings`
 
-A template can set a few process settings on the parts of one colour (issue #5626;
+A template can set process settings on the parts of one colour (issue #5626;
 print-flow spec `docs/superpowers/specs/2026-09-24-print-flow-design.md` §4, "Settings
 per part"). Each key is a `// color` parameter of `model.scad`, never a slot number:
 
@@ -96,11 +95,10 @@ per part"). Each key is a `// color` parameter of `model.scad`, never a slot num
 "part_print_settings": {"letter_color": {"top_shell_layers": 8}}
 ```
 
-- The keys and limits are `PartSettings` in `backend/scadbuddy/bambuddy/part_settings.py`:
-  `top_shell_layers`, `bottom_shell_layers` and `wall_loops` (0-1000),
-  `sparse_infill_density` (0-100), `sparse_infill_pattern` and `ironing_type`. Values
-  are JSON numbers and strings, not Bambu's strings. An unknown key or a value out of
-  range fails the load, as in `print_settings`.
+- Any Bambu Studio key (`PartSettings` in `backend/scadbuddy/bambuddy/part_settings.py`,
+  open since #2998): `top_shell_layers`, `sparse_infill_density` (a number is a
+  percent), `ironing_type` or any other. Values are JSON strings, numbers, booleans or
+  lists. No key or range is refused; the slicer judges them.
 - A key that is not a `// color` parameter of `model.scad` makes the print fail, and
   the error names the key. A template with a pipeline is only warned about.
 - Each print reads the parameter's value in the output and gives the settings to the

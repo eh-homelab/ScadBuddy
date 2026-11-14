@@ -107,6 +107,12 @@ WarningKind = Literal[
     "supports-not-applied",
     # #3628: a prime tower setting the process preset has no value for, sent anyway.
     "prime-tower-unconfirmed",
+    # #2998: a process override the process preset has no value for, or a list over
+    # one value: sent as set, and the slicer judges it.
+    "process-override-unchecked",
+    # #2998: a setting that acts on the machine that slices (`post_process`, the print
+    # host's), dropped from the print (`process_overrides.HOST_SIDE_KEYS`).
+    "host-setting-dropped",
     # #3628: a prime tower chosen for an already-sliced file, which queues as it is;
     # #3962: a tower asked for that Bambuddy's slicer dropped from the slice.
     "prime-tower-not-applied",

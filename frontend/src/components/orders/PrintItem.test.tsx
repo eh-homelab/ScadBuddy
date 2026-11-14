@@ -67,7 +67,16 @@ describe('PrintItem', () => {
     for (const quote of state.quotes) {
       if (quote.order_item_id === ITEM_APPROVED && quote.accepted) {
         Object.assign(quote, {
-          choices: { printer_id: null, printer: null, path: null, choices: quoted, prime_tower: null, supports: null, print_sequence: 'by object' },
+          choices: {
+            printer_id: null,
+            printer: null,
+            path: null,
+            choices: quoted,
+            prime_tower: null,
+            supports: null,
+            print_sequence: 'by object',
+            process_overrides: { skirt_loops: '2' },
+          },
           // Not the dialog's own picks (21 then 27): the quote's spools, swapped.
           filament_plan: { slots: [{ slot_id: 1, spool_id: 27 }, { slot_id: 2, spool_id: 21 }], force_colour_match: false },
         })
@@ -89,6 +98,8 @@ describe('PrintItem', () => {
     ])
     // The tower, supports and sequence are left out: the backend takes the quote's.
     expect(body).not.toHaveProperty('print_sequence')
+    // #2998: the slicer settings are sent as the dialog shows them, seeded from the quote's.
+    expect(body.process_overrides).toEqual({ skirt_loops: '2' })
   })
 
   // #5761 review — a quote with a setup but no spools seeds no plan: the dialog's own picks

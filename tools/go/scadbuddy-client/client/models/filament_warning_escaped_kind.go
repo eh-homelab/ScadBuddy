@@ -26,6 +26,8 @@ const (
 	PROFILENOTAPPLIED_FILAMENTWARNING_KIND
 	SUPPORTSNOTAPPLIED_FILAMENTWARNING_KIND
 	PRIMETOWERUNCONFIRMED_FILAMENTWARNING_KIND
+	PROCESSOVERRIDEUNCHECKED_FILAMENTWARNING_KIND
+	HOSTSETTINGDROPPED_FILAMENTWARNING_KIND
 	PRIMETOWERNOTAPPLIED_FILAMENTWARNING_KIND
 	SLICEDOTHERMODEL_FILAMENTWARNING_KIND
 	SLICEDNOZZLEMISSING_FILAMENTWARNING_KIND
@@ -38,7 +40,7 @@ const (
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "mixed-flows", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "prime-tower-unconfirmed", "process-override-unchecked", "host-setting-dropped", "prime-tower-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "sliced-unchecked", "sliced-same-family", "slice-reused", "mixed-materials", "inlet-shared"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -84,6 +86,10 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = SUPPORTSNOTAPPLIED_FILAMENTWARNING_KIND
 	case "prime-tower-unconfirmed":
 		result = PRIMETOWERUNCONFIRMED_FILAMENTWARNING_KIND
+	case "process-override-unchecked":
+		result = PROCESSOVERRIDEUNCHECKED_FILAMENTWARNING_KIND
+	case "host-setting-dropped":
+		result = HOSTSETTINGDROPPED_FILAMENTWARNING_KIND
 	case "prime-tower-not-applied":
 		result = PRIMETOWERNOTAPPLIED_FILAMENTWARNING_KIND
 	case "sliced-other-model":

@@ -98,7 +98,7 @@ with workflow.unsafe.imports_passed_through():
         SucceedInput,
         lan_sequence_id,
     )
-    from scadbuddy.workflows.problems import problem_of
+    from scadbuddy.workflows.problems import problem_of, setting_refused
     from scadbuddy.workflows.slicing import SLICE_RETRY, SLICE_ROUND, SLICE_TIMEOUT
 
 #: The reads and the insert: a Bambuddy blip is retried, a refusal is not.
@@ -705,6 +705,25 @@ class PrintRunWorkflow(_PlateStarts):
         await workflow.wait_condition(workflow.all_handlers_finished)
 
     async def _slice(
+        self, planned: PlannedRun, plate: PlatePlan, subject: str
+    ) -> tuple[SliceStarted | NativeSliced, int]:
+        """:meth:`_slice_plate`, with a failure whose text names one of the plan's
+        process overrides answered as a 422 naming that key (#2998,
+        ``problems.setting_refused``). Only the failure's problem changes; the commands
+        are the same, so a history replays as before."""
+        try:
+            return await self._slice_plate(planned, plate, subject)
+        except (ActivityError, ApplicationError) as error:
+            if is_cancelled_exception(error) or plate.plan is None:
+                raise
+            refused = setting_refused(problem_of(error), plate.plan.process_overrides)
+            if refused is None:
+                raise
+            raise ApplicationError(
+                refused.detail, refused, type=FAILED, non_retryable=True
+            ) from None
+
+    async def _slice_plate(
         self, planned: PlannedRun, plate: PlatePlan, subject: str
     ) -> tuple[SliceStarted | NativeSliced, int]:
         """Slice one plate: its job and the sliced file; on the native slicer, the

@@ -78,6 +78,7 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, normalised, parts_set_only
 from scadbuddy.bambuddy.print_links import ImportSource
+from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_overrides
 from scadbuddy.core.config import LibraryBackend, Slicer, StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_pool import row_pool
@@ -293,6 +294,8 @@ def _parts_only_when_set(dumped: dict[str, Any]) -> dict[str, Any]:
     the settings set in each slot (#5627, ``parts_set_only``)."""
     if dumped.get("part_settings") is None:
         dumped.pop("part_settings", None)
+    if dumped.get("process_overrides") is None:
+        dumped.pop("process_overrides", None)
     return parts_set_only(dumped, maps=("part_settings",))
 
 
@@ -309,9 +312,11 @@ class ModelPrintChoices(BaseModel):
     the template's or the process's. ``part_settings`` are its slicer settings per
     filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
     (#5628). Kept per model or file only, never at the print options' global or printer
-    scope, since a slot number means one file's colour. All default to "nothing remembered", so
-    a settings file written before them still loads; an empty ``nozzles`` means the
-    dialog's default.
+    scope, since a slot number means one file's colour. ``process_overrides`` are its
+    "Slicer settings" (#2998, ``bambuddy/process_overrides.py``): any Bambu Studio
+    process key, kept in the stored jsonb with the rest, so no migration. All default to
+    "nothing remembered", so a settings file written before them still loads; an empty
+    ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
@@ -323,6 +328,7 @@ class ModelPrintChoices(BaseModel):
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
+    process_overrides: ProcessOverrides | None = None
 
     @field_validator("part_settings")
     @classmethod
@@ -330,9 +336,16 @@ class ModelPrintChoices(BaseModel):
         """Only slots that set something (#5627): none set is nothing remembered."""
         return normalised(value)
 
-    # `part_settings` only when some are remembered (#5627): an entry with none reads as
-    # it did before the field existed. A lambda with no return annotation, so the schema
-    # stays the model's (`part_settings.parts_set_only` says why).
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_set(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        """As a print request keeps them (#2998); none set is nothing remembered."""
+        return normalised_overrides(value)  # type: ignore[return-value]
+
+    # `part_settings` and `process_overrides` only when some are remembered (#5627,
+    # #2998): an entry with none reads as it did before the fields existed. A lambda with
+    # no return annotation, so the schema stays the model's (`part_settings.parts_set_only`
+    # says why).
     _parts_when_set = model_serializer(mode="wrap")(
         lambda self, handler: _parts_only_when_set(handler(self))
     )

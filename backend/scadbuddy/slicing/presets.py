@@ -82,6 +82,7 @@ from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, ProcessValue
+from scadbuddy.bambuddy.process_overrides import without_host_side
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.profiles import (
@@ -111,19 +112,26 @@ class PresetFiles(BaseModel):
     from_bambuddy: dict[str, str] = Field(default_factory=dict)
 
 
+def _host_safe(document: Flat, where: str) -> Flat:
+    """``document`` without print-host credentials (``strip_credentials``) or any other
+    host-side setting (``process_overrides.without_host_side``)."""
+    return without_host_side(strip_credentials(document), where=where)
+
+
 def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Flat:
     """``process`` with ``overrides`` written over it, as Bambuddy writes a slice's
     ``process_overrides``: a string over a string; a list over a list position by
     position, the positions it does not name kept (#717); a string over a list sets
     every position.
 
-    A list over a single value is refused: the preset stores that option as one value,
-    and Bambu Studio's JSON loader joins a list with commas and reads the result as the
-    option (``ConfigBase::load_from_json``, Config.cpp, v02.08.02.61), so ``["3", "3"]``
-    would reach a single-value option as ``"3,3"``: refused, or misread. A process
-    built from Bambuddy's values is checked the same way: ``/slicer/preset-values``
-    answers a vector option as a list (measured 2026-10-18 on 30 cloud and standard
-    process presets, 1330 list values, none of the image's vector options a string).
+    A list over a single value is written as it is (#2998: no setting is refused before
+    the slice). Bambu Studio's JSON loader joins a list with commas and reads the result
+    as the option (``ConfigBase::load_from_json``, Config.cpp, v02.08.02.61), so
+    ``["3", "3"]`` reaches a single-value option as ``"3,3"``, which the slicer then
+    judges; the print's check warns of it first (``process_overrides.override_warnings``).
+    ``/slicer/preset-values`` answers a vector option as a list (measured 2026-10-18 on
+    30 cloud and standard process presets, 1330 list values, none of the image's vector
+    options a string), so a process built from Bambuddy's values is written the same way.
 
     A list for an option the preset leaves out is written whole: the preset takes Bambu
     Studio's default there, whose shape this side cannot see, and the override's shape
@@ -135,13 +143,8 @@ def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Fla
             out[key] = [value] * len(current) if isinstance(current, list) else value
         elif isinstance(current, list):
             out[key] = [*value, *current[len(value) :]]
-        elif current is None:
-            out[key] = list(value)
         else:
-            raise ProfileError(
-                f"the process override {key} is a list, but the preset stores {key} as a"
-                " single value"
-            )
+            out[key] = list(value)
     return out
 
 
@@ -337,13 +340,22 @@ async def build_presets(
         (apply_overrides(filament, plan.filament_overrides.get(slot, {})), held)
         for slot, (filament, held) in enumerate(filaments, start=1)
     ]
-    process = apply_overrides(process, plan.process_overrides)
+    # #2998: a host-side setting never reaches the slicer, even from a plan whose request
+    # skipped validation (one in a workflow's history from before it, say).
+    process = apply_overrides(
+        process, without_host_side(plan.process_overrides, where="slice plan")
+    )
     if plan.bed_type:
         process["curr_bed_type"] = plan.bed_type
-    # No print-host credential reaches a slicer file, whichever tree or document it came from.
-    machine_document = _document(strip_credentials(machine))
-    process_document = _document(strip_credentials(process))
-    filament_documents = [_document(strip_credentials(filament)) for filament, _ in filaments]
+    # No print-host credential reaches a slicer file, whichever tree or document it came
+    # from, nor any setting that acts on the machine that slices: `post_process` would run
+    # a command in the slicer's pod (#2998, `process_overrides.HOST_SIDE_KEYS`). A local
+    # preset Bambuddy holds may carry one too.
+    machine_document = _document(_host_safe(machine, "printer preset"))
+    process_document = _document(_host_safe(process, "process preset"))
+    filament_documents = [
+        _document(_host_safe(filament, "filament preset")) for filament, _ in filaments
+    ]
     from_bambuddy: dict[str, str] = {}
     if machine_held:
         from_bambuddy["printer"] = _digest(machine_document)
