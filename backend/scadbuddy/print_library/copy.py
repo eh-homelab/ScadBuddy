@@ -424,7 +424,8 @@ async def copy_file_to_native(
 
     Two calls with the same ``root_id`` and ``path`` find or make its folders one at a
     time, under a lock of their own, released once the folders exist: the second reads
-    the tree after the first made them, so the two never make two folders of one name."""
+    the tree after the first made them, so the two never make two folders of one name.
+    That step releases every lock on ``locks``: pass locks that hold none yet."""
     target = _NativeTarget(native, root_id)
     if path:
         await asyncio.to_thread(locks.acquire, "native_folder", f"{root_id}/{path}")

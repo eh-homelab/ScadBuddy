@@ -74,7 +74,9 @@ async def get_makerworld_status(store: SettingsStoreDep) -> MakerWorldStatus:
         "The design and its print profiles (`instances`, each `profileId` an import's"
         " `profile_id`) for a MakerWorld link, read by Bambuddy, and the library files an"
         " earlier import of the model made. Downloads nothing. 422 for a link Bambuddy"
-        " does not take; 409 when no Bambuddy is configured."
+        " does not take; 409 when no Bambuddy is configured. On library_backend native it"
+        " also reads each earlier import's Bambuddy file, so the key needs `Manage Library`"
+        " as well as `Read Status`: without it the whole resolve is the scope 409."
     ),
 )
 async def post_makerworld_resolve(

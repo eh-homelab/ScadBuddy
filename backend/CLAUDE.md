@@ -532,9 +532,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
 - MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
   `/import`) calls Bambuddy's own MakerWorld routes with the API's key
   (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
-  assistant and flows import only through these routes (agent `get_makerworld_status`,
+  assistant imports only through these routes (agent `get_makerworld_status`,
   `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
-  Bambuddy and never holds its key. The import is the `makerworld_import` operation on the
+  Bambuddy and never holds its key. The `makerworld-import` flow (stored in the
+  database, not in this repo) still posts to Bambuddy's `/api/v1/makerworld/import`
+  directly until its `import_one` is changed to call `import_makerworld_model`. The import is the `makerworld_import` operation on the
   `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
   `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
   copies it into the native library as a `bb_to_sb` copy does
