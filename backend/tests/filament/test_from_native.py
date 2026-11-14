@@ -20,10 +20,15 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
         migrate(conn, MIGRATIONS[: _index("filament_from_native")])
         live = conn.execute(
             "INSERT INTO native_spools (material, colour, label_weight_g, remaining_g,"
-            " tray_uuid, note, created_at)"
-            " VALUES ('pla', '#aabbcc', 1000, 600, 'TRAY1', 'hi', '2026-11-01T10:00:00Z')"
+            " tray_uuid, note, created_at, brand, name, preset)"
+            " VALUES ('pla', '#aabbcc', 1000, 600, 'TRAY1', 'hi', '2026-11-01T10:00:00Z',"
+            " 'Bambu Lab', 'Jade', 'GFA00')"
             " RETURNING id"
         ).fetchone()
+        conn.execute(
+            "INSERT INTO native_spools (material, remaining_g, brand)"
+            " VALUES ('PLA', 1, 'BAMBU LAB')"
+        )
         old = conn.execute(
             "INSERT INTO native_spools (material, colour, label_weight_g, remaining_g,"
             " tag_uid, archived_at)"
@@ -63,7 +68,7 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             " s.archived_at, m.name FROM filament_spools s"
             " JOIN filament_materials m ON m.id = s.material_id"
         ).fetchall()
-        assert len(spools) == 3
+        assert len(spools) == 4
         by_id = {s[0]: s for s in spools}
         a = by_id[live[0]]
         assert a[1:6] == ("#AABBCCFF", 600, 1000, "hi", None)
@@ -75,7 +80,21 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             "SELECT count(*) FROM filament_materials WHERE upper(name) = 'PLA'"
         ).fetchone() == (1,)
 
-        tags = dict(
+        copied = conn.execute(
+            "SELECT b.name, s.colour_name FROM filament_spools s"
+            " LEFT JOIN filament_brands b ON b.id = s.brand_id WHERE s.id = %s",
+            (live[0],),
+        ).fetchone()
+        assert copied is not None and copied[0].upper() == "BAMBU LAB" and copied[1] == "Jade"
+        assert conn.execute(
+            "SELECT count(*) FROM filament_brands WHERE upper(name) = 'BAMBU LAB'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT spool_id, printer_model, nozzle_diameter, slicer_filament"
+            " FROM filament_spool_presets"
+        ).fetchall() == [(live[0], "*", "*", "GFA00")]
+
+        tags: dict[str, str] = dict(
             conn.execute("SELECT coalesce(tray_uuid, tag_uid), kind FROM filament_tags").fetchall()
         )
         assert tags == {
@@ -94,7 +113,7 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             "SELECT spool_id, source, grams_after, at FROM filament_spool_events"
             " WHERE kind = 'created'"
         ).fetchall()
-        assert len(created) == 3
+        assert len(created) == 4
         mine = next(c for c in created if c[0] == live[0])
         assert mine[1:3] == ("person", 600)
         assert mine[3].isoformat().startswith("2026-11-01T10:00:00")

@@ -16,6 +16,16 @@ WHERE NOT EXISTS (
 )
 ORDER BY upper(m.name), m.name;
 
+-- Brands a native spool names and the catalog lacks, by case-blind name.
+INSERT INTO filament_brands (name, sort_order)
+SELECT DISTINCT ON (upper(b.name)) b.name, 1000
+FROM (SELECT btrim(brand) AS name FROM native_spools WHERE nullif(btrim(brand), '') IS NOT NULL) b
+WHERE NOT EXISTS (
+    SELECT 1 FROM filament_brands f
+    WHERE f.archived_at IS NULL AND upper(f.name) = upper(b.name)
+)
+ORDER BY upper(b.name), b.name;
+
 DO $$
 DECLARE
     n record;
@@ -33,15 +43,25 @@ BEGIN
     LOOP
         v_spool := coalesce(n.physical_spool_id, n.id);
         INSERT INTO filament_spools
-            (id, material_id, rgba, label_weight_g, note, grams_left, archived_at,
-             created_at, updated_at)
+            (id, material_id, brand_id, colour_name, rgba, label_weight_g, note, grams_left,
+             archived_at, created_at, updated_at)
         SELECT v_spool, f.id,
+               (SELECT br.id FROM filament_brands br
+                WHERE br.archived_at IS NULL AND upper(br.name) = upper(btrim(n.brand))),
+               n.name,
                CASE WHEN n.colour ~ '^#[0-9A-Fa-f]{6}$' THEN upper(n.colour) || 'FF' END,
                n.label_weight_g, n.note, n.remaining_g, n.archived_at,
                n.created_at, n.updated_at
         FROM filament_materials f
         WHERE f.archived_at IS NULL
           AND upper(f.name) = upper(coalesce(nullif(btrim(n.material), ''), 'Unknown'));
+
+        -- A native preset has no printer model: it is the '*' row (#6262 replaces it).
+        IF nullif(btrim(n.preset), '') IS NOT NULL THEN
+            INSERT INTO filament_spool_presets
+                (spool_id, printer_model, nozzle_diameter, slicer_filament)
+            VALUES (v_spool, '*', '*', n.preset);
+        END IF;
 
         IF n.tray_uuid IS NOT NULL OR n.tag_uid IS NOT NULL THEN
             SELECT t.id INTO v_tag FROM filament_tags t
