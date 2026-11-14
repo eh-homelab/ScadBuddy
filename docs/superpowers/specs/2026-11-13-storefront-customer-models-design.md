@@ -471,8 +471,11 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   container. The sandbox refuses to start with a database secret, the KEK or a proof, and
   with any file under `/var/run/secrets/` (where Kubernetes mounts a ServiceAccount token,
   [Kubernetes: opt out of API credential automounting](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting);
-  `sandbox.mounted_secrets`; a folder it cannot list refuses too).
-- The RPC (`runner.py`'s docstring has every bound). `POST /check`: the body is the file's
+  `sandbox.mounted_secrets`; a folder it cannot list refuses too). The RPC token's Secret
+  is therefore mounted outside `/var/run/secrets/`, e.g. at
+  `/etc/scadbuddy-intake-rpc/token`.
+- The RPC (`runner.py`'s docstring has every bound). `POST /check`: the header
+  `Authorization: Bearer <token>` carries the RPC token, the body is the file's
   bytes (`Content-Length` required, at most 256 MiB, streamed to the box, never held in
   memory whole), and the header `X-Intake-Request` is the request as JSON (the filename,
   the timeout, the address-space cap and a random `id` of 16 to 64 hex digits; at most
@@ -481,12 +484,33 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   `X-Intake-Verdict-Bytes: N`: the first `N` bytes are the verdict's JSON (at most 1 MiB),
   the rest the preview PNG (at most 4 MiB, empty when none). The framing is binary, never
   base64 (`.github/scripts/lint-base64-images.sh`). Every other status is a small JSON
-  error that fails the check: 400, 404, 405, 411, 413, 431, 500 (the child crashed, did not
-  start or wrote no verdict), 503 (busy, or stopping) and 504 (past the check's timeout).
-  When the client goes away, or the timeout passes, the sandbox kills the child's group.
-  The RPC carries no key, because the sandbox must hold no secret: a key in its pod is a
-  key an escaped parser reads. Two things protect it instead. The NetworkPolicy admits
-  only the worker's pods to its port, and the worker reads every answer as untrusted:
+  error that fails the check: 401 (no token or a wrong one), 400, 404, 405, 411, 413,
+  431, 500 (the child crashed, did not start or wrote no verdict), 503 (busy, or stopping)
+  and 504 (past the check's timeout). When the client goes away, or the timeout passes, the
+  sandbox kills the child's group.
+- The RPC token. A security review found that `serve` listened on every address with no
+  authentication, so anything that reached the port could take the one check slot or feed
+  the sandbox files. The owner decided on a token that authorizes calls to the sandbox and
+  nothing else. Both processes read it from the file `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`
+  names, from the Secret `scadbuddy-intake-sandbox-rpc`, mounted in the worker's and the
+  sandbox's pods only. Both refuse to start without the file, with an empty file, or with a
+  token shorter than 32 bytes or not visible ASCII (`runner.read_token`; one final newline
+  is dropped). It is the one secret the sandbox may hold, and the rule "the sandbox holds
+  no secret" stays true of every other credential: an escaped parser that reads the token
+  can call only the sandbox it is already in, so the leak reaches no other service, no
+  data and no other customer's file. The sandbox compares the header with
+  `hmac.compare_digest` ([Python: hmac](https://docs.python.org/3/library/hmac.html#hmac.compare_digest))
+  and answers 401 (`WWW-Authenticate: Bearer`) before it reads any byte of the body, then
+  closes the connection without draining it. `/healthz` asks no token: the kubelet's
+  probes cannot read a Secret, and it tells nothing.
+- The request deadline. A request's head and its whole body must arrive within
+  `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
+  is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the
+  check slot and keeps no file (the box is removed), so one connection cannot hold `busy`
+  by trickling its body.
+- Two more things protect the RPC. The NetworkPolicy admits only the worker's pods to
+  the sandbox's port; it ships in the eh-homelab/clusters PR with a check that fails
+  without it. And the worker reads every answer as untrusted:
   status 200, the echoed id, the verdict length an integer within its cap, no
   `Content-Encoding`, the body counted while it is read and stopped past 5 MiB, the
   verdict validated (`runner.parse_verdict`) and the preview's PNG signature and `IHDR`
@@ -582,7 +606,8 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   by the runtime's seccomp and AppArmor, so the launcher's own filter is the only syscall
   filter on the parser until a `Localhost` profile replaces `Unconfined`.
 - A parser that escaped through such a bug runs as the sandbox's user in the sandbox's
-  pod. That pod holds no token, no proof and no secret, and by the isolation rule no other
+  pod. That pod holds no ServiceAccount token, no proof and no secret but the RPC token
+  (which reaches only the sandbox itself), and by the isolation rule no other
   customer's file: it runs one check at a time and removes each box. It shares no network
   namespace and no volume with the worker, so the worker's projected token, its Temporal
   grant and its CRUD credential are out of reach. Its NetworkPolicy allows it no egress,
@@ -855,7 +880,9 @@ One PR: the `scadbuddy-intake` Deployment (the app image, `python -m scadbuddy.i
 a ServiceAccount whose projected token the CRUD service exchanges, no database secret, no
 store credential, read-only root, a memory limit, its egress policy), the
 `scadbuddy-intake-sandbox` Deployment and its Service (`python -m
-scadbuddy.intake_worker.sandbox`, no token, its own `emptyDir`, seccomp and AppArmor
+scadbuddy.intake_worker.sandbox`, no ServiceAccount token, its own `emptyDir`, the
+Secret `scadbuddy-intake-sandbox-rpc` mounted outside `/var/run/secrets/` in it and in the
+worker, a NetworkPolicy check that fails without its policy, seccomp and AppArmor
 `Unconfined` on its pod only, ingress from the worker's pods only, no egress; §7, "The
 child's sandbox"), and the bucket's CORS rule (§6.4).
 

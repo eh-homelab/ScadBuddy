@@ -72,6 +72,7 @@ async def run(
         crud,
         settings.intake_work_dir,
         sandbox_url=settings.intake_sandbox_url if settings.intake_sandbox == "true" else None,
+        sandbox_token=settings.sandbox_token,
     )
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)

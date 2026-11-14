@@ -484,12 +484,14 @@ def test_the_childs_verdict_says_whether_it_was_isolated(tmp_path: Path) -> None
 
 
 def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     """It fails closed: no check is served by a sandbox whose checks would run unconfined."""
     for name in sandbox.SANDBOX_FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sandbox, "SECRETS_DIR", Path("/nowhere/secrets"))
+    (tmp_path / "rpc-token").write_text("Zk3q" * 10)
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "rpc-token"))
     monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "unshare: refused")
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
     served: list[object] = []

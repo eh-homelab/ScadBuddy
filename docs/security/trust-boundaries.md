@@ -131,7 +131,9 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 
 The CRUD service is the only process with a database secret, and nothing untrusted runs in
 its pod. Every other process calls it over HTTP with a short-lived service credential.
-Untrusted code runs in a pod that holds no secret and has no route to Postgres.
+Untrusted code runs in a pod that holds no secret and has no route to Postgres. The one
+exception is a token that authorizes calls to that sandbox and nothing else (the intake
+sandbox's RPC token, #6133), so a leak reaches nothing beyond the sandbox.
 
 Today (each line into Postgres is a connection; the dotted ones cross into the other
 service's tables; the render, print and projects workers call the API over HTTP, #5298):
@@ -153,12 +155,12 @@ The target:
 
 ```mermaid
 flowchart LR
-  subgraph untrusted[Sandbox pods: no secret, no route to Postgres]
+  subgraph untrusted[Sandbox pods: no secret but an RPC token to itself, no route to Postgres]
     T[template Python, openscad]
     C[Claude Code tools, plugins]
     X[intake sandbox<br/>customer file parser]
   end
-  I -- HTTP POST /check, no key; answers read as untrusted --> X
+  I -- HTTP POST /check + RPC token; answers read as untrusted --> X
   R[render worker] -- HTTP + credential --> CRUD
   P[print worker] -- HTTP + credential --> CRUD
   J[projects worker] -- HTTP + credential --> CRUD
@@ -178,7 +180,7 @@ What changes:
 | agent services | the owner role; 46 `ai_*` tables and 5 backend tables; its workspace blob holds through CRUD routes (#5299) | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |
 | agent-durable | the owner role, 0 replicas | no database secret |
 | storefront (#4962, not built yet) | none | no database, Temporal, store or KEK secret; listings, drafts, renders and estimates through `/api/v1/internal/crud/storefront/*`, which scope every draft to the visitor id they are sent (storefront spec §5.1, amended 2026-11-07) |
-| intake worker (#6133) | none: it refuses to start with a database secret or the KEK (`backend/scadbuddy/intake_worker/settings.py`), and holds no store credential | as today: it reads a customer's file only through a URL the CRUD service presigns (of the claim's frozen copy, a key of its own claim attempt, `If-Match` its ETag and its SHA-256 compared where the store gave one), parses it only in a child run by the intake sandbox, a Deployment of its own (`scadbuddy-intake-sandbox`: no token, proof or secret, its own `emptyDir`, no network namespace or volume shared with the worker, ingress from the worker's pods only and no egress; the worker hands each file over `POST /check` with no key, since the sandbox must hold no secret; a box directory per check; through a launcher that gives the parser its own network, mount and PID namespaces with no `/proc`, no capabilities, no new privileges and a seccomp filter, and that fails closed: the sandbox refuses to start where any step is refused; one check per pod at a time, so no other customer's file is there to reach), reads the answer as untrusted (status, echoed id, each length within its cap, the verdict validated, the preview's PNG header checked), and posts the verdict through `/api/v1/internal/crud/intake/*` (spec 2026-11-13 §7) |
+| intake worker (#6133) | none: it refuses to start with a database secret or the KEK (`backend/scadbuddy/intake_worker/settings.py`), and holds no store credential | as today: it reads a customer's file only through a URL the CRUD service presigns (of the claim's frozen copy, a key of its own claim attempt, `If-Match` its ETag and its SHA-256 compared where the store gave one), parses it only in a child run by the intake sandbox, a Deployment of its own (`scadbuddy-intake-sandbox`: no ServiceAccount token, proof or database secret, its own `emptyDir`, no network namespace or volume shared with the worker, ingress from the worker's pods only and no egress; the worker hands each file over `POST /check` with the RPC token, `Authorization: Bearer`, from the Secret `scadbuddy-intake-sandbox-rpc` mounted in those two pods only, the one secret the sandbox holds because it authorizes calls to the sandbox and nothing else; 401 before any body byte is read; head and body within 60 s; a box directory per check; through a launcher that gives the parser its own network, mount and PID namespaces with no `/proc`, no capabilities, no new privileges and a seccomp filter, and that fails closed: the sandbox refuses to start where any step is refused; one check per pod at a time, so no other customer's file is there to reach), reads the answer as untrusted (status, echoed id, each length within its cap, the verdict validated, the preview's PNG header checked), and posts the verdict through `/api/v1/internal/crud/intake/*` (spec 2026-11-13 §7) |
 | API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
 | Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
 

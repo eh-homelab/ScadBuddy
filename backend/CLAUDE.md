@@ -1448,16 +1448,24 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
   `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
   sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
-  no token, proof or secret, its own `emptyDir`, nothing shared with the worker's pod; it
-  exits 2 with any file under `/var/run/secrets/`, `SECRETS_DIR`),
+  no ServiceAccount token, proof or secret but the RPC token, its own `emptyDir`, nothing
+  shared with the worker's pod; it exits 2 with any file under `/var/run/secrets/`,
+  `SECRETS_DIR`),
   never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
   its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
   worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,
   default 8090; the body the file, the request JSON in `X-Intake-Request`; the answer
   binary-framed: `X-Intake-Verdict-Bytes` bytes of verdict JSON, then the preview PNG; the
-  wire format and every cap in `runner.py`'s docstring). No RPC key: the sandbox holds no
-  secret; its NetworkPolicy admits only the worker's pods, and the worker reads every
-  answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
+  wire format and every cap in `runner.py`'s docstring). Each check carries the RPC token,
+  `Authorization: Bearer <token>`: both processes read it from
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` (`runner.read_token`; the Secret
+  `scadbuddy-intake-sandbox-rpc`, mounted outside `/var/run/secrets/`) and refuse to start
+  without a file, with an empty one or a token under 32 bytes. It authorizes calls to the
+  sandbox only, so it is the one secret the sandbox may hold. The sandbox compares it with
+  `hmac.compare_digest` and answers 401 before it reads the body, then closes. A request's
+  head and whole body arrive within `sandbox.REQUEST_DEADLINE` (60 s) or the sandbox drops
+  it and frees the slot. Its NetworkPolicy admits only the worker's pods, and the worker
+  reads every answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
   its cap, the verdict validated by `parse_verdict`, the PNG signature and `IHDR` checked).
   The sandbox fails closed: it runs the launcher with `--strict` (a refused step is exit
   126, no parse) and exits 3 at start when its probe is refused (`probe_isolation`); the

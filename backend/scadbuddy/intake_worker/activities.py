@@ -98,12 +98,14 @@ class IntakeActivities:
         http: httpx.AsyncClient | None = None,
         *,
         sandbox_url: str | None,
+        sandbox_token: str | None = None,
     ) -> None:
         self._crud = crud
         self._work_dir = work_dir
-        #: The sandbox's Service: the check's child runs there (`runner.py`). None:
-        #: dev-only local runs.
+        #: The sandbox's Service and its RPC token: the check's child runs there
+        #: (`runner.py`). None: dev-only local runs.
         self._sandbox_url = sandbox_url
+        self._sandbox_token = sandbox_token
         self._http = http or httpx.AsyncClient(timeout=TRANSFER_TIMEOUT)
 
     async def aclose(self) -> None:
@@ -143,7 +145,11 @@ class IntakeActivities:
                 )
             else:
                 verdict = await run_check(
-                    file, read.filename, folder, sandbox_url=self._sandbox_url
+                    file,
+                    read.filename,
+                    folder,
+                    sandbox_url=self._sandbox_url,
+                    sandbox_token=self._sandbox_token,
                 )
                 if verdict.preview is None:
                     result = CheckResult(outcome="refused", reason=verdict.reason)

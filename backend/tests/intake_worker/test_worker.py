@@ -30,7 +30,39 @@ def worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.delenv("SCADBUDDY_SERVICE_BOOTSTRAP_FILE", raising=False)
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "true")
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_URL", "http://scadbuddy-intake-sandbox:8090")
+    rpc = tmp_path / "rpc-token"
+    rpc.write_text(RPC_TOKEN + "\n")
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(rpc))
     return proof
+
+
+RPC_TOKEN = "Zk3q" * 10
+
+
+def test_the_settings_read_the_rpc_token(worker_env: Path) -> None:
+    settings = IntakeSettings()  # type: ignore[call-arg]
+    assert settings.sandbox_token == RPC_TOKEN
+
+
+@pytest.mark.parametrize("token", [None, "missing", "", "\n", "x" * 31, "é" * 40])
+def test_the_sandbox_needs_a_token_of_32_bytes(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, token: str | None
+) -> None:
+    if token is None:
+        monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE")
+    elif token == "missing":
+        monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "nowhere"))
+    else:
+        (tmp_path / "bad").write_text(token)
+        monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "bad"))
+    with pytest.raises(ValidationError, match="SANDBOX_TOKEN_FILE"):
+        IntakeSettings()  # type: ignore[call-arg]
+
+
+def test_local_mode_needs_no_rpc_token(worker_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "unsafe-local")
+    monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE")
+    assert IntakeSettings().sandbox_token is None  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize("name", FORBIDDEN_ENV)

@@ -4,12 +4,18 @@ customer's file is parsed in a pod that holds no service-account token, no proof
 database secret and no KEK, and shares no network namespace and no volume with the worker.
 The worker hands it each check over HTTP on the pod network: ``POST /check`` on
 ``SCADBUDDY_INTAKE_SANDBOX_PORT`` (default `runner.SANDBOX_PORT`), the wire format in
-`runner`'s docstring; ``GET /healthz`` answers 200 while it serves. It holds no secret, so
-the RPC carries no key: its NetworkPolicy admits only the worker's pods, and the worker
-reads every answer as untrusted. It refuses to start with a database secret, the KEK or a
-proof (`check_sandbox_environment`), or with any file under `SECRETS_DIR` (a mounted
-ServiceAccount token or secret, `mounted_secrets`), and makes itself non-dumpable
-(`hardening.forbid_dumping`).
+`runner`'s docstring; ``GET /healthz`` answers 200 while it serves. A check must carry the
+RPC token (``Authorization: Bearer <token>``, compared with `hmac.compare_digest`): without
+it the answer is 401 before any byte of the body is read, and the connection is closed.
+The token authorizes calls to this sandbox only, so it is the one secret the sandbox
+holds; its NetworkPolicy admits only the worker's pods too, and the worker reads every
+answer as untrusted. A request's head and whole body must arrive within
+`REQUEST_DEADLINE`, so one connection cannot hold the one check slot by sending slowly.
+It refuses to start without a valid token file (`runner.read_token`, from
+``SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE``), with a database secret, the KEK or a proof
+(`check_sandbox_environment`), or with any file under `SECRETS_DIR` (a mounted
+ServiceAccount token or secret, `mounted_secrets`; the RPC token's Secret is mounted
+elsewhere), and makes itself non-dumpable (`hardening.forbid_dumping`).
 
 Each check's child runs in a box of its own (``box/`` on the sandbox's own spool,
 ``SCADBUDDY_INTAKE_WORK_DIR``, an emptyDir; mode 0700, the upload made in it with
@@ -33,6 +39,7 @@ the client goes away or the check's timeout passes, the child's group is killed.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -58,11 +65,13 @@ from scadbuddy.intake_worker.runner import (
     MAX_VERDICT_BYTES,
     REQUEST_HEADER,
     SANDBOX_PORT,
+    TOKEN_FILE_ENV,
     VERDICT_BYTES_HEADER,
     CheckCrashedError,
     open_dir,
     parse_request,
     read_output,
+    read_token,
     run_child,
 )
 from scadbuddy.intake_worker.settings import FORBIDDEN_ENV, IntakeRefusal
@@ -84,6 +93,10 @@ MAX_HEADERS: Final = 64
 HEAD_TIMEOUT: Final = 10.0
 #: The longest wait for the next piece of a body.
 BODY_IDLE: Final = 60.0
+#: A request's head and its whole body arrive within this many seconds of the connection,
+#: or the sandbox drops it, frees the slot and keeps no file. 256 MiB in 60 s is about
+#: 4.5 MB/s, well below the pod network's speed.
+REQUEST_DEADLINE: float = 60.0
 #: After an early refusal, how long the sandbox reads and drops the unread body so the
 #: client sees the answer, not a reset.
 LINGER: Final = 0.5
@@ -92,6 +105,7 @@ _TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _REASONS: Final = {
     200: "OK",
     400: "Bad Request",
+    401: "Unauthorized",
     404: "Not Found",
     405: "Method Not Allowed",
     411: "Length Required",
@@ -260,8 +274,9 @@ class Sandbox:
     """The server's state: one check at a time (`busy`); `outlived` and `stopped` once a
     process of an earlier check will not die."""
 
-    def __init__(self, spool: Path) -> None:
+    def __init__(self, spool: Path, token: str) -> None:
         self.spool = spool
+        self._authorization = f"Bearer {token}".encode("ascii")
         self.busy = False
         self.outlived: JobOutlivedError | None = None
         self.stopped = asyncio.Event()
@@ -279,8 +294,11 @@ class Sandbox:
                 await writer.wait_closed()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        deadline = asyncio.get_running_loop().time() + REQUEST_DEADLINE
         try:
-            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEAD_TIMEOUT)
+            head = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), min(HEAD_TIMEOUT, _left(deadline))
+            )
         except asyncio.LimitOverrunError:
             await _send(writer, *_error(431, "head-too-large"), reader=reader, unread=None)
             return
@@ -301,13 +319,24 @@ class Sandbox:
         if method != "POST":
             await _send(writer, *_error(405, "method"), reader=reader, unread=None)
             return
-        await self._check(reader, writer, headers)
+        if not self._authorized(headers):
+            # Before any byte of the body is read; the connection is closed, not drained.
+            status, kind, body = _error(401, "unauthorized")
+            await _send(writer, status, {**kind, "WWW-Authenticate": "Bearer"}, body)
+            return
+        await self._check(reader, writer, headers, deadline)
+
+    def _authorized(self, headers: dict[str, list[str]]) -> bool:
+        values = headers.get("authorization", [])
+        presented = values[0].encode("latin-1") if len(values) == 1 else b""
+        return hmac.compare_digest(presented, self._authorization)
 
     async def _check(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         headers: dict[str, list[str]],
+        deadline: float,
     ) -> None:
         lengths = headers.get("content-length", [])
         if "transfer-encoding" in headers or len(lengths) > 1:
@@ -339,7 +368,7 @@ class Sandbox:
             return
         self.busy = True
         try:
-            answer = await self._job(reader, request, length)
+            answer = await self._job(reader, request, length, deadline)
         finally:
             self.busy = False
         if answer is not None:
@@ -347,7 +376,7 @@ class Sandbox:
             await _send(writer, *answer, reader=reader, unread=length if answer[0] == 503 else 0)
 
     async def _job(
-        self, reader: asyncio.StreamReader, request: dict[str, Any], length: int
+        self, reader: asyncio.StreamReader, request: dict[str, Any], length: int, deadline: float
     ) -> tuple[int, dict[str, str], bytes] | None:
         """One check in a fresh box; its answer, or None when the client went away."""
         try:
@@ -365,7 +394,7 @@ class Sandbox:
             box_fd = open_dir(BOX, dir_fd=spool_fd)
             try:
                 os.fchmod(box_fd, BOX_MODE)
-                return await self._run(reader, box_fd, request, length)
+                return await self._run(reader, box_fd, request, length, deadline)
             finally:
                 os.close(box_fd)
                 with suppress(OSError):
@@ -374,9 +403,15 @@ class Sandbox:
             os.close(spool_fd)
 
     async def _run(
-        self, reader: asyncio.StreamReader, box_fd: int, request: dict[str, Any], length: int
+        self,
+        reader: asyncio.StreamReader,
+        box_fd: int,
+        request: dict[str, Any],
+        length: int,
+        deadline: float,
     ) -> tuple[int, dict[str, str], bytes] | None:
-        if not await _receive(reader, box_fd, length):
+        if not await _receive(reader, box_fd, length, deadline):
+            logger.info("a request's body did not arrive whole in time; it was dropped")
             return None
         cancelled = asyncio.Event()
 
@@ -434,9 +469,14 @@ class Sandbox:
         return 200, headers, verdict + preview
 
 
-async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int) -> bool:
+def _left(deadline: float) -> float:
+    return max(0.0, deadline - asyncio.get_running_loop().time())
+
+
+async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int, deadline: float) -> bool:
     """The body streamed into the box's ``upload.bin`` (made here, ``O_EXCL``, never
-    through a symlink), exactly ``length`` bytes; False when the client went away."""
+    through a symlink), exactly ``length`` bytes by ``deadline``; False when the client
+    went away or the deadline passed."""
     fd = os.open(
         UPLOAD,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -446,8 +486,11 @@ async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int) -> bo
     try:
         left = length
         while left:
+            wait = min(BODY_IDLE, _left(deadline))
+            if wait <= 0:
+                return False
             try:
-                chunk = await asyncio.wait_for(reader.read(min(_CHUNK, left)), BODY_IDLE)
+                chunk = await asyncio.wait_for(reader.read(min(_CHUNK, left)), wait)
             except (TimeoutError, ConnectionError):
                 return False
             if not chunk:
@@ -504,11 +547,16 @@ async def start(sandbox: Sandbox, *, host: str, port: int) -> asyncio.Server:
 
 
 async def serve(
-    spool: Path, stop: asyncio.Event, *, host: str = "0.0.0.0", port: int = SANDBOX_PORT
+    spool: Path,
+    stop: asyncio.Event,
+    *,
+    token: str,
+    host: str = "0.0.0.0",
+    port: int = SANDBOX_PORT,
 ) -> None:
     """Serves checks one at a time until ``stop``; `JobOutlivedError` once a process of an
     earlier check will not die."""
-    sandbox = Sandbox(spool)
+    sandbox = Sandbox(spool, token)
     server = await start(sandbox, host=host, port=port)
     logger.info("intake sandbox serving on %s:%d, one check at a time", host, port)
     waits = [asyncio.ensure_future(stop.wait()), asyncio.ensure_future(sandbox.stopped.wait())]
@@ -524,12 +572,12 @@ async def serve(
         raise sandbox.outlived
 
 
-async def _main(spool: Path, port: int) -> None:
+async def _main(spool: Path, port: int, token: str) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
-    await serve(spool, stop, port=port)
+    await serve(spool, stop, token=token, port=port)
 
 
 def _port(value: str) -> int | None:
@@ -554,6 +602,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ", ".join(secrets[:5]),
         )
         return 2
+    token_file = os.environ.get(TOKEN_FILE_ENV)
+    if not token_file:
+        logger.error("the intake sandbox refuses to start: %s is not set", TOKEN_FILE_ENV)
+        return 2
+    try:
+        token = read_token(Path(token_file))
+    except ValueError as bad:
+        logger.error("the intake sandbox refuses to start: %s %s", TOKEN_FILE_ENV, bad)
+        return 2
     port = _port(os.environ.get("SCADBUDDY_INTAKE_SANDBOX_PORT", str(SANDBOX_PORT)))
     if port is None:
         logger.error("SCADBUDDY_INTAKE_SANDBOX_PORT must be a port number, 1 to 65535")
@@ -573,7 +630,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("the intake sandbox refuses to start: it cannot be the child subreaper")
         return 3
     try:
-        asyncio.run(_main(spool, port))
+        asyncio.run(_main(spool, port, token))
     except JobOutlivedError as error:
         logger.error("the intake sandbox stops: %s", error)
         return 4

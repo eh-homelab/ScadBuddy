@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scadbuddy.intake_worker.runner import TOKEN_FILE_ENV, read_token
 from scadbuddy.intake_worker.wire import DEFAULT_CHECK_QUEUE
 
 #: The worker refuses to start when any of these is set: it must never hold a database
@@ -62,7 +63,16 @@ class IntakeSettings(BaseSettings):
     #: The sandbox's Service, required with ``true``: a plain ``http://`` URL with no
     #: user, path, query or fragment, e.g. ``http://scadbuddy-intake-sandbox:8090``.
     intake_sandbox_url: str | None = None
+    #: The file of the RPC token, required with ``true`` (`runner.read_token`: 32 to 1024
+    #: bytes of visible ASCII), from the Secret ``scadbuddy-intake-sandbox-rpc``.
+    intake_sandbox_token_file: Path | None = None
     log_level: str = "INFO"
+    _sandbox_token: str | None = PrivateAttr(default=None)
+
+    @property
+    def sandbox_token(self) -> str | None:
+        """The RPC token read at start; None in local mode."""
+        return self._sandbox_token
 
     @field_validator("api_internal_url")
     @classmethod
@@ -103,6 +113,12 @@ class IntakeSettings(BaseSettings):
                 f" Service, not {url!r}"
             )
         self.intake_sandbox_url = url.rstrip("/")
+        if self.intake_sandbox_token_file is None:
+            raise ValueError(f"SCADBUDDY_INTAKE_SANDBOX=true needs {TOKEN_FILE_ENV}")
+        try:
+            self._sandbox_token = read_token(self.intake_sandbox_token_file)
+        except ValueError as bad:
+            raise ValueError(f"{TOKEN_FILE_ENV} {bad}") from None
         return self
 
     @model_validator(mode="after")

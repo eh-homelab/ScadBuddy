@@ -27,6 +27,14 @@ from tests.intake_worker.test_check import box_stl
 from tests.intake_worker.test_runner import _job, _png, _state, needs_confinement
 
 ID = "ab" * 16
+#: The RPC token both processes read from `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`.
+TOKEN = "Zk3q" * 10
+
+
+def _token_file(folder: Path, token: str = TOKEN) -> Path:
+    path = folder / "rpc-token"
+    path.write_text(token)
+    return path
 
 
 def _request(**changes: Any) -> dict[str, Any]:
@@ -47,8 +55,11 @@ def _head(
     method: str = "POST",
     path: str = "/check",
     extra: str = "",
+    token: str | None = TOKEN,
 ) -> bytes:
     lines = [f"{method} {path} HTTP/1.1", "Host: sandbox"]
+    if token is not None:
+        lines.append(f"Authorization: Bearer {token}")
     if length is not None:
         lines.append(f"Content-Length: {length}")
     if request is not None:
@@ -81,7 +92,7 @@ async def _raw(url: str, data: bytes) -> tuple[int, dict[str, str], bytes]:
 @contextlib.asynccontextmanager
 async def _served(spool: Path) -> AsyncIterator[tuple[str, sandbox.Sandbox]]:
     spool.mkdir(parents=True, exist_ok=True)
-    box = sandbox.Sandbox(spool)
+    box = sandbox.Sandbox(spool, TOKEN)
     server = await sandbox.start(box, host="127.0.0.1", port=0)
     port = server.sockets[0].getsockname()[1]
     try:
@@ -130,7 +141,9 @@ def _failed(reason: str) -> float:
 async def test_the_sandbox_runs_a_ready_check(tmp_path: Path) -> None:
     job = _job(tmp_path, box_stl())
     async with _served(tmp_path / "spool") as (url, _):
-        verdict = await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+        verdict = await run_check(
+            job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN
+        )
     assert verdict.outcome == "ready" and verdict.facts is not None
     assert verdict.facts.triangles == 12
     assert verdict.preview is not None and verdict.preview.startswith(runner.PNG_MAGIC)
@@ -142,7 +155,9 @@ async def test_the_sandbox_runs_a_ready_check(tmp_path: Path) -> None:
 async def test_the_sandbox_answers_a_refused_file(tmp_path: Path) -> None:
     job = _job(tmp_path, b"not a model at all")
     async with _served(tmp_path / "spool") as (url, _):
-        verdict = await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+        verdict = await run_check(
+            job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN
+        )
     assert (verdict.outcome, verdict.preview) == ("refused", None)
     assert verdict.reason == "The file is not a 3MF or an STL."
 
@@ -172,7 +187,9 @@ async def test_a_second_check_while_one_runs_is_503(tmp_path: Path, sleeper: Pat
     spool = tmp_path / "spool"
     async with _served(spool) as (url, box):
         first = asyncio.create_task(
-            run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, timeout=30.0)
+            run_check(
+                job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=30.0
+            )
         )
         await _until(sleeper.exists, "the first check's child never started")
         assert box.busy
@@ -194,12 +211,14 @@ async def test_a_busy_sandbox_fails_the_check_once_its_wait_is_spent(
     job, other = _job(tmp_path, box_stl()), _job(tmp_path, box_stl(), "check-2")
     async with _served(tmp_path / "spool") as (url, _):
         first = asyncio.create_task(
-            run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, timeout=30.0)
+            run_check(
+                job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=30.0
+            )
         )
         await _until(sleeper.exists, "the first check's child never started")
         before = _failed("busy")
         with pytest.raises(CheckCrashedError, match="503"):
-            await run_check(other / UPLOAD, "box.stl", other, sandbox_url=url)
+            await run_check(other / UPLOAD, "box.stl", other, sandbox_url=url, sandbox_token=TOKEN)
         assert _failed("busy") == before + 1
         first.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -252,12 +271,125 @@ async def test_a_head_past_its_cap_is_refused(tmp_path: Path) -> None:
     assert status == 431
 
 
+@pytest.mark.parametrize(
+    "auth",
+    [
+        None,
+        "Bearer " + "x" * len(TOKEN),
+        "Bearer " + TOKEN[:-1],
+        "Bearer " + TOKEN + "x",
+        "bearer " + TOKEN,
+        "Basic " + TOKEN,
+        TOKEN,
+        "Bearer  " + TOKEN,
+    ],
+)
+async def test_a_check_without_the_token_is_401_before_its_body(
+    tmp_path: Path, sleeper: Path, monkeypatch: pytest.MonkeyPatch, auth: str | None
+) -> None:
+    """Only the head is read: the 401 comes while the declared body is still unsent, and
+    nothing reaches the spool."""
+    received: list[int] = []
+    real = sandbox._receive
+
+    async def spy(*args: Any, **kwargs: Any) -> bool:
+        received.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "_receive", spy)
+    head = _head(_request(), 1 << 20, token=None, extra=f"Authorization: {auth}" if auth else "")
+    async with _served(tmp_path / "spool") as (url, box):
+        status, headers, _ = await _raw(url, head)
+        assert not box.busy
+    assert status == 401
+    assert headers["www-authenticate"] == "Bearer"
+    assert received == []
+    assert not sleeper.exists()
+    assert list((tmp_path / "spool").iterdir()) == []
+
+
+async def test_two_authorization_headers_are_401(tmp_path: Path) -> None:
+    head = _head(_request(), 3, extra=f"Authorization: Bearer {TOKEN}")
+    async with _served(tmp_path / "spool") as (url, _):
+        assert (await _raw(url, head + b"abc"))[0] == 401
+
+
+async def test_a_check_with_a_wrong_token_fails_unauthorized(tmp_path: Path) -> None:
+    job = _job(tmp_path, box_stl())
+    before = _failed("unauthorized")
+    async with _served(tmp_path / "spool") as (url, _):
+        with pytest.raises(CheckCrashedError, match="401"):
+            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token="w" * 40)
+    assert _failed("unauthorized") == before + 1
+
+
+def test_a_sandbox_call_needs_its_token(tmp_path: Path) -> None:
+    job = _job(tmp_path, box_stl())
+    with pytest.raises(ValueError, match="token"):
+        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_url="http://127.0.0.1:1"))
+
+
+async def test_a_body_trickled_past_the_request_deadline_is_cut_off(
+    tmp_path: Path, sleeper: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One connection cannot hold the one check slot by sending slowly: past
+    `REQUEST_DEADLINE` (head and body together) the sandbox drops it, frees the slot and
+    keeps no file."""
+    monkeypatch.setattr(sandbox, "REQUEST_DEADLINE", 0.6)
+    async with _served(tmp_path / "spool") as (url, box):
+        parts = urlsplit(url)
+        reader, writer = await asyncio.open_connection(parts.hostname, parts.port)
+        writer.write(_head(_request(), 1000))
+        await writer.drain()
+        cut = asyncio.get_running_loop().time()
+        dropped = False
+        try:
+            for _ in range(100):
+                writer.write(b"x")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+                if reader.at_eof():
+                    dropped = True
+                    break
+            answer = await asyncio.wait_for(reader.read(), 5)
+            dropped = dropped or answer == b""
+        except ConnectionError:
+            dropped = True
+        finally:
+            writer.close()
+        assert dropped
+        assert asyncio.get_running_loop().time() - cut < 3
+        await _until(lambda: not box.busy, "the slot stayed taken")
+    assert not sleeper.exists()
+    assert list((tmp_path / "spool").iterdir()) == []
+
+
+async def test_a_head_trickled_past_the_request_deadline_is_cut_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sandbox, "REQUEST_DEADLINE", 0.4)
+    async with _served(tmp_path / "spool") as (url, _):
+        parts = urlsplit(url)
+        reader, writer = await asyncio.open_connection(parts.hostname, parts.port)
+        writer.write(b"POST /check HTTP/1.1\r\n")
+        await writer.drain()
+        try:
+            answer = await asyncio.wait_for(reader.read(), 5)
+        except ConnectionError:
+            answer = b""
+        finally:
+            writer.close()
+    assert answer == b""
+
+
 async def test_a_check_past_its_timeout_kills_the_child(tmp_path: Path, sleeper: Path) -> None:
     job = _job(tmp_path, box_stl())
     before = _failed("check-timeout")
     async with _served(tmp_path / "spool") as (url, box):
         with pytest.raises(CheckCrashedError, match="504"):
-            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, timeout=0.5)
+            await run_check(
+                job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=0.5
+            )
         assert not box.busy
     assert _failed("check-timeout") == before + 1
     assert _state(_pid(sleeper)) in (None, "Z", "X")
@@ -305,7 +437,7 @@ async def test_a_child_that_exits_non_zero_is_a_500(
         status, _, body = await _raw(url, _head(_request(), 3) + b"abc")
         assert status == 500 and json.loads(body) == {"error": "crashed", "detail": "exit 7"}
         with pytest.raises(CheckCrashedError, match="500"):
-            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN)
     assert _failed("crashed") == before + 1
 
 
@@ -367,7 +499,9 @@ async def test_the_sandbox_clears_earlier_job_processes_before_each_job(
     job = _job(tmp_path, box_stl())
     async with _served(tmp_path / "spool") as (url, _):
         with pytest.raises(CheckCrashedError):
-            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, timeout=0.2)
+            await run_check(
+                job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=0.2
+            )
     assert cleared == [True]
 
 
@@ -389,17 +523,64 @@ async def test_a_job_process_that_will_not_die_stops_the_sandbox(
 def test_the_sandbox_takes_no_concurrency_setting() -> None:
     import inspect
 
-    assert set(inspect.signature(sandbox.serve).parameters) == {"spool", "stop", "host", "port"}
+    assert set(inspect.signature(sandbox.serve).parameters) == {
+        "spool",
+        "stop",
+        "token",
+        "host",
+        "port",
+    }
+
+
+@pytest.fixture
+def start_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
+    """The sandbox's environment at start, whole: no forbidden variable, no mounted secret,
+    a valid token file; nothing past the start's checks runs."""
+    for name in sandbox.SANDBOX_FORBIDDEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sandbox, "SECRETS_DIR", tmp_path / "no-secrets")
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(_token_file(tmp_path)))
+    monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
+    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "stop here")
+    return monkeypatch
+
+
+def test_the_start_checks_pass_with_a_whole_environment(start_env: pytest.MonkeyPatch) -> None:
+    # It gets as far as the confinement probe (stubbed to refuse).
+    assert sandbox.main([]) == 3
 
 
 @pytest.mark.parametrize("port", ["0", "70000", "http", "-1"])
-def test_the_sandbox_refuses_a_bad_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
-    for name in sandbox.SANDBOX_FORBIDDEN_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(sandbox, "SECRETS_DIR", Path("/nowhere/secrets"))
-    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_PORT", port)
-    monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
+def test_the_sandbox_refuses_a_bad_port(
+    start_env: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], port: str
+) -> None:
+    start_env.setenv("SCADBUDDY_INTAKE_SANDBOX_PORT", port)
     assert sandbox.main([]) == 2
+    assert "SCADBUDDY_INTAKE_SANDBOX_PORT" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "token", [None, "missing", "", "\n", "x" * 31, "x" * 16 + " " + "x" * 16, "é" * 40]
+)
+def test_the_sandbox_refuses_a_missing_empty_or_short_token(
+    start_env: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    token: str | None,
+) -> None:
+    if token is None:
+        start_env.delenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE")
+    elif token == "missing":
+        start_env.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "nowhere"))
+    else:
+        (tmp_path / "bad").write_text(token)
+        start_env.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "bad"))
+    assert sandbox.main([]) == 2
+    assert "SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE" in capsys.readouterr().out
+
+
+def test_a_token_file_ending_in_a_newline_is_read_without_it(tmp_path: Path) -> None:
+    assert runner.read_token(_token_file(tmp_path, TOKEN + "\n")) == TOKEN
 
 
 def _free_port() -> int:
@@ -423,7 +604,11 @@ async def test_the_sandbox_as_deployed_runs_a_check(tmp_path: Path) -> None:
         for name, value in os.environ.items()
         if name not in sandbox.SANDBOX_FORBIDDEN_ENV
     }
-    env |= {"SCADBUDDY_INTAKE_WORK_DIR": str(spool), "SCADBUDDY_INTAKE_SANDBOX_PORT": str(port)}
+    env |= {
+        "SCADBUDDY_INTAKE_WORK_DIR": str(spool),
+        "SCADBUDDY_INTAKE_SANDBOX_PORT": str(port),
+        "SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE": str(_token_file(tmp_path)),
+    }
     served = subprocess.Popen(
         [sys.executable, "-m", "scadbuddy.intake_worker.sandbox"],
         env=env,
@@ -440,7 +625,9 @@ async def test_the_sandbox_as_deployed_runs_a_check(tmp_path: Path) -> None:
                     break
             assert time.monotonic() < deadline, "the sandbox never answered /healthz"
             await asyncio.sleep(0.1)
-        verdict = await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, timeout=60.0)
+        verdict = await run_check(
+            job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=60.0
+        )
     finally:
         served.terminate()
         log = served.communicate(timeout=30)[0].decode(errors="replace")
@@ -516,7 +703,9 @@ READY = json.dumps(
 async def test_a_well_formed_answer_is_read(tmp_path: Path) -> None:
     job = _job(tmp_path, box_stl())
     async with _answering(lambda rid: _framed(rid, READY, _png())) as url:
-        verdict = await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+        verdict = await run_check(
+            job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN
+        )
     assert verdict.outcome == "ready" and verdict.preview == _png()
 
 
@@ -571,7 +760,7 @@ async def test_an_answer_out_of_its_bounds_fails_the_check(
     before = _failed("bad-answer")
     async with _answering(answer) as url:
         with pytest.raises(CheckCrashedError):
-            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN)
     assert _failed("bad-answer") == before + 1
 
 
@@ -585,7 +774,7 @@ async def test_a_non_200_answer_fails_the_check(tmp_path: Path, status: str, rea
     error = json.dumps({"error": "crashed", "detail": "exit 1"}).encode()
     async with _answering(lambda rid: _framed(rid, error, status=status)) as url:
         with pytest.raises(CheckCrashedError, match=status.split()[0]):
-            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url)
+            await run_check(job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN)
     assert _failed(reason) == before + 1
 
 
@@ -597,7 +786,11 @@ async def test_an_unreachable_sandbox_fails_the_check(
     before = _failed("unreachable")
     with pytest.raises(CheckCrashedError, match="unreachable"):
         await run_check(
-            job / UPLOAD, "box.stl", job, sandbox_url=f"http://127.0.0.1:{_free_port()}"
+            job / UPLOAD,
+            "box.stl",
+            job,
+            sandbox_url=f"http://127.0.0.1:{_free_port()}",
+            sandbox_token=TOKEN,
         )
     assert _failed("unreachable") == before + 1
 

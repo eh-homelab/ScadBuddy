@@ -2362,16 +2362,25 @@ holds the manifest (spec §12).
   each check's child. The worker sends it each file over HTTP (`POST /check` on
   `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090; `GET /healthz` there for its probes; the
   wire format is `intake_worker/runner.py`'s docstring). The two pods share no network
-  namespace, no volume and no token. The sandbox's environment is
-  `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where each check gets a box that is
-  removed after it), `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing
-  else: it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
-  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set, and (exit 2) with any
-  file under `/var/run/secrets/`, so its pod must set `automountServiceAccountToken: false`
-  and mount no secret there. It holds no secret, so
-  the RPC carries no key; the worker reads every answer as untrusted. It runs one check at
-  a time and answers a second request 503 (the worker tries again for up to 60 s), so give
-  it as many replicas as the worker.
+  namespace, no volume and no ServiceAccount token.
+- **The RPC token.** Each `POST /check` carries `Authorization: Bearer <token>`; without
+  the right one the sandbox answers 401 before it reads the body. Create a Secret
+  `scadbuddy-intake-sandbox-rpc` holding one random token of at least 32 bytes of visible
+  ASCII (e.g. `openssl rand -hex 32`), mount it in the worker's and the sandbox's pods only,
+  outside `/var/run/secrets/` (e.g. at `/etc/scadbuddy-intake-rpc/token`), and set
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` to that file in both. Both refuse to start without
+  the file, with an empty file or with a shorter token. The token authorizes calls to the
+  sandbox and nothing else, so it is the one secret the sandbox may hold. A request's head
+  and whole body must arrive within 60 s (`REQUEST_DEADLINE`), or the sandbox drops it.
+- **The sandbox's environment** is `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where
+  each check gets a box that is removed after it), `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`,
+  `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing else: it refuses to
+  start with `SCADBUDDY_SERVICE_TOKEN_FILE`, `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of
+  `FORBIDDEN_ENV` set, and (exit 2) with any file under `/var/run/secrets/`, so its pod
+  must set `automountServiceAccountToken: false` and mount no secret there. The worker
+  reads every answer as untrusted. The sandbox runs one check at a time and answers a
+  second request 503 (the worker tries again for up to 60 s), so give it as many replicas
+  as the worker.
 - **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
   minutes, so size the sandbox's memory limit for one such child and its work volume for
   one 256 MiB upload; size the worker's work volume for one 256 MiB download.
@@ -2384,18 +2393,20 @@ holds the manifest (spec §12).
   [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)), its pod only, until
   the nodes can carry a `Localhost` profile that allows exactly that call; the worker's pod
   keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
-  the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason` (`busy`,
-  `unreachable`, `timeout`, `transport`, `check-timeout`, `crashed`, `status`,
-  `bad-answer`; `/metrics` on port 9090). Alert on it and on the sandbox's restarts.
+  the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
+  (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
+  `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the
+  sandbox's restarts.
 - **Pods:** `runAsNonRoot` and `readOnlyRootFilesystem` in both, and no ServiceAccount token
-  automount in either. The only token is the projected one the worker's proof needs, in the
-  worker's pod. No `fsGroup` is needed: no volume is shared.
+  automount in either. The only ServiceAccount token is the projected one the worker's
+  proof needs, in the worker's pod. No `fsGroup` is needed: no volume is shared.
 - **Network
   ([NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)):**
   the worker's egress allows DNS, the API's 8082, Temporal, the bucket host and the
   sandbox's 8090 only; only the worker is on the Temporal frontend's allowlist. The
-  sandbox's ingress admits the worker's pods on 8090 only, and
-  its egress allows nothing.
+  sandbox's ingress admits the worker's pods on 8090 only, and its egress allows nothing.
+  The policies ship in the eh-homelab/clusters PR, with a check that fails without the
+  sandbox's.
 
 ### Switching continuous deploy off
 

@@ -16,22 +16,29 @@ Two ways to reach the child:
   starts the child itself, in the check's scratch folder, and a launcher step refused is
   reported in the verdict's ``isolation``.
 
-The RPC. ``POST /check`` with the file's bytes as the body (``Content-Length`` required,
-at most `MAX_MODEL_FILE_BYTES`) and the request as JSON in `REQUEST_HEADER`: the filename,
+The RPC. ``POST /check`` with ``Authorization: Bearer <token>`` (`AUTH_HEADER`; the token
+read by `read_token` from the file `TOKEN_FILE_ENV` names, in both processes), the file's
+bytes as the body (``Content-Length`` required, at most `MAX_MODEL_FILE_BYTES`; the head
+and the whole body within the sandbox's ``REQUEST_DEADLINE``) and the request as JSON in
+`REQUEST_HEADER`: the filename,
 the timeout, the address-space cap and a random ``id`` of 16 to 64 lowercase hex digits, at
 most `MAX_REQUEST_BYTES`, checked by `parse_request`. The answer is 200,
 ``application/octet-stream``, with `ID_HEADER` that echoes the id and
 `VERDICT_BYTES_HEADER` ``N``: the body's first ``N`` bytes are the verdict's JSON (at most
 `MAX_VERDICT_BYTES`), the rest is the preview PNG (at most `MAX_PREVIEW_BYTES`, empty when
 there is none). The framing is binary: never base64, never bytes inside JSON. Each other
-status carries a small JSON error (``{"error": …, "detail": …}``) and fails the check: 400
-a bad request, 404 or 405 a wrong route, 411 no length, 413 a body past its cap, 431 a head
+status carries a small JSON error (``{"error": …, "detail": …}``) and fails the check: 401
+a missing or wrong token (sent before any byte of the body is read; the connection is then
+closed, so a client still sending may see a reset instead), 400 a bad request, 404 or 405
+a wrong route, 411 no length, 413 a body past its cap, 431 a head
 past its cap, 500 a child that crashed, did not start or wrote no verdict, 503 busy (the
 sandbox runs one check at a time) or stopping, 504 a check past its timeout. When the
 client goes away, the sandbox kills the child's group.
 
-The sandbox holds no secret, so the RPC carries no key: the sandbox's NetworkPolicy admits
-only the worker's pods, and the worker reads every answer as untrusted (`_read_answer`):
+The token authorizes calls to the sandbox and nothing else, so it is the one secret the
+sandbox may hold: a leak reaches no service but the sandbox itself. The sandbox's
+NetworkPolicy admits only the worker's pods too, and the worker reads every answer as
+untrusted (`_read_answer`):
 status 200, the echoed id, `VERDICT_BYTES_HEADER` an integer within its cap, no
 ``Content-Encoding``, the body counted while it is read and stopped past
 `MAX_ANSWER_BYTES`, the verdict validated (`parse_verdict`) and the preview a PNG with a
@@ -101,6 +108,13 @@ SANDBOX_PORT: Final = 8090
 REQUEST_HEADER: Final = "X-Intake-Request"
 ID_HEADER: Final = "X-Intake-Id"
 VERDICT_BYTES_HEADER: Final = "X-Intake-Verdict-Bytes"
+#: The RPC token: both processes read it from the file this variable names, and the worker
+#: sends it as ``Authorization: Bearer <token>`` (`read_token`).
+TOKEN_FILE_ENV: Final = "SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE"
+AUTH_HEADER: Final = "Authorization"
+MIN_TOKEN_BYTES: Final = 32
+MAX_TOKEN_BYTES: Final = 1024
+_TOKEN_CHARS: Final = re.compile(r"[\x21-\x7e]+")
 #: How long past the check's timeout the worker waits for the sandbox's answer.
 SANDBOX_GRACE: Final = 30.0
 #: How long the worker tries again while the sandbox answers 503 busy or cannot be reached
@@ -118,6 +132,7 @@ _isolation_logged = False
 
 #: Why a call to the sandbox failed: the label values of `SANDBOX_FAILED`.
 SANDBOX_FAILURE_REASONS: Final = (
+    "unauthorized",
     "busy",
     "unreachable",
     "timeout",
@@ -251,6 +266,26 @@ def check_request(
     }
 
 
+def read_token(path: Path) -> str:
+    """The RPC token in ``path``, one final newline dropped: `ValueError`, saying why,
+    unless it is 32 to 1024 bytes of visible ASCII (no space or control character)."""
+    try:
+        with open(path, "rb") as file:
+            raw = file.read(MAX_TOKEN_BYTES + 3)
+    except OSError as error:
+        raise ValueError(f"names a file that cannot be read ({error.strerror})") from None
+    raw = raw.removesuffix(b"\n").removesuffix(b"\r")
+    if len(raw) > MAX_TOKEN_BYTES:
+        raise ValueError("names a token past 1024 bytes")
+    if not raw:
+        raise ValueError("names an empty file")
+    if not raw.isascii() or not _TOKEN_CHARS.fullmatch(raw.decode("ascii")):
+        raise ValueError("names a token that is not visible ASCII with no space")
+    if len(raw) < MIN_TOKEN_BYTES:
+        raise ValueError("names a token shorter than 32 bytes")
+    return raw.decode("ascii")
+
+
 def parse_request(header: str) -> dict[str, Any]:
     """`REQUEST_HEADER`'s value read: at most `MAX_REQUEST_BYTES`, a JSON object of exactly
     the four keys with their types, then `check_request`; `ValueError` otherwise."""
@@ -368,7 +403,7 @@ def _fail(reason: str, message: str) -> NoReturn:
     raise _SandboxFailedError(reason, message)
 
 
-_STATUS_REASONS: Final = {500: "crashed", 503: "busy", 504: "check-timeout"}
+_STATUS_REASONS: Final = {401: "unauthorized", 500: "crashed", 503: "busy", 504: "check-timeout"}
 
 
 async def _read_capped(response: httpx.Response, cap: int) -> bytes:
@@ -423,7 +458,9 @@ async def _file_chunks(fd: int, size: int) -> AsyncIterator[bytes]:
         yield chunk
 
 
-async def _call_sandbox(file: Path, request: dict[str, Any], sandbox_url: str) -> Verdict:
+async def _call_sandbox(
+    file: Path, request: dict[str, Any], sandbox_url: str, token: str
+) -> Verdict:
     """One ``POST /check``, tried again while the sandbox answers 503 busy or cannot be
     reached, for at most `BUSY_WAIT`."""
     header = json.dumps(request, ensure_ascii=True, separators=(",", ":"))
@@ -439,6 +476,7 @@ async def _call_sandbox(file: Path, request: dict[str, Any], sandbox_url: str) -
             "Content-Type": "application/octet-stream",
             "Content-Length": str(size),
             "Accept-Encoding": "identity",
+            AUTH_HEADER: f"Bearer {token}",
             REQUEST_HEADER: header,
         }
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -474,17 +512,21 @@ async def run_check(
     timeout: float = CHILD_TIMEOUT,
     address_space: int = CHILD_ADDRESS_SPACE,
     sandbox_url: str | None = None,
+    sandbox_token: str | None = None,
 ) -> Verdict:
     """The child's verdict on ``file`` (``scratch``'s ``upload.bin``); `CheckCrashedError`
-    when it gave none. With ``sandbox_url`` the sandbox runs it (the module docstring);
+    when it gave none. With ``sandbox_url`` the sandbox runs it, called with
+    ``sandbox_token`` (the module docstring);
     else this process does, in ``scratch``, with the tmpfs over ``scratch``'s parent (the
     work directory of every check)."""
     if file.parent != scratch or file.name != UPLOAD:
         raise ValueError("a check's file is its scratch folder's upload.bin")
     if sandbox_url is not None:
+        if not sandbox_token:
+            raise ValueError("a call to the sandbox needs its RPC token")
         request = check_request(filename, timeout, address_space, secrets.token_hex(16))
         try:
-            return await _call_sandbox(file, request, sandbox_url)
+            return await _call_sandbox(file, request, sandbox_url, sandbox_token)
         except _SandboxFailedError as failure:
             SANDBOX_FAILED.labels(reason=failure.reason).inc()
             raise
