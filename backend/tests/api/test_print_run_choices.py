@@ -267,6 +267,10 @@ def test_process_overrides_go_over_the_template_and_the_shorthands(
     run_routes()
     sliced = slice_routes()
     queue_route()
+    # The overrides are checked against the process preset's values, for warnings only.
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {}})
+    )
 
     response = run_print(
         client,
@@ -356,11 +360,13 @@ def test_a_template_without_print_settings_sends_no_overrides(
 
 
 @respx.mock
-def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
+def test_a_print_setting_no_slicer_takes_is_refused_before_anything_is_sliced(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """#2998: any key and any string, number or list is taken; an object is no
+    setting's value, so the model.json is refused."""
     output_id = prepared(client, model)
-    declare_print_settings(paths, model, {"infill": "15%"})
+    declare_print_settings(paths, model, {"infill": {"density": "15%"}})
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -368,7 +374,7 @@ def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
     response = run_print(client, output_id, json=body())
 
     assert response.status_code == 409
-    assert "'infill' is not a print setting" in response.json()["detail"]
+    assert "print_settings.infill" in response.json()["detail"]
     assert not sliced.called
 
 
