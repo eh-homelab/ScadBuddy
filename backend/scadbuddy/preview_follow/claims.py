@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 #: The claims' connection, as `core/pg_pool.py`'s registry and ``pg_stat_activity`` name it.
 CLAIMS_NAME = "scadbuddy-preview-follows"
 CONNECT_TIMEOUT = 5
-#: Seconds after a failed claim in which a claim answers True with no connect.
+#: Seconds after a failed claim or release in which a claim answers True with no connect.
 CONNECT_BACKOFF = 10.0
 
 
@@ -82,7 +82,7 @@ class PgFollowClaims:
         self.conninfo = conninfo
         self._clock = clock
         self._conn: psycopg.Connection[Any] | None = None
-        #: When a claim may connect again after a failed one.
+        #: When a claim may connect again after a failed claim or release.
         self._retry_at = 0.0
         #: Serialises the connection's statements: claims come from several threads.
         self._lock = threading.Lock()
