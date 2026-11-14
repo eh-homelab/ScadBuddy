@@ -72,6 +72,10 @@ class _Bound(BaseModel):
         ]
         | None
     ) = None
+    #: The value a render takes while the customer picks none, in place of the template's
+    #: own default (#6144). Publish refuses one outside the bound; for a colour, one that
+    #: is not a listing filament's colour.
+    default: ParamValue | None = None
 
 
 class NumberBound(_Bound):

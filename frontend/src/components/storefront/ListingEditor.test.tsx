@@ -95,15 +95,15 @@ describe('ListingEditor (#5282)', () => {
     expect(listingInput(draft, keychainSchema, [PLA]).params).toEqual({ body_color: { kind: 'choice', choices: ['#FF0000'] } })
   })
 
-  it('keeps an offered colour’s own label when it is saved (#6137)', () => {
+  it('keeps an offered colour’s own label and default when it is saved (#6137, #6144)', () => {
     const draft: ListingDraft = {
       ...emptyDraft('name-keychain', COMMIT),
       title: 'Tag',
       colours: [PLA.id],
-      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters' } },
+      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters', default: '#FF0000' } },
     }
     expect(listingInput(draft, keychainSchema, [PLA]).params).toEqual({
-      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters' },
+      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters', default: '#FF0000' },
     })
   })
 

@@ -12,8 +12,8 @@ describe('ListingView', () => {
     expect(screen.getByLabelText('Name')).toHaveValue('')
     await userEvent.type(screen.getByLabelText('Length (mm)'), '5')
     expect(onChange).toHaveBeenLastCalledWith('size', 5)
-    await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue PLA' }))
-    expect(onChange).toHaveBeenLastCalledWith('base_colour', '#1B6CA8')
+    await userEvent.click(screen.getByRole('radio', { name: 'Signal orange PLA' }))
+    expect(onChange).toHaveBeenLastCalledWith('base_colour', '#E8532F')
   })
 
   it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {
@@ -56,5 +56,12 @@ describe('ListingView', () => {
     render(<ListingView listing={hostile} values={{}} onChange={() => undefined} />)
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
     expect(document.querySelector('img[src="x"], b')).toBeNull()
+  })
+
+  it('shows the shop’s default as picked until the visitor picks (#6144)', () => {
+    render(<ListingView listing={KEYCHAIN} values={{}} onChange={vi.fn()} />)
+    expect(screen.getByRole('radio', { name: 'Ocean blue PLA' })).toHaveAttribute('data-state', 'on')
+    expect(screen.getByRole('radio', { name: 'Signal orange PLA' })).toHaveAttribute('data-state', 'off')
+    expect(screen.getByLabelText('Length (mm)')).toHaveAttribute('placeholder', '60')
   })
 })

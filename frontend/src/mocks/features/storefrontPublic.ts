@@ -36,8 +36,8 @@ export const KEYCHAIN: Listing = {
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
     name: { kind: 'text', label: 'Name', group: '', colour: false, max_length: 20 },
-    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5 },
-    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'] },
+    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5, default: 60 },
+    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'], default: '#1b6ca8' },
   },
   colours: [BLUE, ORANGE],
   media: [],

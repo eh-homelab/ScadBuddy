@@ -349,3 +349,33 @@ def test_the_cart_never_shows_another_listings_label(listing: Listing) -> None:
     locked = labelled.model_copy(update={"id": "c", "params": bounds})
     found = _captions([with_label("a", "Letters"), locked])
     assert found[("demo", COMMIT)]["colour"] == "Letters"
+
+
+def test_an_unpicked_value_is_the_listings_default(listing: Listing) -> None:
+    """#6144: the listing's default stands in for the template's while the customer
+    picks none; a picked value still wins."""
+    bounds = dict(listing.params)
+    bounds["colour"] = bounds["colour"].model_copy(update={"default": "#0000FF"})
+    bounds["width"] = bounds["width"].model_copy(update={"default": 30})
+    defaulted = listing.model_copy(update={"params": bounds})
+    values = listing_values(defaulted, {}, FILAMENTS)
+    assert (values["colour"], values["width"]) == ("#0000FF", 30)
+    assert listing_values(defaulted, {"width": 40}, FILAMENTS)["width"] == 40
+
+
+def test_the_page_preselects_what_an_unpicked_render_takes(listing: Listing) -> None:
+    bounds = dict(listing.params)
+    bounds["width"] = bounds["width"].model_copy(update={"default": 30})
+    bounds["label"] = bounds["label"].model_copy(update={"default": "Ada"})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["width"].default == 30
+    assert shown["shape"].default == "round"
+    assert shown["colour"].default == "#FF0000"
+    assert shown["label"].default == "Ada"
+    assert getattr(shown["label"], "placeholder", None) == "Ada"
+
+
+def test_a_colour_default_no_filament_is_left_for_is_not_shown(listing: Listing) -> None:
+    """The template's red with red archived: the page preselects nothing."""
+    left = {k: v for k, v in FILAMENTS.items() if k != PLA_RED}
+    assert _public(listing, left).params["colour"].default is None

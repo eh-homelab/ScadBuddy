@@ -49,6 +49,7 @@ from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, 
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.storefront.inputs import effective_default, value_reason
 from scadbuddy.orders.storefront.wire import (
     ChoiceBound,
     Listing,
@@ -512,6 +513,25 @@ def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> Non
         )
 
 
+def _check_default(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
+    """The value an unpicked render of ``parameter`` takes (`effective_default`) as one
+    the listing allows, or 422: ``listing_colour_unknown`` for a colour no listing
+    filament has, else ``listing_default_invalid`` (#6144). A render would refuse it."""
+    name = parameter.name
+    value = effective_default(parameter, bound)
+    if value is None:
+        return
+    if parameter.type == "color":
+        _check_colour(name, value, colours)
+    if value_reason(parameter, bound, value, {c.casefold() for c in colours}) is not None:
+        whose = "the listing's" if bound.default is not None else "the template's"
+        raise _unprocessable(
+            "listing_default_invalid",
+            f"{name!r} starts at {whose} default {value!r}, which its bounds do not allow",
+            name,
+        )
+
+
 def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
     """``bound`` as a subset of what the schema lets ``parameter`` take, or 422."""
     name = parameter.name
@@ -584,6 +604,7 @@ def checked_fixed(
     offered = [colours[filament_id] for filament_id in body.colours]
     for name, bound in body.params.items():
         _check_bound(by_name[name], bound, offered)
+        _check_default(by_name[name], bound, offered)
     for name, value in body.fixed.items():
         if name in body.params:
             raise _unprocessable(
@@ -783,7 +804,9 @@ def _public_param(
     name: str, bound: ParamBound, by_name: Mapping[str, Parameter], colours: Collection[str]
 ) -> PublicParam:
     """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
-    listing filaments the price book still has, casefolded)."""
+    listing filaments the price book still has, casefolded), and its ``default`` only
+    when it is one of them. ``default`` is what a render takes while the customer picks
+    none (`effective_default`)."""
     parameter = by_name.get(name)
     shown = {
         "label": shown_label(name, bound.label, parameter.caption if parameter else None),
@@ -791,13 +814,17 @@ def _public_param(
         "colour": parameter is not None and parameter.type == "color",
     }
     fields = {**bound.model_dump(), **shown}
-    if isinstance(bound, TextBound) and parameter is not None:
-        initial = parameter.initial
-        fields["placeholder"] = initial if isinstance(initial, str) and initial.strip() else None
+    # What an unpicked render takes (#6144): the page preselects it.
+    start = effective_default(parameter, bound) if parameter is not None else bound.default
+    fields["default"] = start
+    if isinstance(bound, TextBound):
+        fields["placeholder"] = start if isinstance(start, str) and start.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
         fields["choices"] = [
             c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
         ]
+        if not (isinstance(start, str) and start.casefold() in colours):
+            fields["default"] = None
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)
     if isinstance(bound, ChoiceBound):

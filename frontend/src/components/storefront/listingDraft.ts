@@ -100,8 +100,15 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
   const params = Object.fromEntries(
     Object.entries(draft.params).map(([name, bound]) => [
       name,
-      // A colour's choices are the filaments'; its own label stays (#6137).
-      types.get(name) === 'color' ? { kind: 'choice' as const, choices: colours, ...(bound.label ? { label: bound.label } : {}) } : bound,
+      // A colour's choices are the filaments'; its own label (#6137) and default (#6144) stay.
+      types.get(name) === 'color'
+        ? {
+            kind: 'choice' as const,
+            choices: colours,
+            ...(bound.label ? { label: bound.label } : {}),
+            ...(bound.default != null ? { default: bound.default } : {}),
+          }
+        : bound,
     ]),
   )
   return { ...draft, params }

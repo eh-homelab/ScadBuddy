@@ -92,7 +92,13 @@ def _number_reason(
     return None
 
 
-def _reason(
+def effective_default(parameter: Parameter, bound: ParamBound) -> ParamValue | None:
+    """What a render of an offered parameter takes while the customer picks none: the
+    listing's ``default``, else the template's (#6144)."""
+    return bound.default if bound.default is not None else parameter.initial
+
+
+def value_reason(
     parameter: Parameter, bound: ParamBound, value: ParamValue, colours: Collection[str]
 ) -> InputReason | None:
     """Why ``value`` is outside ``bound``, or None when the listing allows it."""
@@ -156,11 +162,11 @@ def listing_values(
             raise InputOutsideListingError(name, "unknown")
         if name in asked:
             value = asked[name]
-        elif parameter.initial is not None:
-            value = parameter.initial
+        elif (effective := effective_default(parameter, bound)) is not None:
+            value = effective
         else:
             continue
-        reason = _reason(parameter, bound, value, colours)
+        reason = value_reason(parameter, bound, value, colours)
         if reason is not None:
             raise InputOutsideListingError(name, reason)
         values[name] = value

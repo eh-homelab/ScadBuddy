@@ -41,7 +41,8 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           spacing={2}
           className="w-full flex-wrap"
           aria-label={param.label}
-          value={value === undefined ? '' : String(param.choices.findIndex((choice) => choice === value))}
+          // The shop's default shows as picked until the visitor picks (#6144).
+          value={String(param.choices.findIndex((choice) => sameChoice(param.colour, choice, value ?? param.default)))}
           // Choosing the one picked again empties the group: back to the shop's choice.
           onValueChange={(picked) => onChange(picked === '' ? undefined : param.choices[Number(picked)])}
         >
@@ -132,7 +133,7 @@ function NumberInput({
       type="text"
       inputMode={param.min < 0 ? 'text' : 'decimal'}
       value={text}
-      placeholder={`${param.min} to ${param.max}`}
+      placeholder={param.default != null ? String(param.default) : `${param.min} to ${param.max}`}
       aria-describedby={hintId}
       aria-invalid={problem ? true : undefined}
       onChange={(event) => {
@@ -142,4 +143,10 @@ function NumberInput({
       }}
     />
   )
+}
+
+/** Whether `choice` is `value`: a colour in any case, as the backend compares it. */
+function sameChoice(colour: boolean, choice: ParamValue, value: ParamValue | null | undefined): boolean {
+  if (colour && typeof choice === 'string' && typeof value === 'string') return choice.toLowerCase() === value.toLowerCase()
+  return choice === value
 }
