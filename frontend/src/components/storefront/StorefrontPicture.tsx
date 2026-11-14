@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { StoreIcon } from 'lucide-react'
 import { api, ApiError } from '../../api/client'
-import type { MediaView, StorefrontListing } from '../../api/types'
+import type { MediaView, StorefrontListingRow } from '../../api/types'
 import { listingPath } from './listingsQuery'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,37 +11,57 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 /** The most listings one template's dialog reads: the list route's page cap. */
 const MAX_LISTINGS = 200
-/** How many listings the dialog reads at once. */
-const READS_AT_ONCE = 4
 
-/** Each id read with `read`, at most `READS_AT_ONCE` at a time, in the order given. */
-async function readAll(ids: readonly string[], read: (id: string) => Promise<StorefrontListing>): Promise<StorefrontListing[]> {
-  const out: StorefrontListing[] = new Array<StorefrontListing>(ids.length)
-  let next = 0
-  async function worker() {
-    while (next < ids.length) {
-      const index = next++
-      out[index] = await read(ids[index]!)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, ids.length) }, () => worker()))
-  return out
-}
+/** What the dialog needs of a listing: the list's row carries it all, as does a whole listing. */
+type Row = Pick<StorefrontListingRow, 'id' | 'title' | 'published' | 'media_ids' | 'updated_at'>
 
 function message(caught: unknown): string {
   return caught instanceof ApiError || caught instanceof Error ? caught.message : String(caught)
 }
 
+function same(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index])
+}
+
+/**
+ * What a refused save did, told from the listing read again after it. `PUT …/media` writes
+ * the pictures before it publishes a published listing again, so a refusal may come after
+ * the write: the pictures are saved, and the store shows the last publish.
+ */
+async function afterRefusal(listing: Row, sent: readonly string[], caught: unknown): Promise<{ row: Row | null; said: string }> {
+  const reason = message(caught)
+  let fresh: Row
+  try {
+    fresh = await api.storefrontListing(listing.id)
+  } catch {
+    return { row: null, said: `Not confirmed: ${reason}. Open this dialog again to see the listing as it is.` }
+  }
+  if (same(fresh.media_ids, sent)) {
+    return {
+      row: fresh,
+      said: fresh.published
+        ? `Pictures saved, but not published again: ${reason}. The store shows the last published pictures until the listing is published again from its page.`
+        : `Pictures saved: ${reason}.`,
+    }
+  }
+  if (caught instanceof ApiError && caught.status === 409) {
+    return { row: fresh, said: 'Changed elsewhere since it was read; read again. Save to try again.' }
+  }
+  return { row: fresh, said: `Not saved: ${reason}` }
+}
+
 /**
  * #6213 — "Storefront…" on one image of a template's media: which of the template's
- * listings show it, changed in one place. Save sets each changed listing's pictures
- * (`PUT /storefront/listings/{id}/media`): the image is added last, or taken out. A
- * published listing is published again at once and stays on the store; a draft stays a
- * draft. Each listing's answer is shown beside it.
+ * listings show it, changed in one place. The listings come from the list route, whose
+ * rows carry each one's pictures and `updated_at`. Save sets each changed listing's
+ * pictures (`PUT /storefront/listings/{id}/media`): the image is added last, or taken out.
+ * A published listing is published again at once and stays on the store; a draft stays a
+ * draft. Each listing's answer is shown beside it, and a refused save is told from the
+ * listing read again (`afterRefusal`).
  */
 export function StorefrontPicture({ slug, item }: { slug: string; item: MediaView }) {
   const [open, setOpen] = useState(false)
-  const [listings, setListings] = useState<StorefrontListing[] | null>(null)
+  const [listings, setListings] = useState<Row[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [wanted, setWanted] = useState<Record<string, boolean>>({})
   const [results, setResults] = useState<Record<string, string>>({})
@@ -54,18 +74,18 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
     setResults({})
     try {
       const page = await api.storefrontListings(new URLSearchParams({ slug, limit: String(MAX_LISTINGS) }))
-      const read = await readAll(
-        page.items.map((row) => row.id),
-        (id) => api.storefrontListing(id),
-      )
-      setListings(read)
-      setWanted(Object.fromEntries(read.map((listing) => [listing.id, listing.media_ids.includes(item.id)])))
+      setListings(page.items)
+      setWanted(Object.fromEntries(page.items.map((listing) => [listing.id, listing.media_ids.includes(item.id)])))
     } catch (caught) {
       setLoadError(`Could not read the listings: ${message(caught)}`)
     }
   }
 
   const changes = (listings ?? []).filter((listing) => (wanted[listing.id] ?? false) !== listing.media_ids.includes(item.id))
+
+  function replace(row: Row) {
+    setListings((all) => (all ?? []).map((one) => (one.id === row.id ? row : one)))
+  }
 
   async function save() {
     setBusy(true)
@@ -75,20 +95,12 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
       const ids = show ? [...listing.media_ids, item.id] : listing.media_ids.filter((id) => id !== item.id)
       try {
         const saved = await api.setStorefrontListingMedia(listing.id, ids, listing.updated_at)
-        setListings((all) => (all ?? []).map((one) => (one.id === saved.id ? saved : one)))
+        replace(saved)
         said[listing.id] = show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.'
       } catch (caught) {
-        said[listing.id] = `Not saved: ${message(caught)}`
-        // Changed elsewhere since it was read: read it again, so Save tries over its newest state.
-        if (caught instanceof ApiError && caught.status === 409) {
-          try {
-            const fresh = await api.storefrontListing(listing.id)
-            setListings((all) => (all ?? []).map((one) => (one.id === fresh.id ? fresh : one)))
-            said[listing.id] = 'Changed elsewhere since it was read; read again. Save to try again.'
-          } catch {
-            // Left as it was read; reopening the dialog reads it again.
-          }
-        }
+        const told = await afterRefusal(listing, ids, caught)
+        if (told.row) replace(told.row)
+        said[listing.id] = told.said
       }
     }
     setResults(said)

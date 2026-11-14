@@ -84,6 +84,9 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
     <div className="flex flex-col gap-2" role="group" aria-label="Pictures">
       <span className="text-sm font-medium">Pictures</span>
       {live === 'unknown' && <p className="text-xs text-muted-foreground">Publish again to see which pictures are live.</p>}
+      {Array.isArray(live) && (
+        <p className="text-xs text-muted-foreground">Live is what the store shows now. Save draft takes the listing off the store; Publish puts these pictures live.</p>
+      )}
       {shown.length === 0 ? (
         <p className="text-xs text-muted-foreground">No pictures: the customer sees none.</p>
       ) : (

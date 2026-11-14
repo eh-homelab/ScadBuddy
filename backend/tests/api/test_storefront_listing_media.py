@@ -58,6 +58,9 @@ def test_a_drafts_pictures_change_and_it_stays_a_draft(
     assert changed["published"] is False and changed["media"] == []
     # Nothing else moved.
     assert (changed["title"], changed["params"]) == (listing["title"], listing["params"])
+    # The list's row carries every picture and the `updated_at` to set them with.
+    [row] = client.get(LISTINGS, params={"slug": template["slug"]}).json()["items"]
+    assert (row["media_ids"], row["updated_at"]) == (changed["media_ids"], changed["updated_at"])
 
 
 def test_a_published_listing_is_published_again_with_the_new_pictures(

@@ -66,6 +66,7 @@ describe('ListingPictures (#6213)', () => {
     const [first, second] = screen.getAllByTestId('listing-picture')
     expect(within(first!).getByText('Live')).toBeInTheDocument()
     expect(within(second!).getByText('Not live yet')).toBeInTheDocument()
+    expect(screen.getByText(/Save draft takes the listing off the store/)).toBeInTheDocument()
   })
 
   it('marks nothing when the published pictures cannot be told apart, and says to publish again', async () => {

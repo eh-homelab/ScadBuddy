@@ -18,6 +18,17 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
 const STORAGE_KEY = 'sb-mock-storefront-listings'
 
 let listings: StorefrontListing[] = []
+/** #6213 — the problem slug the next republish of a media PUT is refused with, once; see `refuseNextRepublish`. */
+let republishRefusal: string | null = null
+
+/**
+ * #6213 — the next `PUT …/media` of a published listing writes its pictures, then has its
+ * republish refused with 422 `slug`, as the backend's `change_media` does when a publish
+ * check fails: the pictures are kept, the last publish stays live.
+ */
+export function refuseNextRepublish(slug: string): void {
+  republishRefusal = slug
+}
 let ticks = 0
 
 function save(): void {
@@ -142,6 +153,7 @@ function page(url: URL): StorefrontListingPage {
       place: place.get(l.id) ?? 0,
       published: l.published,
       media_id: l.media_ids[0] ?? null,
+      media_ids: l.media_ids,
       published_at: l.published_at,
       updated_at: l.updated_at,
     })),
@@ -235,9 +247,12 @@ export const handlers = [
     }
     const at = stamp()
     const next: StorefrontListing = { ...found, media_ids, updated_at: at }
-    const changed: StorefrontListing = found.published ? { ...next, media: publishedMedia(next), published_at: at } : next
+    const refusal = found.published ? republishRefusal : null
+    republishRefusal = null
+    const changed: StorefrontListing = found.published && refusal === null ? { ...next, media: publishedMedia(next), published_at: at } : next
     listings = listings.map((l) => (l.id === id ? changed : l))
     save()
+    if (refusal !== null) return refused(422, refusal, `the republish was refused: ${refusal}`)
     return HttpResponse.json(changed)
   }),
 
@@ -290,6 +305,7 @@ export const handlers = [
 
 export function reset(): void {
   listings = []
+  republishRefusal = null
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {

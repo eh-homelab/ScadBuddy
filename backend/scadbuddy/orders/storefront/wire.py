@@ -257,6 +257,9 @@ class ListingRow(BaseModel):
     published: bool
     #: The first media id the listing shows, for the row's picture; None for none.
     media_id: str | None
+    #: Every media id the listing shows, in order (#6213): a model media's "Storefront…"
+    #: dialog sets them with the row's ``updated_at`` and reads no listing whole.
+    media_ids: list[str]
     published_at: datetime | None
     updated_at: datetime
 

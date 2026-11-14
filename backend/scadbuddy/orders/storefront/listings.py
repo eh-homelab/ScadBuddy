@@ -393,8 +393,8 @@ class ListingStore:
                 args,
             ).fetchone()
             rows = conn.execute(
-                "SELECT id, slug, commit, title, place, published, media_ids[1] AS media_id,"
-                " published_at, updated_at FROM ("
+                "SELECT id, slug, commit, title, place, published, media_ids,"
+                " media_ids[1] AS media_id, published_at, updated_at FROM ("
                 "  SELECT *, row_number() OVER (ORDER BY position, id) AS place"
                 "  FROM storefront_listings"
                 f") ranked {filtered} ORDER BY {order} LIMIT %s OFFSET %s",

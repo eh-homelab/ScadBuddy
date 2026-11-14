@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
 import type { MediaView, StorefrontListingInput } from '../../api/types'
 import { GALLERY_SLUG } from '../../mocks/fixtures'
+import { refuseNextRepublish } from '../../mocks/features/storefront'
 import { renderPage } from '../../test/utils'
 import { StorefrontPicture } from './StorefrontPicture'
 
@@ -79,6 +80,23 @@ describe('StorefrontPicture (#6213)', () => {
 
     expect(await within(dialog).findByText('Added to the draft.')).toBeInTheDocument()
     expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['a1b2c3d4e5f6', item.id])
+  })
+
+  it('says the pictures were saved when only the republish was refused', async () => {
+    const item = await image()
+    const listing = await api.createStorefrontListing(body('Coaster', ['a1b2c3d4e5f6']))
+    const live = await api.publishStorefrontListing(listing.id)
+    refuseNextRepublish('listing_colour_unknown')
+    const { user, dialog } = await open(item)
+    await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    expect(await within(dialog).findByText(/^Pictures saved, but not published again: .*listing_colour_unknown.*The store shows the last published pictures/)).toBeInTheDocument()
+    // Nothing is left to save: the dialog holds the listing as it now is.
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+    const after = await api.storefrontListing(listing.id)
+    expect(after.media_ids).toEqual(['a1b2c3d4e5f6', item.id])
+    expect(after.media).toEqual(live.media)
   })
 
   it('shows the refusal of a picture that is no image', async () => {
