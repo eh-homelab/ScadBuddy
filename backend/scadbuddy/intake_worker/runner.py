@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from prometheus_client import Counter
+from pydantic import ValidationError
 
 from scadbuddy.intake_worker import confine
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
@@ -207,7 +208,7 @@ def check_request(filename: str, timeout: float, address_space: int) -> dict[str
 
 
 async def run_child(
-    box: str | Path,
+    box: str | Path | int,
     filename: str,
     *,
     hide: str,
@@ -216,7 +217,8 @@ async def run_child(
     address_space: int = CHILD_ADDRESS_SPACE,
     cancelled: asyncio.Event | None = None,
 ) -> int:
-    """The child run in ``box`` (its working directory, holding ``upload.bin``) through its
+    """The child run in ``box`` (its working directory, holding ``upload.bin``: a path, or
+    a descriptor of it, which the launcher inherits and ``fchdir``s to) through its
     launcher, with an empty tmpfs over ``hide`` in its own mount namespace (`confine.py`;
     with ``strict``, a step refused exits 126 with no parse); its exit code.
     `CheckCrashedError` past ``timeout``; the group is killed then, on cancellation and
@@ -224,17 +226,24 @@ async def run_child(
     # -I: the box (its working directory, which holds the customer's file) and the
     # environment never reach its import path.
     parser = [sys.executable, "-I", "-m", "scadbuddy.intake_worker.child"]
+    box_fd = box if isinstance(box, int) else None
+    argv = confine.command(
+        hide, [*parser, filename, str(address_space)], strict=strict, box_fd=box_fd
+    )
     process = await asyncio.create_subprocess_exec(
-        *confine.command(hide, [*parser, filename, str(address_space)], strict=strict),
+        *argv,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
-        env=child_env(Path(box)),
-        cwd=box,
+        # Where the confined child sees its box (`confine.isolate` binds it there).
+        env=child_env(Path(hide) / BOX if box_fd is not None else Path(str(box))),
+        cwd=None if isinstance(box, int) else box,
         start_new_session=True,
-        # Only its standard streams (all /dev/null): no inherited descriptor, so it cannot
-        # reach the worker's sockets (Temporal, the CRUD service) or its proof.
+        # Only its standard streams (all /dev/null) and the box's descriptor, which the
+        # launcher closes before the parser starts: no worker socket (Temporal, the CRUD
+        # service) is inherited.
         close_fds=True,
+        pass_fds=(box_fd,) if box_fd is not None else (),
     )
     waits: list[asyncio.Future[Any]] = [asyncio.ensure_future(process.wait())]
     if cancelled is not None:
@@ -271,13 +280,18 @@ def read_verdict(dir_fd: int, owner: int | None) -> Verdict:
     if isolation is not None and not _isolation_logged:
         _isolation_logged = True
         logger.warning("the check runs without its own namespaces: %s", str(isolation)[:200])
-    if outcome == "ready":
-        preview = read_output(dir_fd, PREVIEW, MAX_PREVIEW_BYTES, owner)
-        check_png(preview)
-        return Verdict("ready", facts=FileFacts.model_validate(verdict["facts"]), preview=preview)
-    if outcome == "refused":
-        return Verdict("refused", reason=str(verdict["reason"])[:500])
-    raise CheckCrashedError("the check wrote a verdict that is not one")
+    try:
+        if outcome == "ready":
+            facts = FileFacts.model_validate(verdict["facts"])
+        elif outcome == "refused":
+            return Verdict("refused", reason=str(verdict["reason"])[:500])
+        else:
+            raise CheckCrashedError("the check wrote a verdict that is not one")
+    except (ValidationError, KeyError, TypeError):
+        raise CheckCrashedError("the check wrote a verdict that is not one") from None
+    preview = read_output(dir_fd, PREVIEW, MAX_PREVIEW_BYTES, owner)
+    check_png(preview)
+    return Verdict("ready", facts=facts, preview=preview)
 
 
 def _make(dir_fd: int, name: str, data: bytes, mode: int) -> None:
@@ -302,6 +316,23 @@ def _jobs_dir(work: Path) -> int:
     return fd
 
 
+def _remove_answered(jobs_fd: int, keep: str) -> None:
+    """Every earlier job the sandbox has answered, removed: one that timed out could not be
+    removed while the sandbox still held its box, which it removes before it writes
+    ``done``. The worker runs one check at a time, so every other job is an earlier one;
+    one not answered yet is the sandbox's still."""
+    for name in os.listdir(jobs_fd):
+        if name == keep:
+            continue
+        with suppress(OSError):
+            job_fd = open_dir(name, dir_fd=jobs_fd)
+            try:
+                os.stat(DONE, dir_fd=job_fd, follow_symlinks=False)
+            finally:
+                os.close(job_fd)
+            shutil.rmtree(name, dir_fd=jobs_fd)
+
+
 async def _run_spooled(
     scratch: Path,
     filename: str,
@@ -319,6 +350,7 @@ async def _run_spooled(
     handed = False
     try:
         jobs_fd = _jobs_dir(scratch.parent)
+        _remove_answered(jobs_fd, scratch.name)
         os.mkdir(JOB, 0o700, dir_fd=scratch_fd)
         job_fd = open_dir(JOB, dir_fd=scratch_fd)
         os.rename(UPLOAD, UPLOAD, src_dir_fd=scratch_fd, dst_dir_fd=job_fd)

@@ -1,5 +1,11 @@
 """The check's launcher (#6133, spec 2026-11-13 §7):
-``python -I -S confine.py [--strict] <hide> -- <program> [args...]``.
+``python -I -S confine.py [--strict] [--box-fd N] <hide> -- <program> [args...]``.
+
+Its working directory is the job's box, or, with ``--box-fd``, the directory of that
+inherited descriptor, which it ``fchdir``s to and closes first. The sandbox container
+hands the box over that way: it is non-dumpable, so its children cannot follow a
+``/proc/<its pid>/fd/<n>`` link of its own (``proc_fd_access_allowed`` needs
+``ptrace_may_access``, which refuses a non-dumpable target).
 
 It makes itself non-dumpable (``PR_SET_DUMPABLE`` 0, lifted only for the three writes of
 its id maps, which a non-dumpable process cannot open), confines itself, then forks the
@@ -280,9 +286,20 @@ def _fail(message: str) -> NoReturn:
 def main(argv: list[str]) -> NoReturn:
     strict = argv[:1] == ["--strict"]
     rest = argv[1:] if strict else argv
+    box_fd: int | None = None
+    if rest[:1] == ["--box-fd"]:
+        if len(rest) < 2 or not rest[1].isdigit():
+            _fail("--box-fd takes a descriptor number")
+        box_fd, rest = int(rest[1]), rest[2:]
     if len(rest) < 3 or rest[1] != "--":
-        _fail("usage: confine.py [--strict] <hide> -- <program> [args...]")
+        _fail("usage: confine.py [--strict] [--box-fd N] <hide> -- <program> [args...]")
     hide, command = rest[0], rest[2:]
+    if box_fd is not None:
+        try:
+            os.fchdir(box_fd)
+            os.close(box_fd)
+        except OSError as error:
+            _fail(f"the box's descriptor: {error.strerror}")
     if strict and os.getuid() == 0:
         _fail("refusing to run the parser as root: its exec would keep its capabilities")
     libc = _libc()
@@ -328,14 +345,16 @@ def _exec(command: list[str]) -> NoReturn:
         _fail(f"{command[0]}: {error.strerror}")
 
 
-def command(hide: str, program: list[str], *, strict: bool) -> list[str]:
-    """The argv that runs ``program`` confined."""
+def command(hide: str, program: list[str], *, strict: bool, box_fd: int | None = None) -> list[str]:
+    """The argv that runs ``program`` confined; with ``box_fd``, in that descriptor's
+    directory, which the caller must pass on (``pass_fds``)."""
     return [
         sys.executable,
         "-I",
         "-S",
         str(Path(__file__).resolve()),
         *(["--strict"] if strict else []),
+        *(["--box-fd", str(box_fd)] if box_fd is not None else []),
         hide,
         "--",
         *program,

@@ -29,8 +29,9 @@ deletes them again (``gone``). It never reads a byte of the file (#5295, #5296).
 names past `ORPHAN_AGE` is deleted, a row past `ORPHAN_AGE` whose watcher is not running
 gets its watcher started again, and a file source still waiting for its check past
 `CHECK_STALE` whose check is not running gets its check started again. A pass checks at
-most `SWEEP_PASS_BATCHES` batches of rows and the next pass goes on from there (the
-cursor is the process's; a restart starts again from the oldest row). Each counts
+most `SWEEP_PASS_BATCHES` batches of rows, and as many of waiting file sources, and the
+next pass goes on from there (each cursor is the process's; a restart starts again from
+the oldest row). Each counts
 `scadbuddy_staged_files_repaired`; any count is
 a bug to look into.
 """
@@ -379,26 +380,43 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
     return repaired + await _restart_checks(state, now)
 
 
-def _unchecked(state: AppState, now: datetime) -> list[str]:
-    """The file sources still waiting for their check past `CHECK_STALE`, oldest first."""
+#: Where each app's next pass over the waiting file sources goes on from (as `_resume`).
+_check_resume: dict[int, tuple[datetime, str]] = {}
+
+
+def _unchecked(
+    state: AppState, now: datetime, after: tuple[datetime, str] | None
+) -> list[tuple[datetime, str]]:
+    """The next `SWEEP_BATCH` file sources still waiting for their check past
+    `CHECK_STALE`, in (``updated_at``, ``id``) order after ``after``."""
+    floor = (datetime.min.replace(tzinfo=UTC), "") if after is None else after
     with state.projection.pool.connection() as conn:
         rows = conn.execute(
-            "SELECT id FROM order_item_sources WHERE kind = 'file' AND check_status = 'checking'"
-            " AND upload_id IS NOT NULL AND updated_at < %s ORDER BY updated_at, id LIMIT %s",
-            (now - CHECK_STALE, SWEEP_BATCH * SWEEP_PASS_BATCHES),
+            "SELECT updated_at, id FROM order_item_sources WHERE kind = 'file'"
+            " AND check_status = 'checking' AND upload_id IS NOT NULL AND updated_at < %s"
+            " AND (updated_at, id) > (%s, %s) ORDER BY updated_at, id LIMIT %s",
+            (now - CHECK_STALE, floor[0], floor[1], SWEEP_BATCH),
         ).fetchall()
-    return [row["id"] for row in rows]
+    return [(row["updated_at"], row["id"]) for row in rows]
 
 
 async def _restart_checks(state: AppState, now: datetime) -> int:
     """A file source whose check is not running (its start was lost, or the check ended
-    without a verdict) gets its check started again (#6133 PR 2)."""
+    without a verdict) gets its check started again (#6133 PR 2). A pass checks at most
+    `SWEEP_PASS_BATCHES` batches and the next goes on from there, as the rows' pass does,
+    so many sources whose checks still run never hide a newer one whose start was lost."""
     from scadbuddy.orders.storefront.intake import checker
 
     checking = checker(state)
     repaired = 0
-    for source_id in await asyncio.to_thread(_unchecked, state, now):
-        if await checking.running(source_id) is False:
+    after = _check_resume.pop(id(state), None)
+    for _ in range(SWEEP_PASS_BATCHES):
+        batch = await asyncio.to_thread(_unchecked, state, now, after)
+        if not batch:
+            break
+        for _updated, source_id in batch:
+            if await checking.running(source_id) is not False:
+                continue
             logger.warning("customer file %s had no running check; starting one", source_id)
             try:
                 await checking.start([source_id])
@@ -407,4 +425,8 @@ async def _restart_checks(state: AppState, now: datetime) -> int:
                 continue
             state.metrics.staged_files_repaired.labels("unchecked_source").inc()
             repaired += 1
+        after = batch[-1]
+    else:
+        if after is not None:
+            _check_resume[id(state)] = after
     return repaired

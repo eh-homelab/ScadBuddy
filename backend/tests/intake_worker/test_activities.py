@@ -79,7 +79,7 @@ class Fake:
         return httpx.Response(200)
 
 
-def run(fake: Fake, tmp_path: Path, which: str = "check") -> str:
+def run(fake: Fake, tmp_path: Path, which: str = "check", beats: list[object] | None = None) -> str:
     crud = CrudClient(
         "http://api",
         "intake",
@@ -91,6 +91,8 @@ def run(fake: Fake, tmp_path: Path, which: str = "check") -> str:
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.bucket))
     activities = IntakeActivities(crud, tmp_path, http, sandbox_uid=None)
     env = ActivityEnvironment()
+    if beats is not None:
+        env.on_heartbeat = lambda *details: beats.append(details)
 
     async def go() -> str:
         try:
@@ -166,3 +168,11 @@ def test_failed_posts_failed(tmp_path: Path) -> None:
     fake = Fake(b"")
     assert run(fake, tmp_path, "failed") == "failed"
     assert fake.posted[0][0]["outcome"] == "failed"
+
+
+def test_the_check_heartbeats_while_it_runs(tmp_path: Path) -> None:
+    """So an attempt whose pod died is tried again after `CHECK_HEARTBEAT`, not after the
+    whole `CHECK_TIMEOUT`."""
+    beats: list[object] = []
+    assert run(Fake(box_stl()), tmp_path, beats=beats) == "ready"
+    assert beats

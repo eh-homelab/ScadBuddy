@@ -1428,7 +1428,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
   running gets one started again, and a file source still `checking` past `CHECK_STALE`
   (1 h) whose check is not running gets its check started again, each counted in
-  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows (`SWEEP_PASS_BATCHES`)
+  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows and 1000 waiting sources (`SWEEP_PASS_BATCHES`)
   and the next goes on from there.
   The check (#6133 PR 2, spec §7) runs in the intake worker, `python -m
   scadbuddy.intake_worker` (`intake_worker/`), which holds no database secret or KEK and

@@ -215,10 +215,11 @@ async def _run_claimed(job_fd: int, spool: Path) -> None:
 
     watcher = asyncio.create_task(watch_cancel())
     try:
-        # The box by its descriptor (the magic link of this process's fd), never by a
-        # path another child could have swapped.
+        # The box by its descriptor, inherited by the launcher, never by a path another
+        # child could have swapped. Not by this process's /proc/<pid>/fd link: it is
+        # non-dumpable, so its children cannot follow one.
         code = await run_child(
-            f"/proc/{os.getpid()}/fd/{box_fd}",
+            box_fd,
             checked["filename"],
             hide=str(spool),
             strict=True,
@@ -228,6 +229,10 @@ async def _run_claimed(job_fd: int, spool: Path) -> None:
         )
     except CheckCrashedError:
         answer = "timeout"
+    except OSError as error:
+        # The launcher never started: the job is answered, never left taken.
+        logger.warning("the intake sandbox could not start a check: %s", error)
+        answer = "spawn-failed"
     else:
         answer = str(code)
         if code == 0:

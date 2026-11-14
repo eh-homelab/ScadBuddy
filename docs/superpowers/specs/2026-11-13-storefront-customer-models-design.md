@@ -356,7 +356,7 @@ deletes an object under `staging/` that no row names, older than `ORPHAN_AGE`, a
 the watcher again of a row older than `ORPHAN_AGE` whose watcher is not running (Temporal's
 describe answers not found or closed), and the check again (§7) of a file source still
 `checking` past `CHECK_STALE` (1 hour) whose check is not running; that watcher then applies the rules above, so a
-submitted file is never deleted by the backstop. One pass checks at most 1000 rows
+submitted file is never deleted by the backstop. One pass checks at most 1000 rows, and as many waiting file sources
 (`SWEEP_PASS_BATCHES` batches of `SWEEP_BATCH`, one describe each, so the sweep keeps
 inside its 5-minute timeout); the next pass goes on from where it stopped, and past the
 newest row it starts again from the oldest. Each repair is logged and counted
@@ -524,10 +524,14 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   (mode 0750, the worker's own: the sandbox lists it but cannot add to it), so no job is
   readable by the sandbox's user before it is whole. The sandbox claims a job (`taken`,
   made `O_EXCL`), makes a `box/` (0700, its own), copies the upload into it with
-  `O_NOFOLLOW`, and starts the launcher with the box as its working directory, named by
-  the sandbox's own descriptor (`/proc/<pid>/fd/<n>`). It reads the box's outputs and
-  writes fresh files into `out/`, then `done`; the worker reads `done` and the outputs by
-  its descriptors and removes the job. Every read of an output opens it with
+  `O_NOFOLLOW`, and starts the launcher with the box's descriptor, inherited
+  (`--box-fd`), which the launcher `fchdir`s to and closes before anything else. Never a
+  `/proc/<pid>/fd/<n>` path: the sandbox is non-dumpable, so its children cannot follow
+  such a link of its own. A launcher that does not start is answered (`spawn-failed`),
+  never left taken. It reads the box's outputs and writes fresh files into `out/`, then
+  `done`; the worker reads `done` and the outputs by its descriptors and removes the job.
+  A job the worker could not remove (it timed out while the sandbox still held its box)
+  is removed by its next check once the sandbox has answered it. Every read of an output opens it with
   `O_NOFOLLOW | O_NONBLOCK` relative to a directory descriptor, then checks with `fstat`
   that it is a regular file with one link, owned by the user that should have written it
   (the sandbox's uid, for the worker), and reads at most the cap: the verdict 1 MiB and

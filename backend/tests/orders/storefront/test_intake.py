@@ -4,6 +4,7 @@ it opens the file: the routes presign, and store the worker's preview as opaque 
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
+from scadbuddy.orders.storefront import staged_files
 from scadbuddy.orders.storefront.intake import PREVIEW_HOLDER, preview_key
 from scadbuddy.store.s3 import staging_key
 from tests.orders.storefront.test_drafts import (  # noqa: F401  (fixtures)
@@ -301,3 +303,39 @@ def test_the_backstop_starts_a_check_that_was_lost(
     assert sweep(s3_api, datetime.now(UTC) + timedelta(hours=2)) == 1
     assert checker.started == [source_id, source_id]
     assert sweep(s3_api, datetime.now(UTC) + timedelta(hours=2)) == 0  # running now
+
+
+@pytest.fixture
+def _fresh_cursors() -> Iterator[None]:
+    staged_files._resume.clear()
+    staged_files._check_resume.clear()
+    yield
+    staged_files._resume.clear()
+    staged_files._check_resume.clear()
+
+
+@pytest.mark.usefixtures("_fresh_cursors")
+def test_a_backstop_pass_over_waiting_sources_is_bounded_and_goes_on(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    checker: FakeChecker,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sources whose checks still run (the intake worker is down) never hide a newer one
+    whose start was lost: the next pass goes on where the last stopped."""
+    monkeypatch.setattr(staged_files, "SWEEP_BATCH", 1)
+    monkeypatch.setattr(staged_files, "SWEEP_PASS_BATCHES", 2)
+    files = [("a.stl", STL, "model/stl"), ("b.stl", STL, "model/stl"), ("c.stl", STL, "model/stl")]
+    ask(asks, {"uploads": uploaded(asks, files)})
+    order = rows(
+        s3_api,
+        "SELECT id FROM order_item_sources WHERE kind = 'file' ORDER BY updated_at, id",
+    )
+    later = datetime.now(UTC) + timedelta(hours=2)
+    checker.stopped = {order[2]["id"]}
+    started = len(checker.started)
+    assert sweep(s3_api, later) == 0  # the first two sources only
+    assert sweep(s3_api, later) == 1  # the third, from where the first pass stopped
+    assert checker.started[started:] == [order[2]["id"]]
+    checker.stopped = {order[0]["id"]}
+    assert sweep(s3_api, later) == 1  # past the end: from the oldest again

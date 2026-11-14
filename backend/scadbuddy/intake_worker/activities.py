@@ -29,6 +29,7 @@ from typing import Final
 import httpx
 from temporalio import activity
 
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.crud.client import CrudClient, CrudRefusedError, activity_key
 from scadbuddy.crud.wire import PREFIX
 from scadbuddy.intake_worker.runner import run_check
@@ -118,7 +119,11 @@ class IntakeActivities:
 
     @activity.defn(name=CHECK_ACTIVITY)
     async def check(self, source_id: str) -> str:
-        """The check (the module docstring); its outcome, or ``skipped``."""
+        """The check (the module docstring); its outcome, or ``skipped``. It heartbeats
+        while it runs (`workflow.CHECK_HEARTBEAT`)."""
+        return await heartbeating(self._check(source_id))
+
+    async def _check(self, source_id: str) -> str:
         try:
             response = await self._crud.request("POST", f"{BASE}/{source_id}/read")
         except CrudRefusedError as refusal:

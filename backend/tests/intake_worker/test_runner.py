@@ -111,6 +111,28 @@ def test_a_verdict_that_is_not_one_fails_the_check(tmp_path: Path) -> None:
         os.close(fd)
 
 
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        {"outcome": "ready"},
+        {"outcome": "ready", "facts": {"format": "stl"}},
+        {"outcome": "ready", "facts": [1]},
+        {"outcome": "refused"},
+    ],
+)
+def test_a_verdict_with_bad_facts_or_no_reason_fails_the_check(
+    tmp_path: Path, verdict: dict[str, Any]
+) -> None:
+    (tmp_path / VERDICT).write_text(json.dumps(verdict))
+    (tmp_path / PREVIEW).write_bytes(_png())
+    fd = runner.open_dir(tmp_path)
+    try:
+        with pytest.raises(CheckCrashedError, match="not one"):
+            runner.read_verdict(fd, OWN)
+    finally:
+        os.close(fd)
+
+
 def test_an_output_past_its_cap_fails_the_check(tmp_path: Path) -> None:
     (tmp_path / PREVIEW).write_bytes(b"\0" * (MAX_PREVIEW_BYTES + 1))
     with pytest.raises(CheckCrashedError, match="past its cap"):
@@ -486,6 +508,35 @@ def test_the_sandbox_container_runs_a_spooled_check(tmp_path: Path) -> None:
     assert list(jobs.iterdir()) == [] and list(job.iterdir()) == []
 
 
+@needs_confinement
+def test_the_sandbox_as_deployed_runs_a_spooled_check(tmp_path: Path) -> None:
+    """``python -m scadbuddy.intake_worker.sandbox`` itself, non-dumpable as it makes itself
+    at start: its child must reach the box without a ``/proc/<pid>/fd`` path of the
+    sandbox's, which a non-dumpable process's children cannot follow."""
+    job = _job(tmp_path, box_stl())
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in sandbox.SANDBOX_FORBIDDEN_ENV
+    }
+    env["SCADBUDDY_INTAKE_WORK_DIR"] = str(job.parent)
+    served = subprocess.Popen(
+        [sys.executable, "-m", "scadbuddy.intake_worker.sandbox"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        verdict = asyncio.run(
+            run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=60.0)
+        )
+    finally:
+        served.terminate()
+        log = served.communicate(timeout=30)[0].decode(errors="replace")
+    assert verdict.outcome == "ready", log
+    assert served.returncode == 0, log
+
+
 def test_a_job_is_handed_over_whole_by_one_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -509,6 +560,27 @@ def test_a_job_is_handed_over_whole_by_one_rename(
 
     asyncio.run(go())
     assert seen == [sorted([UPLOAD, runner.REQUEST, runner.OUT])]
+
+
+def test_the_worker_removes_an_earlier_answered_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that timed out could not remove its job while the sandbox held its box; once
+    the sandbox answered it, the next check removes it, so ``jobs/`` does not grow. A job
+    not answered yet is left alone."""
+    monkeypatch.setattr(runner, "SPOOL_GRACE", 0.2)
+    jobs = tmp_path / "work" / runner.JOBS
+    answered = jobs / "check-0"
+    (answered / runner.OUT).mkdir(parents=True)
+    (answered / runner.OUT / VERDICT).write_text("{}")
+    (answered / runner.DONE).write_text("timeout")
+    waiting = jobs / "check-w"
+    waiting.mkdir()
+    (waiting / runner.TAKEN).write_text("")
+    job = _job(tmp_path, box_stl())
+    with pytest.raises(CheckCrashedError):
+        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1))
+    assert sorted(p.name for p in jobs.iterdir()) == ["check-w"]
 
 
 def test_a_planted_jobs_symlink_is_never_followed(tmp_path: Path) -> None:
@@ -611,6 +683,37 @@ def test_the_sandbox_answers_a_bad_request_without_running_it(tmp_path: Path) ->
 
     asyncio.run(go())
     assert (job / runner.DONE).read_text() == "bad-request"
+    assert not (job / runner.BOX).exists()
+
+
+def test_the_sandbox_answers_a_check_it_could_not_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launcher that never starts is an answer, never a crash that leaves the job taken."""
+
+    async def no_launcher(*args: Any, **kwargs: Any) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(sandbox, "run_child", no_launcher)
+    spool = tmp_path / "work"
+    job = spool / runner.JOBS / "check-1"
+    job.mkdir(parents=True)
+    (job / UPLOAD).write_bytes(box_stl())
+    (job / runner.REQUEST).write_text(
+        json.dumps({"filename": "box.stl", "timeout": 5.0, "address_space": 1 << 30})
+    )
+    (job / runner.OUT).mkdir()
+
+    async def go() -> None:
+        stop = asyncio.Event()
+        serving = asyncio.create_task(sandbox.serve(spool, stop))
+        while not (job / runner.DONE).exists():
+            await asyncio.sleep(0.05)
+        stop.set()
+        await serving
+
+    asyncio.run(go())
+    assert (job / runner.DONE).read_text() == "spawn-failed"
     assert not (job / runner.BOX).exists()
 
 

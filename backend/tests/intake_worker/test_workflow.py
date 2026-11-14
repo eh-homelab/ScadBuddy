@@ -13,7 +13,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from scadbuddy.intake_worker.wire import CHECK_ACTIVITY, FAILED_ACTIVITY, check_workflow_id
-from scadbuddy.intake_worker.workflow import CustomerFileCheck
+from scadbuddy.intake_worker.workflow import CHECK_HEARTBEAT, CustomerFileCheck
 from scadbuddy.orders.storefront.intake import TemporalChecker
 from tests.support.temporal import temporal_client, terminate_open_workflows
 
@@ -36,11 +36,13 @@ class Fakes:
         self.crash = crash
         self.checks = 0
         self.failed: list[str] = []
+        self.heartbeat_timeouts: list[object] = []
 
     def activities(self) -> list[Callable[[str], Awaitable[str]]]:
         @activity.defn(name=CHECK_ACTIVITY)
         async def check(source_id: str) -> str:
             self.checks += 1
+            self.heartbeat_timeouts.append(activity.info().heartbeat_timeout)
             if self.crash:
                 raise RuntimeError("the child crashed")
             return "ready"
@@ -70,6 +72,7 @@ async def test_a_check_that_finishes_ends_the_run(client: Client, queue: str) ->
     fakes = Fakes()
     assert await _run(client, queue, fakes) == "ready"
     assert (fakes.checks, fakes.failed) == (1, [])
+    assert fakes.heartbeat_timeouts == [CHECK_HEARTBEAT]
 
 
 async def test_a_check_that_cannot_finish_posts_failed(client: Client, queue: str) -> None:

@@ -22,6 +22,9 @@ from scadbuddy.intake_worker.wire import CHECK_ACTIVITY, CHECK_WORKFLOW, FAILED_
 
 #: One attempt: a download of up to 256 MiB, then the child's 5 minutes.
 CHECK_TIMEOUT: Final = timedelta(minutes=15)
+#: The activity heartbeats every `core.heartbeat.HEARTBEAT_EVERY` (10 s) while it runs, so
+#: an attempt whose pod died is tried again after this, not after `CHECK_TIMEOUT`.
+CHECK_HEARTBEAT: Final = timedelta(minutes=1)
 CHECK_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=10),
     maximum_interval=timedelta(minutes=2),
@@ -45,6 +48,7 @@ class CustomerFileCheck:
                 source_id,
                 result_type=str,
                 start_to_close_timeout=CHECK_TIMEOUT,
+                heartbeat_timeout=CHECK_HEARTBEAT,
                 retry_policy=CHECK_RETRY,
             )
         except ActivityError:
