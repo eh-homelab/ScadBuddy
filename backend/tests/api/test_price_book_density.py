@@ -5,6 +5,7 @@ where each came from, and the estimate says which density it used."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any
 
@@ -14,6 +15,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import orders as orders_api
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.orders import bambuddy as orders_bambuddy
@@ -487,3 +489,34 @@ def test_an_unexpected_density_read_error_is_raised_as_itself(
         client.post(IMPORT)
     # Its own cause stays (#6188 review).
     assert isinstance(raised.value.__cause__, KeyError)
+
+
+@respx.mock
+def test_when_two_density_reads_fail_one_is_raised_and_the_other_logged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#6188 review: the first failed read is raised as itself; another that failed too
+    is logged, never dropped."""
+    configure(client)
+    bambuddy([spool(1, cost_per_kg=20)])
+
+    async def trays_broke(*args: object) -> dict[int, str]:
+        raise RuntimeError("tray read broke")
+
+    async def catalogue_broke(self: object) -> list[object]:
+        raise RuntimeError("catalogue read broke")
+
+    monkeypatch.setattr(orders_bambuddy, "_tray_presets", trays_broke)
+    monkeypatch.setattr(BambuddyClient, "filament_catalog", catalogue_broke)
+    with (
+        caplog.at_level(logging.WARNING, logger=orders_bambuddy.__name__),
+        pytest.raises(RuntimeError, match="read broke") as raised,
+    ):
+        client.post(IMPORT)
+
+    [logged] = [r for r in caplog.records if r.message == "another density read failed too"]
+    assert logged.exc_info is not None
+    assert {str(raised.value), str(logged.exc_info[1])} == {
+        "tray read broke",
+        "catalogue read broke",
+    }
