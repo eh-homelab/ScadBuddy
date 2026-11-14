@@ -2410,6 +2410,10 @@ holds the manifest (spec §12).
   sandbox's ingress admits the worker's pods on 8090 only, and its egress allows nothing.
   The policies ship in the eh-homelab/clusters PR, with a check that fails without the
   sandbox's.
+- **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-intake.yaml`
+  (`MANIFEST_INTAKE`) like the other workers, once that file is in clusters. The sandbox's
+  Deployment has no image line of its own: clusters copies the worker's with a kustomize
+  replacement, so one pin moves both.
 
 ### Switching continuous deploy off
 
