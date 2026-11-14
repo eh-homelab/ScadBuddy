@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, BinaryIO, get_args
+from typing import TYPE_CHECKING, BinaryIO, Final, get_args
 
 from aiobotocore.config import AioConfig
 from aiobotocore.session import get_session
@@ -51,6 +51,12 @@ def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
 #: its preview beside it. Nothing here is content-addressed, so `sweep_unrecorded` (which
 #: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it.
 _STAGED = re.compile(r"staging/[0-9a-f]{32}(?:\.png)?")
+
+
+#: The canned ACL every staging object is written with, signed into its presigned PUT.
+STAGED_ACL: Final = "private"
+#: The headers a presigned staging PUT carries beside ``Content-Type``.
+STAGED_PUT_HEADERS: Final = {"x-amz-acl": STAGED_ACL}
 
 
 def staging_key(prefix: str, upload_id: str, *, preview: bool = False) -> str:
@@ -253,15 +259,18 @@ class S3ContentBackend:
 
     async def presign_put(self, key: str, *, size: int, media_type: str, expires: timedelta) -> str:
         """A URL that PUTs exactly ``size`` bytes of ``media_type`` to the staging object
-        ``key`` without credentials until ``expires`` from now. botocore signs both
-        headers (``X-Amz-SignedHeaders=content-length;content-type;host``), so the store
-        refuses a body of any other length or type. The query carries the signature:
-        never log it."""
+        ``key`` without credentials until ``expires`` from now. botocore signs the length,
+        the type and the canned ACL ``private``
+        (``X-Amz-SignedHeaders=content-length;content-type;host;x-amz-acl``), so the store
+        refuses a body of any other length or type, and a PUT that asks for any other ACL
+        (``public-read``) fails the signature: the browser sends `STAGED_PUT_HEADERS`. The
+        query carries the signature: never log it."""
         params = {
             "Bucket": self.settings.bucket,
             "Key": self._staged(key),
             "ContentType": media_type,
             "ContentLength": size,
+            "ACL": STAGED_ACL,
         }
         client = await self._v4()
         return await client.generate_presigned_url(

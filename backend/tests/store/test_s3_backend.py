@@ -19,7 +19,7 @@ from botocore.exceptions import EndpointConnectionError
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
-from scadbuddy.store.s3 import S3ContentBackend, object_key, staging_key
+from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, object_key, staging_key
 
 SCOPE = BlobScope(slug="demo", title="Demo")
 MISSING = "t/asset/" + "0" * 64
@@ -306,10 +306,13 @@ async def test_a_presigned_put_signs_its_length_and_type_and_writes_one_staging_
             key, size=5, media_type="model/stl", expires=timedelta(minutes=15)
         )
         query = parse_qs(urlsplit(url).query)
-        assert query["X-Amz-SignedHeaders"] == ["content-length;content-type;host"]
+        assert query["X-Amz-SignedHeaders"] == ["content-length;content-type;host;x-amz-acl"]
         assert query["X-Amz-Expires"] == ["900"]
+        sent = {"Content-Type": "model/stl", **STAGED_PUT_HEADERS}
+        # moto checks no signature, so a PUT with another ACL is not refused here; the
+        # signed ``x-amz-acl`` is what makes S3 refuse it (SigV4, signed headers).
         async with httpx.AsyncClient() as http:
-            answer = await http.put(url, content=b"solid", headers={"Content-Type": "model/stl"})
+            answer = await http.put(url, content=b"solid", headers=sent)
         answer.raise_for_status()
         assert await backend.staged_size(key) == 5
         assert await backend.staged_size(staging_key(s3.prefix, "f" * 32)) is None

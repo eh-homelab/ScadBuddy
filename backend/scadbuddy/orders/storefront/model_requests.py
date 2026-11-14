@@ -51,7 +51,7 @@ from scadbuddy.orders.storefront.wire import (
     UploadSlots,
     UploadSlotsBody,
 )
-from scadbuddy.store.s3 import S3ContentBackend, staging_key
+from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, staging_key
 from scadbuddy.storefront.uploads import checked_text
 from scadbuddy.storefront.wire import (
     MAX_MODEL_REQUEST_BYTES,
@@ -154,7 +154,7 @@ async def _signed(backend: S3ContentBackend, slots: Sequence[_Slot]) -> UploadSl
                 id=slot.id,
                 filename=slot.filename,
                 url=url,
-                headers={"Content-Type": slot.media_type},
+                headers={"Content-Type": slot.media_type, **STAGED_PUT_HEADERS},
                 expires_at=expires_at,
             )
         )

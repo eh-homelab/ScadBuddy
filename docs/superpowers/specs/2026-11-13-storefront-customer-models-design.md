@@ -220,14 +220,19 @@ CRUD route `POST /api/v1/crud/storefront/uploads` (area `draft`, service credent
 the S3 store (`listings.py` `public_content`; any other backend is 503 `storefront_needs_s3`,
 as public media is), checks each entry (a name ending `.stl` or `.3mf` that agrees with
 `media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, and answers
-per file `{id, url, headers: {"Content-Type": …}, expires_at}`.
+per file `{id, url, headers: {"Content-Type": …, "x-amz-acl": "private"}, expires_at}`.
 
 Each URL is a presigned `PUT` (`S3ContentBackend.presign_put`, new) for exactly one key,
 `<prefix>/staging/<id>`, with `ContentType` and `ContentLength` signed in, valid 15 minutes
 **(call)**. botocore signs both headers: a URL made with aiobotocore for a DO Spaces endpoint
 carried `X-Amz-SignedHeaders=content-length;content-type;host` (generated offline in
 `backend/`'s environment, 2026-11-13). So the store refuses a body of any other length or
-type. S3 checks the expiry when the request starts, so a slow upload that started in time
+type. As built (PR 1) the canned ACL `private` is signed in too (`ACL`, so
+`X-Amz-SignedHeaders=content-length;content-type;host;x-amz-acl`): a PUT that asks for
+another ACL, `public-read` among them, does not match the signature. The bucket itself names
+no ACL and no policy (`infra/do-spaces/scadbuddy-store/main.tf`), so it is private, and every
+staging object is private; a staging object is read only through a presigned GET. S3 checks
+the expiry when the request starts, so a slow upload that started in time
 completes ([AWS, presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html),
 "Expiration time").
 
@@ -255,7 +260,7 @@ The rule, added to the tofu module `infra/do-spaces/scadbuddy-store` in eh-homel
 
 - `AllowedOrigin`: `https://michaels-workshop.nullreference.io` only;
 - `AllowedMethod`: `PUT` only;
-- `AllowedHeader`: `content-type`;
+- `AllowedHeader`: `content-type` and `x-amz-acl`;
 - `ExposeHeader`: `ETag`;
 - `MaxAgeSeconds`: 3600.
 
