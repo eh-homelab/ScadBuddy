@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
-import { copyForkRanges, hasForks } from '../src/sessions/store.js'
+import { CHAIN_ROWS_SQL, copyForkRanges, hasForks } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
@@ -204,5 +204,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`fork event logs and images${TEST_DATABASE_U
     // B holds A's range as its own rows now, at A's seqs, and C still reads a1 through B.
     expect(await all(c)).toEqual(before)
     expect(texts(await all(b)).filter((x) => x.startsWith('turn:'))).toEqual(['turn:a1', 'turn:a2', 'turn:b1'])
+  })
+
+  it("reads a fork's ancestor rows from ai_session_entries_load, the limit stopping the scan (#4212)", async () => {
+    const parent = await session()
+    const child = await session(parent)
+    await t.db.sql`UPDATE ai_sessions SET fork_cut = 10 WHERE id = ${child}`
+    // The parent's long transcript, among other sessions' rows.
+    await t.db.sql.unsafe(`
+      INSERT INTO ai_session_entries (project_key, session_id, subpath, entry)
+      SELECT 'p', CASE WHEN g % 4 = 0 THEN '${parent}' ELSE 'other-' || (g % 50) END, '', '{}'
+      FROM generate_series(1, 20000) AS g`)
+    await t.db.sql`ANALYZE ai_session_entries`
+    await t.db.sql`ANALYZE ai_sessions`
+    type PlanNode = { 'Node Type': string; 'Index Name'?: string; Plans?: PlanNode[] }
+    const [row] = await t.db.sql.unsafe<{ 'QUERY PLAN': { Plan: PlanNode }[] }[]>(`EXPLAIN (FORMAT JSON) ${CHAIN_ROWS_SQL}`, [child])
+    const limits: PlanNode[] = []
+    const walk = (node: PlanNode) => {
+      if (node['Node Type'] === 'Limit') limits.push(node)
+      for (const sub of node.Plans ?? []) walk(sub)
+    }
+    walk(row!['QUERY PLAN'][0]!.Plan)
+    expect(limits).toHaveLength(1)
+    // An index scan in load order straight under the limit: no sort of every row first.
+    expect(limits[0]!.Plans?.[0]).toMatchObject({ 'Node Type': 'Index Scan', 'Index Name': 'ai_session_entries_load' })
   })
 })
