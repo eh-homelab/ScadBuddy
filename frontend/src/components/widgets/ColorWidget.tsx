@@ -91,7 +91,9 @@ export function ColorWidget({
                 // That holds while the popover is non-modal; a modal one would narrow fill's
                 // search to itself (agent/dom activeDialog) and find no field by the caption.
                 aria-label={`${paramLabel(param)} picker`}
-                onChange={(event) => commit(event.target.value)}
+                // It has no alpha channel: a new tint keeps the value's alpha, so a
+                // translucent colour stays translucent (#6289 review).
+                onChange={(event) => commit(`${event.target.value}${kept?.slice(7) ?? ''}`)}
                 className="h-8 w-14 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
               />
               Any colour

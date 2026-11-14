@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
@@ -129,6 +129,13 @@ describe('a colour from a filament (#1026)', () => {
     await again.tab()
     expect(onChange).not.toHaveBeenCalled()
     expect(screen.getByRole('textbox', { name: 'Plate' })).toHaveValue('#FFFFFF80')
+  })
+
+  it("keeps a translucent value's alpha when Any colour picks a new tint (#6289 review)", async () => {
+    const { onChange, user } = setup('#FFFFFF80')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    fireEvent.change(screen.getByLabelText('Plate picker'), { target: { value: '#ff0000' } })
+    expect(onChange).toHaveBeenCalledWith('#FF000080')
   })
 
   it('marks the spool whose colour the parameter already has', async () => {
