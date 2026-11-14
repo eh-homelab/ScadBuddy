@@ -33,13 +33,14 @@ from scadbuddy.api.printing import (
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.lifecycle import Lifecycle
+from scadbuddy.orders.lifecycle import ClaimRefusedError, Lifecycle, LifecycleError
 from scadbuddy.orders.models import Actor, Fulfilment
 from scadbuddy.orders.printing import (
     ACCEPT_BUDGET_S,
     ATTACH_MARGIN_S,
     FOLLOW_MAX_WAIT_S,
     FOLLOWED_PROBLEMS,
+    LOOK_MIN_S,
     LOOK_TIMEOUT_S,
     PRINT_TIMEOUT,
     START_FOLLOW_S,
@@ -354,10 +355,15 @@ def test_at_the_bound_a_look_with_no_answer_in_time_keeps_the_claim() -> None:
 def test_a_library_file_start_still_accepting_is_sent_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#6187: a library file item starts through ``start_library_run``, not the output's
-    ``accept_run`` call. Its still-accepting answer has the same problem ``type``, so it
-    is sent again and its run attached."""
+    """#6187, #6193: a library file item starts through ``start_library_run``, not the
+    output's ``accept_run`` call. Both sends go through it with the same body. The first
+    starts ``print-<key>``, which answers it is still accepting: the 503 has the same
+    problem ``type``, so it is sent again. By the second, that run recorded its row, and
+    ``accept_run`` finds it by the same run key (``runs.store.find``) and answers it as a
+    repeat, starting nothing: the second send follows the run the first one started. The
+    store is a fake keyed by the run key, as ``print_runs`` is; no database."""
     starts: list[str] = []
+    finds: list[str] = []
 
     async def still_accepting(*args: Any, **kwargs: Any) -> Any:
         starts.append(kwargs["id"])
@@ -366,13 +372,15 @@ def test_a_library_file_start_still_accepting_is_sent_again(
     async def no_slots(*args: Any, **kwargs: Any) -> None:
         return None
 
-    async def nothing_stored(key: str, *, has_request_id: bool) -> None:
-        return None
+    async def recorded_after_the_first(key: str, *, has_request_id: bool) -> PrintRun | None:
+        # The row the first start's run wrote, under its key, once that start was sent.
+        finds.append(key)
+        return RUN if starts and f"print-{key}" == starts[0] else None
 
     monkeypatch.setattr(printing_api, "start_command", still_accepting)
     monkeypatch.setattr(library_print, "_run_filaments", no_slots)
     runs = SimpleNamespace(
-        store=SimpleNamespace(find=nothing_stored, repeat_window=timedelta(minutes=5)),
+        store=SimpleNamespace(find=recorded_after_the_first, repeat_window=timedelta(minutes=5)),
         client=None,
         task_queue="q",
         search_attributes=False,
@@ -385,12 +393,11 @@ def test_a_library_file_start_still_accepting_is_sent_again(
         }
     )
     raised: list[ApiError] = []
+    answered: list[PrintRun] = []
 
     async def start(copies: int) -> PrintRun:
-        if raised:
-            return RUN
         try:
-            await library_print.start_library_run(
+            run = await library_print.start_library_run(
                 104,
                 body,
                 runs=cast(Any, runs),
@@ -404,15 +411,116 @@ def test_a_library_file_start_still_accepting_is_sent_again(
         except ApiError as error:
             raised.append(error)
             raise
-        raise AssertionError("the start answered")
+        assert isinstance(run, PrintRun)
+        answered.append(run)
+        return run
 
     lifecycle = FakeLifecycle()
     attempt = run_print(lifecycle, start, nothing_expected)
+    # One start: the second send followed it by its key and started nothing.
     assert len(starts) == 1
     [error] = raised
     assert error.status == 503
     assert error.type == STILL_ACCEPTING_PROBLEM
+    assert len(finds) == 2 and finds[0] == finds[1]
+    [run] = answered
+    assert run.id == RUN.id and run.repeated
     assert attempt.print_run_id == RUN.id
+
+
+def test_slow_work_before_the_start_leaves_the_look_and_the_attach_their_time() -> None:
+    """#6193: the run's timeout counts from the activity's start, and the item's project
+    and the claim come before the first send. The follow is cut by what they took, so the
+    look still has at least ``LOOK_MIN_S`` and the attach its margin."""
+    clock = Clock()
+    project_took = 30.0
+    claim_took = 30.0
+
+    class SlowClaim(FakeLifecycle):
+        def claim_print(self, *args: Any, **kwargs: Any) -> Fulfilment:
+            clock.now += claim_took
+            return self.claim
+
+    async def start(copies: int) -> PrintRun:
+        # Each send waits out its own accept budget.
+        clock.now += ACCEPT_BUDGET_S
+        raise fresh(STILL_CHECKING)
+
+    looked: list[float] = []
+
+    async def looks(copies: int) -> PrintRun | None:
+        looked.append(clock.now)
+        return None
+
+    lifecycle = SlowClaim()
+    clock.now = project_took
+    with pytest.raises(ApiError):
+        asyncio.run(
+            print_item(
+                cast(Lifecycle, lifecycle),
+                start,
+                looks,
+                "o1",
+                "i1",
+                BY,
+                request_id="k",
+                sliced_sha256=None,
+                sliced_blob_key=None,
+                started=0.0,
+                sleep=clock.sleep,
+                clock=clock,
+            )
+        )
+    [at] = looked
+    assert at + LOOK_MIN_S + ATTACH_MARGIN_S <= PRINT_TIMEOUT.total_seconds()
+    assert len(lifecycle.released) == 1
+
+
+def test_a_refused_claims_look_with_no_answer_in_time_keeps_the_claim() -> None:
+    """#6193: a retry whose claim may no longer print asks ``existing`` for its run. With
+    Temporal away that look had no limit and could end as a bare activity timeout. It gets
+    the time left on the run's clock; past it the claim is kept and the failure names the
+    attempt."""
+    refusal = LifecycleError("order_on_hold", "the order is on hold")
+
+    class Refused(FakeLifecycle):
+        def claim_print(self, *args: Any, **kwargs: Any) -> Fulfilment:
+            raise ClaimRefusedError(self.claim, refusal)
+
+    async def never_answers(copies: int) -> PrintRun | None:
+        await asyncio.sleep(3600)
+        return None
+
+    lifecycle = Refused()
+    clock = Clock()
+    # 0.05 s left on the run's clock once the attach margin is kept.
+    started = -(PRINT_TIMEOUT.total_seconds() - ATTACH_MARGIN_S - 0.05)
+
+    async def bounded() -> Fulfilment:
+        # The outer bound only stops a hang without the fix; one loop, so it cancels.
+        return await asyncio.wait_for(
+            print_item(
+                cast(Lifecycle, lifecycle),
+                answers(RUN),
+                never_answers,
+                "o1",
+                "i1",
+                BY,
+                request_id="k",
+                sliced_sha256=None,
+                sliced_blob_key=None,
+                started=started,
+                sleep=clock.sleep,
+                clock=clock,
+            ),
+            timeout=5,
+        )
+
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(bounded())
+    assert caught.value.status == 503
+    assert lifecycle.released == []
+    assert "Attempt 3 stays queued" in caught.value.detail
 
 
 def test_send_until_answered_backs_off_up_to_its_bound() -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import aclosing
@@ -693,6 +694,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
         a test print of the request's ``revision_id`` when it names one."""
+        # The run's one clock (#6193): the project and the claim count against its time.
+        started = time.monotonic()
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
@@ -796,6 +799,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             sliced_blob_key=checked["sliced_blob_key"],
             project_id=project_id,
             revision_id=request.get("revision_id"),
+            started=started,
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
