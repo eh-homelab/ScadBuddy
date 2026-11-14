@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+// FilamentPlan what the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 type FilamentPlan struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
@@ -21,7 +21,7 @@ type FilamentPlan struct {
 func NewFilamentPlan() *FilamentPlan {
 	m := &FilamentPlan{}
 	m.SetAdditionalData(make(map[string]any))
-	force_colour_matchValue := false
+	force_colour_matchValue := true
 	m.SetForceColourMatch(&force_colour_matchValue)
 	return m
 }

@@ -19,7 +19,7 @@ type PrintRunRequest struct {
 	choices PrintChoicesable
 	// The copies property
 	copies PrintRunRequest_PrintRunRequest_copiesable
-	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+	// What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 	filament_plan FilamentPlanable
 	// The filament_profiles property
 	filament_profiles []string
@@ -1371,7 +1371,7 @@ func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e8
 	return res
 }
 
-// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+// GetFilamentPlan gets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 // returns a FilamentPlanable when successful
 func (m *PrintRunRequest) GetFilamentPlan() FilamentPlanable {
 	return m.filament_plan
@@ -1635,7 +1635,7 @@ func (m *PrintRunRequest) SetCopies(value PrintRunRequest_PrintRunRequest_copies
 	m.copies = value
 }
 
-// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is off by default because it only bites on a model-targeted queue item, where insisting can leave the job unschedulable.
+// SetFilamentPlan sets the filament_plan property value. What the dialog submits: one spool per slot, and how hard to insist on it. “force_colour_match“ becomes “force_color_match“ on every override, which is the flag Bambuddy's scheduler reads to require an exact type+colour match rather than merely preferring one. It is on by default (#6218): with it off, the scheduler can print a part in the wrong colour when the right one is not loaded; with it on, Bambuddy holds the queue item until a tray of the right colour is loaded. A caller may still send “False“.
 func (m *PrintRunRequest) SetFilamentPlan(value FilamentPlanable) {
 	m.filament_plan = value
 }

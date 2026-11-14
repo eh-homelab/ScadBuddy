@@ -401,7 +401,7 @@ describe('PrintPicker', () => {
           { slot_id: 1, spool_id: 21 },
           { slot_id: 2, spool_id: 27 },
         ],
-        force_colour_match: false,
+        force_colour_match: true,
       },
       choices: {
         nozzles: [
@@ -3447,9 +3447,48 @@ describe('PrintPicker · Remembered choices', () => {
       tier: 'standard',
       process_name: null,
       print_sequence: null,
+      force_colour_match: true,
       // #5627 — no settings per colour changed: none remembered.
       part_settings: null,
     })
+  })
+
+  it('waits for the right colour by default, and remembers it switched off (#6218)', async () => {
+    const runs = watch('POST', '/run')
+    const remembered = watch('PUT', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+    const colourMatch = screen.getByRole('switch', { name: /wait for the right colour/i })
+    expect(colourMatch).toHaveAttribute('aria-checked', 'true')
+
+    await user.click(colourMatch)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    await waitFor(() => expect(remembered.bodies).toHaveLength(1))
+
+    expect(runs.bodies[0]).toMatchObject({ filament_plan: { force_colour_match: false } })
+    expect(remembered.bodies[0]).toMatchObject({ force_colour_match: false })
+  })
+
+  it('opens on the remembered colour match (#6218)', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          model_choices: { printer_id: null, filament_plan: [], force_colour_match: false },
+        }),
+      ),
+    )
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /wait for the right colour/i })).toHaveAttribute('aria-checked', 'false'),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ filament_plan: { force_colour_match: false } })
   })
 
   it('still prints when the choices cannot be saved', async () => {
@@ -3954,7 +3993,7 @@ describe('PrintPicker · Checks (#284)', () => {
         printer_id: 1,
         plate_id: 1,
         choices: { nozzles: [{ size: '0.4' }, { size: '0.4' }], bed_type: 'Textured PEI Plate' },
-        filament_plan: { force_colour_match: false },
+        filament_plan: { force_colour_match: true },
       },
     })
     expect(await screen.findByTestId('diagnostic-SB1003')).toBeVisible()

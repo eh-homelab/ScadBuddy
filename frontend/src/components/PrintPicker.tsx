@@ -74,6 +74,7 @@ import { usePrintProgress } from '../lib/usePrintProgress'
 import { printRunBody, useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
+import { ColourMatchSwitch } from './print/ColourMatchSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { FlowChoice } from './print/FlowChoice'
@@ -558,7 +559,17 @@ export function PrintPicker({
     : itemPrint
       ? sentPartSettings(itemPrint.quoted)
       : sentPartSettings(picker.partSettings)
-  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
+  const {
+    filaments,
+    plan,
+    setPlan,
+    planChanged,
+    filamentError,
+    planReady,
+    retryFilaments,
+    forceColourMatch,
+    setForceColourMatch,
+  } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -917,6 +928,7 @@ export function PrintPicker({
     selection: { ...selection, plate },
     plan,
     planChanged,
+    forceColourMatch,
     copies,
     projectId,
     folderId,
@@ -1053,7 +1065,7 @@ export function PrintPicker({
               goal: arrangeGoal,
               ...(registryPrinter ? { printer: registryPrinter } : {}),
               printer_id: sentPrinterId,
-              filament_plan: { slots: plan, force_colour_match: false },
+              filament_plan: { slots: plan, force_colour_match: forceColourMatch },
               // #3637 — every colour a recoloured copy prints in has its slot, whether
               // or not this output's `colors` already lists it.
               colours: [
@@ -1140,7 +1152,7 @@ export function PrintPicker({
           // The registry printer, so a native dialog's analysis asks Bambuddy nothing (#4629).
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: false },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
           choices: printChoices,
           ...plateFields(plate),
           copies: effectiveCopies,
@@ -1159,7 +1171,7 @@ export function PrintPicker({
       ? {
           ...(registryPrinter ? { printer: registryPrinter } : {}),
           printer_id: sentPrinterId,
-          filament_plan: { slots: plan, force_colour_match: false },
+          filament_plan: { slots: plan, force_colour_match: forceColourMatch },
           choices: printChoices,
           ...plateFields(plate),
           rack_position: rackPosition,
@@ -1382,10 +1394,15 @@ export function PrintPicker({
     seeding.current = 'done'
     if (!project && 'project_id' in seed) setOwnProjectId(seed.project_id ?? null)
     // An item print's quote with no plan seeds none (#4673): the picks stay.
-    const chosen = (seed.filament_plan as PrintRunRequest['filament_plan'] | undefined)?.slots ?? []
+    const seededPlan = seed.filament_plan as PrintRunRequest['filament_plan'] | undefined
+    const chosen = seededPlan?.slots ?? []
     const mine = slotKeys(filaments)
     const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
     if (!seeded.seedIsOwn && !same) return
+    // #6218: the seed's colour match, as it was chosen or quoted. A seed made before
+    // #6218 (an item quoted, or a batch step saved, then) carries the dialog's old fixed
+    // `false`, so it opens with the switch off, as it was quoted; the user may switch it on.
+    if (typeof seededPlan?.force_colour_match === 'boolean') setForceColourMatch(seededPlan.force_colour_match)
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
       current.map((choice) => {
@@ -1437,6 +1454,7 @@ export function PrintPicker({
     changeNozzles,
     changeQuality,
     setPlan,
+    setForceColourMatch,
     setPlate,
     setPrintSequence,
     setPartSettings,
@@ -1452,6 +1470,7 @@ export function PrintPicker({
       printerId: sentPrinterId,
       registryPrinter,
       plan,
+      forceColourMatch,
       printChoices,
       copies,
       plate,
@@ -1504,7 +1523,7 @@ export function PrintPicker({
       await quote.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: false },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
         choices: printChoices,
         filaments: priced,
         // A support slot with no filament chosen yet prices nothing.
@@ -1534,7 +1553,7 @@ export function PrintPicker({
       await itemPrint.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
         printer_id: sentPrinterId,
-        filament_plan: { slots: plan, force_colour_match: false },
+        filament_plan: { slots: plan, force_colour_match: forceColourMatch },
         choices: printChoices,
         // #5627: the quote's, as the background slice was made with them.
         ...(sentParts === null ? {} : { part_settings: sentParts }),
@@ -1930,6 +1949,10 @@ export function PrintPicker({
                           : undefined
                       }
                     />
+                  )}
+                  {/* #6218: a native LAN run maps its trays itself and never reads the flag. */}
+                  {filaments && !native && (
+                    <ColourMatchSwitch value={forceColourMatch} onChange={setForceColourMatch} />
                   )}
                   {partsUnquoted && (
                     <p className="text-sm text-muted-foreground" role="status" data-testid="part-settings-unquoted">

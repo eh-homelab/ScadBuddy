@@ -36,7 +36,7 @@ const request = {
   all_plates: z.boolean().optional(),
   plate_ids: z.array(z.number().int().min(1)).min(1).optional(),
   copies: z.number().int().min(1).max(1000).optional(),
-  filament_plan: z.object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) }).optional(),
+  filament_plan: z.object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(true) }).optional(),
   choices: z
     .object({
       nozzles,

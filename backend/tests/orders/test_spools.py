@@ -127,11 +127,24 @@ async def test_the_item_print_fills_its_plan_from_its_filaments(shop: Shop) -> N
     item_id = priced_item(shop)
     seam = Inventory(spool(4, loaded_printer_id=PRINTER), spool(5, remaining_g=900))
 
-    plan = await item_plan(shop.rows, seam, item_id, FilamentPlan(force_colour_match=True), PRINTER)
+    plan = await item_plan(shop.rows, seam, item_id, FilamentPlan(), PRINTER)
 
     assert plan is not None
     assert [(s.slot_id, s.spool_id) for s in plan.slots] == [(1, 4)]
     assert plan.force_colour_match
+
+
+@pytest.mark.requires_postgres
+async def test_the_item_print_keeps_force_colour_match_off_when_asked(shop: Shop) -> None:
+    item_id = priced_item(shop)
+    seam = Inventory(spool(4, loaded_printer_id=PRINTER), spool(5, remaining_g=900))
+
+    plan = await item_plan(
+        shop.rows, seam, item_id, FilamentPlan(force_colour_match=False), PRINTER
+    )
+
+    assert plan is not None
+    assert not plan.force_colour_match
 
 
 @pytest.mark.requires_postgres
