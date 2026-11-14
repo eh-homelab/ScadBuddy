@@ -256,6 +256,43 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
 
 
 @respx.mock
+def test_process_overrides_go_over_the_template_and_the_shorthands(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2998: any key, as JSON gives it, sent in Bambu's string shape, over the
+    template's defaults and over the print's own ``print_sequence``."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_prime_tower": "1", "print_sequence": "by layer"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json={
+            **body(),
+            "print_sequence": "by object",
+            "process_overrides": {
+                "print_sequence": "by layer",
+                "enable_prime_tower": False,
+                "skirt_loops": 0,
+                "a_key_scadbuddy_never_heard_of": 0.25,
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["process_overrides"] == {
+        "a_key_scadbuddy_never_heard_of": "0.25",
+        "enable_prime_tower": "0",
+        "print_sequence": "by layer",
+        "skirt_loops": "0",
+    }
+
+
+@respx.mock
 def test_a_templates_by_object_default_is_checked_as_by_object(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

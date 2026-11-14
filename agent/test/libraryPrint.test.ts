@@ -185,6 +185,7 @@ describe('the library routes', () => {
       print_sequence: 'by object',
       part_settings: null,
       force_colour_match: null,
+      process_overrides: null,
     })
   })
 
@@ -208,6 +209,7 @@ describe('the library routes', () => {
       print_sequence: null,
       part_settings: null,
       force_colour_match: null,
+      process_overrides: null,
     })
     // And the listing says so, rather than sending the user to Settings.
     const listing = tool('get_remembered_choices').description

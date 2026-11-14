@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import psycopg
 from opentelemetry.trace import Span
@@ -33,6 +33,7 @@ from pydantic import (
 )
 
 from scadbuddy.bambuddy.part_settings import ColourParameter, PartSettings
+from scadbuddy.bambuddy.process_overrides import ProcessInput, joined_text, scalar_text
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
@@ -281,65 +282,21 @@ class PipelineDeclaration(BaseModel):
     api: int = Field(ge=1)
 
 
-_BOOLEAN = ("0", "1")
-
-#: Bambu's ``print_sequence`` (#907): the one list a template's ``print_settings`` and a
-#: print's own override both take.
+#: Bambu's ``print_sequence`` (#907): the values the print's own ``print_sequence`` takes.
 PrintSequence = Literal["by layer", "by object"]
 
-#: The process settings a template may declare in ``print_settings`` (#770), in the
-#: order a download lists them as edits, each with the values it takes. Each is a
-#: Bambu Studio process key, and its value the string a Bambu config stores; the
-#: enums are ``s_keys_map_SupportType``, ``s_keys_map_BrimType`` and
-#: ``s_keys_map_PrintSequence`` (#907) in Bambu Studio's
-#: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
-#: number of millimetres, or ``support_threshold_angle``, whole degrees (#1899).
-#: Only these: a template states how it prints best, not a whole profile.
-PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
-    "enable_prime_tower": _BOOLEAN,
-    "wipe_tower_no_sparse_layers": _BOOLEAN,
-    "enable_support": _BOOLEAN,
-    "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
-    # #1899: whole degrees from vertical, 0-90.
-    "support_threshold_angle": None,
-    "support_on_build_plate_only": _BOOLEAN,
-    "brim_width": None,
-    "brim_type": (
-        "auto_brim",
-        "brim_ears",
-        "outer_only",
-        "inner_only",
-        "outer_and_inner",
-        "no_brim",
-    ),
-    "print_sequence": get_args(PrintSequence),
-}
-PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
-#: The settings among those that are an angle, not millimetres (#1899).
-_DEGREES = frozenset({"support_threshold_angle"})
 
-
-def _print_setting_problem(key: str, value: str) -> str | None:
-    """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
-    allowed = PRINT_SETTING_VALUES[key]
-    if key in _DEGREES:
-        if value.isascii() and value.isdigit() and int(value) <= 90:
-            return None
-        return f"{key} is {value!r}; it must be a whole number of degrees from 0 to 90"
-    if allowed is not None:
-        if value in allowed:
-            return None
-        return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
-    # Plain digits only ("5", "2.5"), as the file stores it and a download writes it:
-    # float() would also take "1e2", "5_0" and " 5 " (#851).
-    whole, point, fraction = value.partition(".")
-    parts = (whole, fraction) if point else (whole,)
-    if all(part.isascii() and part.isdigit() for part in parts):
-        return None
-    return (
-        f"{key} is {value!r}; it must be a non-negative number of millimetres "
-        "in plain digits, like '5' or '2.5'"
-    )
+def _print_setting_text(value: Any) -> Any:
+    """One ``print_settings`` value as a Bambu config stores it (#2998): a number or a
+    boolean as its string (``process_overrides.scalar_text``), a list joined with commas
+    as Bambu Studio's JSON loader reads one. Anything else is left for the field's type."""
+    if isinstance(value, bool | int | float):
+        return scalar_text(value)
+    if isinstance(value, list) and all(
+        isinstance(item, bool | int | float | str) for item in value
+    ):
+        return joined_text(value)
+    return value
 
 
 #: What a create or an edit may set a model's description and tags to (review #1126 1.4):
@@ -442,42 +399,36 @@ class ModelMeta(BaseModel):
         return data
 
     #: The template's default slicer settings (#770): process overrides on the print
-    #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
-    #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
+    #: run's slice, and edits to the system process in a downloaded 3MF. Any Bambu Studio
+    #: process key (#2998: no allowlist); not in `ModelPatch`, it is edited in the file.
     print_settings: dict[str, StrictStr] = Field(
         default_factory=dict,
         description=(
             "The template's own default slicer settings, as Bambu Studio process keys "
-            "and values from its model.json. The server applies them to every slice and "
-            "every downloaded 3MF; for clients they are informational, and no request "
-            "sets them."
+            "and values from its model.json: any process key. The server applies them to "
+            "every slice and every downloaded 3MF; for clients they are informational, "
+            "and no request sets them (a print's process_overrides go over them)."
         ),
     )
 
-    @field_validator("print_settings")
+    @field_validator("print_settings", mode="before")
     @classmethod
-    def _known_print_settings(cls, value: dict[str, str]) -> dict[str, str]:
-        """Only the allowlisted keys, each with a value it takes, in the allowlist's
-        order. An unknown key or value is refused rather than dropped: a template that
-        means a setting must not print without it."""
-        for key, setting in value.items():
-            if key not in PRINT_SETTING_VALUES:
-                raise ValueError(
-                    f"{key!r} is not a print setting a template can set; "
-                    f"the allowed keys are {', '.join(PRINT_SETTING_KEYS)}"
-                )
-            problem = _print_setting_problem(key, setting)
-            if problem is not None:
-                raise ValueError(problem)
-        return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
+    def _print_setting_texts(cls, value: Any) -> Any:
+        """Every key is taken (#2998): the slicer, not ScadBuddy, judges a key and its
+        value. A number, a boolean or a list is written as the string a Bambu config
+        stores; only a value that is no setting at all (an object, null) fails the
+        field's type."""
+        if not isinstance(value, dict):
+            return value
+        return {key: _print_setting_text(setting) for key, setting in value.items()}
 
     #: The template's slicer settings per colour part (#5626): each key a ``// color``
     #: parameter of its source, each value the settings for the parts of that colour,
-    #: with the keys and limits of a print's ``part_settings``
-    #: (``bambuddy/part_settings.py`` ``PartSettings``). Not in `ModelPatch` either.
+    #: with the keys of a print's ``part_settings`` (``bambuddy/part_settings.py``
+    #: ``PartSettings``: any Bambu Studio key, #2998). Not in `ModelPatch` either.
     #: Stored as plain dicts of the settings set, so a plain ``model_dump`` is the
     #: model.json shape (an operation's stored result is sent as it is).
-    part_print_settings: dict[ColourParameter, dict[str, int | str]] = Field(
+    part_print_settings: dict[ColourParameter, dict[str, ProcessInput]] = Field(
         default_factory=dict,
         description=(
             "The template's own slicer settings per colour part, from its model.json: each"
@@ -492,9 +443,9 @@ class ModelMeta(BaseModel):
     @field_validator("part_print_settings", mode="before")
     @classmethod
     def _set_part_print_settings(cls, value: Any) -> Any:
-        """Each parameter's settings checked by ``PartSettings``: an unknown key or a
-        value out of range is refused, as an unknown print setting is. Only the settings
-        set are kept, and a parameter that sets nothing is dropped."""
+        """Each parameter's settings read by ``PartSettings``: any key and value (#2998),
+        and only a value that is no setting at all (an object) is refused. Only the
+        settings set are kept, and a parameter that sets nothing is dropped."""
         if not isinstance(value, dict):
             return value  # the field's own type check refuses it
         kept: dict[Any, dict[str, Any]] = {}

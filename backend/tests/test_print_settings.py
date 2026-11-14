@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import get_args
 
@@ -13,10 +12,7 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.catalogue import (
-    PRINT_SETTING_KEYS,
-    PRINT_SETTING_VALUES,
     Catalogue,
-    InvalidModelMetaError,
     PrintSequence,
     meta_from_raw,
 )
@@ -26,13 +22,13 @@ from tests.support.media import MemoryMediaStore
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
 
-def test_print_settings_are_read_in_the_allowlists_order() -> None:
+def test_print_settings_keep_the_files_order() -> None:
+    """#2998: no allowlist decides the order any more."""
     meta = meta_from_raw(
         {"print_settings": {"enable_support": "0", "enable_prime_tower": "1"}}, "demo"
     )
 
-    assert meta.print_settings == {"enable_prime_tower": "1", "enable_support": "0"}
-    assert list(meta.print_settings) == ["enable_prime_tower", "enable_support"]
+    assert list(meta.print_settings) == ["enable_support", "enable_prime_tower"]
 
 
 def test_no_print_settings_is_empty() -> None:
@@ -40,113 +36,48 @@ def test_no_print_settings_is_empty() -> None:
     assert meta_from_raw({"print_settings": None}, "demo").print_settings == {}
 
 
-def test_every_allowlisted_key_is_accepted() -> None:
-    raw = {
-        "enable_prime_tower": "1",
-        "wipe_tower_no_sparse_layers": "0",
-        "enable_support": "1",
-        "support_type": "tree(auto)",
-        "support_threshold_angle": "40",
-        "support_on_build_plate_only": "1",
-        "brim_width": "5",
-        "brim_type": "outer_only",
-        "print_sequence": "by object",
-    }
-    assert tuple(raw) == PRINT_SETTING_KEYS
-
-    assert meta_from_raw({"print_settings": raw}, "demo").print_settings == raw
-
-
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("support_type", "normal(auto)"),
-        ("support_type", "tree(auto)"),
-        ("support_type", "normal(manual)"),
-        ("support_type", "tree(manual)"),
-        *[
-            ("brim_type", brim)
-            for brim in (
-                "auto_brim",
-                "brim_ears",
-                "outer_only",
-                "inner_only",
-                "outer_and_inner",
-                "no_brim",
-            )
-        ],
-        # #1899: whole degrees from vertical.
-        ("support_threshold_angle", "0"),
-        ("support_threshold_angle", "30"),
-        ("support_threshold_angle", "90"),
-        ("support_on_build_plate_only", "0"),
-        ("support_on_build_plate_only", "1"),
-        ("brim_width", "0"),
-        ("brim_width", "2.5"),
-        ("brim_width", "10"),
-        ("print_sequence", "by layer"),
-        ("print_sequence", "by object"),
+        # Keys outside the old allowlist (#2998): every Bambu Studio key is taken.
+        ("layer_height", "0.2"),
+        ("skirt_loops", "0"),
+        ("support_interface_filament", "2"),
+        ("a_key_bambu_studio_may_not_know", "anything"),
+        # Values the allowlist refused: the slicer judges them now.
+        ("enable_prime_tower", "true"),
+        ("support_threshold_angle", "91"),
+        ("brim_width", "1e2"),
+        ("print_sequence", "by_object"),
     ],
 )
-def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
+def test_any_key_and_value_is_taken(key: str, value: str) -> None:
     assert meta_from_raw({"print_settings": {key: value}}, "demo").print_settings == {key: value}
 
 
 @pytest.mark.parametrize(
-    ("key", "value", "says"),
+    ("value", "stored"),
     [
-        ("enable_prime_tower", "true", "must be one of '0', '1'"),
-        ("wipe_tower_no_sparse_layers", "2", "must be one of '0', '1'"),
-        ("enable_support", "", "must be one of '0', '1'"),
-        ("support_type", "tree", "must be one of 'normal(auto)'"),
-        ("brim_type", "outer", "must be one of 'auto_brim'"),
-        ("support_threshold_angle", "91", "whole number of degrees from 0 to 90"),
-        ("support_threshold_angle", "30.5", "whole number of degrees from 0 to 90"),
-        ("support_threshold_angle", "-5", "whole number of degrees from 0 to 90"),
-        ("support_threshold_angle", "", "whole number of degrees from 0 to 90"),
-        ("support_on_build_plate_only", "yes", "must be one of '0', '1'"),
-        ("print_sequence", "by_object", "must be one of 'by layer', 'by object'"),
-        ("brim_width", "-1", "non-negative number"),
-        ("brim_width", "wide", "non-negative number"),
-        ("brim_width", "nan", "non-negative number"),
-        ("brim_width", "inf", "non-negative number"),
-        # float() takes these, but the file would carry them as typed (#851).
-        ("brim_width", "1e2", "in plain digits"),
-        ("brim_width", "5_0", "in plain digits"),
-        ("brim_width", " 5 ", "in plain digits"),
-        ("brim_width", "+5", "in plain digits"),
-        ("brim_width", "5.", "in plain digits"),
-        ("brim_width", ".5", "in plain digits"),
-        ("brim_width", "\u0665", "in plain digits"),
+        (0, "0"),
+        (True, "1"),
+        (False, "0"),
+        (0.2, "0.2"),
+        (5.0, "5"),
+        ([1, 2], "1,2"),
+        (["15%", "20%"], "15%,20%"),
     ],
 )
-def test_a_value_the_key_does_not_take_is_refused(key: str, value: str, says: str) -> None:
-    with pytest.raises(ValidationError, match=re.escape(f"{key} is {value!r}")) as caught:
-        meta_from_raw({"print_settings": {key: value}}, "demo")
+def test_a_value_that_is_not_a_string_is_stored_as_bambu_does(value: object, stored: str) -> None:
+    """Bambu's configs store every value as a string: a number, a boolean or a list is
+    taken and written so (#2998), never refused."""
+    meta = meta_from_raw({"print_settings": {"skirt_loops": value}}, "demo")
 
-    assert says in str(caught.value)
-
-
-def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"brim_type": "wide"}})
-
-    with pytest.raises(InvalidModelMetaError, match="brim_type is 'wide'"):
-        catalogue.print_settings("demo")
+    assert meta.print_settings == {"skirt_loops": stored}
 
 
-def test_an_unknown_key_is_refused_by_name() -> None:
-    with pytest.raises(ValidationError) as caught:
-        meta_from_raw({"print_settings": {"layer_height": "0.2"}}, "demo")
-
-    message = str(caught.value)
-    assert "'layer_height' is not a print setting a template can set" in message
-    assert "enable_prime_tower" in message
-
-
-def test_a_value_that_is_not_a_string_is_refused() -> None:
-    """Bambu's configs store every value as a string, so a template does too."""
+def test_a_value_that_is_no_setting_at_all_is_refused() -> None:
     with pytest.raises(ValidationError):
-        meta_from_raw({"print_settings": {"enable_support": 0}}, "demo")
+        meta_from_raw({"print_settings": {"enable_support": {"on": 1}}}, "demo")
 
 
 def test_print_settings_that_are_not_an_object_are_refused() -> None:
@@ -173,13 +104,10 @@ def test_a_template_that_is_gone_has_none(tmp_path: Path) -> None:
     assert _catalogue(tmp_path, {"name": "Demo"}).print_settings("gone") == {}
 
 
-def test_loading_a_template_with_an_unknown_key_says_which(tmp_path: Path) -> None:
+def test_loading_a_template_with_any_key_reads_it(tmp_path: Path) -> None:
     catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"infill": "15%"}})
 
-    with pytest.raises(InvalidModelMetaError, match="'infill' is not a print setting"):
-        catalogue.print_settings("demo")
-    with pytest.raises(InvalidModelMetaError, match="print_settings"):
-        catalogue.record("demo")
+    assert catalogue.print_settings("demo") == {"infill": "15%"}
 
 
 def test_name_keychain_declares_its_print_defaults() -> None:
@@ -197,8 +125,8 @@ def test_every_bundled_model_json_reads(meta: Path) -> None:
     meta_from_raw(json.loads(meta.read_text(encoding="utf-8")), meta.parent.name)
 
 
-def test_a_prints_own_sequence_takes_exactly_what_a_template_may_declare() -> None:
-    """#907: the per-print ``print_sequence`` and the template's allowlist are one type."""
+def test_a_prints_own_sequence_is_bambus_print_sequence() -> None:
+    """#907: the per-print ``print_sequence`` shorthand takes Bambu's two values."""
     annotation: object = PrintRunRequest.model_fields["print_sequence"].annotation
     assert annotation == PrintSequence | None
-    assert get_args(PrintSequence) == PRINT_SETTING_VALUES["print_sequence"]
+    assert get_args(PrintSequence) == ("by layer", "by object")

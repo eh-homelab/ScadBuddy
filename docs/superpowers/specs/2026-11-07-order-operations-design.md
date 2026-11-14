@@ -200,6 +200,10 @@ main (#5315, #5337, #5347), and #5280 is closed. scadify reviewed §5 against th
   `orders/quote.py` `print_setup`) and `filament_plan` are written with a slice quote and
   shown on `Quote`, so `order_get` lists them. A manual or archive quote has neither. The
   agent's `order_item_quote.slice` takes the three.
+- #2998: `SliceQuoteRequest` also takes `process_overrides` (any Bambu Studio process
+  key, `PrintRunRequest`'s type), which `preview_request` passes on and `print_setup`
+  records in `choices` beside the rest (`SETUP_FIELDS`); a quote recorded before has no
+  such key. It is in `QUOTED_SETUP` too, so it is filled and compared as below.
 - PR 2: the print reads the whole setup. An item's print or test print takes the body
   `ItemPrintRequest` (`orders/printing.py`: `choices` and `filament_plan` optional), and
   each of `QUOTED_SETUP` (every `choices` key above) and the spools it leaves out is the

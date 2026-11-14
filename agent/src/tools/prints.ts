@@ -54,7 +54,9 @@ export const printHistoryTools: Tool[] = [
       'outcome (status, failure reason, times, filament, cost), runs, the slicing (printer model, bed, layers, ' +
       'nozzle, temperatures, filament per slot), the slicer settings per filament slot the ScadBuddy run set ' +
       '(`part_settings`, #5627: only the request\'s; pass them to print_output again to print with them. A ' +
-      'template\'s own part_print_settings, #5626, are not listed and apply again at the reprint) and Bambuddy\'s ' +
+      'template\'s own part_print_settings, #5626, are not listed and apply again at the reprint), the process ' +
+      'settings the run set (`process_overrides`, #2998: only the request\'s; pass them to print_output again; ' +
+      'the template\'s print_settings apply again on their own) and Bambuddy\'s ' +
       'record of it, ' +
       'with every other archive field. ' +
       '`printer_media: true` also lists the ' +

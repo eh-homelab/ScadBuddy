@@ -41,12 +41,13 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from fastapi import status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.part_settings import PartSettingsMap, dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice
+from scadbuddy.bambuddy.process_overrides import ProcessOverrides, normalised_overrides
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.bambuddy.supports import SupportsChoice
 from scadbuddy.core.problems import ApiError
@@ -137,6 +138,16 @@ class SliceQuoteRequest(BaseModel):
     prime_tower: PrimeTowerChoice | None = None
     supports: SupportsChoice | None = None
     print_sequence: PrintSequence | None = None
+    #: Any Bambu Studio process settings (#2998, `PrintRunRequest.process_overrides`):
+    #: every key is accepted, the quote slices with them and records them, and the
+    #: item's print that sends none prints with them.
+    process_overrides: ProcessOverrides | None = None
+
+    @field_validator("process_overrides")
+    @classmethod
+    def _overrides_stored(cls, value: ProcessOverrides | None) -> ProcessOverrides | None:
+        # As the print run keeps them, so the recorded setup compares equal.
+        return normalised_overrides(value)  # type: ignore[return-value]
 
 
 class ItemSliceQuoteRequest(SliceQuoteRequest):
@@ -153,9 +164,19 @@ class ItemSliceQuoteRequest(SliceQuoteRequest):
 
 #: The fields of a slice quote's request that are its print setup (#4673): what the print
 #: sends to slice what was priced. `filaments` prices and `filament_plan` has a column
-#: of its own; `part_settings` has its own since #5571.
+#: of its own; `part_settings` has its own since #5571. `process_overrides` (#2998) is
+#: in the `choices` column with the rest, so no migration.
 SETUP_FIELDS = frozenset(
-    {"printer_id", "printer", "path", "choices", "prime_tower", "supports", "print_sequence"}
+    {
+        "printer_id",
+        "printer",
+        "path",
+        "choices",
+        "prime_tower",
+        "supports",
+        "print_sequence",
+        "process_overrides",
+    }
 )
 
 

@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Output } from '../api/types'
+import type { Output, PrintCheck } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -10,9 +10,10 @@ import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
-// #5627 — "Settings for this colour" in the filament step: each control opens on the
-// process's value (the mocked check's `process_part_settings`), only changed ones are
-// sent, and they are remembered with the model's other choices.
+// #5627, #2998 — "Settings for this colour" in the filament step: every key of the process
+// listed, each showing the slot's default (the mocked check's `process_part_settings` over
+// the process's values) as its placeholder; only changed ones are sent, as typed, and they
+// are remembered with the model's other choices. Any key is taken, none refused.
 
 const output = fixtures.outputs[0] as Output
 
@@ -28,8 +29,13 @@ async function loaded() {
 async function openSlot(slot: number): Promise<HTMLElement> {
   fireEvent.click(await screen.findByTestId(`part-settings-toggle-${slot}`))
   const settings = await screen.findByTestId(`part-settings-${slot}`)
-  await waitFor(() => expect(within(settings).getByLabelText(/Top shell layers/)).toBeEnabled())
+  await waitFor(() => expect(field(settings, 'top_shell_layers')).toBeEnabled())
   return settings
+}
+
+/** A setting's value field in an open list, by its key. */
+function field(settings: HTMLElement, key: string): HTMLElement {
+  return within(settings).getByTestId(`${settings.dataset['testid']}-${key}-value`)
 }
 
 async function showAdvanced() {
@@ -48,22 +54,22 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(1)
-    const top = within(slot).getByLabelText(/Top shell layers/)
-    await waitFor(() => expect(top).toHaveValue(5))
+    const top = field(slot, 'top_shell_layers')
+    await waitFor(() => expect(top).toHaveAttribute('placeholder', '5'))
 
     fireEvent.change(top, { target: { value: '8' } })
     // The process's own value is no change: unset again.
-    fireEvent.change(within(slot).getByLabelText(/Wall loops/), { target: { value: '2' } })
+    fireEvent.change(field(slot, 'wall_loops'), { target: { value: '2' } })
     expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
 
     await waitFor(() => expect(printButton()).toBeEnabled())
     fireEvent.click(printButton())
     await waitFor(() => expect(run).toHaveBeenCalled())
-    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { top_shell_layers: 8 } } })
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { top_shell_layers: '8' } } })
     await waitFor(() =>
       expect(remember).toHaveBeenCalledWith(
         output.slug,
-        expect.objectContaining({ part_settings: { '1': { top_shell_layers: 8 } } }),
+        expect.objectContaining({ part_settings: { '1': { top_shell_layers: '8' } } }),
       ),
     )
   })
@@ -74,22 +80,26 @@ describe('PrintPicker · settings per colour (#5627)', () => {
       const answer = await real(outputId, body, processValues)
       if (!processValues) return answer
       const process = { ...answer.process_part_settings, top_shell_layers: 3 }
-      return { ...answer, process_part_settings: process, slot_part_settings: { '2': { ...process, top_shell_layers: 5 } } }
+      return {
+        ...answer,
+        process_part_settings: process,
+        slot_part_settings: { '2': { ...process, top_shell_layers: 5 } },
+      } as PrintCheck
     })
     const run = vi.spyOn(api, 'runPrint')
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(2)
-    const top = within(slot).getByLabelText(/Top shell layers/)
+    const top = field(slot, 'top_shell_layers')
     // What prints with nothing sent: the template's 5, not the process's 3.
-    await waitFor(() => expect(top).toHaveValue(5))
+    await waitFor(() => expect(top).toHaveAttribute('placeholder', '5'))
 
     fireEvent.change(top, { target: { value: '3' } })
     expect(screen.getByTestId('part-settings-toggle-2')).toHaveTextContent('(1 changed)')
     await waitFor(() => expect(printButton()).toBeEnabled())
     fireEvent.click(printButton())
     await waitFor(() => expect(run).toHaveBeenCalled())
-    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '2': { top_shell_layers: 3 } } })
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '2': { top_shell_layers: '3' } } })
   })
 
   it('keeps a value the user set when a later check reads a process whose default equals it', async () => {
@@ -102,14 +112,17 @@ describe('PrintPicker · settings per colour (#5627)', () => {
       if (!processValues) return answer
       flagged += 1
       // The first answer's process has 5 top shell layers; every later one, 8.
-      return { ...answer, process_part_settings: { ...answer.process_part_settings, top_shell_layers: flagged === 1 ? 5 : 8 } }
+      return {
+        ...answer,
+        process_part_settings: { ...answer.process_part_settings, top_shell_layers: flagged === 1 ? 5 : 8 },
+      } as PrintCheck
     })
     const run = vi.spyOn(api, 'runPrint')
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(1)
-    const top = within(slot).getByLabelText(/Top shell layers/)
-    await waitFor(() => expect(top).toHaveValue(5))
+    const top = field(slot, 'top_shell_layers')
+    await waitFor(() => expect(top).toHaveAttribute('placeholder', '5'))
 
     const before = checks
     fireEvent.change(top, { target: { value: '8' } })
@@ -125,7 +138,7 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
     fireEvent.click(printButton())
     await waitFor(() => expect(run).toHaveBeenCalled())
-    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { top_shell_layers: 8 } } })
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { top_shell_layers: '8' } } })
   })
 
   it('sends a whole-percent density that differs from a fractional process value', async () => {
@@ -138,36 +151,42 @@ describe('PrintPicker · settings per colour (#5627)', () => {
         ...answer,
         process_part_settings: { ...answer.process_part_settings, sparse_infill_density: 16 },
         process_inexact: ['sparse_infill_density'],
-      }
+      } as PrintCheck
     })
     const run = vi.spyOn(api, 'runPrint')
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(1)
-    const density = within(slot).getByLabelText(/Sparse infill density/)
-    await waitFor(() => expect(density).toHaveValue(16))
+    const density = field(slot, 'sparse_infill_density')
+    // The rounded 16 is not what the process prints: the process's own value is shown.
+    await waitFor(() => expect(density).toHaveAttribute('placeholder', '15%'))
 
-    // The field already shows 16: type another number, then 16 (the same text fires no change).
-    fireEvent.focus(density)
-    fireEvent.change(density, { target: { value: '1' } })
     fireEvent.change(density, { target: { value: '16' } })
-    fireEvent.blur(density)
     expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
     await waitFor(() => expect(printButton()).toBeEnabled())
     fireEvent.click(printButton())
     await waitFor(() => expect(run).toHaveBeenCalled())
-    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { sparse_infill_density: 16 } } })
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ part_settings: { '1': { sparse_infill_density: '16' } } })
   })
 
-  it('says a number out of range was kept within the bounds', async () => {
+  it('takes any key and any value, a key the process lacks with a note (#2998)', async () => {
+    const run = vi.spyOn(api, 'runPrint')
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(1)
-    const density = within(slot).getByLabelText(/Sparse infill density/)
-    fireEvent.focus(density)
-    fireEvent.change(density, { target: { value: '150' } })
-    expect(density).toHaveAttribute('aria-invalid', 'true')
-    expect(within(slot).getByRole('status')).toHaveTextContent('Kept within 0–100.')
+    // A value Bambu Studio's own range would not take is sent as typed: the slicer judges it.
+    fireEvent.change(field(slot, 'sparse_infill_density'), { target: { value: '150' } })
+    fireEvent.change(within(slot).getByTestId('part-settings-1-new-key'), { target: { value: 'ironing_speed' } })
+    fireEvent.change(within(slot).getByTestId('part-settings-1-new-value'), { target: { value: '30' } })
+    fireEvent.click(within(slot).getByTestId('part-settings-1-add'))
+    expect(within(slot).getByTestId('part-settings-1-ironing_speed-unknown')).toBeInTheDocument()
+    expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(2 changed)')
+    await waitFor(() => expect(printButton()).toBeEnabled())
+    fireEvent.click(printButton())
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]?.[1]).toMatchObject({
+      part_settings: { '1': { sparse_infill_density: '150', ironing_speed: '30' } },
+    })
   })
 
   it('sends no field when nothing is changed, and the check sees what Print sends', async () => {
@@ -182,9 +201,9 @@ describe('PrintPicker · settings per colour (#5627)', () => {
 
     const slot = await openSlot(1)
     expect(check.mock.calls.at(-1)?.[2]).toBe(true)
-    fireEvent.change(within(slot).getByLabelText(/Bottom shell layers/), { target: { value: '6' } })
+    fireEvent.change(field(slot, 'bottom_shell_layers'), { target: { value: '6' } })
     await waitFor(() =>
-      expect(check.mock.calls.at(-1)?.[1]).toMatchObject({ part_settings: { '1': { bottom_shell_layers: 6 } } }),
+      expect(check.mock.calls.at(-1)?.[1]).toMatchObject({ part_settings: { '1': { bottom_shell_layers: '6' } } }),
     )
     fireEvent.click(within(slot).getByTestId('part-settings-1-bottom_shell_layers-reset'))
 
@@ -244,7 +263,7 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     )
     await loaded()
     const slot = await openSlot(1)
-    expect(within(slot).getByLabelText(/Top shell layers/)).toHaveValue(5)
+    await waitFor(() => expect(field(slot, 'top_shell_layers')).toHaveAttribute('placeholder', '5'))
   })
 
   it('opens a library file on its remembered settings (#5628)', async () => {
@@ -268,20 +287,18 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     expect(await screen.findByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
   })
 
-  it('takes backspace and a new number in a field, and a cleared field is the process value on blur', async () => {
+  it('takes backspace and a new value in a field, and a cleared field is the default again', async () => {
     renderPage(<PrintPicker open source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
     const slot = await openSlot(1)
-    const walls = within(slot).getByLabelText(/Wall loops/)
-    await waitFor(() => expect(walls).toHaveValue(2))
+    const walls = field(slot, 'wall_loops')
+    await waitFor(() => expect(walls).toHaveAttribute('placeholder', '2'))
     fireEvent.focus(walls)
-    fireEvent.change(walls, { target: { value: '' } })
-    expect(walls).toHaveValue(null)
     fireEvent.change(walls, { target: { value: '4' } })
     expect(screen.getByTestId('part-settings-toggle-1')).toHaveTextContent('(1 changed)')
     fireEvent.change(walls, { target: { value: '' } })
     fireEvent.blur(walls)
-    expect(walls).toHaveValue(2)
+    expect(walls).toHaveValue('')
     expect(screen.getByTestId('part-settings-toggle-1')).not.toHaveTextContent('changed')
   })
 
@@ -299,9 +316,9 @@ describe('PrintPicker · settings per colour (#5627)', () => {
     )
     await loaded()
     const slot = await openSlot(1)
-    expect(within(slot).getByLabelText(/Top shell layers/)).toHaveValue(8)
+    expect(field(slot, 'top_shell_layers')).toHaveValue('8')
 
-    fireEvent.change(within(slot).getByLabelText(/Top shell layers/), { target: { value: '9' } })
+    fireEvent.change(field(slot, 'top_shell_layers'), { target: { value: '9' } })
     expect(await screen.findByTestId('part-settings-unquoted')).toBeInTheDocument()
     expect(screen.getByTestId('run-item-print')).toBeDisabled()
 

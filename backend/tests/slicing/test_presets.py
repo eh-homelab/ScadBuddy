@@ -610,9 +610,11 @@ def test_a_process_from_bambuddy_keys_apart(plan: SlicePlan) -> None:
     assert "/bambuddy-process=" + "ab" * 32 + "/colours=" in bambuddy
 
 
-def test_a_list_over_a_scalar_option_is_refused() -> None:
-    with pytest.raises(ProfileError, match=r"wall_loops.*list.*single value"):
-        apply_overrides({"wall_loops": "2"}, {"wall_loops": ["3", "3"]})
+def test_a_list_over_a_scalar_option_is_written_for_the_slicer_to_judge() -> None:
+    """#2998: no setting is refused before the slice; the check warns of it instead."""
+    assert apply_overrides({"wall_loops": "2"}, {"wall_loops": ["3", "3"]}) == {
+        "wall_loops": ["3", "3"]
+    }
 
 
 def test_a_list_over_an_option_the_preset_leaves_out_is_written_whole() -> None:

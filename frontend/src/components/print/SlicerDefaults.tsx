@@ -8,8 +8,8 @@ type Props = {
 }
 
 /**
- * Readable names for the process keys a template may set: exactly the backend's
- * `PRINT_SETTING_VALUES` (`backend/scadbuddy/library/catalogue.py`). Any other key shows as
+ * Readable names for the process keys templates most often set. A template may set any
+ * Bambu Studio process key (#2998: the backend keeps no allowlist); any other key shows as
  * itself.
  */
 const LABELS: Record<string, string> = {

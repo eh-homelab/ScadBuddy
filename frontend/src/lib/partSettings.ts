@@ -1,56 +1,25 @@
 import type { PartSettings, PartSettingsMap } from '../api/types'
 
+import type { PrintRunRequest } from '../api/types'
+import { settingText } from './processOverrides'
+
 /**
- * #5627 — the slicer settings a print can set on the parts of one filament slot
- * (print-flow spec §4 "Settings per part (#5571)", `backend/scadbuddy/bambuddy/part_settings.py`).
- * The bounds are the backend's, Bambu Studio v02.08.02.61's `PrintConfig.cpp`.
+ * #5627, #2998 — the slicer settings a print sets on the parts of one filament slot
+ * (print-flow spec §4 "Settings per part (#5571)", `backend/scadbuddy/bambuddy/part_settings.py`):
+ * any Bambu Studio key, with no bound or list of values; the slicer judges each.
  */
-export type PartSettingKey = keyof PartSettings
-type NumberKey = 'top_shell_layers' | 'bottom_shell_layers' | 'wall_loops' | 'sparse_infill_density'
-type ChoiceKey = 'sparse_infill_pattern' | 'ironing_type'
+export type PartSettingKey = string
 
-export const NUMBER_SETTINGS: readonly { key: NumberKey; label: string; max: number; unit?: string }[] = [
-  { key: 'top_shell_layers', label: 'Top shell layers', max: 1000 },
-  { key: 'bottom_shell_layers', label: 'Bottom shell layers', max: 1000 },
-  { key: 'wall_loops', label: 'Wall loops', max: 1000 },
-  { key: 'sparse_infill_density', label: 'Sparse infill density', max: 100, unit: '%' },
-]
+/** The request's own type for the settings per slot (`PrintRunRequest.part_settings`). */
+export type ApiPartSettingsMap = NonNullable<PrintRunRequest['part_settings']>
 
-/** `sparse_infill_pattern`'s `enum_values` (PrintConfig.cpp lines 3107-3128), as the API takes them. */
-const PATTERNS = [
-  'concentric',
-  'zig-zag',
-  'grid',
-  'line',
-  'cubic',
-  'triangles',
-  'tri-hexagon',
-  'gyroid',
-  'honeycomb',
-  'adaptivecubic',
-  'alignedrectilinear',
-  '3dhoneycomb',
-  'hilbertcurve',
-  'archimedeanchords',
-  'octagramspiral',
-  'supportcubic',
-  'lightning',
-  'crosshatch',
-  'zigzag',
-  'crosszag',
-  'lockedzag',
-  '2dlattice',
-] as const satisfies readonly NonNullable<PartSettings['sparse_infill_pattern']>[]
-
-/** `ironing_type`'s `enum_values` (PrintConfig.cpp lines 4075-4078). */
-const IRONING = ['no ironing', 'top', 'topmost', 'solid'] as const satisfies readonly NonNullable<
-  PartSettings['ironing_type']
->[]
-
-export const CHOICE_SETTINGS: readonly { key: ChoiceKey; label: string; values: readonly string[] }[] = [
-  { key: 'sparse_infill_pattern', label: 'Sparse infill pattern', values: PATTERNS },
-  { key: 'ironing_type', label: 'Ironing type', values: IRONING },
-]
+/**
+ * `value` as a request sends it: `sentPartSettings`' answer holds no unset key, which is
+ * what the API's type asks of a key it does not name.
+ */
+export function apiParts(value: PartSettingsMap | null): ApiPartSettingsMap | null {
+  return value as ApiPartSettingsMap | null
+}
 
 /** One slot's settings with only the ones set: an unset one is the process's. */
 function setOnly(settings: PartSettings | undefined): PartSettings {
@@ -104,9 +73,7 @@ export function comparedBaseline(
   const baseline = slotBaseline(slot, process, slots)
   if (baseline === null || inexact.length === 0) return baseline
   return Object.fromEntries(
-    Object.entries(baseline).filter(
-      ([key, setting]) => !(inexact.includes(key) && process?.[key as PartSettingKey] === setting),
-    ),
+    Object.entries(baseline).filter(([key, setting]) => !(inexact.includes(key) && process?.[key] === setting)),
   ) as PartSettings
 }
 
@@ -128,7 +95,9 @@ export function withoutDefaults(
       return [
         slot,
         Object.fromEntries(
-          Object.entries(settings).filter(([key, setting]) => baseline?.[key as PartSettingKey] !== setting),
+          Object.entries(settings).filter(
+            ([key, setting]) => baseline?.[key] == null || settingText(baseline[key]) !== settingText(setting),
+          ),
         ) as PartSettings,
       ] as const
     })
@@ -153,8 +122,8 @@ export function withoutSeededDefaults(
   for (const [slot, settings] of Object.entries(current)) {
     const kept = Object.fromEntries(
       Object.entries(settings ?? {}).filter(([key, setting]) => {
-        const seed = seeded[slot]?.[key as PartSettingKey]
-        const isDefault = seed !== undefined && changes[slot]?.[key as PartSettingKey] === undefined
+        const seed = seeded[slot]?.[key]
+        const isDefault = seed !== undefined && changes[slot]?.[key] === undefined
         return !(isDefault && seed === setting)
       }),
     ) as PartSettings
@@ -173,7 +142,11 @@ function sortedKeys(value: PartSettingsMap | null): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([slot, settings]) => [
       slot,
-      Object.fromEntries(Object.entries(settings).sort(([a], [b]) => a.localeCompare(b))),
+      Object.fromEntries(
+        Object.entries(settings)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, setting]) => [key, settingText(setting)]),
+      ),
     ]),
   )
 }
@@ -183,14 +156,15 @@ function sortedKeys(value: PartSettingsMap | null): unknown {
  * from `slotBaseline`: the process's value, or the template's for the slot), is
  * unset: only a setting changed from what the slot would print with is sent.
  */
-export function withSetting<K extends PartSettingKey>(
+export function withSetting(
   settings: PartSettings | undefined,
-  key: K,
-  value: PartSettings[K] | null,
-  baseline: PartSettings[K] | null | undefined,
+  key: PartSettingKey,
+  value: PartSettings[string] | null,
+  baseline: unknown,
 ): PartSettings {
-  const next = { ...setOnly(settings) }
-  if (value === null || value === undefined || value === baseline) delete next[key]
-  else next[key] = value
-  return next
+  const next: Record<string, unknown> = { ...setOnly(settings) }
+  if (value === null || value === undefined || (baseline != null && settingText(value) === settingText(baseline))) {
+    delete next[key]
+  } else next[key] = value
+  return next as PartSettings
 }

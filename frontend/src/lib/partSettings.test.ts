@@ -24,6 +24,9 @@ describe('partSettings (#5627)', () => {
     expect(withSetting({}, 'wall_loops', 4, 2)).toEqual({ wall_loops: 4 })
     expect(withSetting({ wall_loops: 4 }, 'wall_loops', null, 2)).toEqual({})
     expect(changedCount({ wall_loops: 4, ironing_type: null })).toBe(1)
+    // #2998: typed text is compared with the default as Bambu writes it.
+    expect(withSetting({}, 'top_shell_layers', '5', 5)).toEqual({})
+    expect(withSetting({}, 'skirt_loops', '2', undefined)).toEqual({ skirt_loops: '2' })
   })
 
   it('compares what two maps set, whatever their order or empty slots', () => {
@@ -31,6 +34,7 @@ describe('partSettings (#5627)', () => {
       samePartSettings({ '1': { wall_loops: 3, top_shell_layers: 8 }, '2': {} }, { '1': { top_shell_layers: 8, wall_loops: 3 } }),
     ).toBe(true)
     expect(samePartSettings({}, null)).toBe(true)
+    expect(samePartSettings({ '1': { wall_loops: '3' } }, { '1': { wall_loops: 3 } })).toBe(true)
     expect(samePartSettings({ '1': { wall_loops: 3 } }, null)).toBe(false)
   })
 

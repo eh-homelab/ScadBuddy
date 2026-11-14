@@ -38,6 +38,13 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     }
     await waitFor(() => expect(quote).toBeEnabled())
     expect(within(dialog).queryByRole('button', { name: 'Print' })).toBeNull()
+    // #2998: any slicer setting by key, which the quote slices with and records.
+    await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
+    await user.click(await within(dialog).findByTestId('slicer-settings-toggle'))
+    await user.type(within(dialog).getByTestId('slicer-settings-new-key'), 'skirt_loops')
+    await user.type(within(dialog).getByTestId('slicer-settings-new-value'), '2')
+    await user.click(within(dialog).getByTestId('slicer-settings-add'))
+    await waitFor(() => expect(quote).toBeEnabled())
     await user.click(quote)
     // The dialog does not wait on the operation: its modal would hold the page (#4693).
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Quote from a slice' })).toBeNull())
@@ -48,6 +55,7 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     expect(body?.filament_plan.slots?.length).toBeGreaterThan(0)
     expect(body).not.toHaveProperty('project_id')
+    expect(body?.process_overrides).toEqual({ skirt_loops: '2' })
     // #4551: the registry row beside the Bambuddy id, as the run names them.
     const linked = printersState().find((row) => row.bambuddy_printer_id === body?.printer_id)
     expect(linked).toBeDefined()

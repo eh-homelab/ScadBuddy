@@ -187,6 +187,7 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
         "printer",
         "path",
         "part_settings",
+        "process_overrides",
     )
     exclude = {name for name in optional if getattr(request, name) is None}
     if request.printer_id is not None:
