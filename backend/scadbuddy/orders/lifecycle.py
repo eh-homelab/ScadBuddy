@@ -65,6 +65,7 @@ from scadbuddy.orders.models import (
     Money,
     Order,
     OrderItem,
+    OrderItemSource,
     OrderStatus,
     Outcome,
     Payment,
@@ -2699,6 +2700,100 @@ class Lifecycle:
             items = self._purchase_items(conn, source)
         self._told(_Change(order, items))
         return declined
+
+    # -- a customer's own models (#6133 PR 4, spec 2026-11-13 §8.1, §9.3, §11) -----------
+
+    def _item_source(self, conn: Conn, order: Order, source_id: str) -> OrderItemSource:
+        source = self.store.lock_item_source(conn, order.id, source_id)
+        if source is None:
+            raise LifecycleError(
+                "source_not_found", f"no source {source_id} of order {order.label}", not_found=True
+            )
+        return source
+
+    def decline_source(
+        self, order_id: str, source_id: str, reason: str, by: Actor
+    ) -> OrderItemSource:
+        """A print file or link the shop does not take: ``declined`` with ``reason`` (the
+        shop's; the customer never reads it), audit row ``source.declined``. A declined
+        file's watcher then deletes its staged copy (the caller signals ``declined``). A
+        second decline writes nothing. Refusals: 404 ``source_not_found``; 409
+        ``source_not_print`` for a thing to buy (``decline_purchase`` takes it),
+        ``source_imported`` for one already in the library, ``order_not_submitted`` on a
+        cart, ``order_cancelled`` or ``order_closed``."""
+        reason = reason.strip()
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._item_source(conn, order, source_id)
+            if source.purpose != "print":
+                raise LifecycleError(
+                    "source_not_print", f"source {source_id} is a thing to buy, not a model"
+                )
+            if source.status == "declined":
+                return source
+            if source.status == "imported":
+                raise LifecycleError(
+                    "source_imported", f"source {source_id} is in the library already"
+                )
+            self.store.set_source_status(
+                conn, source.id, status="declined", reason=reason or "Declined by the shop."
+            )
+            self._event(
+                conn, order, by, "source.declined", source_id=source.id, item_id=source.item_id
+            )
+            [declined] = self.store.item_sources(order.id, conn=conn, source_id=source.id)
+            item = self.store.item(source.item_id, conn=conn)
+        self._told(_Change(order, [] if item is None else [(item, None)]))
+        return declined
+
+    def recheck_source(self, order_id: str, source_id: str, by: Actor) -> OrderItemSource:
+        """A file whose check ``failed`` (every attempt timed out or crashed) waits for its
+        check again: ``checking``, audit row ``source.rechecked``. The caller starts the
+        check (`intake.start_checks`). A file already ``checking`` is returned as it is, so
+        the caller starts its check again (a running one is joined). Refusals: 404
+        ``source_not_found``; 409 ``source_not_failed`` for any other check,
+        ``source_not_staged`` once its staged copy is gone, ``order_cancelled`` or
+        ``order_closed``."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            source = self._item_source(conn, order, source_id)
+            if source.kind != "file" or source.check_status not in ("failed", "checking"):
+                raise LifecycleError(
+                    "source_not_failed", f"source {source_id} has no failed check to run again"
+                )
+            if not source.staged:
+                raise LifecycleError(
+                    "source_not_staged", f"source {source_id} has no staged file to check"
+                )
+            if source.check_status == "checking":
+                return source
+            self.store.set_source_checking(conn, source.id)
+            self._event(
+                conn, order, by, "source.rechecked", source_id=source.id, item_id=source.item_id
+            )
+            [checking] = self.store.item_sources(order.id, conn=conn, source_id=source.id)
+        self._told(_Change(order))
+        return checking
+
+    def retry_import(self, order_id: str, source_id: str, by: Actor) -> OrderItemSource:
+        """ "Retry import" on a stuck file (`IMPORT_STUCK`): audit row ``source.import_retry``
+        only; the caller sends the file's watcher ``retry``, which runs the import again.
+        Refusals: 404 ``source_not_found``; 409 ``import_not_stuck`` unless the source
+        reads stuck and its staged file is still there."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            source = self._item_source(conn, order, source_id)
+            if not source.import_stuck or not source.staged:
+                raise LifecycleError(
+                    "import_not_stuck", f"source {source_id} has no stuck import to retry"
+                )
+            self._event(
+                conn, order, by, "source.import_retry", source_id=source.id, item_id=source.item_id
+            )
+        return source
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)

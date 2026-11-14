@@ -1914,3 +1914,78 @@ def test_a_model_request_refusal_passes_through(
     r = edge.post("/api/store/v1/draft/models", json={"uploads": ["a" * 32]}, headers=_keyed())
     assert r.status_code == 422
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_missing"
+
+
+# -- a customer file's preview (#6133 PR 4, spec 2026-11-13 §7 "Serving the preview") ------
+
+SOURCE = "0b6f0f1e-5d0c-4d43-9d33-6c1f9d0f6a12"
+PREVIEW_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+DRAFT_SOURCES = "/api/v1/internal/crud/storefront/draft/sources"
+SHOWN_PREVIEW = {
+    "content-type": "image/png",
+    "content-disposition": "inline",
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, max-age=60",
+}
+
+
+def _preview_headers(r: Any) -> dict[str, str | None]:
+    return {k: r.headers.get(k) for k in SHOWN_PREVIEW}
+
+
+def test_a_carts_preview_is_relayed_with_fixed_headers(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    # Whatever the CRUD side says the type is, the edge sends a PNG shown inline, unsniffed.
+    route = crud_mock.get(f"{DRAFT_SOURCES}/{SOURCE}/preview").respond(
+        200, content=PREVIEW_PNG, headers={**CRUD, "Content-Type": "text/html"}
+    )
+    r = edge.get(f"/api/store/v1/draft/sources/{SOURCE}/preview")
+    assert r.status_code == 200
+    assert r.content == PREVIEW_PNG
+    assert _preview_headers(r) == SHOWN_PREVIEW
+    assert route.calls.last.request.headers[VISITOR_HEADER]
+
+
+def test_an_order_sources_preview_takes_the_readers_body(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{ORDER}/sources/{SOURCE}/preview").respond(
+        200, content=PREVIEW_PNG, headers={**CRUD, "Content-Type": "image/png"}
+    )
+    r = edge.post(
+        f"/api/store/v1/order/sources/{SOURCE}/preview",
+        json={"token": LINK},
+        headers={"Origin": PUBLIC_URL},
+    )
+    assert r.status_code == 200
+    assert r.content == PREVIEW_PNG
+    assert _preview_headers(r) == SHOWN_PREVIEW
+    sent = route.calls.last.request
+    assert LINK not in str(sent.url)
+    assert sent.content == b'{"token":"' + LINK.encode() + b'"}'
+
+
+def test_a_refused_preview_is_a_bare_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.get(f"{DRAFT_SOURCES}/{SOURCE}/preview").respond(404, headers=CRUD)
+    crud_mock.post(f"{ORDER}/sources/{SOURCE}/preview").respond(404, headers=CRUD)
+    before = len(crud_mock.calls)
+    for r in (
+        edge.get(f"/api/store/v1/draft/sources/{SOURCE}/preview"),
+        edge.post(
+            f"/api/store/v1/order/sources/{SOURCE}/preview",
+            json={"token": "x"},
+            headers={"Origin": PUBLIC_URL},
+        ),
+    ):
+        assert (r.status_code, r.content) == (404, b"")
+    assert len(crud_mock.calls) == before + 2
+    # An id that is not one never reaches the CRUD side.
+    r = edge.get("/api/store/v1/draft/sources/not-an-id/preview")
+    assert (r.status_code, r.content) == (404, b"")
+    assert len(crud_mock.calls) == before + 2

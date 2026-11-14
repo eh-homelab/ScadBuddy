@@ -79,9 +79,24 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
             "payments",
             "payment_instructions",
             "shipments",
+            "charges",
         }
     ),
-    "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote"}),
+    "items": frozenset({"id", "title", "quantity", "status", "revisions", "quote", "sources"}),
+    "items.sources": frozenset(
+        {
+            "kind",
+            "purpose",
+            "filename",
+            "url",
+            "note",
+            "status",
+            "amount_minor",
+            "shop_note",
+            "preview_url",
+            "customer_reason",
+        }
+    ),
     "items.revisions": frozenset(
         {
             "id",
@@ -104,7 +119,37 @@ ORDER_VIEW_FIELDS: Final[dict[str, frozenset[str]]] = {
         {"id", "kind", "amount_minor", "currency", "status", "pay_url", "manual"}
     ),
     "shipments": frozenset({"carrier", "service", "tracking", "shipped_at"}),
+    "charges": frozenset({"kind", "label", "amount_minor"}),
 }
+#: An order item source's id (``gen_random_uuid()::text``, #6133). Both sides answer any
+#: other with a bare 404 before a lookup.
+SOURCE_ID: Final = LISTING_ID
+#: The headers of a checked file's preview, wherever it is served (#6133, spec 2026-11-13
+#: §7 "Serving the preview"). The bytes are the untrusted check's and are never decoded or
+#: re-encoded, so they are always a PNG shown inline that no browser sniffs as anything
+#: else. A presigned GET cannot set ``nosniff``, so the bytes always come through a route.
+#: Only the reader's own browser keeps a copy, and only for a short time: a check run
+#: again stores a new preview.
+PREVIEW_HEADERS: Final[dict[str, str]] = {
+    "Content-Type": "image/png",
+    "Content-Disposition": "inline",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, max-age=60",
+}
+
+
+def draft_preview_path(source_id: str) -> str:
+    """The edge's path of a cart line's preview (the visitor's cookie reads it)."""
+    return f"/api/store/v1/draft/sources/{source_id}/preview"
+
+
+def order_preview_path(source_id: str) -> str:
+    """The edge's path of an order source's preview. The page POSTs its reader's body to
+    it (the order link's token, or a signed-in reader's ``order_id``), so no URL holds the
+    token."""
+    return f"/api/store/v1/order/sources/{source_id}/preview"
+
+
 #: A render job's id (``uuid4().hex``). Both sides answer any other 404
 #: ``render_not_found`` before a lookup.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}")

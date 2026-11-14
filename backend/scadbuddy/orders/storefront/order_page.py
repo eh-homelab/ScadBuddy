@@ -48,7 +48,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from fastapi import status
@@ -64,6 +64,7 @@ from scadbuddy.orders.models import (
     SHOWN_IMAGES,
     Actor,
     Attachment,
+    Charge,
     ItemStatus,
     Order,
     OrderItem,
@@ -76,11 +77,14 @@ from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import Conn
 from scadbuddy.orders.storefront.accounts import account_owns_order, attach_order, submitted
 from scadbuddy.orders.storefront.customers import customer_actor
+from scadbuddy.orders.storefront.intake import read_preview
 from scadbuddy.orders.storefront.links import link_by_token, mark_opened, token_sha256
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
+from scadbuddy.orders.storefront.model_requests import ENDED as ENDED_REASON
 from scadbuddy.orders.storefront.staged_files import poke_order
 from scadbuddy.orders.storefront.wire import (
     CancelBody,
+    CustomerCharge,
     CustomerColour,
     CustomerItem,
     CustomerOrderView,
@@ -89,6 +93,7 @@ from scadbuddy.orders.storefront.wire import (
     CustomerQuote,
     CustomerRevision,
     CustomerShipment,
+    CustomerSource,
     RevisionAnswerBody,
 )
 from scadbuddy.payments import store as payments
@@ -97,7 +102,7 @@ from scadbuddy.payments.models import PaymentRequest, PaymentRequestView
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.wire import QUOTE_ID, REVISION_ID
+from scadbuddy.storefront.wire import QUOTE_ID, REVISION_ID, SOURCE_ID, order_preview_path
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -272,6 +277,44 @@ class _Rows:
     #: Whether a thing to buy is still `pending` (#6133, spec 2026-11-13 §10.4): no accept
     #: is offered until the shop prices it.
     purchase_pending: bool = False
+    #: Each request item's files and links, by item id (#6133, spec 2026-11-13 §10.5).
+    sources: dict[str, list[CustomerSource]] = field(default_factory=dict)
+    charges: list[Charge] = field(default_factory=list)
+
+
+#: The reasons a source may show its customer: only those ScadBuddy wrote for the customer
+#: (spec 2026-11-13 §10.5). An import's refusal (Bambuddy's words) and a person's reason
+#: are the shop's.
+CUSTOMER_REASONS: Final = frozenset({ENDED_REASON})
+
+
+def _sources(conn: Conn, order_id: str) -> dict[str, list[CustomerSource]]:
+    """The order's request sources as the customer reads them, by item id and position."""
+    rows = conn.execute(
+        "SELECT s.id, s.item_id, s.kind, s.purpose, s.filename, s.url, s.note, s.status,"
+        " s.status_reason, s.shop_note, s.preview_key, c.amount_minor"
+        " FROM order_item_sources s LEFT JOIN order_charges c ON c.id = s.charge_id"
+        " WHERE s.order_id = %s ORDER BY s.item_id, s.position",
+        (order_id,),
+    ).fetchall()
+    found: dict[str, list[CustomerSource]] = {}
+    for row in rows:
+        reason = row["status_reason"]
+        found.setdefault(row["item_id"], []).append(
+            CustomerSource(
+                kind=row["kind"],
+                purpose=row["purpose"],
+                filename=row["filename"],
+                url=row["url"],
+                note=row["note"],
+                status=row["status"],
+                amount_minor=row["amount_minor"] if row["status"] == "recorded" else None,
+                shop_note=row["shop_note"],
+                preview_url=order_preview_path(row["id"]) if row["preview_key"] else None,
+                customer_reason=reason if reason in CUSTOMER_REASONS else None,
+            )
+        )
+    return found
 
 
 def _picture(attachment: Attachment) -> bool:
@@ -328,6 +371,8 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
             f.id: f.colour_name for f in store.filaments(include_archived=True, conn=conn)
         },
         purchase_pending=bool(store.pending_purchases(conn, order_id)),
+        sources=_sources(conn, order_id),
+        charges=store.charges(order_id, conn=conn),
     )
 
 
@@ -531,6 +576,7 @@ async def _item(
         status=ITEM_WORDS[item.status],
         revisions=shown,
         quote=_quote(item, rows, revisions),
+        sources=rows.sources.get(item.id, []),
     )
 
 
@@ -584,6 +630,10 @@ async def _build(state: AppState, rows: _Rows) -> CustomerOrderView:
             )
             for s in rows.shipments
         ],
+        charges=[
+            CustomerCharge(kind=c.kind, label=c.label, amount_minor=c.amount_minor)
+            for c in rows.charges
+        ],
     )
 
 
@@ -609,6 +659,29 @@ async def view(state: AppState, reader: Reader, *, attach: bool = True) -> Custo
 
     rows = await asyncio.to_thread(read)
     return None if rows is None else await _build(state, rows)
+
+
+async def preview(state: AppState, reader: Reader, source_id: str) -> bytes | None:
+    """The stored preview of ``source_id``, a source of the order ``reader`` opens, as
+    opaque bytes (#6133, spec 2026-11-13 §7 "Serving the preview"); None for a reader that
+    reads nothing, another order's source or one with no preview. It is no view: it stamps
+    nothing and attaches nothing."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return None
+    orders = _orders(state)
+
+    def key() -> str | None:
+        with orders.store.transaction() as conn:
+            access = resolve(conn, reader)
+            if access is None:
+                return None
+            row = conn.execute(
+                "SELECT preview_key FROM order_item_sources WHERE id = %s AND order_id = %s",
+                (source_id, access.order_id),
+            ).fetchone()
+        return None if row is None else row["preview_key"]
+
+    return await read_preview(state, await asyncio.to_thread(key))
 
 
 # -- the customer's writes ---------------------------------------------------------------
