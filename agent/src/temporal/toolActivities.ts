@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
-import { type Attributes, context as otelContext, type Span, SpanStatusCode } from '@opentelemetry/api'
+import { type Attributes, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
@@ -436,9 +436,35 @@ async function runAsActivity(
   const flow = flowOf(workflowExecution?.workflowId)
   if (flow === undefined) return runCall(tool, input, deps, lookup, toolUseId, undefined, undefined)
   // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
-  return withSpan(`agent.tool/${tool.name}`, { attributes: flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue, tool.risk) }, (span) =>
+  return flowCallSpan(tool.name, flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue, tool.risk), (span) =>
     runCall(tool, input, deps, lookup, toolUseId, flow, span),
   )
+}
+
+/** What a call sets on its `agent.tool/<name>` span: its tier and its outcome. */
+export type CallSpan = { setAttribute(key: string, value: string): void }
+
+/**
+ * A flow run's call under its `agent.tool/<name>` span (#6123). A call that throws before
+ * it names an outcome (its run gone, an unknown server) reads `error`, so the dashboard's
+ * outcome column has one for every call.
+ */
+export function flowCallSpan<T>(tool: string, attributes: Attributes, run: (span: CallSpan) => Promise<T>): Promise<T> {
+  return withSpan(`agent.tool/${tool}`, { attributes }, async (span) => {
+    let named = false
+    const call: CallSpan = {
+      setAttribute: (key, value) => {
+        if (key === 'scadbuddy.outcome') named = true
+        span.setAttribute(key, value)
+      },
+    }
+    try {
+      return await run(call)
+    } catch (err) {
+      if (!named) span.setAttribute('scadbuddy.outcome', 'error')
+      throw err
+    }
+  })
 }
 
 /** A flow run's `agent.tool/<name>` attributes: the run and its call, and the queue it ran on. */
@@ -459,7 +485,7 @@ async function runCall(
   lookup: (name: string) => Tool | undefined,
   toolUseId: string,
   flow: string | undefined,
-  span: Span | undefined,
+  span: CallSpan | undefined,
 ): Promise<unknown> {
   const context = Context.current()
   const { workflowExecution } = context.info
@@ -498,7 +524,7 @@ type GatedRun = {
   /** ToolContext.callKey: the call's Idempotency-Key. */
   callKey?: string
   /** The call's `agent.tool/<name>` span, given the tier it ran at and a refusal's outcome. */
-  span?: Span | undefined
+  span?: CallSpan | undefined
 }
 
 /**

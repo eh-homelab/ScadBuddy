@@ -11,7 +11,7 @@ import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import type { TouchedCall } from '../src/sessions/touched.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, flowCallSpan, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -414,6 +414,24 @@ describe('flow runs in tool activities', () => {
     // The tool's own error text is the call's, never the span's.
     expect(exportedText(spans)).not.toContain('it broke')
     expect(exportedText(spans)).not.toContain('needs an approval')
+  })
+
+  // #6126 review: a call that throws before it names an outcome (its run gone, an unknown
+  // server) still reads one; a refusal keeps its own.
+  it('gives a call that throws before naming an outcome the outcome error', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    await expect(flowCallSpan('early', {}, async () => Promise.reject(new Error('gone')))).rejects.toThrow('gone')
+    await expect(
+      flowCallSpan('refused', {}, async (span) => {
+        span.setAttribute('scadbuddy.outcome', 'refused')
+        throw new Error('no')
+      }),
+    ).rejects.toThrow('no')
+    await flushTracing()
+    const named = (name: string) => spans.getFinishedSpans().find((s) => s.name === `agent.tool/${name}`)
+    expect(named('early')?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(named('refused')?.attributes['scadbuddy.outcome']).toBe('refused')
   })
 
   it('refuses a gated call with no approval recorded for it, and runs it once one is', async () => {

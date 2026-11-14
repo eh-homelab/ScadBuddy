@@ -1,5 +1,5 @@
 import { Context } from '@temporalio/activity'
-import { context as otelContext, type Span } from '@opentelemetry/api'
+import { context as otelContext } from '@opentelemetry/api'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { TURN_TOOL_PREFIX } from './names.js'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
@@ -27,6 +27,8 @@ import {
   callBlocks,
   durableSession,
   flowCallAttributes,
+  flowCallSpan,
+  type CallSpan,
   flowResult,
   GRANT_REVOKED,
   NOT_APPROVED,
@@ -656,7 +658,9 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const flow = flowOf(context.info.workflowExecution?.workflowId)
     if (flow === undefined) return runTurnTool(deps, name, toolUseId, raw, undefined)
     // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
-    return withSpan(`agent.tool/${name}`, { attributes: flowCallAttributes(name, flow, toolUseId, context.info.taskQueue) }, (span) =>
+    // Its tier is the server's, known only once the server is found; a call refused or
+    // failed before that has an outcome and no tier.
+    return flowCallSpan(name, flowCallAttributes(name, flow, toolUseId, context.info.taskQueue), (span) =>
       runTurnTool(deps, name, toolUseId, raw, undefined, span),
     )
   }
@@ -692,7 +696,7 @@ async function runTurnTool(
   toolUseId: string,
   raw: unknown,
   asCall: { session: string; toolUseId: string } | undefined,
-  span?: Span,
+  span?: CallSpan,
 ): Promise<unknown> {
   {
     const context = Context.current()
@@ -711,7 +715,8 @@ async function runTurnTool(
       const scrub = (text: string) => redact(text, set.secrets)
       const startedAt = new Date()
       const record = (tier: RiskTier, outcome: 'ok' | 'error' | 'refused', detail?: string) => {
-        span?.setAttributes({ 'scadbuddy.tier': tier, 'scadbuddy.outcome': outcome })
+        span?.setAttribute('scadbuddy.tier', tier)
+        span?.setAttribute('scadbuddy.outcome', outcome)
         return audit?.record({
           kind: 'tool_call',
           action: name,
