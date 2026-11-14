@@ -314,6 +314,19 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(screen.getByLabelText('Title')).toHaveValue('Mine')
   })
 
+  it('keeps an edited saved listing when its design’s settings fail to load (#6140 review)', async () => {
+    server.use(http.get('/api/v1/models/:slug/versions/:commit/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const open = await seed('Open')
+    const other = await seed('Other')
+    const { user } = renderStorefront(`/storefront/listings/${open.id}`, <GoTo to={`/storefront/listings/${other.id}`} />)
+    const title = await screen.findByLabelText('Title')
+    await waitFor(() => expect(title).toHaveValue('Open'))
+    await user.type(title, ' edited')
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Save the open listing first')
+    expect(screen.getByLabelText('Title')).toHaveValue('Open edited')
+  })
+
   it('asks before Back drops unsaved edits', async () => {
     const listing = await seed('Edited')
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
