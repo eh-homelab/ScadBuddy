@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bambuddyBase, bambuddyLink, framingOrigin, webUrls } from './bambuddyLinks'
+import { bambuddyBase, bambuddyLink, framingOrigin, pageMatch, webUrls } from './bambuddyLinks'
 
 const API = 'http://bambuddy.bambuddy.svc.cluster.local:8000'
 const SSO = 'https://bambuddy.sso.example'
@@ -73,6 +73,22 @@ describe('bambuddyBase', () => {
 
   it('is the Bambuddy beside the page when the framing origin is not listed', () => {
     expect(bambuddyBase([SSO, LAN], 'https://bambuddy.unlisted.example', 'scadbuddy.lan.example')).toBe(LAN)
+  })
+})
+
+describe('pageMatch', () => {
+  // #6240: the two-label rule holds on both sides. A listed host whose rest is one label
+  // (`bambuddy.example`, with `example` standing for `com`) is nobody's sibling, and a
+  // page whose rest is one label looks for none.
+  it('takes a listed sibling whose rest keeps two labels', () => {
+    expect(pageMatch(['https://bambuddy.sso.example'], 'scadbuddy.sso.example')).toBe(
+      'https://bambuddy.sso.example',
+    )
+  })
+
+  it('takes no listed host whose rest is a bare TLD, from either side', () => {
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.example')).toBeNull()
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.sso.example')).toBeNull()
   })
 })
 
