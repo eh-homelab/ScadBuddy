@@ -905,8 +905,15 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
   the media type, sha256, size and `source`, and the bytes: a sealed blob of the
   backend's store (`blob_key`, `key_sealed`, #4789, `20261027T0114Z_session_files_blobs.sql`)
-  or, where the backend keeps no blobs, `data`. `SessionFiles` in
+  or, where the backend keeps no blobs, a row of `ai_session_file_bytes` it names
+  (`bytes_sha256`), or `data` for a row an older agent wrote. `SessionFiles` in
   [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
+- `ai_session_file_bytes`: a workspace file's bytes where the backend keeps no blobs
+  (`store_backend` local; #4212, `20261114T1609Z_session_file_bytes.sql`), one row per
+  sha256 (a CHECK makes the key the hash of the bytes), named by every `ai_session_files`
+  row with those bytes, a fork's included, through a foreign key. A row no file names is
+  deleted after a write or delete, on the sweep, and when its session is forgotten.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content

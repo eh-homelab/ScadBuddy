@@ -164,6 +164,21 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(Buffer.concat(parts).toString()).toBe('inline')
     })
 
+    it('copies, inline, a parent row whose bytes do not match its sha256, and shares none of it', async () => {
+      await db.sql`
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size)
+        VALUES (${`session:${sessionId}`}, ${sessionId}, 'odd.txt', 'text/plain', ${Buffer.from('odd')}, ${'f'.repeat(64)}, 3)`
+      const child = (await m.start(browser, { origin: 'chat' })).session
+      await files.copy(sessionId, child.id)
+      const rows = await db.sql<{ data: Buffer | null; bytes_sha256: string | null }[]>`SELECT data, bytes_sha256 FROM ai_session_files`
+      expect(rows.map((r) => [r.data?.toString(), r.bytes_sha256])).toEqual([
+        ['odd', null],
+        ['odd', null],
+      ])
+      expect(await db.sql`SELECT 1 FROM ai_session_file_bytes`).toHaveLength(0)
+      expect((await files.read({ kind: 'session', sessionId: child.id }, 'odd.txt'))?.bytes.toString()).toBe('odd')
+    })
+
     it('forgets a session with its unshared bytes, and keeps the bytes a fork names', async () => {
       const child = (await m.start(browser, { origin: 'chat' })).session
       await files.write(ws, 'a.txt', Buffer.from('kept by the fork'))

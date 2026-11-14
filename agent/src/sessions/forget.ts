@@ -134,7 +134,11 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     const entries = await deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
     const sessions = await deps.sql`DELETE FROM ai_sessions WHERE id = ${id}`
     rows = entries.count + sessions.count
-    await dropUnnamedBytes(deps.sql, shared.map((row) => row.bytes_sha256))
+    // A write naming the same bytes meanwhile fails this on the foreign key: the sweep deletes them later.
+    await dropUnnamedBytes(
+      deps.sql,
+      shared.map((row) => row.bytes_sha256),
+    ).catch((err: unknown) => console.error(`forgetSubject: could not delete unnamed workspace bytes; the sweep deletes them later: ${(err as Error).message}`))
     // A classic session's warm process, on whichever replica holds it (spec 2026-10-13 §5.3, warmEvict.ts).
     await notifyWarmEvict(deps.sql, id)
   }

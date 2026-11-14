@@ -982,7 +982,12 @@ export class SessionFiles {
       DELETE FROM ai_session_files
       WHERE session_id IS NULL AND updated_at < now() - (${ttlMs} * interval '1 millisecond') RETURNING workspace, path, blob_key`
     for (const row of rows) if (row.blob_key !== null) await this.#release(row.workspace, row.path, row.blob_key)
-    await dropUnnamedBytes(this.sql)
+    // Logged, not thrown, so the tick's reconcile still runs; the next sweep tries again.
+    try {
+      await dropUnnamedBytes(this.sql)
+    } catch (err) {
+      this.onReleaseError(`workspace files: could not delete unnamed bytes; the next sweep tries again: ${(err as Error).message}`)
+    }
     return rows.length
   }
 

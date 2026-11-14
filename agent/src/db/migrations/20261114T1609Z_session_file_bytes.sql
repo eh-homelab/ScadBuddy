@@ -9,8 +9,13 @@
 -- a delete, on its sweep, and at forgetSubject). EXTERNAL storage, as `data` has, so
 -- SessionFiles.chunks reads one slice at a time.
 --
--- `data` stays for a row an older agent writes while this one rolls out; nothing here
--- writes it any more, and SessionFiles.copy moves such a row's bytes here first.
+-- Rows kept in `data` stay there: this migration moves none, so an older replica still
+-- serving during the rolling update reads, writes and forks the files that were there
+-- before it. Nothing here writes `data` any more; reads take either place, and
+-- SessionFiles.copy moves a parent's `data` rows here before a fork shares them. Until the
+-- last older replica stops, it cannot read, overwrite or fork a file a newer one wrote or
+-- shared at a fork: that row names its bytes, which an older agent does not know (its read
+-- fails, its write is refused by the CHECK below, and its fork leaves that file out).
 CREATE TABLE ai_session_file_bytes (
   sha256     text PRIMARY KEY CHECK (sha256 ~ '^[0-9a-f]{64}$'),
   data       bytea NOT NULL,
@@ -31,12 +36,3 @@ ALTER TABLE ai_session_files ADD CONSTRAINT ai_session_files_bytes_check CHECK (
 -- The check that a row of bytes is still named, and moveToBlobs's pass over them.
 CREATE INDEX ai_session_files_bytes ON ai_session_files (bytes_sha256) WHERE bytes_sha256 IS NOT NULL;
 CREATE INDEX ai_session_files_shared ON ai_session_files (workspace, path) WHERE bytes_sha256 IS NOT NULL;
-
--- The rows kept inline so far. A row whose sha256 does not match its bytes stays inline.
-INSERT INTO ai_session_file_bytes (sha256, data)
-SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
-WHERE data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')
-ORDER BY sha256
-ON CONFLICT (sha256) DO NOTHING;
-UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
-WHERE data IS NOT NULL AND sha256 = encode(sha256(data), 'hex');
