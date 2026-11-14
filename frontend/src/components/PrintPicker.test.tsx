@@ -5202,6 +5202,14 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(runs.bodies[0]).not.toHaveProperty('project_id')
   })
 
+  it('offers no "Wait for the right colour" on a LAN run, which maps its trays itself (#6218)', async () => {
+    setHotPath(true)
+    renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByText('Choose the trays. ScadBuddy slices it and sends it to the printer over the LAN.')).toBeInTheDocument())
+    expect(screen.queryByRole('switch', { name: /wait for the right colour/i })).toBeNull()
+  })
+
   it("offers the LAN printer a failed Bambuddy read names, and opens on it (#4601)", async () => {
     setHotPath(true)
     server.use(
