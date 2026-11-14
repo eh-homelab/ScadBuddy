@@ -122,6 +122,12 @@ same way, `vite.config.ts`).
   `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.
+  Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` orders,
+  removes and adds a listing's images, uploads one into the template's media, and marks
+  each one Live from the listing's published `media` (`media_id`). A template's Media
+  dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
+  which sets the image on each listing of that template through `PUT
+  /storefront/listings/{id}/media`; a published listing is published again at once.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

@@ -147,6 +147,9 @@ class ListingMedia(BaseModel):
     kind: MediaKind
     media_type: str
     caption: str
+    #: The template media id it was copied from (#6213); None for a listing published
+    #: before it was kept.
+    media_id: str | None = None
 
 
 class ListingInput(BaseModel):
@@ -187,6 +190,20 @@ class ListingUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     listing: ListingInput
+    updated_at: datetime
+
+
+#: How many pictures ``PUT …/listings/{id}/media`` takes (#6213).
+LISTING_MEDIA_MAX = 50
+
+
+class ListingMediaUpdate(BaseModel):
+    """``PUT …/listings/{id}/media`` (#6213): the listing's pictures, ids of its
+    template's images in the order to show them, and the ``updated_at`` that was read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    media_ids: list[str] = Field(max_length=LISTING_MEDIA_MAX)
     updated_at: datetime
 
 

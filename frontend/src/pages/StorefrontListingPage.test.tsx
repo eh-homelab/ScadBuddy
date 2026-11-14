@@ -504,4 +504,16 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       expect(await screen.findByLabelText('Title')).toHaveValue('From the assistant')
     })
   })
+
+  it('marks the pictures the public site shows as live (#6213)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: ['thumbnail'] })
+    await api.publishStorefrontListing(listing.id)
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const [row] = await screen.findAllByTestId('listing-picture')
+    expect(within(row!).getByText('Live')).toBeInTheDocument()
+    // Taken out of the draft, it is offered to add back.
+    await user.click(within(row!).getByRole('button', { name: /^Remove / }))
+    expect(screen.queryByTestId('listing-picture')).toBeNull()
+    expect(screen.getByRole('button', { name: /^Add / })).toBeInTheDocument()
+  })
 })

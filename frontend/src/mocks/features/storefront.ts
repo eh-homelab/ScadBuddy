@@ -54,6 +54,11 @@ function emptyChoice(body: StorefrontListingInput) {
   return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
 }
 
+/** #6213 — what a publish copies: one entry per picture, keyed by its media id. */
+function publishedMedia(listing: StorefrontListing): StorefrontListing['media'] {
+  return listing.media_ids.map((id) => ({ blob_key: `listing-media-${id}`, kind: 'image', media_type: 'image/png', caption: '', media_id: id }))
+}
+
 function sorted(): StorefrontListing[] {
   return [...listings].sort((a, b) => a.position - b.position)
 }
@@ -213,6 +218,22 @@ export const handlers = [
     return HttpResponse.json(edited)
   }),
 
+  // #6213 — the pictures alone; a published listing is published again with them.
+  http.put(`${base}/:id/media`, async ({ params, request }) => {
+    const id = String(params['id'])
+    const { media_ids, updated_at } = (await request.json()) as { media_ids: string[]; updated_at: string }
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
+    if (new Set(media_ids).size !== media_ids.length) return refused(422, 'listing_media_duplicate', 'a picture is named twice')
+    const at = stamp()
+    const next: StorefrontListing = { ...found, media_ids, updated_at: at }
+    const changed: StorefrontListing = found.published ? { ...next, media: publishedMedia(next), published_at: at } : next
+    listings = listings.map((l) => (l.id === id ? changed : l))
+    save()
+    return HttpResponse.json(changed)
+  }),
+
   http.post(`${base}/:id/publish`, ({ params }) => {
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
@@ -221,6 +242,7 @@ export const handlers = [
     const published: StorefrontListing = {
       ...found,
       published: true,
+      media: publishedMedia(found),
       published_at: at,
       updated_at: at,
       snapshot: {

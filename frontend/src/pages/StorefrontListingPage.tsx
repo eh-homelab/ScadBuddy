@@ -38,6 +38,8 @@ interface Open {
   filled: boolean
   /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
   notes: string[]
+  /** #6213 — the pictures the public site shows now (`liveMedia`), or null while not published. */
+  live: string[] | null
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -51,12 +53,25 @@ function newKey(): symbol {
 
 /** A new listing: blank, or the one "Sell on storefront" filled in. */
 function fresh(sold?: SellListing): Open {
-  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [], live: null }
+}
+
+/**
+ * #6213 — the media ids a published listing shows, in order. A listing published before
+ * publish kept each picture's `media_id` reads it from `media_ids` by place: publish copied
+ * them in that order, and an edit since would have unpublished it.
+ */
+function liveMedia(listing: StorefrontListing): string[] | null {
+  if (!listing.published) return null
+  return listing.media.flatMap((item, index) => {
+    const id = item.media_id ?? listing.media_ids[index]
+    return id ? [id] : []
+  })
 }
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [] }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [], live: liveMedia(listing) }
 }
 
 function message(error: unknown): string {
@@ -411,6 +426,10 @@ export function StorefrontListingPage() {
                 schema={schema.data}
                 filaments={filaments}
                 media={media}
+                live={open.live}
+                onMediaUploaded={(model) => {
+                  if (models.data) models.setData(models.data.map((m) => (m.slug === model.slug ? model : m)), { supersede: true })
+                }}
               />
             </section>
 
