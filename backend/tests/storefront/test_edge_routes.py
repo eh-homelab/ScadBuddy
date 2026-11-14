@@ -202,7 +202,7 @@ class _Down:
 
     async def aclose(self) -> None: ...
 
-    async def listings(self, **_kwargs: Any) -> Any:
+    async def listings(self, *_args: Any, **_kwargs: Any) -> Any:
         raise CrudUnavailableError("the API did not answer", "unreached")
 
 

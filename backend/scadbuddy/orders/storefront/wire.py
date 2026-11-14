@@ -26,6 +26,9 @@ from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import LISTINGS_MAX_PAGE as LISTINGS_MAX_PAGE
+from scadbuddy.storefront.wire import LISTINGS_MAX_QUERY as LISTINGS_MAX_QUERY
+from scadbuddy.storefront.wire import LISTINGS_QUERY_PATTERN as LISTINGS_QUERY_PATTERN
 from scadbuddy.storefront.wire import (
     MAX_COLOUR_CHOICES,
     MAX_LINK_NOTE,
@@ -322,8 +325,25 @@ class PublicListing(BaseModel):
     updated_at: datetime
 
 
+class PublicListingCard(BaseModel):
+    """One listing in the public list (#6154): what a card shows, and no more. The page
+    reads the whole listing (`PublicListing`) only when the visitor opens it."""
+
+    id: str
+    title: str
+    description: str
+    #: The listing's first picture, as a presigned GET, if it has one.
+    image: PublicMedia | None
+    #: False when a colour the customer must pick has no filament left (`colourGone`).
+    available: bool
+
+
 class PublicListings(BaseModel):
-    listings: list[PublicListing]
+    """One page of the published listings, in the shop's order."""
+
+    listings: list[PublicListingCard]
+    #: The next page's ``cursor``; null on the last page.
+    next_cursor: str | None
     #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
     requests_enabled: bool
 
