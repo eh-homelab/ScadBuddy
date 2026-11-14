@@ -1471,7 +1471,7 @@ jobs:
       # skip. Here they must pass. The runner's AppArmor restriction of unprivileged
       # user namespaces is lifted (Ubuntu's sysctls:
       # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces;
-      # Ubuntu 24.04 runners refuse `unshare` without it:
+      # Ubuntu runners from 24.04 on refuse `unshare` without it:
       # https://github.com/actions/runner-images/issues/10443), and the container runs
       # unconfined by seccomp and AppArmor as uid 10001, as the pod's sandbox container
       # does with its own profiles. SCADBUDDY_REQUIRE_CONFINEMENT=1 makes a refusal a
