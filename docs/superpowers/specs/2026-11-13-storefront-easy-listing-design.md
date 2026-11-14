@@ -94,9 +94,9 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   colour, the names of its filaments' colours are taken out of the title, with the separators
   they leave (`titleColours`, `withoutWords`). A title typed with one gets a warning under it
   and "Take it out". Every listing filament's colour is a choice of each offered colour,
-  except a colour only a support setting uses, which no customer can choose. So the names of
+  except the colour of a support-only filament (below), which no customer can choose. So the names of
   the colours on offer go while any colour is offered; a colour may stay in the title of a
-  listing that offers none, and a support-only colour's name always may.
+  listing that offers none, and a support-only filament's colour name always may.
 - Pictures: every model media item that is an image (`kind` `image`, an `image/*` content
   type, not missing). Videos and anything else are left unticked.
 - Parameters (the smart defaults; also used for a blank listing):

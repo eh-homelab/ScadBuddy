@@ -105,7 +105,7 @@
     "input": { "body": { "kind": "choice", "choices": ["#ffffff"] } }
   },
   {
-    "name": "a support colour an offered colour also uses stays a choice: only a colour no customer setting uses is kept from the customer",
+    "name": "a support colour an offered colour also uses stays a choice: only the colour of a support-only filament (one of a material that is not the design's) is kept from the customer",
     "schema": {
       "groups": ["Supports", "Colours"],
       "parameters": [
