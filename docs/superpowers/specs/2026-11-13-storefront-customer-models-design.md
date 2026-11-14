@@ -507,7 +507,9 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   check's mount namespace, as it covers the spool and `/proc` (`confine.py --cover`,
   `sandbox.covered_dirs`; the start's probe covers it too, so a refusal stops the start).
   The file is not unlinked, because a Secret volume is read-only. Test:
-  `test_a_confined_child_cannot_read_the_rpc_token`.
+  `test_a_confined_child_cannot_read_the_rpc_token`. The launcher also covers the
+  container's `/dev/shm` (a tmpfs of mode 1777) the same way, so a parse can neither fill
+  pod memory there nor leave a file for a later check (`test_a_confined_child_cannot_write_a_covered_folder`).
 - The request deadline. A request's head and its whole body must arrive within
   `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
   is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the

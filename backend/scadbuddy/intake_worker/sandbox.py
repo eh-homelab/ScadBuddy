@@ -155,11 +155,20 @@ def check_sandbox_environment(environ: Mapping[str, str]) -> None:
         raise IntakeRefusal(reasons)
 
 
+#: The container's shared-memory tmpfs, writable by every user (mode 1777).
+SHARED_MEMORY: Final = "/dev/shm"
+
+
 def covered_dirs(token_file: str) -> tuple[str, ...]:
-    """The directories the launcher covers with an empty tmpfs for each check besides the
-    spool: the RPC token's own, so the parser cannot read the token by its path. The token
-    sits on a read-only Secret volume, so it cannot be unlinked instead."""
-    return (os.path.dirname(os.path.abspath(token_file)),)
+    """The directories the launcher covers with an empty tmpfs (mode 0) for each check
+    besides the spool and ``/proc``: the RPC token's own, so the parser cannot read the
+    token by its path (it sits on a read-only Secret volume, so it cannot be unlinked
+    instead), and `SHARED_MEMORY` when it exists, so a parse can neither fill pod memory
+    there nor leave a file for a later check."""
+    covers = [os.path.dirname(os.path.abspath(token_file))]
+    if os.path.isdir(SHARED_MEMORY):
+        covers.append(SHARED_MEMORY)
+    return tuple(covers)
 
 
 def probe_isolation(spool: Path, covers: tuple[str, ...] = ()) -> str | None:
