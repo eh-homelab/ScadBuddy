@@ -56,6 +56,7 @@ from scadbuddy.orders.storefront.inputs import (
     same_value,
     value_reason,
 )
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
     ChoiceBound,
     Listing,
@@ -607,6 +608,14 @@ class ListingStore:
             ).fetchall()
         return {row["id"]: row["colour"] for row in rows}
 
+    def filament_materials(self) -> dict[str, str]:
+        """Each price-book filament not archived, by id: its material (#6153)."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, material FROM filaments WHERE archived_at IS NULL"
+            ).fetchall()
+        return {row["id"]: row["material"] for row in rows}
+
 
 # -- publish ---------------------------------------------------------------------------
 
@@ -871,13 +880,35 @@ async def _copy_media(
     return copied
 
 
+def check_sliceable(
+    profile: StorefrontSliceProfile | None,
+    listing: ListingInput,
+    materials: Mapping[str, str],
+) -> None:
+    """422 ``listing_material_unsliceable``, with ``materials``, when the shop slice
+    profile has no spool for a material of the listing's filaments (``materials``, by
+    filament id). A support material needs none, and with no profile nothing is checked:
+    the listing is then shown with no price (#6153)."""
+    missing = missing_materials(profile, (materials[f] for f in listing.colours if f in materials))
+    if missing:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "listing_material_unsliceable",
+            "the shop slice profile has no spool for "
+            + ", ".join(missing)
+            + ": add one in Settings → Storefront pricing",
+            materials=missing,
+        )
+
+
 async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
     ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
     ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
-    the price book does not back; 409 ``listing_changed`` when it was edited while it was
+    the price book does not back, ``listing_material_unsliceable`` for a material the shop
+    slice profile has no spool for (#6153); 409 ``listing_changed`` when it was edited while it was
     being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
@@ -902,6 +933,8 @@ async def _publish(
     facts = await _commit_facts(core, listing.slug, listing.commit)
     colours = await asyncio.to_thread(store.filament_colours)
     fixed = checked_fixed(facts.schema_, listing, colours)
+    profile = (await asyncio.to_thread(core.settings_store.load)).storefront_slice_profile
+    check_sliceable(profile, listing, await asyncio.to_thread(store.filament_materials))
     refs = BlobRefs(core.projection.pool)
     try:
         key = await snapshots.ensure(listing.slug, listing.commit)

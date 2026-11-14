@@ -228,6 +228,9 @@ class Settings(BaseSettings):
     storefront_renders_per_minute: int = Field(default=3, ge=1, le=60)
     storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
+    # SCADBUDDY_STOREFRONT_SLICES_CONCURRENT: the storefront's slices that run at once,
+    # shop-wide (#6153); the rest wait.
+    storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False
     # The storefront's mail (#5283, spec 2026-11-02 §5.7), sent only by the CRUD service
@@ -1065,6 +1068,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "storefront_renders_per_minute": "live",
         "storefront_renders_per_day": "live",
         "storefront_render_concurrency": "live",
+        "storefront_slices_concurrent": "live",
         "storefront_draft_ttl_days": "live",
         "storefront_requests_enabled": "live",
         # Read from the store by each send of the storefront's mail (#5283).

@@ -7,6 +7,10 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/storefront/slice-profile/options',
+    reason: "The printers and spools the Storefront settings control offers for the shop's slice profile (#6153). The assistant reads and sets the profile through the settings tools (get_settings, the settings write).",
+  },
+  {
     operation: 'GET /api/v1/storefront/listings',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },

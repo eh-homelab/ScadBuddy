@@ -509,6 +509,10 @@ export type PaymentCreate = Defaulted<Schemas['PaymentCreate'], 'notes' | 'metho
  * way an order reaches its customer at a fixed price. */
 export type DepositRule = Schemas['DepositRule']
 export type ShippingOption = Schemas['ShippingOption']
+/** #6153 — the shop slice profile: a printer and a spool per material. */
+export type StorefrontSliceProfile = Schemas['StorefrontSliceProfile']
+export type ProfileOptions = Schemas['ProfileOptions']
+export type ProfileSpool = Schemas['ProfileSpool']
 /** Orders phase 2 (#4250, spec 2026-10-18 §5): the price book, the slice quote and the
  * rough estimate. Rates are decimal strings; `minor_exponent` is the minor unit's decimal
  * places, the backend's (ISO 4217) and never `Intl`'s. */

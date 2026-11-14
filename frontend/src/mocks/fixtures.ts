@@ -1034,6 +1034,8 @@ export const settingsDefaults = {
   storefront_shipping_options: [],
   storefront_payment_instructions: null,
   orders_customer_messaging: null,
+  // #6153 — the shop slice profile: none, so no visitor sees a price.
+  storefront_slice_profile: null,
   // #4250 — the price book's policy and the rough estimate's factor, read by each quote.
   pricing_machine_rate_per_hour: '0',
   pricing_setup_fee: '0',
@@ -1045,6 +1047,8 @@ export const settingsDefaults = {
   storefront_renders_per_minute: 3,
   storefront_renders_per_day: 30,
   storefront_render_concurrency: 2,
+  // #6153 — the storefront's slices at once.
+  storefront_slices_concurrent: 1,
   storefront_draft_ttl_days: 30,
   storefront_requests_enabled: false,
   // #5283 — the storefront's mail; the password is sealed apart (`/storefront/mail/password`).
@@ -1088,6 +1092,7 @@ const STORED_ONLY = new Set([
   'storefront_shipping_options',
   'storefront_payment_instructions',
   'orders_customer_messaging',
+  'storefront_slice_profile',
 ])
 
 /** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */

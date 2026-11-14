@@ -29,6 +29,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.printing import printer_keys
 from scadbuddy.api.runtime import apply_runtime, restart_required
+from scadbuddy.api.storefront_slice import check_profile
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
@@ -70,8 +71,10 @@ from scadbuddy.library.settings_store import (
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
+from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.print_watch.component import AUTO_IMPORTS
 from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -136,6 +139,8 @@ class SettingsView(BaseModel):
     storefront_renders_per_minute: int = 3
     storefront_renders_per_day: int = 30
     storefront_render_concurrency: int = 2
+    #: The storefront's slices at once, shop-wide (#6153).
+    storefront_slices_concurrent: int = 1
     storefront_draft_ttl_days: int = 30
     storefront_requests_enabled: bool = False
     #: The storefront's mail (#5283): SMTP host, port, user, From and the TLS mode
@@ -168,6 +173,9 @@ class SettingsView(BaseModel):
     storefront_payment_instructions: str | None = None
     #: The messaging plugin tool bound to "customer messages" (#5660); null is none.
     orders_customer_messaging: MessagingBinding | None = None
+    #: The shop slice profile (#6153): the printer and a spool per material; null is none,
+    #: and the storefront then shows no price.
+    storefront_slice_profile: StorefrontSliceProfile | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -476,6 +484,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,
         orders_customer_messaging=stored.orders_customer_messaging,
+        storefront_slice_profile=stored.storefront_slice_profile,
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
         has_git_remote_token=bool(runtime.git_remote_token),
         has_storefront_turnstile_secret=bool(runtime.storefront_turnstile_secret),
@@ -547,6 +556,7 @@ async def put_settings(
     state: StateDep,
     ops: OperationsDep,
     registry: PrintersDep,
+    spools: SpoolsDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
@@ -555,10 +565,14 @@ async def put_settings(
     The default printer is ``default_printer``, a registry id (#4971, #5167). An older
     client's ``printer_id`` (a Bambuddy id) is saved as the registry printer that links
     it; ``default_printer`` sent beside it wins. 422 for a ``default_printer`` the
-    registry does not hold, and for a ``printer_id`` no registry printer links."""
+    registry does not hold, and for a ``printer_id`` no registry printer links. 422 for a
+    ``storefront_slice_profile`` whose printer the registry does not hold, or whose spool
+    the print dialog does not offer on that printer (#6153)."""
     _mail_connection_by_a_person(patch)
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
+    if patch.storefront_slice_profile is not None:
+        await check_profile(patch.storefront_slice_profile, store.load(), registry, spools)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:

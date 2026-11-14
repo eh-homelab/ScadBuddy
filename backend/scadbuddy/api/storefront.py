@@ -169,7 +169,9 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
     ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
     ``listing_media_unknown``,
-    ``listing_reference``, ``listing_pipeline_unsupported``); 409 ``listing_publishing``
+    ``listing_reference``, ``listing_pipeline_unsupported``,
+    ``listing_material_unsliceable``: the shop slice profile has no spool for a material
+    of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""
     return await publish(state, orders.listings, listing_id)

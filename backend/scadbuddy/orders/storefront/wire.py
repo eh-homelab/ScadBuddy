@@ -65,6 +65,14 @@ MAX_LABEL_LENGTH = 200
 #: customer's (#6137).
 #: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
 EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
+#: A support material: the shop's choice, never the customer's (#6152, owner rule
+#: 2026-11-13). The shop slice profile needs no spool for it (#6153).
+SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
+
+
+def is_support(material: str) -> bool:
+    """Whether ``material`` is a support material (`SUPPORT_MATERIAL`)."""
+    return SUPPORT_MATERIAL.search(material) is not None
 
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
