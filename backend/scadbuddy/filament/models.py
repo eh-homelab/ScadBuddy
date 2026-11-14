@@ -15,11 +15,14 @@ from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from scadbuddy.filament.colour import Rgba
 
-Name = Annotated[str, Field(min_length=1, max_length=128)]
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+SortOrder = Annotated[int, Field(ge=-1_000_000, le=1_000_000)]
+Idx = Annotated[int, Field(ge=0, le=1000)]
+CaliIdx = Annotated[int, Field(ge=-1, le=1_000_000)]
 Text = Annotated[str, Field(max_length=128)]
 Note = Annotated[str, Field(max_length=2000)]
 Temp = Annotated[int, Field(ge=0, le=1000)]
@@ -68,13 +71,13 @@ class _Catalog(_Row):
 
 class _NamedCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
 
 
 class _NamedPatch(_Patch):
     not_null = frozenset({"name", "sort_order"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     archived: bool | None = None
 
 
@@ -119,7 +122,7 @@ class InsertMaterial(_Catalog): ...
 
 class MaterialCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     family: Text | None = None
     density_g_cm3: Density | None = None
     nozzle_temp_min: Temp | None = None
@@ -149,7 +152,7 @@ class MaterialPatch(_Patch):
         }
     )
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     family: Text | None = None
     density_g_cm3: Density | None = None
     nozzle_temp_min: Temp | None = None
@@ -186,7 +189,7 @@ class Material(_Catalog):
 
 class SubtypeCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     material_id: UUID | None = None
     density_g_cm3: Density | None = None
     nozzle_temp_min: Temp | None = None
@@ -200,7 +203,7 @@ class SubtypeCreate(_In):
 class SubtypePatch(_Patch):
     not_null = frozenset({"name", "sort_order"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     material_id: UUID | None = None
     density_g_cm3: Density | None = None
     nozzle_temp_min: Temp | None = None
@@ -228,7 +231,7 @@ class Subtype(_Catalog):
 
 class InsertTypeCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     empty_weight_g: Annotated[int, Field(gt=0, le=100_000)]
     insert_material_id: UUID | None = None
     note: Note | None = None
@@ -237,7 +240,7 @@ class InsertTypeCreate(_In):
 class InsertTypePatch(_Patch):
     not_null = frozenset({"name", "sort_order", "empty_weight_g"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     empty_weight_g: Annotated[int, Field(gt=0, le=100_000)] | None = None
     insert_material_id: UUID | None = None
     note: Note | None = None
@@ -252,7 +255,7 @@ class InsertType(_Catalog):
 
 class ColourCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     manufacturer: Text | None = None
     rgba: Rgba
     material_id: UUID | None = None
@@ -263,7 +266,7 @@ class ColourCreate(_In):
 class ColourPatch(_Patch):
     not_null = frozenset({"name", "sort_order", "rgba"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     manufacturer: Text | None = None
     rgba: Rgba | None = None
     material_id: UUID | None = None
@@ -274,9 +277,9 @@ class ColourPatch(_Patch):
 
 class Colour(_Catalog):
     manufacturer: str | None
-    rgba: str
+    rgba: Rgba
     material_id: UUID | None
-    extra_colours: list[str] | None
+    extra_colours: list[Rgba] | None
     effect_id: UUID | None
 
 
@@ -285,7 +288,7 @@ class Colour(_Catalog):
 
 class LocationKindCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     dry_storage: bool = False
     ams: bool = False
 
@@ -293,7 +296,7 @@ class LocationKindCreate(_In):
 class LocationKindPatch(_Patch):
     not_null = frozenset({"name", "sort_order", "dry_storage", "ams"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     dry_storage: bool | None = None
     ams: bool | None = None
     archived: bool | None = None
@@ -306,28 +309,28 @@ class LocationKind(_Catalog):
 
 class LocationCreate(_In):
     name: Name
-    sort_order: int = 0
+    sort_order: SortOrder = 0
     kind_id: UUID
     parent_id: UUID | None = None
     identifier: Text | None = None
     capacity: Annotated[int, Field(gt=0, le=100_000)] | None = None
     printer_id: UUID | None = None
-    ams_id: int | None = None
-    tray_id: int | None = None
+    ams_id: Idx | None = None
+    tray_id: Idx | None = None
     note: Note | None = None
 
 
 class LocationPatch(_Patch):
     not_null = frozenset({"name", "sort_order", "kind_id"})
     name: Name | None = None
-    sort_order: int | None = None
+    sort_order: SortOrder | None = None
     kind_id: UUID | None = None
     parent_id: UUID | None = None
     identifier: Text | None = None
     capacity: Annotated[int, Field(gt=0, le=100_000)] | None = None
     printer_id: UUID | None = None
-    ams_id: int | None = None
-    tray_id: int | None = None
+    ams_id: Idx | None = None
+    tray_id: Idx | None = None
     note: Note | None = None
     archived: bool | None = None
 
@@ -404,8 +407,8 @@ class SpoolType(_Row):
     category_id: UUID | None
     effect_id: UUID | None
     colour_name: str | None
-    rgba: str
-    extra_colours: list[str] | None
+    rgba: Rgba
+    extra_colours: list[Rgba] | None
     diameter_mm: Decimal
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -444,12 +447,12 @@ class TypePreset(BaseModel):
 
 class TypeKValueCreate(_In):
     printer_id: UUID
-    extruder: int
+    extruder: Idx
     nozzle_diameter: Name
     nozzle_type: Text | None = None
     k_value: Annotated[Decimal, Field(ge=0, lt=100)]
     name: Text | None = None
-    cali_idx: int | None = None
+    cali_idx: CaliIdx | None = None
     setting_id: Text | None = None
 
 
@@ -458,12 +461,44 @@ class TypeKValuePatch(_Patch):
     nozzle_type: Text | None = None
     k_value: Annotated[Decimal, Field(ge=0, lt=100)] | None = None
     name: Text | None = None
-    cali_idx: int | None = None
+    cali_idx: CaliIdx | None = None
     setting_id: Text | None = None
 
 
 class TypeKValue(BaseModel):
     type_id: UUID
+    printer_id: UUID
+    extruder: Idx
+    nozzle_diameter: str
+    nozzle_type: str | None
+    k_value: Decimal
+    name: str | None
+    cali_idx: int | None
+    setting_id: str | None
+
+
+class SpoolPresetCreate(TypePresetCreate): ...
+
+
+class SpoolPresetPatch(TypePresetPatch): ...
+
+
+class SpoolPreset(BaseModel):
+    spool_id: UUID
+    printer_model: str
+    nozzle_diameter: str
+    slicer_filament: str
+    slicer_filament_name: str | None
+
+
+class SpoolKValueCreate(TypeKValueCreate): ...
+
+
+class SpoolKValuePatch(TypeKValuePatch): ...
+
+
+class SpoolKValue(BaseModel):
+    spool_id: UUID
     printer_id: UUID
     extruder: int
     nozzle_diameter: str
@@ -487,8 +522,8 @@ class EffectiveValues(BaseModel):
     category_id: UUID | None = None
     effect_id: UUID | None = None
     colour_name: str | None = None
-    rgba: str | None = None
-    extra_colours: list[str] | None = None
+    rgba: Rgba | None = None
+    extra_colours: list[Rgba] | None = None
     diameter_mm: Decimal | None = None
     density_g_cm3: Decimal | None = None
     nozzle_temp_min: int | None = None
@@ -573,8 +608,8 @@ class Spool(_Row):
     category_id: UUID | None
     effect_id: UUID | None
     colour_name: str | None
-    rgba: str | None
-    extra_colours: list[str] | None
+    rgba: Rgba | None
+    extra_colours: list[Rgba] | None
     diameter_mm: Decimal | None
     density_g_cm3: Decimal | None
     nozzle_temp_min: int | None
@@ -692,8 +727,8 @@ class SpoolEventCreate(_In):
     source: EventSource | None = None
     at: datetime | None = None
     printer_id: UUID | None = None
-    ams_id: int | None = None
-    tray_id: int | None = None
+    ams_id: Idx | None = None
+    tray_id: Idx | None = None
     grams_before: float | None = None
     grams_after: float | None = None
     delta_g: float | None = None
@@ -725,3 +760,25 @@ class SpoolEvent(BaseModel):
     ref_id: str | None
     actor: str | None
     data: dict[str, Any]
+
+
+class BbLinkCreate(_In):
+    """The link of a spool to its record in Bambuddy, for the sync."""
+
+    spool_id: UUID
+    bb_spool_id: Annotated[int, Field(ge=0, le=2_147_483_647)]
+    bb_updated_at: datetime | None = None
+    pushed_hash: Text | None = None
+
+
+class BbLinkPatch(_Patch):
+    bb_updated_at: datetime | None = None
+    pushed_hash: Text | None = None
+
+
+class BbLink(BaseModel):
+    spool_id: UUID
+    bb_spool_id: int
+    bb_updated_at: datetime | None
+    pushed_hash: str | None
+    linked_at: datetime
