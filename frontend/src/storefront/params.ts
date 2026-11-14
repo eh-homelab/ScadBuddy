@@ -122,6 +122,37 @@ export function keepPicks(
   return kept
 }
 
+/**
+ * #6152 — `picks` with one filament per colour. A slot of the render shows only a colour,
+ * so it prints from one filament, and the shop refuses two filaments of one colour (422
+ * `pick_colour_clash`, `inputs.py` `checked_picks`). The pick of `first` wins, else the
+ * earliest; each other pick of that colour moves to its filament. `moved` names them.
+ */
+export function oneFilamentPerColour(
+  listing: Listing,
+  picks: Readonly<Record<string, string>>,
+  first?: string,
+): { picks: Record<string, string>; moved: string[] } {
+  const byId = new Map(listing.colours.map((filament) => [filament.id, filament]))
+  const names = Object.keys(picks)
+  const order = first !== undefined && first in picks ? [first, ...names.filter((name) => name !== first)] : names
+  const byColour = new Map<string, string>()
+  const next = { ...picks }
+  const moved: string[] = []
+  for (const name of order) {
+    const filament = byId.get(picks[name]!)
+    if (!filament) continue
+    const colour = filament.colour.toLowerCase()
+    const held = byColour.get(colour)
+    if (held === undefined) byColour.set(colour, filament.id)
+    else if (held !== filament.id) {
+      next[name] = held
+      moved.push(name)
+    }
+  }
+  return { picks: next, moved }
+}
+
 /** The materials a customer may pick on `listing`, in the shop's order (#6152). */
 export function listingMaterials(listing: Listing): string[] {
   return [...new Set(customerFilaments(listing.colours).map((filament) => filament.material))]
@@ -170,12 +201,16 @@ export function settleMaterial(
   const nextPicks = { ...picks }
   let moved = false
   if (!listing.one_material || material === null) return { values: nextValues, picks: nextPicks, moved }
+  const keptNames = new Set<string>()
   for (const [name, param] of Object.entries(listing.params)) {
     if (!(param.kind === 'choice' && param.colour)) continue
     const offered = paramFilaments(param, listing.colours, material)
     const set = values[name]
     const kept = offered.find((filament) => filament.id === picks[name] && typeof set === 'string' && filament.colour.toLowerCase() === set.toLowerCase())
-    if (kept) continue
+    if (kept) {
+      keptNames.add(name)
+      continue
+    }
     const from = typeof set === 'string' ? set : startColour(param)
     const nearest = from === undefined ? offered[0] : nearestFilament(from, offered)
     if (nearest) {
@@ -188,7 +223,11 @@ export function settleMaterial(
       if (typeof set === 'string') moved = true
     }
   }
-  return { values: nextValues, picks: nextPicks, moved }
+  // #6152: one filament per colour (`oneFilamentPerColour`). A pick the visitor kept wins
+  // over one this function chose; the colours stay as they are.
+  const kept = Object.keys(nextPicks).filter((name) => keptNames.has(name))
+  const ordered = Object.fromEntries([...kept, ...Object.keys(nextPicks).filter((name) => !keptNames.has(name))].map((name) => [name, nextPicks[name]!]))
+  return { values: nextValues, picks: oneFilamentPerColour(listing, ordered).picks, moved }
 }
 
 /** Of `values`, those `listing` still offers and allows: what survives a reload of it. */

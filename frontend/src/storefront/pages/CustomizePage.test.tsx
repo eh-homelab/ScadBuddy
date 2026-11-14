@@ -221,6 +221,61 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Teal')
   })
 
+  it('gives one colour one filament, and says so, when a second pick of it names another (#6152 review)', async () => {
+    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
+    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
+    const choice = { kind: 'choice', group: '', colour: true, choices: ['#C0392B'] }
+    const listing = {
+      ...KEYCHAIN,
+      id: 'l9',
+      params: { body_colour: { ...choice, label: 'Body colour' }, rim_colour: { ...choice, label: 'Rim colour' } },
+      colours: [cheap, dear],
+    }
+    const sent: { picks?: Record<string, string> }[] = []
+    server.use(
+      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(listing)),
+      http.post('/api/store/v1/renders', async ({ request }) => {
+        sent.push((await request.json()) as { picks?: Record<string, string> })
+        return HttpResponse.json(DONE)
+      }),
+    )
+    const { user } = show('l9')
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
+    expect(await screen.findByText('Body colour uses Dear red PLA too. One colour prints from one filament.')).toBeInTheDocument()
+    await waitFor(() => expect(sent.at(-1)?.picks).toEqual({ body_colour: 'f-dear', rim_colour: 'f-dear' }))
+    expect(sent.some((body) => new Set(Object.values(body.picks ?? {})).size > 1)).toBe(false)
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Dear red')
+  })
+
+  it('says why the shop refused two filaments of one colour (#6152 review)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', () =>
+        HttpResponse.json(
+          { type: `${PROBLEMS}pick_colour_clash`, status: 422, detail: 'refused', name: 'picks.rim_colour' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    show()
+    expect(await screen.findByText('Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.')).toBeInTheDocument()
+  })
+
+  it('says the preview must show before an add, with a retry, when the preview fails (#6152 review)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', () =>
+        HttpResponse.json({ type: `${PROBLEMS}render_queue_full`, status: 503, detail: 'busy' }, { status: 503, headers: { 'Retry-After': '120' } }),
+      ),
+    )
+    show(CHARM_ID)
+    expect(await screen.findByText('You can add it once its preview shows. Its preview could not be made: try again.')).toBeInTheDocument()
+    expect(screen.queryByText('You can add it once its preview shows.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
+  })
+
   it('holds “Add to order” back while the preview of the picked colours is made (#6152)', async () => {
     server.use(
       http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),

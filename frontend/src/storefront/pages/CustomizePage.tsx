@@ -15,7 +15,7 @@ import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
-import { keepOffered, keepPicks, listingMaterials, listingUnavailable, settleMaterial, startMaterial, valueProblem } from '../params'
+import { filamentLabels, keepOffered, keepPicks, listingMaterials, listingUnavailable, oneFilamentPerColour, settleMaterial, startMaterial, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
 
 // three.js is most of the viewer: its own chunk, fetched once there is a render to show.
@@ -69,6 +69,8 @@ function refusalText(error: unknown): string {
   if (error.slug === 'render_limited') return `You have made a lot of previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'render_queue_full') return `The shop is busy making other previews. Try again ${inSeconds(error)}.`
   if (error.slug === 'rate_limited') return `Your connection has sent a lot of requests. Try again ${inSeconds(error)}.`
+  // #6152: the page gives one colour one filament (`oneFilamentPerColour`); this is the shop's own check.
+  if (error.slug === 'pick_colour_clash') return 'Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.'
   return errorText(error)
 }
 
@@ -136,6 +138,8 @@ export function CustomizePage({
   /** With `one_material`, the material shown (`startMaterial` until the visitor picks one); else null. */
   const [material, setMaterial] = useState<string | null>(null)
   const [materialNote, setMaterialNote] = useState<string | null>(null)
+  /** #6152: which other colours a pick moved to its filament (`oneFilamentPerColour`). */
+  const [pickNote, setPickNote] = useState<string | null>(null)
   /** The latest render while it runs; the viewer shows its progress until one is done. */
   const [job, setJob] = useState<StoreRender>()
   /** The last done render: the viewer keeps it on screen while a newer one runs. */
@@ -247,8 +251,10 @@ export function CustomizePage({
   }
 
   const setPick = (name: string, next: string | undefined) => {
+    if (!listing) return
     setMaterialNote(null)
-    if (next === undefined && listing?.one_material) {
+    setPickNote(null)
+    if (next === undefined && listing.one_material) {
       // #6152: "Use the shop's choice" on a `one_material` listing. With no value, the shop
       // would use the listing's default, which can be of another material (422
       // `listing_mixed_material`): the colour goes to the nearest of the shown material.
@@ -258,12 +264,21 @@ export function CustomizePage({
       setPicks(settled.picks)
       return
     }
-    setPicks((before) => {
-      const copy = { ...before }
-      if (next === undefined) delete copy[name]
-      else copy[name] = next
-      return copy
-    })
+    const copy = { ...picks }
+    if (next === undefined) delete copy[name]
+    else copy[name] = next
+    // #6152: a colour prints from one filament. A pick of a colour another parameter
+    // already picked moves that parameter to the new filament, and the page says so. Only
+    // the picks the page sends count (`keepPicks`); `values` does not yet hold this one.
+    const sent = next === undefined ? {} : { ...keepPicks(listing, values, copy), [name]: next }
+    const one = oneFilamentPerColour(listing, sent, name)
+    setPicks({ ...copy, ...one.picks })
+    const filament = listing.colours.find((each) => each.id === next)
+    if (filament && one.moved.length > 0) {
+      const names = one.moved.map((moved) => listing.params[moved]?.label ?? moved)
+      const shown = `${filamentLabels(listing.colours).get(filament.id) ?? filament.colour} ${filament.material}`
+      setPickNote(`${names.join(' and ')} ${names.length === 1 ? 'uses' : 'use'} ${shown} too. One colour prints from one filament.`)
+    }
   }
 
   /**
@@ -277,6 +292,7 @@ export function CustomizePage({
     setMaterial(next)
     setValues(nextValues)
     setPicks(nextPicks)
+    setPickNote(null)
     setMaterialNote(moved ? `Your colours changed to the nearest ${next} colours.` : null)
     setAdded(false)
   }
@@ -470,6 +486,11 @@ export function CustomizePage({
           onMaterial={chooseMaterial}
           materialNote={materialNote}
         />
+        {pickNote && (
+          <p className="sf-hint" role="status">
+            {pickNote}
+          </p>
+        )}
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>
@@ -513,7 +534,12 @@ export function CustomizePage({
             {adding ? 'Adding…' : 'Add to order'}
           </button>
         </div>
-        {waitsForPreview && !blocked && <p className="sf-hint">You can add it once its preview shows.</p>}
+        {waitsForPreview && !blocked && (
+          <p className="sf-hint">
+            {/* #6152: a failed or refused preview never shows by itself; say to try again. */}
+            {renderError && !rendering ? 'You can add it once its preview shows. Its preview could not be made: try again.' : 'You can add it once its preview shows.'}
+          </p>
+        )}
         {addError && (
           <p className="sf-error" role="alert">
             {addError}

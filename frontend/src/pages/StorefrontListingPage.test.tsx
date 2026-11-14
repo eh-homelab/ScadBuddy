@@ -307,6 +307,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const listing = await seed('Linked')
     const { user } = renderStorefront('/storefront/listings/new', <GoTo to={`/storefront/listings/${listing.id}`} />)
     const title = await screen.findByLabelText('Title')
+    // The page fills the title from the first design when the designs arrive. Wait for that
+    // fill (#6178 CI), so it cannot land between the clear and the typing.
+    await waitFor(() => expect(title).toHaveValue('Name Keychain'))
     await user.clear(title)
     await user.type(title, 'Mine')
     await user.click(screen.getByRole('button', { name: 'Go' }))

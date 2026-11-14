@@ -188,12 +188,19 @@ function outside(body: Body): Response | Listing {
   // #6152: a pick is a listing filament of the parameter's value (`checked_picks`), and a
   // `one_material` listing's picks share one material (`check_one_material`).
   const materials = new Set<string>()
+  const byColour = new Map<string, string>()
   for (const [name, id] of Object.entries(body.picks ?? {})) {
     const filament = listing.colours.find((f) => f.id === id)
     const value = body.values?.[name]
     if (!filament || typeof value !== 'string' || filament.colour.toLowerCase() !== value.toLowerCase()) {
       return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
     }
+    // Two picks of one colour name one filament (`checked_picks`, 422 `pick_colour_clash`).
+    const held = byColour.get(filament.colour.toLowerCase()) ?? filament.id
+    if (held !== filament.id) {
+      return refused(422, 'pick_colour_clash', 'Two of your colours are one colour of two filaments. A colour prints from one filament: pick the same one for both.')
+    }
+    byColour.set(filament.colour.toLowerCase(), filament.id)
     materials.add(filament.material.toLowerCase())
   }
   if (listing.one_material && materials.size > 1) {

@@ -396,9 +396,10 @@ class RenderBody(BaseModel):
     #: The listing filament the visitor picked for each offered colour parameter, by
     #: parameter name (#6152). Its colour must be the parameter's value. The CRUD side
     #: maps picks to the render's slots by colour, so the page never guesses a slot.
-    picks: dict[str, Annotated[str, StringConstraints(max_length=200)]] = Field(
-        default_factory=dict, max_length=200
-    )
+    picks: dict[
+        Annotated[str, StringConstraints(max_length=200)],
+        Annotated[str, StringConstraints(max_length=200)],
+    ] = Field(default_factory=dict, max_length=200)
 
 
 class StoreRender(BaseModel):

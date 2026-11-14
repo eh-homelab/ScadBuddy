@@ -60,6 +60,7 @@ from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
     MixedMaterialError,
+    PickColourClashError,
     check_one_material,
     checked_picks,
     customer_filaments,
@@ -338,7 +339,8 @@ async def checked_choice(
     Refusals: 404 ``listing_not_found``, 409 ``listing_changed`` (the listing moved since
     the page read it), 422 ``input_outside_listing`` (with ``name`` and ``reason``; a pick
     is ``picks.<name>``), 422 ``listing_mixed_material`` (a ``one_material`` listing's
-    colours of more than one material)."""
+    colours of more than one material), 422 ``pick_colour_clash`` (two picks of one colour
+    that name two filaments, with ``name``)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -377,6 +379,14 @@ async def checked_choice(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "listing_mixed_material",
             "Every colour of this design must be of one material. Pick colours of one material.",
+        ) from None
+    except PickColourClashError as error:
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "pick_colour_clash",
+            "Two of your colours are one colour of two filaments. A colour prints from one"
+            " filament: pick the same one for both.",
+            name=error.name,
         ) from None
     except InputOutsideListingError as error:
         raise problem(
@@ -758,9 +768,11 @@ def _filament_for(
 ) -> dict[str, Filament]:
     """Each colour of the render, casefolded, to its filament: the listing filament the
     visitor picked of that colour (#6152), else the one it chose for its slot, else the
-    first listing filament of that colour a customer may pick."""
-    offered = customer_filaments(listing, filaments)
-    by_id = {f.id: f for f in offered}
+    first listing filament of that colour. A pick is never a support material
+    (`customer_filaments`), but the last fallback takes one: a locked support colour is a
+    slot of the render too, and the estimate prices it (#6152)."""
+    by_id = {f.id: f for f in customer_filaments(listing, filaments)}
+    listed = [filaments[f] for f in listing.colours if f in filaments]
     chosen: dict[str, Filament] = {}
     for filament_id in (picks or {}).values():
         record = by_id.get(filament_id)
@@ -771,7 +783,7 @@ def _filament_for(
             record = filaments.get(filament_id)
             if record is not None:
                 chosen.setdefault(render_colours[slot].casefold(), record)
-    for record in offered:
+    for record in listed:
         chosen.setdefault(record.colour.casefold(), record)
     return chosen
 

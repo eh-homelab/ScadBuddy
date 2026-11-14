@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultsFor, emptyDraft, fixColour, isSupport, listingInput, nearestFilaments, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultsFor, emptyDraft, fixColour, isSupport, listingInput, nearestFilaments, previewListing, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -216,6 +216,17 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
     const body = listingInput(draft, schema, [BLUE])
     expect(body.params).toEqual({})
     expect(body.fixed).toEqual({ support_colour: '#E8532F', body: '#1b6ca8' })
+  })
+
+  it('shows no support material in the preview, as the public listing does (#6152)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
+      params: { body: { kind: 'choice', choices: [] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, SUPPORT.id],
+    }
+    expect(previewListing(draft, schema, [BLUE, SUPPORT], [], () => '').colours.map((f) => f.id)).toEqual([BLUE.id])
   })
 
   it('offers no colour of a support material ticked by hand (#6152)', () => {

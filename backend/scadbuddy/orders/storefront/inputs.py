@@ -64,6 +64,16 @@ class MixedMaterialError(ValueError):
     """A ``one_material`` listing's colours that share no one material (#6152)."""
 
 
+class PickColourClashError(ValueError):
+    """Two picks of one colour that name two filaments (#6152). A slot shows only a
+    colour, so it prints from one filament. ``name`` is the second pick's
+    ``picks.<name>``."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name!r} names another filament of a colour already picked")
+        self.name = name
+
+
 def customer_filaments(listing: Listing, filaments: Mapping[str, Filament]) -> list[Filament]:
     """The listing's filaments that the price book still has and a customer may pick:
     never a support material (#6152)."""
@@ -227,10 +237,13 @@ def checked_picks(
     parameter must be an offered ``// color`` parameter, and the filament one of the
     listing's that the price book still has, not a support material, whose colour is the
     parameter's value in ``values`` (`listing_values`' answer), casefolded. Else
-    `InputOutsideListingError` (``picks.<name>``, ``colour``)."""
+    `InputOutsideListingError` (``picks.<name>``, ``colour``). Two picks of one colour
+    must name one filament, as a slot prints from one: else `PickColourClashError`. The
+    render runs this check too, so the visitor learns it when the pair is chosen."""
     by_name = {p.name: p for p in _snapshot(listing).schema_.parameters}
     offered = {f.id: f for f in customer_filaments(listing, filaments)}
     picked: dict[str, Filament] = {}
+    by_colour: dict[str, str] = {}
     for name, filament_id in picks.items():
         parameter = by_name.get(name)
         filament = offered.get(filament_id)
@@ -244,6 +257,8 @@ def checked_picks(
             or filament.colour.casefold() != value.casefold()
         ):
             raise InputOutsideListingError(f"picks.{name}", "colour")
+        if by_colour.setdefault(filament.colour.casefold(), filament.id) != filament.id:
+            raise PickColourClashError(f"picks.{name}")
         picked[name] = filament
     return picked
 
@@ -299,14 +314,9 @@ def slots_from_picks(
     """``chosen`` (slot to filament id), with each slot it lacks filled from ``picked``:
     the picked filament whose colour is the slot's colour in the render
     (``job.result.colors``), casefolded (#6152). A slot no pick matches stays out, and
-    the shop picks it. A slot shows only a colour, so two picks of one colour must be one
-    filament: else `InputOutsideListingError` (``picks.<name>``, ``colour``) for the
-    second pick, and the order line never drops it."""
-    by_colour: dict[str, str] = {}
-    for name, filament in picked.items():
-        colour = filament.colour.casefold()
-        if by_colour.setdefault(colour, filament.id) != filament.id:
-            raise InputOutsideListingError(f"picks.{name}", "colour")
+    the shop picks it. ``picked`` is `checked_picks`' answer, so each colour has one
+    filament."""
+    by_colour = {f.colour.casefold(): f.id for f in picked.values()}
     filled = dict(chosen)
     for slot, colour in enumerate(render_colours):
         if slot not in filled and colour.casefold() in by_colour:

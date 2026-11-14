@@ -18,6 +18,7 @@ from scadbuddy.orders.storefront.drafts import _captions
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
     MixedMaterialError,
+    PickColourClashError,
     check_one_material,
     checked_picks,
     listing_reference,
@@ -455,15 +456,18 @@ def test_slots_take_the_pick_of_their_colour() -> None:
     }
 
 
-def test_two_picks_of_one_colour_are_one_filament() -> None:
-    # #6152: a slot shows only a colour, so it cannot take two filaments of one colour.
-    same = {"colour": WITH_RED_TOO[PLA_RED], "trim": WITH_RED_TOO[PLA_RED]}
-    assert slots_from_picks({}, same, ["#FF0000"]) == {0: PLA_RED}
-    two = {"colour": WITH_RED_TOO[PLA_RED], "trim": WITH_RED_TOO[PETG_RED]}
-    with pytest.raises(InputOutsideListingError) as refused:
-        slots_from_picks({}, two, ["#FF0000"])
+def test_two_picks_of_one_colour_are_one_filament(listing: Listing) -> None:
+    """#6152: a slot shows only a colour, so it cannot take two filaments of one colour.
+    The render refuses the pair, so the visitor learns it when it is chosen, not at the
+    add."""
+    two = _two_colours(listing, PLA_RED, PLA_RED_TOO, PLA_BLUE)
+    values = listing_values(two, {"colour": "#FF0000", "trim": "#FF0000"}, WITH_RED_TOO)
+    same = {"colour": PLA_RED, "trim": PLA_RED}
+    picked = checked_picks(two, values, same, WITH_RED_TOO)
+    assert slots_from_picks({}, picked, ["#FF0000"]) == {0: PLA_RED}
+    with pytest.raises(PickColourClashError) as refused:
+        checked_picks(two, values, {"colour": PLA_RED, "trim": PLA_RED_TOO}, WITH_RED_TOO)
     assert refused.value.name == "picks.trim"
-    assert refused.value.reason == "colour"
 
 
 def test_a_slot_is_never_a_support_filament(listing: Listing) -> None:
@@ -494,10 +498,25 @@ def test_the_estimate_prices_a_slot_at_the_pick(listing: Listing) -> None:
     assert _filament_for(listing, WITH_RED_TOO, {}, ["#FF0000"])["#ff0000"].id == PLA_RED
 
 
+def test_the_estimate_prices_a_locked_support_colour(listing: Listing) -> None:
+    """#6152: a support filament is never a customer's pick, but a locked support colour
+    is still a slot of the render, and the estimate prices it at that filament."""
+    natural = filament("pva-natural", "#F4F1E8", "PVA")
+    listing = _with_colours(listing, PLA_RED, natural.id)
+    chosen = _filament_for(listing, {**FILAMENTS, natural.id: natural}, {}, ["#FF0000", "#F4F1E8"])
+    assert chosen["#f4f1e8"].id == natural.id
+    assert chosen["#ff0000"].id == PLA_RED
+
+
 def test_picks_are_bounded() -> None:
     body = {"listing_id": "l", "listing_updated_at": NOW.isoformat()}
     with pytest.raises(ValidationError):
         RenderBody.model_validate({**body, "picks": {str(n): "f" for n in range(201)}})
+    # A key is bounded as a value is (#6152).
+    with pytest.raises(ValidationError):
+        RenderBody.model_validate({**body, "picks": {"k" * 201: "f"}})
+    with pytest.raises(ValidationError):
+        RenderBody.model_validate({**body, "picks": {"k": "f" * 201}})
     assert RenderBody.model_validate(body).picks == {}
 
 

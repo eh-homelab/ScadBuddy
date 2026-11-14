@@ -1295,3 +1295,40 @@ def test_a_one_material_listing_refuses_a_default_of_another_material(
     # All PLA passes.
     same = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": dense_red}}
     assert crud.post("/renders", json=same, key=uuid.uuid4().hex).status_code == 202
+
+
+def test_two_filaments_of_one_colour_are_refused_at_the_render(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    two_reds: tuple[dict[str, Any], str, str],
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """Two colour parameters, both red, picked at two red filaments. A slot shows only a
+    colour, so it prints from one filament: the render refuses the pair with 422
+    ``pick_colour_clash``, so the visitor learns it before the add (#6152)."""
+    _, cheap, dear = two_reds
+    source = SOURCE.replace(
+        "// %%LISTING%%\n", '// %%LISTING%% %%TWO_COLOURS%%\ntrim = "#FF0000"; // color\n'
+    )
+    made = client.post("/api/v1/models", json={"name": "Two", "source": source}, headers=press())
+    assert made.status_code == 201, made.text
+    slug = made.json()["slug"]
+    commit = client.get(f"/api/v1/models/{slug}").json()["version"]
+    choices = {"kind": "choice", "choices": ["#FF0000"]}
+    body = listing_body(
+        {"slug": slug, "commit": commit, "media_id": template["media_id"]},
+        dense_red,
+        params={"colour": choices, "trim": choices},
+        colours=[cheap, dear],
+        media_ids=[],
+    )
+    listing = publish(client, create(client, body)["id"])
+    values = render_body(listing, {"colour": "#FF0000", "trim": "#FF0000"})
+    clash = {**values, "picks": {"colour": cheap, "trim": dear}}
+    r = crud.post("/renders", json=clash, key=uuid.uuid4().hex)
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "pick_colour_clash"
+    assert r.json()["name"] == "picks.trim"
+    same = {**values, "picks": {"colour": dear, "trim": dear}}
+    assert crud.post("/renders", json=same, key=uuid.uuid4().hex).status_code == 202
