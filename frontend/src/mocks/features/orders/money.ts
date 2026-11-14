@@ -129,11 +129,6 @@ export function typedCharges<T extends { id?: string | null; auto?: boolean | nu
 /** #6133 — `store.py` `LIFECYCLE_CHARGES`: the kinds only the lifecycle writes. A replace keeps their rows. */
 export const LIFECYCLE_CHARGES = new Set(['purchase', 'handling'])
 
-/** `store.charges`' order: the typed rows, the purchases, the handling fee, then the auto tax. */
-export function chargeRank(c: { auto: boolean; kind: string; position: number }): number {
-  return (c.auto ? 3000 : c.kind === 'handling' ? 2000 : c.kind === 'purchase' ? 1000 : 0) + c.position
-}
-
 /** `money.skipped_for_currency`: the rules `depositFor` skips only for the order's currency. */
 function skippedForCurrency(policy: readonly DepositRule[], { hasRequest, firstOrder, currency, shopCurrency }: { hasRequest: boolean; firstOrder: boolean; currency: string; shopCurrency: string }): number[] {
   if (currency === shopCurrency) return []

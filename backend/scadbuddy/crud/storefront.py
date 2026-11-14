@@ -88,7 +88,13 @@ async def _multipart(
     yield dash + b'Content-Disposition: form-data; name="text"\r\n\r\n'
     yield text.encode() + b"\r\n"
     if purchase_links:
-        links = json.dumps([link.model_dump() for link in purchase_links], separators=(",", ":"))
+        # UTF-8, not ASCII escapes: `ensure_ascii` writes a character outside the BMP as a
+        # surrogate pair, 12 bytes, past `MAX_PURCHASE_LINKS_BYTES` (review of #6200).
+        links = json.dumps(
+            [link.model_dump() for link in purchase_links],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
         disposition = f'Content-Disposition: form-data; name="{PURCHASE_LINKS_FIELD}"\r\n\r\n'
         yield dash + disposition.encode()
         yield links.encode() + b"\r\n"

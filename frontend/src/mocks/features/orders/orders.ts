@@ -32,7 +32,8 @@ import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
 import { archiveCopies, pastPrint } from './pastPrints'
-import { balanceUnpaid, chargeRank, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
+import { compareCharges } from '../../../components/orders/chargeOrder'
+import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
 
 /**
  * `/api/v1/orders` (backend/scadbuddy/api/orders.py) with the lifecycle's rules
@@ -252,7 +253,7 @@ export function rederive(order: Order) {
 function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   // `store.charges`: the typed rows by position, then the auto tax row (#5281).
-  const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => chargeRank(a) - chargeRank(b))
+  const charges = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `orders/totals.py` `order_totals`: an accepted quote's total, else the newest quote's unit
   // price times the quantity now; an item with no quote is in no sum.
@@ -1094,7 +1095,7 @@ export const handlers = [
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
       replaceCharges(order.id, typedCharges(order.id, parsed))
       retax(order.id)
-      const after = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => chargeRank(a) - chargeRank(b)).map(line)
+      const after = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges).map(line)
       event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after })
       order.updated_at = now()
       return HttpResponse.json(order)

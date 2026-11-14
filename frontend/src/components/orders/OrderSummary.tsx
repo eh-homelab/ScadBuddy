@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { OrderCharge, OrderTotals } from '../../api/types'
 import { formatMoney } from '../../lib/money'
+import { compareCharges } from './chargeOrder'
 
 const KIND_TEXT: Record<OrderCharge['kind'], string> = { shipping: 'Shipping', discount: 'Discount', fee: 'Fee', tax: 'Tax', purchase: 'Bought for the customer', handling: 'Handling' }
 
@@ -20,7 +21,8 @@ function SummaryRow({ label, badge, amount, className = 'text-muted-foreground',
 /**
  * #4955 step 4, spec 2026-11-07 §4.1 — the order's summary: the items' subtotal (and the part
  * of it not yet accepted), each charge on its own line in the order it was added (a discount
- * is negative), the total, what was paid and the balance (`orders/totals.py`). `chargeBadge`
+ * is negative; `compareCharges`, as the backend lists them: the typed rows, then a purchase's
+ * and the handling fee's, #6133), the total, what was paid and the balance (`orders/totals.py`). `chargeBadge`
  * puts a small mark beside a charge's label (such as a computed tax's). #5281: the auto tax
  * row comes last among the charges, as the backend lists them; what of the deposit is still
  * due has its own row, and a note says when the unpaid balance holds the shipment.
@@ -47,7 +49,7 @@ export function OrderSummary({
         <SummaryRow label="Subtotal" amount={money(totals.subtotal_minor)} />
         {pending !== 0 && <SummaryRow label="of which not accepted" amount={money(pending)} className="pl-3 text-xs text-muted-foreground" amountClassName="text-xs text-muted-foreground" />}
         {[...charges]
-          .sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position)
+          .sort(compareCharges)
           .map((c) => (
             <SummaryRow key={c.id} label={`${KIND_TEXT[c.kind]} · ${c.label}`} badge={chargeBadge?.(c)} amount={money(c.amount_minor)} />
           ))}

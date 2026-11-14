@@ -1519,8 +1519,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   is not gated. The customer's order view offers no accept while one is pending
   (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
   /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
-  `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, each under
-  `_run_linked`; no `Idempotency-Key` (the `purchase:` source and the link's state make
+  `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, the three writes
+  each under `_run_linked`; no `Idempotency-Key` (the `purchase:` source and the link's state make
   a repeat safe). Agent `order_purchases` (read), `order_purchase_record`,
   `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
   to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
