@@ -865,6 +865,9 @@ async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
         except ApiError as error:
             logger.warning("a filament was added with no density: %s", error.detail)
             groups = []
+        except ValidationError as error:
+            logger.warning("a filament was added with no density: %s", error)
+            groups = []
         densities = await asyncio.to_thread(orders.densities)
         found = density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
         if found is not None:

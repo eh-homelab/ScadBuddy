@@ -960,8 +960,9 @@ class SpoolImportRow(BaseModel):
     #: The record's density after the import (#6136): its own, or the one the import
     #: read through Bambuddy when it had none.
     density_g_cm3: str | None = None
-    #: Where the import read ``density_g_cm3`` from this time; ``None`` when it kept
-    #: the record's own, or found none.
+    #: The record's ``density_profile`` after the import: where this import read
+    #: ``density_g_cm3`` from, or where a density it kept was read from before;
+    #: ``None`` for a density a person set, or none.
     density_profile: str | None = None
 
 

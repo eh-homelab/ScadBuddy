@@ -263,6 +263,9 @@ def test_a_filament_added_by_hand_takes_its_spools_density(client: TestClient) -
     routes["spools"].mock(return_value=httpx.Response(503))
     empty = tri_color(client, colour="#FF0000")
     assert empty["density_g_cm3"] is None
+    # Nor does an answer of another shape.
+    routes["spools"].mock(return_value=httpx.Response(200, json=[{"material": "PLA"}]))
+    assert tri_color(client, colour="#FFFF00")["density_g_cm3"] is None
 
 
 @respx.mock

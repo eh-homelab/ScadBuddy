@@ -127,7 +127,7 @@ function importSpools(): SpoolImportRow[] {
     const action = Number(previous) === Number(cost) && !fill ? 'unchanged' : 'updated'
     if (action === 'updated') Object.assign(found, { cost_per_kg: cost, updated_at: now() })
     if (fill) Object.assign(found, { density_g_cm3: fill.density_g_cm3, density_profile: fill.profile })
-    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: fill?.profile ?? null }]
+    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: found.density_profile ?? null }]
   })
 }
 

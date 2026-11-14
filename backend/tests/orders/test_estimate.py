@@ -101,6 +101,22 @@ def test_a_filament_with_no_density_has_no_estimate() -> None:
         )
 
 
+def test_a_colour_with_no_volume_needs_no_density() -> None:
+    """A colour whose parts all have no volume weighs nothing, so its filament needs no
+    density, as before #6136."""
+    plain = filament("plain", "#0000FF", "20", density=None)
+    by_colour = {"#ff0000": RED, "#0000ff": plain}
+    est = rough_estimate(
+        [part(1, 1, "#FF0000", 10000.0), part(1, 2, "#0000FF", None)],
+        lambda c: by_colour[c.casefold()],
+        POLICY,
+        currency="USD",
+        factor="1",
+    )
+    assert est.unknown_parts == 1
+    assert [d.filament_id for d in est.densities] == [RED.id]
+
+
 def test_the_estimate_says_which_density_it_used() -> None:
     """#6136: each filament's density, and where a filled one came from."""
     filled = filament("filled", "#FF0000", "20", density="1.32").model_copy(

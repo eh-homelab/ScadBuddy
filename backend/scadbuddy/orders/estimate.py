@@ -160,9 +160,10 @@ def rough_estimate(
         record = filament_for(part.colour)
         slot = slots.setdefault(record.id, len(slots) + 1)
         records[slot] = record
-        if slot not in used:
-            used[slot] = used_density(record)
         if part.volume_mm3 is not None:
+            # Only a colour that weighs something needs its filament's density.
+            if slot not in used:
+                used[slot] = used_density(record)
             volumes.setdefault((part.plate, slot), []).append(part.volume_mm3)
     plates: list[Plate] = []
     total = Decimal(0)
