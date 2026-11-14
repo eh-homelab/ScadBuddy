@@ -8,6 +8,7 @@ only (spec 2026-10-01 §7)."""
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -115,6 +116,46 @@ async def test_nothing_to_ask_asks_nothing() -> None:
         assert await remote.record_lan_picks(RUN, FIRST, None, []) == 0
         await remote.seen(None, [""])
         await remote.seen("00000000-0000-4000-8000-0000000000ff", ["", ""])
+    finally:
+        await client.aclose()
+
+
+async def test_a_retried_follow_attempt_s_settle_lan_replays_the_earlier_answer() -> None:
+    """`WriteKeys` ``rack``: a retried attempt of one follow activity sends its same-body
+    ``settle_lan`` under the key the earlier attempt used, so the API's ledger answers what
+    that attempt's settle wrote, never runs it again. The ledger is a stand-in that keeps
+    each key's body and reply, as `crud/idempotency.py` does."""
+    ledger: dict[str, tuple[bytes, dict[str, Any]]] = {}
+    ran: list[bytes] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"{BASE}/rack/settle-lan"
+        key = request.headers["Idempotency-Key"]
+        if key not in ledger:
+            ran.append(request.content)
+            # The first run settles two picks; a second run would find none left.
+            ledger[key] = (request.content, {"written": 2 if len(ran) == 1 else 0})
+        body, reply = ledger[key]
+        assert body == request.content
+        return httpx.Response(200, json=reply, headers={"X-ScadBuddy-Crud": "1"})
+
+    client = CrudClient(
+        "http://api", "print", ServiceAuth(FixedToken()), transport=httpx.MockTransport(answer)
+    )
+
+    # One store, as the print worker holds one: `WriteKeys` counts each attempt apart.
+    remote = RemoteRackUsage(client)
+
+    async def settle() -> int:
+        return await remote.settle_lan(RUN, FIRST)
+
+    try:
+        first = ActivityEnvironment()
+        retried = ActivityEnvironment()
+        retried.info = dataclasses.replace(first.info, attempt=first.info.attempt + 1)
+        assert await first.run(settle) == 2
+        assert await retried.run(settle) == 2
+        assert len(ran) == 1 and len(ledger) == 1
     finally:
         await client.aclose()
 

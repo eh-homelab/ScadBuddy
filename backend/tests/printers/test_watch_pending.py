@@ -1,7 +1,8 @@
 """The printer watch's reports when a write fails (#5298 Task 30 re-review N1, N3, N4):
-a report whose write failed is kept and written again, one whose answer was lost under
-the same Idempotency-Key (so the API answers the print end that write showed, which the
-watch then settles), one that never ran under a new key; ``printer.report`` is announced
+a report whose write failed is kept and written again, one whose answer was lost (on any
+try of its call) under the same Idempotency-Key until a resend lands (so the API answers
+the print end that write showed, which the watch then settles), one that never ran under
+a new key; ``printer.report`` is announced
 only once the write lands; a cancel passes through; and a failure leaves something to
 search for in the log, never the report. No database: a scripted store and printer."""
 
@@ -258,20 +259,110 @@ async def test_a_failure_is_logged_to_be_found_never_with_the_report(
         assert all(secret not in repr(vars(record)) for record in caplog.records)
 
 
-async def test_an_owed_report_answered_with_a_5xx_goes_pending() -> None:
-    """Re-review D1(a): a route's 5xx means the write raised and the ledger recorded
-    nothing, so the resend's 5xx stops owing it: the newer report is written under a key
-    of its own, and the quiet tick touches again."""
+#: A resend's answers that do not land: none says anything of the first send, which may
+#: have committed, so the report stays owed under its key.
+NOT_LANDED = [
+    CrudUnavailableError("500", "unavailable"),
+    CrudUnavailableError("503", "database_unavailable"),
+    CrudUnavailableError("no answer", "transport"),
+    CrudUnavailableError("no connection", "unreached"),
+    CrudUnavailableError("not served here", "route_missing"),
+    CrudRefusedError(429, {"type": "x", "reason": "busy"}),
+]
+NOT_LANDED_IDS = ["5xx", "database-unavailable", "transport", "unreached", "route-missing", "429"]
+
+
+@pytest.mark.parametrize("answer", NOT_LANDED, ids=NOT_LANDED_IDS)
+async def test_an_owed_report_that_does_not_land_on_its_resend_stays_owed_under_its_key(
+    answer: Exception,
+) -> None:
+    """claude-review on #6125: a resend that does not land says nothing of the first
+    send, which may have committed. The report stays owed and is sent again under the
+    same key, before the newer report, which then gets a key of its own."""
     log: list[Any] = []
     lost = CrudUnavailableError("no answer", "transport")
-    server = CrudUnavailableError("500", "unavailable")
     newer = {"gcode_state": "IDLE"}
-    watches, store = _watch(log, [lost, server, None])
+    watches, store = _watch(log, [lost, answer, PrintEnd("sub-1", timed=True), None])
     await _follow_until(watches, Lan([FINISH, newer]), lambda: ("touch", None) in log)
-    (r1, k1), (r2, k2), (r3, k3) = store.puts[:3]
-    assert (r1, r2, r3) == (FINISH, FINISH, newer)
-    assert k1 == k2 != k3
-    assert len(store.puts) == 3
+    (r1, k1), (r2, k2), (r3, k3), (r4, k4) = store.puts[:4]
+    assert (r1, r2, r3, r4) == (FINISH, FINISH, FINISH, newer)
+    assert k1 == k2 == k3 != k4
+    assert len(store.puts) == 4
+    assert log.count(("settle", "sub-1")) == 1
+
+
+@pytest.mark.parametrize("answer", NOT_LANDED, ids=NOT_LANDED_IDS)
+async def test_every_resend_that_does_not_land_counts_toward_the_bound(
+    answer: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each resend counts toward `OWED_RESENDS`, whatever it answered: past it the report
+    is given up (logged once), written under a new key, and the touch runs again."""
+    log: list[Any] = []
+    lost = CrudUnavailableError("no answer", "transport")
+    watches, store = _watch(log, [lost, *[answer] * OWED_RESENDS, None])
+    with caplog.at_level(logging.WARNING):
+        await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    keys = [key for _, key in store.puts]
+    assert len(keys) == OWED_RESENDS + 2
+    assert len(set(keys[: OWED_RESENDS + 1])) == 1
+    assert keys[-1] != keys[0]
+    assert len([r for r in caplog.records if r.getMessage() == WATCH_OWED_GIVEN_UP]) == 1
+
+
+async def test_an_owed_report_refused_on_its_resend_is_given_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A resend refused with a 4xx other than 429 would be refused again: the report is
+    given up, logged and counted, never sent again, and the quiet tick touches."""
+    log: list[Any] = []
+    failed = Counter("refused_resend", "refused_resend", registry=CollectorRegistry())
+    lost = CrudUnavailableError("no answer", "transport")
+    refused = CrudRefusedError(422, {"type": "x", "reason": "bad"})
+    watches, store = _watch(log, [lost, refused, None], failed=failed)
+    with caplog.at_level(logging.WARNING):
+        await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
+    keys = [key for _, key in store.puts]
+    assert len(keys) == 2 and keys[0] == keys[1]
+    (given_up,) = [r for r in caplog.records if r.getMessage() == WATCH_OWED_GIVEN_UP]
+    assert given_up.given_up is True  # type: ignore[attr-defined]
+    # The lost answer, the refusal, and the giving up.
+    assert failed._value.get() == 3
+
+
+async def test_an_owed_report_resent_through_a_503_settles_and_nudges_once() -> None:
+    """The review's sequence: the first write's answer is lost, its resend gets a 503,
+    and the next resend under the same key lands and replays the first write's answer:
+    the end is settled once and the start nudged once."""
+    log: list[Any] = []
+    lost = CrudUnavailableError("no answer", "transport")
+    busy = CrudUnavailableError("503", "database_unavailable")
+    running = {"gcode_state": "RUNNING", "subtask_name": "sub-2"}
+    replay = Advance(ended=PrintEnd("sub-1", timed=True), started="sub-2")
+    watches, store = _watch(log, [lost, busy, replay])
+    nudged: list[str] = []
+
+    async def nudge(printer_id: str, start: JobStart) -> None:
+        nudged.append(start.subtask_name)
+
+    watches.nudge = nudge
+    await _follow_until(watches, Lan([running]), lambda: ("touch", None) in log)
+    keys = [key for _, key in store.puts]
+    assert len(keys) == 3 and len(set(keys)) == 1
+    assert log.count(("settle", "sub-1")) == 1
+    assert nudged == ["sub-2"]
+
+
+async def test_a_first_write_with_an_earlier_lost_try_is_owed() -> None:
+    """claude-review on #6125: a call whose first try lost its answer and whose retry got
+    a 5xx may have landed (`CrudUnavailableError.maybe_sent`): it is owed and sent again
+    under its key, whose replay answers the end."""
+    log: list[Any] = []
+    retried = CrudUnavailableError("500", "unavailable", maybe_sent=True)
+    watches, store = _watch(log, [retried, PrintEnd("sub-1", timed=True)])
+    await _follow_until(watches, Lan([FINISH]), lambda: ("event", "printer.report") in log)
+    first, second = store.puts[0], store.puts[1]
+    assert first == second == (FINISH, first[1])
+    assert log.count(("settle", "sub-1")) == 1
 
 
 async def test_a_first_5xx_is_never_owed() -> None:
@@ -302,28 +393,6 @@ async def test_an_owed_report_is_given_up_after_its_resends(
     assert given_up.given_up is True  # type: ignore[attr-defined]
     # Each lost answer, and the giving up.
     assert failed._value.get() == OWED_RESENDS + 2
-
-
-@pytest.mark.parametrize(
-    "answer",
-    [
-        CrudRefusedError(429, {"type": "x", "reason": "busy"}),
-        CrudUnavailableError("no connection", "unreached"),
-        CrudUnavailableError("not served here", "route_missing"),
-    ],
-    ids=["4xx", "unreached", "route-missing"],
-)
-async def test_an_owed_report_refused_or_never_run_on_its_resend_is_dropped(
-    answer: Exception,
-) -> None:
-    """A resend refused (a 4xx) or never run (a passing failure) stops owing the report:
-    it is written again under a new key."""
-    log: list[Any] = []
-    lost = CrudUnavailableError("no answer", "transport")
-    watches, store = _watch(log, [lost, answer, None])
-    await _follow_until(watches, Lan([FINISH]), lambda: ("touch", None) in log)
-    keys = [key for _, key in store.puts]
-    assert len(keys) == 3 and keys[0] == keys[1] != keys[2]
 
 
 @pytest.mark.parametrize(

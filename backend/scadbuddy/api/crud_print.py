@@ -1343,14 +1343,23 @@ async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
 # -- the rack hotends' usage (Q27, area ``rack``, #5298 Task 30) -------------------------
 
 
+#: The most serials one rack call takes. A rack holds six hotends (`rack/rank.py`
+#: `POSITIONS`, positions 1-6) and the callers send one rack's at a time; 64 is far above
+#: that, and bounds the ``IN`` list a buggy caller could send.
+RACK_SERIALS_MAX = 64
+#: The longest serial taken: a hotend's serial is a short code.
+RACK_SERIAL_CHARS = 128
+RackSerial = Annotated[str, Field(max_length=RACK_SERIAL_CHARS)]
+
+
 class RackSeen(BaseModel):
     #: The registry printer (#5167); none for a printer the registry does not hold.
     printer: UUID | None = None
-    serials: list[str]
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
 
 
 class RackSerials(BaseModel):
-    serials: list[str]
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
 
 
 class RackUsageRow(BaseModel):

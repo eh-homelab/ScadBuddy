@@ -19,7 +19,9 @@ not make, is logged and counted (`WATCH_WRITE_FAILED`) and the watch goes on; th
 is written at the next quiet tick or report, and announced only once written. A report
 whose answer was lost (it may have landed) is sent again under its Idempotency-Key before
 any newer one, so the API answers the print end that write showed, at most
-`OWED_RESENDS` times. The API writes no report older than the row's. On the print worker
+`OWED_RESENDS` times: it stays owed under that key whatever a resend answers, until one
+lands, except a refusal (a 4xx other than 429), which gives it up. The API writes no
+report older than the row's. On the print worker
 each write is a CRUD call bounded well inside the heartbeat timeout (`crud/print.py`
 `WATCH_CALL_BUDGET`).
 
@@ -74,22 +76,24 @@ HEARD_EVERY = 10.0
 #: could not write a report or touch its row; counted on `Metrics.printer_watch_write_failed`.
 WATCH_WRITE_FAILED = "a printer watch could not write its report"
 
-#: How a report's write ended (`WatchActivities._write`): written; sent and its answer
-#: lost, so it may have landed and is sent again under its key; not written, so it is
-#: written again at the next quiet tick; or refused (a 4xx other than 429), so it is
-#: dropped: sending it again would be refused again and hold back the touch.
+#: How a report's write ended (`WatchActivities._write`): written; sent and an answer
+#: lost (on any try of the call), so it may have landed and is sent again under its key;
+#: not written, so it is written again at the next quiet tick; or refused (a 4xx other
+#: than 429), so it is dropped: sending it again would be refused again and hold back the
+#: touch.
 WriteOutcome = Literal["written", "owed", "unwritten", "refused"]
 WRITTEN: WriteOutcome = "written"
 OWED: WriteOutcome = "owed"
 UNWRITTEN: WriteOutcome = "unwritten"
 REFUSED: WriteOutcome = "refused"
-#: How many times an owed report is sent again under its key before it is given up: its
+#: How many times an owed report is sent again under its key before it is given up (every
+#: resend counts, whatever it answered, except one that lands): its
 #: print end is then left to ``lan_wait``, the run's follow or the pick's age, and the
 #: report itself, or a newer one, is written under a new key. Bounded, so an API whose
 #: answers keep being lost never freezes the card or stops the touch.
 OWED_RESENDS = 3
 #: Logged, and counted on `Metrics.printer_watch_write_failed`, when an owed report is
-#: given up (``given_up`` true).
+#: given up (``given_up`` true): after `OWED_RESENDS`, or when a resend is refused.
 WATCH_OWED_GIVEN_UP = "a printer watch gave up a report whose answer was lost"
 #: How far back an open connection proves the printer was there: paho closes a link
 #: with no inbound traffic within two keepalives, so a touch stamps ``now`` less this
@@ -229,9 +233,12 @@ class WatchActivities:
         nudges: set[asyncio.Task[None]] = set()
         #: A report sent whose answer was lost (it may have landed), with its
         #: Idempotency-Key and how many times it was sent again. It is sent again under
-        #: that key before any newer report, so the API answers the print end that write
-        #: showed; a newer one waits in ``pending``. One write per turn of the loop, so
-        #: each fits between heartbeats. After `OWED_RESENDS` it is given up.
+        #: that key before any newer report, so the API answers the print end and start
+        #: that write showed; a newer one waits in ``pending``. A resend that does not
+        #: land (a 5xx, a lost answer, one never run, a 429) says nothing of the first
+        #: send, so the report stays owed under its key. One write per turn of the loop,
+        #: so each fits between heartbeats. After `OWED_RESENDS`, or on a resend refused
+        #: with a 4xx other than 429, it is given up.
         owed: tuple[LanReport, str, int] | None = None
 
         async def flush(report: LanReport | None) -> None:
@@ -242,13 +249,15 @@ class WatchActivities:
                 sent, key, resends = owed
                 outcome = await self._write(printer_id, sent, key, nudges)
                 owed = None
-                if outcome == OWED:
-                    if resends + 1 < OWED_RESENDS:
-                        owed = (sent, key, resends + 1)
-                    else:
-                        self._gave_up(printer_id)
                 if outcome == WRITTEN:
                     announced = self._announce(printer_id, sent, announced)
+                elif outcome == REFUSED:
+                    # Sent again it would be refused again: dropped, not re-sent.
+                    self._gave_up(printer_id)
+                elif resends + 1 < OWED_RESENDS:
+                    owed = (sent, key, resends + 1)
+                else:
+                    self._gave_up(printer_id)
                 if report is not None:
                     pending = report
                 elif owed is None and outcome in (UNWRITTEN, OWED) and pending is None:
@@ -368,7 +377,8 @@ class WatchActivities:
     ) -> WriteOutcome:
         """``report`` written under the Idempotency-Key ``key``: `WRITTEN`, `OWED` when
         its answer was lost and it may have landed (send it again under ``key``), or
-        `UNWRITTEN` when it never ran or the API answered 429 or a 5xx, or `REFUSED` when
+        `UNWRITTEN` when no try may have run it (never sent, or the API answered 429 or a
+        5xx to every try that was sent), or `REFUSED` when
         the API refused it with any other 4xx (dropped). A failed write is logged and
         counted, and the watch goes on: a stalled API never fails the attempt, which
         would redial the printer. On the print worker each call is bounded
@@ -386,9 +396,13 @@ class WatchActivities:
             )
         except Exception as error:
             self._failed("put", printer_id, error)
-            # Only a lost answer may have landed: a route's 5xx means the write raised
-            # and its ledger recorded nothing, and a passing failure never ran it.
-            landed = isinstance(error, CrudUnavailableError) and error.failure == "transport"
+            # Only a lost answer may have landed, on any try of the call: a try sent whose
+            # answer was lost may have committed even when a later try got a 5xx or never
+            # connected. A call whose every try got a 5xx (the write raised, its ledger
+            # recorded nothing) or never ran is not written. A refusal (`CrudRefusedError`)
+            # ends the call at once, even after a lost try: that retry carried the same key
+            # and body, so the ledger would have replayed a write the lost try committed.
+            landed = isinstance(error, CrudUnavailableError) and error.maybe_sent
             if landed:
                 return OWED
             if isinstance(error, CrudRefusedError) and error.status != 429:
