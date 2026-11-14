@@ -35,10 +35,12 @@ speed of the round trip.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal
 
 from scadbuddy.bambuddy.preview import SlicePreview
 from scadbuddy.core.events import EventBus, PreviewSliceEvent, emit
@@ -87,6 +89,9 @@ class PreviewFollows:
         self._running: dict[tuple[Slicer, int, str], asyncio.Task[None]] = {}
         #: Slices whose claim is on its way: a second read here does not claim again.
         self._claiming: set[tuple[Slicer, int, str]] = set()
+        #: Claims whose read was cancelled, and the releases of those that came back
+        #: True: `aclose` waits for them.
+        self._abandoned: set[asyncio.Future[Any]] = set()
 
     @property
     def following(self) -> int:
@@ -122,10 +127,22 @@ class PreviewFollows:
         claim = f"{slicer}:{job_id}:{subject}"
         if self.claims is not None:
             self._claiming.add(key)
+            # Shielded (#6162): a cancelled read does not stop the thread, which may
+            # still take the lock. When the read is cancelled, `_abandon` settles the
+            # claim once it answers, and the slice stays in `_claiming` until then.
+            pending = asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(contextvars.copy_context().run, self.claims.claim, claim)
+            )
+            abandoned = False
             try:
-                mine = await asyncio.to_thread(self.claims.claim, claim)
+                mine = await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                abandoned = True
+                self._abandon(self.claims, key, claim, pending)
+                raise
             finally:
-                self._claiming.discard(key)
+                if not abandoned:
+                    self._claiming.discard(key)
             if not mine:
                 # Another replica follows it, and its events reach this dialog's socket.
                 return True
@@ -133,6 +150,51 @@ class PreviewFollows:
         self._running[key] = task
         task.add_done_callback(lambda _: self._running.pop(key, None))
         return True
+
+    def _abandon(
+        self,
+        claims: FollowClaims,
+        key: tuple[Slicer, int, str],
+        claim: str,
+        pending: asyncio.Future[bool],
+    ) -> None:
+        """Settle the claim of a cancelled read once ``pending`` answers.
+
+        A read here meanwhile was told ``followed: true``, and its dialog stopped its
+        timer, but no follow uses this claim. So a claim that came back True is
+        released, and then, as at the end of a follow, ``preview_slice.progress`` is
+        published: the dialog reads again, and that read follows the slice, here or on
+        another replica. A claim that failed publishes the same. A claim that came back
+        False needs nothing: another replica follows the slice."""
+        self._abandoned.add(pending)
+
+        def answered(done: asyncio.Future[bool]) -> None:
+            self._abandoned.discard(done)
+            failed = done.cancelled() or done.exception() is not None
+            if not failed and not done.result():
+                self._claiming.discard(key)
+                return
+            release = asyncio.ensure_future(
+                self._release_abandoned(None if failed else claims, key, claim)
+            )
+            self._abandoned.add(release)
+            release.add_done_callback(self._abandoned.discard)
+
+        pending.add_done_callback(answered)
+
+    async def _release_abandoned(
+        self, claims: FollowClaims | None, key: tuple[Slicer, int, str], claim: str
+    ) -> None:
+        slicer, job_id, _ = key
+        try:
+            if claims is not None:
+                await asyncio.to_thread(claims.release, claim)
+        finally:
+            self._claiming.discard(key)
+            emit(
+                self.events,
+                PreviewSliceEvent(kind="preview_slice.progress", slicer=slicer, job_id=job_id),
+            )
 
     async def _follow(
         self,
@@ -186,5 +248,8 @@ class PreviewFollows:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # A claim still answering, then the release of one that came back True.
+        while self._abandoned:
+            await asyncio.gather(*list(self._abandoned), return_exceptions=True)
         if self.claims is not None:
             await asyncio.to_thread(self.claims.close)
