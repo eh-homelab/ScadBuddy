@@ -20,6 +20,7 @@ out or crashed, the download failed) raises, so Temporal tries it again; `failed
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import tempfile
 from pathlib import Path
@@ -74,9 +75,18 @@ async def _download(http: httpx.AsyncClient, read: SourceRead, to: Path) -> str:
                 out.write(chunk)
     if taken != size:
         raise _SizeMismatchError
-    if read.sha256 is not None and base64.b64encode(digest.digest()).decode() != read.sha256:
+    # S3 gives the checksum as base64 of the raw digest; compared as bytes, a malformed one
+    # is a mismatch.
+    if read.sha256 is not None and _checksum(read.sha256) != digest.digest():
         raise FrozenCopyChangedError("the frozen copy does not hash to its SHA-256")
     return digest.hexdigest()
+
+
+def _checksum(value: str) -> bytes | None:
+    try:
+        return base64.b64decode(value, validate=True)
+    except binascii.Error:
+        return None
 
 
 class IntakeActivities:
