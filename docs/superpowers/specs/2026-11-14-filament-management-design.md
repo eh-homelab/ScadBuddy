@@ -413,8 +413,8 @@ else SB proposes a new type for a person to confirm.
 ## 9. Invoice import flow
 
 The owner's existing skill is the source for this flow:
-`eh-homelab/clusters` `.claude/skills/bambuddy-filament-intake/SKILL.md`, with
-`scripts/intake.py` and `scripts/3dfp.mjs`. It does this work against BB today.
+`.claude/skills/filament-intake/SKILL.md` (moved from eh-homelab/clusters in
+#6222), with `scripts/intake.py` and `scripts/3dfp.mjs`. It does this work against BB today.
 SB makes it native. Its rules, as SB rules:
 
 - **Diff before create.** Before it proposes any spool, the session compares
@@ -484,7 +484,7 @@ Steps:
 
 A new plugin skill, `plugins/scadbuddy/skills/filament/SKILL.md`, covers import,
 types, instances, tags and the ledger. It takes over the rules of
-`bambuddy-filament-intake`, which then points to it. The `print` skill says
+`.claude/skills/filament-intake`, which then points to it. The `print` skill says
 "Bambuddy owns printers, spools, presets ..."; that changes to say SB owns
 spools.
 
