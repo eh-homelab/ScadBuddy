@@ -477,8 +477,13 @@ def test_an_unexpected_density_read_error_is_raised_as_itself(
     bambuddy([spool(1, cost_per_kg=20)])
 
     async def broken(*args: object) -> dict[int, str]:
-        raise RuntimeError("tray read broke")
+        try:
+            raise KeyError("decode")
+        except KeyError as error:
+            raise RuntimeError("tray read broke") from error
 
     monkeypatch.setattr(orders_bambuddy, "_tray_presets", broken)
-    with pytest.raises(RuntimeError, match="tray read broke"):
+    with pytest.raises(RuntimeError, match="tray read broke") as raised:
         client.post(IMPORT)
+    # Its own cause stays (#6188 review).
+    assert isinstance(raised.value.__cause__, KeyError)
