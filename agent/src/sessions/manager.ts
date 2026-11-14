@@ -1668,7 +1668,8 @@ export class SessionManager {
    * Branches a session. The child copies no transcript: it records the cut (`fork_parent_id`,
    * `fork_cut`), and the store reads the parent's entries through it, then the child's own
    * (store.ts, plan 2026-10-13 Step 6.5). The child is owned by whoever forked it, records its
-   * parent, and starts with the parent's conversation events so attach shows its history.
+   * parent, and reads the parent's conversation events and the images they name through its event
+   * cut (`fork_event_cut`, eventLog.ts, blobs.ts, #4212), so attach shows its history; it copies none.
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a budget of its own. Like `raiseBudget`, that is
