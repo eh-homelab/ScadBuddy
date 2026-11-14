@@ -141,7 +141,7 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   took N s to render. The store's preview and price give up after about 100 s" (#6120).
 
 `test-fixtures/storefront/sell-draft-vectors.json` pins `defaultsFor`'s rules, and `listingInput`'s choices where a case has `input`; the frontend
-test reads it, and the assistant's tool test (§6) will read it too when that tool lands.
+test and the assistant's tool test (§6) both read it.
 
 ## 5. A simpler editor
 

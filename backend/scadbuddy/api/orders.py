@@ -161,7 +161,7 @@ from scadbuddy.orders.store import (
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.links import LinkState
 from scadbuddy.orders.storefront.mail import ORDER_MAIL_MAX, OrderMail
-from scadbuddy.orders.storefront.staged_files import poke, uploads_of
+from scadbuddy.orders.storefront.staged_files import poke_order
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.credentials import KekMissingError
@@ -1465,7 +1465,7 @@ async def cancel_order(
 async def _tell_staged(state: AppState, order_id: str, signal: str) -> None:
     """Wake the watchers of the order's staged files after an end or a reopen; each reads
     the order again, so a lost signal costs time, never a file (#6164)."""
-    await poke(state, await asyncio.to_thread(uploads_of, state, order_id=order_id), signal)
+    await poke_order(state, order_id, signal)
 
 
 @router.post("/{order_id}/hold", response_model=Order, summary="Put an order on hold")

@@ -307,16 +307,30 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             spools = [s for s in await client.spools() if s.archived_at is None]
-            async with asyncio.TaskGroup() as reads:
-                presets = (
-                    reads.create_task(_density_read(client.local_presets(), "local presets"))
-                    if any((s.slicer_filament or "").strip().isdigit() for s in spools)
-                    else None
-                )
-                trays = reads.create_task(_density_read(_tray_presets(client, spools), "AMS trays"))
-                catalogue = reads.create_task(
-                    _density_read(client.filament_catalog(), "filament catalogue")
-                )
+            failed: BaseException | None = None
+            try:
+                async with asyncio.TaskGroup() as reads:
+                    presets = (
+                        reads.create_task(_density_read(client.local_presets(), "local presets"))
+                        if any((s.slicer_filament or "").strip().isdigit() for s in spools)
+                        else None
+                    )
+                    trays = reads.create_task(
+                        _density_read(_tray_presets(client, spools), "AMS trays")
+                    )
+                    catalogue = reads.create_task(
+                        _density_read(client.filament_catalog(), "filament catalogue")
+                    )
+            except ExceptionGroup as group:
+                # The first read's own error, not the group: the log and the trace show
+                # what failed, as before the reads ran at once (#6186 review). It is
+                # raised after this block, so its own cause stays; any other read that
+                # failed is logged here (#6188 review).
+                failed, *others = group.exceptions
+                for other in others:
+                    logger.warning("another density read failed too", exc_info=other)
+            if failed is not None:
+                raise failed
             local_read = None if presets is None else presets.result()
             local = _local_densities(local_read.filament) if local_read is not None else {}
             return spool_groups(

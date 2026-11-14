@@ -546,6 +546,26 @@ def test_a_file_of_a_cancelled_order_is_kept_30_days_then_cleaned_up(
     assert source == {"status": "declined", "status_reason": ENDED, "upload_id": None}
 
 
+def test_a_cancel_whose_staged_files_cannot_be_read_still_answers(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cancel is committed before its watchers are told: a failed read is logged, and
+    the hourly recheck catches up (#6164)."""
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+
+    def broken(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise RuntimeError("the database went away")
+
+    monkeypatch.setattr(staged_files, "uploads_of", broken)
+    assert s3_api.post(f"/api/v1/orders/{order_id}/cancel").status_code == 200
+    assert (slot_id, "closed") not in watcher.signals
+
+
 def test_a_reopen_within_the_grace_keeps_the_file_with_no_deadline(
     asks: CrudCaller,  # noqa: F811
     s3_api: TestClient,  # noqa: F811
