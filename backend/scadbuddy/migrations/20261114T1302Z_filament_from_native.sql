@@ -112,11 +112,13 @@ INSERT INTO filament_spool_events
     (spool_id, at, kind, source, delta_g, ref_kind, ref_id, data)
 SELECT coalesce(l.physical_spool_id, u.spool_id),
        coalesce(u.settled_at, u.created_at),
-       CASE WHEN u.applied IS TRUE THEN 'print_ended' ELSE 'print_started' END,
-       CASE WHEN u.applied IS TRUE THEN 'print_actual' ELSE 'print_estimate' END,
-       -u.grams,
+       CASE WHEN u.settled_at IS NULL THEN 'print_started' ELSE 'print_ended' END,
+       CASE WHEN u.settled_at IS NULL THEN 'print_estimate' ELSE 'print_actual' END,
+       CASE WHEN u.settled_at IS NULL OR u.applied IS TRUE THEN -u.grams ELSE 0 END,
        'print_run',
        u.run_id || '/' || u.subtask_name || '/' || u.slot_id,
-       CASE WHEN u.applied IS TRUE THEN '{"basis": "sliced"}'::jsonb ELSE '{}'::jsonb END
+       CASE WHEN u.settled_at IS NULL THEN '{}'::jsonb
+            WHEN u.applied IS TRUE THEN '{"basis": "sliced"}'::jsonb
+            ELSE '{"basis": "not_applied"}'::jsonb END
 FROM native_spool_uses u
 LEFT JOIN spool_record_links l ON l.provider = 'native' AND l.record_id = u.spool_id::text;

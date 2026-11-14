@@ -57,6 +57,11 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             (live[0],),
         )
         conn.execute(
+            "INSERT INTO native_spool_uses (run_id, subtask_name, slot_id, spool_id, grams,"
+            " settled_at, applied) VALUES ('r3', 's', 2, %s, 7, now(), false)",
+            (live[0],),
+        )
+        conn.execute(
             "INSERT INTO native_spool_uses (run_id, subtask_name, slot_id, spool_id, grams)"
             " VALUES ('r2', 's', 1, %s, 3)",
             (live[0],),
@@ -125,4 +130,5 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
         assert uses == [
             ("print_ended", "print_actual", -12.5, "print_run", "r1/s/0", "sliced"),
             ("print_started", "print_estimate", -3, "print_run", "r2/s/1", None),
+            ("print_ended", "print_actual", 0, "print_run", "r3/s/2", "not_applied"),
         ]
