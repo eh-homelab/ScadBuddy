@@ -1,14 +1,11 @@
-"""#5210: each caller's own role holds exactly its list (`auth/caller_grants.py`), and a
-worker on such a role (the print worker's) waits for the API rather than migrating
-(`render/worker_role.py` `wait_until_ready`)."""
+"""#5210: each caller's own role holds exactly its list (`auth/caller_grants.py`). The
+print worker's list is empty (#5298 Task 31): it holds no pool."""
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 import psycopg
 import pytest
@@ -17,25 +14,12 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.auth.caller_grants import (
-    GRANTS,
-    SEQUENCES,
-    grant_callers,
-    open_for_caller,
-)
+from scadbuddy.auth.caller_grants import GRANTS, SEQUENCES, grant_callers
 from scadbuddy.auth.service_credentials import ROLES, VIEWS, ServiceCaller
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.pg_store import Migration, migrate
-from scadbuddy.render.worker_role import (
-    WorkerStoppedError,
-    grant_role,
-    missing_privileges,
-    owns_schema,
-    pending_migrations,
-    wait_until_ready,
-)
+from scadbuddy.render.worker_role import grant_role
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
@@ -129,158 +113,74 @@ def test_the_role_holds_its_list_and_cannot_migrate(
     pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
     try:
         with pool.connection() as conn:
-            assert missing_privileges(conn, GRANTS[caller]) == []
-            assert owns_schema(conn) is False
+            for table, privileges in GRANTS[caller].items():
+                for privilege in privileges:
+                    row = conn.execute(
+                        "SELECT has_table_privilege(%s, %s) AS held", (table, privilege)
+                    ).fetchone()
+                    assert row is not None and row["held"], f"{table}: {privilege}"
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))
     finally:
         pool.close()
 
 
-def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
-    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
-) -> None:
+#: Every table the print worker's role was ever granted (#5210), each now behind a CRUD
+#: route (#5298 Tasks 23 to 31), and the migrations ledger it waited on.
+PRINT_RETIRED = (
+    "scadbuddy_migrations",
+    "settings",
+    "model_print_choices",
+    "operations",
+    "print_runs",
+    "print_outcomes",
+    "events",
+    "output_bambuddy_uploads",
+    "output_bambuddy_slices",
+    "print_slice_starts",
+    "print_preview_slices",
+    "folderless_projects",
+    "destination_touches",
+    "project_print_targets",
+    "print_links",
+    "print_sends",
+    "output_last_prints",
+    "printers",
+    "printer_reports",
+    "printer_bed_types",
+    "activity",
+    "rack_nozzle_seen",
+    "rack_nozzle_picks",
+    "rack_nozzle_pick_spools",
+    "rack_nozzle_prints",
+    # #5298 Task 31: the spools, the native spools, the kept presets and native slices.
+    "physical_spools",
+    "spool_provider_records",
+    "spool_record_links",
+    "spool_provider_refreshes",
+    "tray_spool_links",
+    "native_spools",
+    "native_spool_uses",
+    "held_local_presets",
+    "native_slices",
+)
+
+
+def test_a_new_print_role_reads_no_table(owner: Pool, role: str, pg_conninfo: str) -> None:
+    """#5298 Task 31: the print worker holds no pool, so a role granted its list reads
+    none of the tables it once held, nor the sequence it inserted with."""
     _grant(owner, role, "print")
-    store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
-    open_for_caller(store, "print")
-    try:
-        # #5298: the print worker reads its settings through the API's CRUD route
-        # (`crud/print.py`), so its list leaves out the remembered choices a snapshot reads.
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            store.snapshot()
-        # Its operations, outcomes and events go through the API's CRUD routes too
-        # (#5298 Task 24): a new role is granted none of them.
-        operations = OperationStore(store.pool)
-
-        async def run() -> Any:
-            op_id = uuid.uuid4().hex
-            return await operations.insert(
-                op_id,
-                kind="test",
-                subject="test:1",
-                operation_key=op_id,
-                request={},
-                workflow_id=f"wf-{op_id}",
-                workflow_run_id="run",
-                retention=timedelta(days=1),
-            )
-
-        import asyncio
-
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            asyncio.run(run())
-        with store.pool.connection() as conn:
-            # Its uploads, slices, slice starts, background slices, folderless projects
-            # and destination touches too (#5298 Tasks 25, 26), and its print links, sends
-            # and outputs' last prints (Task 28).
-            for table in (
-                "print_outcomes",
-                "events",
-                "output_bambuddy_uploads",
-                "output_bambuddy_slices",
-                "print_slice_starts",
-                "print_preview_slices",
-                "folderless_projects",
-                "destination_touches",
-                "print_links",
-                "print_sends",
-                "output_last_prints",
-                # Its printer registry and reports (#5298 Task 29): a merge runs on the
-                # API, so the tables only a merge rewrote are gone from the list too.
-                "printers",
-                "printer_reports",
-                "settings",
-                "printer_bed_types",
-                "activity",
-                "project_print_targets",
-                # Its rack hotends' usage (#5298 Task 30).
-                "rack_nozzle_seen",
-                "rack_nozzle_picks",
-                "rack_nozzle_pick_spools",
-                "rack_nozzle_prints",
-            ):
-                with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                    conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
-                conn.rollback()
-            # A native print's spool uses still read the runs, and the overlay a tray's
-            # spool; the merge's repoint of a tray's link is the API's.
-            conn.execute("SELECT 1 FROM print_runs")
-            conn.execute("SELECT 1 FROM tray_spool_links")
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                conn.execute("UPDATE tray_spool_links SET printer_id = printer_id WHERE false")
-            conn.rollback()
-    finally:
-        store.close()
-
-
-def test_a_worker_on_a_role_without_its_grants_waits(
-    owner: Pool, role: str, pg_conninfo: str, tmp_path: Path
-) -> None:
-    with owner.connection() as conn:
-        conn.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                sql.Identifier(_schema(conn)), sql.Identifier(role)
-            )
-        )
-        conn.execute(
-            sql.SQL("GRANT SELECT ON scadbuddy_migrations TO {}").format(sql.Identifier(role))
-        )
-    store = _store(make_conninfo(pg_conninfo, user=role, password=role), tmp_path)
-    looks = 0
-
-    def stopping() -> bool:
-        nonlocal looks
-        looks += 1
-        return looks > 3
-
-    try:
-        with pytest.raises(WorkerStoppedError):
-            open_for_caller(store, "print", stopping=stopping)
-    finally:
-        store.close()
-
-
-def test_the_print_worker_waits_for_migrations_then_grants(pg_conninfo: str, role: str) -> None:
-    """Unmigrated: it waits. Migrated, but the ledger not granted yet: a missing grant,
-    waited for, never an error. Granted: it returns."""
-    grants, print_role = GRANTS["print"], ROLES["print"]
-    with psycopg.connect(pg_conninfo, autocommit=True, row_factory=dict_row) as conn:
-        conn.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                sql.Identifier(_schema(conn)), sql.Identifier(role)
-            )
-        )
     pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
     try:
         with pool.connection() as conn:
-            assert pending_migrations(conn)  # nothing migrated yet
-        with pytest.raises(WorkerStoppedError):
-            wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            migrate(conn)
-        with pool.connection() as conn:
-            assert "scadbuddy_migrations: SELECT" in missing_privileges(conn, grants)
-        with pytest.raises(WorkerStoppedError):
-            wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            assert grant_role(conn, role, grants, sequences=SEQUENCES.get("print", ()))
-        with pool.connection() as conn:
-            assert pending_migrations(conn) == []
-        wait_until_ready(pool, stopping=lambda: True, poll=0.01, grants=grants, role=print_role)
+            for table in PRINT_RETIRED:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
+                conn.rollback()
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute("SELECT nextval('native_slices_id_seq')")
     finally:
         pool.close()
-
-
-def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path: Path) -> None:
-    store = _store(pg_conninfo, tmp_path)
-    open_for_caller(store, "print")
-    try:
-        with store.pool.connection() as conn:
-            assert owns_schema(conn)
-            row = conn.execute("SELECT to_regclass('workflow_runs') AS found").fetchone()
-            assert row is not None and row["found"] is not None
-    finally:
-        store.close()
 
 
 def test_the_projects_worker_has_no_list_and_no_role() -> None:

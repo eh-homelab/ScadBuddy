@@ -85,6 +85,13 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.usage import RackUsageStore
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.held_presets import HeldPresetStore
+from scadbuddy.slicing.store import NativeSliceStore
+from scadbuddy.spools.component import SPOOLS
+from scadbuddy.spools.native import NativeSpoolStore
+from scadbuddy.spools.spool_providers import NativeProvider
+from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
@@ -455,7 +462,8 @@ def print_crud_app(
     project records and outputs' last prints on ``store``'s pool. A LAN-only printer's
     print records go to the watcher's store on ``store``'s pool, matched against
     ``catalogue`` (none when not given), and the rack hotends' usage goes through
-    ``rack`` (no rack route answers without one)."""
+    ``rack`` (no rack route answers without one), and the spools, native spools, kept
+    presets and native slices through the API's own stores on ``store``'s pool."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
         AUTH: SimpleNamespace(would_refuse=_Noted()),
@@ -467,6 +475,15 @@ def print_crud_app(
             reports=PrinterReportStore(store.pool),
         ),
         RACK_USAGE: rack,
+        # The spools, ScadBuddy's own and the kept presets and native slices: the API's
+        # own stores on ``store``'s pool (#5298 Task 31).
+        SPOOLS: SimpleNamespace(
+            store=SpoolStore(store.pool),
+            providers=[NativeProvider(NativeSpoolStore(store.pool))],
+        ),
+        SLICING: SimpleNamespace(
+            store=NativeSliceStore(store.pool), held=HeldPresetStore(store.pool)
+        ),
     }
     app.state.scadbuddy = SimpleNamespace(
         settings=SimpleNamespace(auth_mode="enforce"),
@@ -558,6 +575,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "lan-imports",
         "printers",
         "rack",
+        "spools",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

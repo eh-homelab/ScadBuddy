@@ -64,8 +64,9 @@ def _public(cls: type) -> set[str]:
 def test_the_area_is_served_and_awaited() -> None:
     assert "rack" in CRUD_AREAS["print"]
     assert "rack" in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-1] == "rack"
+    # Appended, so an older API's list is a prefix of a newer one's; Task 31's ``spools``
+    # came after it.
+    assert CRUD_AREAS["print"][-2:] == ["rack", "spools"]
 
 
 def test_every_rack_method_is_remote_refused_or_named() -> None:

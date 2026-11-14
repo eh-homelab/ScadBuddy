@@ -79,7 +79,7 @@ from scadbuddy.print_library.reads import NativeCopies, reads_for
 from scadbuddy.printers.hot_path import hot_path_native, native_backends
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
-from scadbuddy.rack.usage import RackUsage
+from scadbuddy.rack.usage import RackUsage, error_facts
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.start import NativeSliceStarter
 from scadbuddy.spools.component import Spools
@@ -498,11 +498,12 @@ class PrintActivities:
             if row is None or report is None:
                 return None, None
             overlay = await printer_overlay(spools, row, report, now=datetime.now(UTC))
-        except Exception:
+        except Exception as error:
+            # Its type and failure word only: on the print worker it is a CRUD call's
+            # error, whose text is never logged (spec §7).
             logger.warning(
                 "a native run's spool overlay could not be read; planning on the trays alone",
-                extra={"printer": prepared.printer},
-                exc_info=True,
+                extra={"printer": prepared.printer, **error_facts(error)},
             )
             return None, None
         return overlay, spool_labels(spools)

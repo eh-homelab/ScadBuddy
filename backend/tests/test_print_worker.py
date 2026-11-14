@@ -1,5 +1,5 @@
 """`python -m scadbuddy.worker --queue bambuddy` (#1060, spec 2026-10-01 §5.5): the
-``scadbuddy-print`` worker, on Postgres and the API's internal routes only, versioned
+``scadbuddy-print`` worker, on the API's internal routes only (no pool, #5298), versioned
 like the render worker, its workflows AUTO_UPGRADE."""
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from scadbuddy.crud.print import (
     RemoteReports,
     WorkerHearsNoEventsError,
 )
-from scadbuddy.library.settings_store import PrintSettings, StoredSettings
+from scadbuddy.library.settings_store import PrintSettings, SettingsStore, StoredSettings
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
@@ -429,16 +429,18 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
     monkeypatch.setattr(worker_module, "bambuddy_kinds_over", recording)
     # `slice_route` calls it (#4551), for the quote and the dialog's slice alike.
     monkeypatch.setattr(print_run_module, "run_route", routed)
-    deps = await asyncio.to_thread(
-        build_print_deps, print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
-    )
+    settings = print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
+    deps = await asyncio.to_thread(build_print_deps, settings)
+    # The API's own store: the worker holds no pool (#5298 Task 31).
+    api = SettingsStore(settings)
+    await asyncio.to_thread(api.open)
     try:
         assert deps.printers is not None and deps.reports is not None
         # The worker reads the registry and the reports through the API's CRUD routes
         # (#5298 Task 29), which this test does not serve: the API's own stores write
         # the row, and the worker's reads answer what those read.
-        api_printers = PrinterStore(deps.database.pool, deps.kek)
-        api_reports = PrinterReportStore(deps.database.pool)
+        api_printers = PrinterStore(api.pool, deps.kek)
+        api_reports = PrinterReportStore(api.pool)
         row = api_printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
         api_printers.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
@@ -467,6 +469,7 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
             await preview.run(request, {})
     finally:
         await deps.aclose()
+        await asyncio.to_thread(api.close)
     [route] = routes
     assert route.row is not None and route.row.id == row.id
     assert (route.path, route.native) == ("native", True)
