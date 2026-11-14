@@ -32,6 +32,13 @@ export function fakePendingChanges() {
         await Promise.resolve()
       })
     },
+    /** The open streams answering: their `open` event. */
+    async opened() {
+      await act(async () => {
+        for (const source of open()) source.dispatchEvent(new Event('open'))
+        await Promise.resolve()
+      })
+    },
     async close() {
       await act(async () => {
         for (const source of open()) {

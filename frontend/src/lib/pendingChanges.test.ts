@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakePendingChanges } from './pendingChanges.fake'
-import { PENDING_CHANGES_PATH, subscribePendingChanges, useReadOnPendingChanges } from './pendingChanges'
+import { PENDING_CHANGES_PATH, REOPEN_MS, subscribePendingChanges, useReadOnPendingChanges } from './pendingChanges'
 
 // #265 — a flow run's queue follows the agent's pending-input stream, not a timer.
 
@@ -34,6 +34,35 @@ describe('useReadOnPendingChanges', () => {
     await stream.close()
     await act(() => vi.advanceTimersByTimeAsync(MS))
     expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('opens a stream that closed for good again after a back-off, and leaves the timer once it answers (#265 review)', async () => {
+    const read = vi.fn()
+    renderHook(() => useReadOnPendingChanges(true, read, MS))
+    await stream.close()
+    expect(stream.open()).toHaveLength(0)
+
+    await act(() => vi.advanceTimersByTimeAsync(REOPEN_MS))
+    expect(stream.sources).toHaveLength(2)
+    expect(stream.open()).toHaveLength(1)
+    await stream.opened()
+    read.mockClear()
+    await act(() => vi.advanceTimersByTimeAsync(MS * 3))
+    expect(read).not.toHaveBeenCalled()
+    await stream.changed()
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits twice as long after each try that closes again', async () => {
+    renderHook(() => useReadOnPendingChanges(true, vi.fn(), MS))
+    await stream.close()
+    await act(() => vi.advanceTimersByTimeAsync(REOPEN_MS))
+    expect(stream.sources).toHaveLength(2)
+    await stream.close()
+    await act(() => vi.advanceTimersByTimeAsync(REOPEN_MS))
+    expect(stream.sources).toHaveLength(2)
+    await act(() => vi.advanceTimersByTimeAsync(REOPEN_MS))
+    expect(stream.sources).toHaveLength(3)
   })
 
   it('follows nothing while inactive', async () => {

@@ -456,7 +456,8 @@ the API process follow it (`preview_follow/follows.py`, every 2 s, either slicer
 each change is published as `preview_slice.progress` or `preview_slice.settled` on
 `preview-slice:<slicer>:<job id>`. The event carries ids only; the browser reads the
 route again for the percent. The browser polls every 2 s only while the socket is
-unavailable (`usePreviewSlice.ts`). A native
+unavailable, or while the read says `followed: false` (past the 64 slices one process
+follows at once) (`usePreviewSlice.ts`). A native
 slice's slots carry no `side` (`slicing/preview.py`), so the side-mismatch warning does
 not fire for it until #4232.
 

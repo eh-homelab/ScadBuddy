@@ -76,7 +76,8 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled'])
  *
  * #265 — the job is read once now and once per signal on its topic
  * (`previewSliceTopic`), one read at a time. It is read on a timer only while the
- * realtime socket is unavailable.
+ * realtime socket is unavailable, or while the last read said the backend does not
+ * follow the slice (`followed: false`).
  */
 export function usePreviewSlice(source: PrintSource | undefined, request: PrintRunRequest | null): PreviewSliceState {
   const latest = useLatest(source)
@@ -114,6 +115,9 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
       let ended = false
       let reading = false
       let again = false
+      // #265 review: the backend follows at most so many slices at once; a read past that
+      // says `followed: false`, and no event will come, so the timer reads instead.
+      let unfollowed = false
       const end = () => {
         ended = true
         unfollow?.()
@@ -131,6 +135,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
           const answer = await sourceApi(current).readPreview(jobId, slicer)
           if (ended || !live()) return
           if (!FINISHED.has(answer.status)) {
+            unfollowed = answer.followed === false
             setProgress(answer.progress ?? null)
             return
           }
@@ -161,7 +166,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
       const fallback = () => {
         timer = setTimeout(() => {
           if (ended || !live()) return
-          if (realtime.status === 'unavailable') void read()
+          if (unfollowed || realtime.status === 'unavailable') void read()
           fallback()
         }, RESLICE_POLL_MS)
       }

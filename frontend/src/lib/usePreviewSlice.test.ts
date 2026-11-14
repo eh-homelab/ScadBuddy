@@ -88,6 +88,41 @@ describe('usePreviewSlice on the native slicer', () => {
     expect(read).toHaveBeenCalledTimes(3)
   })
 
+  it('reads on its timer while the backend says it does not follow the slice, and still sees the end (#265 review)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce({ ...running(20, 'native'), followed: false })
+      .mockResolvedValueOnce({ ...running(70, 'native'), followed: false })
+      .mockResolvedValueOnce(completed('native'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(result.current.progress).toBe(20)
+
+    // The socket is up, but no event will come for this slice.
+    await advance(RESLICE_POLL_MS)
+    expect(result.current.progress).toBe(70)
+    await advance(RESLICE_POLL_MS)
+    expect(result.current.slicing).toBe(false)
+    expect(result.current.result?.status).toBe('completed')
+    await advance(RESLICE_POLL_MS * 3)
+    expect(read).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops the timer once a read says the slice is followed again (#265 review)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce({ ...running(20, 'native'), followed: false })
+      .mockResolvedValue({ ...running(30, 'native'), followed: true })
+    renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    await advance(RESLICE_POLL_MS)
+    expect(read).toHaveBeenCalledTimes(2)
+    await advance(RESLICE_POLL_MS * 4)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
   it('reads again once the subscription is confirmed, so a change before it is seen (#265)', async () => {
     vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
     vi.spyOn(api, 'getPreviewSlice')

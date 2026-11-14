@@ -8,11 +8,18 @@ import { useEffect, useRef } from 'react'
  */
 export const PENDING_CHANGES_PATH = '/api/v1/ai/pending-input/changes'
 
+/** #265 review: the first wait before a stream that closed for good is opened again. */
+export const REOPEN_MS = 15_000
+/** The longest wait between tries: each try that closes again doubles the wait. */
+export const REOPEN_MAX_MS = 5 * 60_000
+
 type Listener = () => void
 
 const listeners = new Set<Listener>()
 let source: EventSource | undefined
 let closed = false
+let reopenMs = REOPEN_MS
+let reopenTimer: ReturnType<typeof setTimeout> | undefined
 /** `EventSource.CLOSED`. */
 const CLOSED = 2
 
@@ -20,10 +27,41 @@ function onChanged() {
   for (const listener of [...listeners]) listener()
 }
 
+function onOpen() {
+  closed = false
+  reopenMs = REOPEN_MS
+}
+
 function onError() {
-  // A 204 or a 503 (an agent without the stream) closes it for good; a lost connection
-  // reconnects by itself, and the stream's first tick then reads again.
-  if (source?.readyState === CLOSED) closed = true
+  // A lost connection reconnects by itself, and the stream's first tick then reads
+  // again. A 204 or a 503 (an agent without the stream, or one that restarts) closes it
+  // for good: it is opened again after a back-off, so the views leave their timer once
+  // the agent answers again. A stream that opens sends its first tick, which reads.
+  if (source?.readyState !== CLOSED) return
+  closed = true
+  drop()
+  reopenTimer = setTimeout(() => {
+    reopenTimer = undefined
+    if (listeners.size > 0) open()
+  }, reopenMs)
+  reopenMs = Math.min(reopenMs * 2, REOPEN_MAX_MS)
+}
+
+function open() {
+  if (source || typeof EventSource === 'undefined') return
+  source = new EventSource(PENDING_CHANGES_PATH)
+  source.addEventListener('changed', onChanged)
+  source.addEventListener('open', onOpen)
+  source.addEventListener('error', onError)
+}
+
+function drop() {
+  if (!source) return
+  source.removeEventListener('changed', onChanged)
+  source.removeEventListener('open', onOpen)
+  source.removeEventListener('error', onError)
+  source.close()
+  source = undefined
 }
 
 /**
@@ -33,22 +71,22 @@ function onError() {
  */
 export function subscribePendingChanges(listener: Listener): () => void {
   listeners.add(listener)
-  if (!source && typeof EventSource !== 'undefined') {
-    closed = false
-    source = new EventSource(PENDING_CHANGES_PATH)
-    source.addEventListener('changed', onChanged)
-    source.addEventListener('error', onError)
-  }
+  // While a back-off waits, its timer opens the stream.
+  if (reopenTimer === undefined) open()
   return () => {
-    if (!listeners.delete(listener) || listeners.size > 0 || !source) return
-    source.removeEventListener('changed', onChanged)
-    source.removeEventListener('error', onError)
-    source.close()
-    source = undefined
+    if (!listeners.delete(listener) || listeners.size > 0) return
+    drop()
+    clearTimeout(reopenTimer)
+    reopenTimer = undefined
+    closed = false
+    reopenMs = REOPEN_MS
   }
 }
 
-/** Whether the stream cannot tell of changes: closed for good, or no `EventSource`. */
+/**
+ * Whether the stream cannot tell of changes: it closed for good and has not opened
+ * again since, or there is no `EventSource`.
+ */
 export function pendingChangesUnavailable(): boolean {
   return closed || typeof EventSource === 'undefined'
 }

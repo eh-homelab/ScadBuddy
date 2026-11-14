@@ -175,7 +175,7 @@ def test_a_running_background_slice_read_once_is_followed_and_its_end_published(
 
     job.body = {**job.body, "status": "running", "result": None}
     read = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
-    assert read.json()["status"] == "running"
+    assert (read.json()["status"], read.json()["followed"]) == ("running", True)
     assert follows.following == 1
     # A second read follows nothing twice.
     client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9")
