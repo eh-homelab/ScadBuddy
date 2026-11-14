@@ -28,6 +28,7 @@ def worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "temporal:7233")
     monkeypatch.setenv("SCADBUDDY_SERVICE_TOKEN_FILE", str(proof))
     monkeypatch.delenv("SCADBUDDY_SERVICE_BOOTSTRAP_FILE", raising=False)
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "true")
     return proof
 
 
@@ -47,6 +48,22 @@ def test_the_settings_read_the_queue_and_need_one_proof(
     monkeypatch.setenv("SCADBUDDY_SERVICE_BOOTSTRAP_FILE", str(worker_env))
     with pytest.raises(ValidationError, match="exactly one"):
         IntakeSettings()  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("value", [None, "false", "", "yes"])
+def test_the_settings_need_the_sandbox_named(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    """No default: a missing or unknown value refuses the start, so production never
+    falls back to parsing in the worker's container."""
+    if value is None:
+        monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX")
+    else:
+        monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", value)
+    with pytest.raises(ValidationError, match="intake_sandbox"):
+        IntakeSettings()  # type: ignore[call-arg]
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "unsafe-local")
+    assert IntakeSettings().intake_sandbox == "unsafe-local"  # type: ignore[call-arg]
 
 
 def test_the_worker_imports_nothing_that_touches_the_database() -> None:

@@ -1430,8 +1430,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   allowed, a timeout, its own process group; `check.py`: the kind by content, the zip's
   directory, the read within the read budget) and posts `ready`, `refused` or, once its
   attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
-  With `SCADBUDDY_INTAKE_SANDBOX` the child runs in the pod's `sandbox` container
-  (`sandbox.py`, the spool protocol in `runner.py`), never in the worker's. The
+  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the pod's
+  `sandbox` container (`sandbox.py`, the spool protocol in `runner.py`), never in the
+  worker's; only the dev-only `unsafe-local` runs it in the worker's container. The
   API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
   (never the worker's reported hash), held by the source
   (`blob_refs` holder `order_item_source`; the trigger of

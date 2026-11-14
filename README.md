@@ -2355,7 +2355,8 @@ holds the manifest (spec §12).
   such children, and the work volume for as many 256 MiB downloads.
 - **Two containers (spec §7, "The child's sandbox").** The worker container runs
   `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true`; it never parses a
-  file. The `sandbox` container runs `python -m scadbuddy.intake_worker.sandbox`, which runs
+  file. The variable is required: the worker refuses to start without it, and only the
+  dev-only value `unsafe-local` starts the child in the worker's own container. The `sandbox` container runs `python -m scadbuddy.intake_worker.sandbox`, which runs
   each check's child: another `runAsUser` than the worker's, no ServiceAccount token and no
   proof volume (it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
   `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set),

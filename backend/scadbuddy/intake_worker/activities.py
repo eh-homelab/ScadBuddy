@@ -78,7 +78,7 @@ class IntakeActivities:
         work_dir: Path,
         http: httpx.AsyncClient | None = None,
         *,
-        sandbox: bool = False,
+        sandbox: bool,
     ) -> None:
         self._crud = crud
         self._work_dir = work_dir

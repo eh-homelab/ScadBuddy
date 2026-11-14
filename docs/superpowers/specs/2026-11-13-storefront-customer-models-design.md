@@ -427,9 +427,12 @@ credential (`intake_worker/hardening.py`, `runner.py`, `sandbox.py`):
   volume, `readOnlyRootFilesystem`, sharing with the worker only an `emptyDir` (the spool)
   through which the worker hands it the file and gets the verdict and the preview back
   (`SCADBUDDY_INTAKE_SANDBOX=true` on the worker; the protocol is `runner.py`'s docstring).
+  The variable has no default: the worker refuses to start without it, so a missing value
+  never falls back to the weaker mode; `unsafe-local` (development only) starts the child
+  in the worker's own container.
   The sandbox refuses to start with a database secret, the KEK or a proof. The worker reads
   what comes back as untrusted: the verdict capped at 1 MiB and validated, the preview capped
-  at 4 MiB. Without the setting (development, tests) the worker starts the child itself. The
+  at 4 MiB. With `unsafe-local` (development, tests) the worker starts the child itself. The
   two containers share the pod's network namespace, so where the runtime refuses the child's
   own namespace, the pod's NetworkPolicy (DNS, the CRUD port, Temporal and the bucket host
   only) bounds what an exploited parse can reach; it holds no credential for the CRUD port.

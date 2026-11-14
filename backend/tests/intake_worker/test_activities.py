@@ -84,7 +84,7 @@ def run(fake: Fake, tmp_path: Path, which: str = "check") -> str:
         backoff=0.01,
     )
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.bucket))
-    activities = IntakeActivities(crud, tmp_path, http)
+    activities = IntakeActivities(crud, tmp_path, http, sandbox=False)
     env = ActivityEnvironment()
 
     async def go() -> str:

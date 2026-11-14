@@ -4,7 +4,8 @@ killed, as `workflows/template_process.py` runs template Python (spec 2026-11-13
 
 Two ways to reach the child:
 
-- local (the default, for development and tests): the worker starts it itself;
+- local (``SCADBUDDY_INTAKE_SANDBOX=unsafe-local``, development and tests only): the
+  worker starts it itself;
 - the sandbox container (``SCADBUDDY_INTAKE_SANDBOX=true``, the deployment's): the worker
   only hands the job over a spool directory it shares with a second container of the pod
   (`sandbox.py`), which runs as another user with no service-account token, no proof and a
