@@ -128,6 +128,24 @@ def test_build_defines_emits_only_supplied_parameters_in_schema_order() -> None:
     ]
 
 
+def test_build_defines_gives_openscad_a_colour_without_its_alpha() -> None:
+    """Owner, 2026-11-14: the alpha stays with the part (`jobs.part_alphas`); OpenSCAD's
+    colour, which the per-colour solids split by, is the same with or without it."""
+    schema = _schema(
+        Parameter(name="shell", type="color"),
+        Parameter(name="core", type="color"),
+        Parameter(name="label", type="string"),
+    )
+    assert build_defines(schema, {"shell": "#FFFFFF80", "core": "#f0a8", "label": "#FFFFFF80"}) == [
+        "-D",
+        'shell="#FFFFFF"',
+        "-D",
+        'core="#f0a"',
+        "-D",
+        'label="#FFFFFF80"',
+    ]
+
+
 async def test_cached_schema_does_not_re_export(tmp_path: Path) -> None:
     source = load_fixture_source("plain")
     scad = tmp_path / "model.scad"

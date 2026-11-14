@@ -9,7 +9,7 @@ import { normalizeHex } from './format'
  */
 export interface SpoolColour {
   hex: string
-  /** Alpha below FF: a translucent filament, which the preview still draws opaque. */
+  /** Alpha below FF: a translucent filament (`spoolValue` keeps its alpha for the preview). */
   translucent: boolean
 }
 
@@ -31,6 +31,19 @@ export function spoolChip(spool: Pick<InventorySpool, 'rgba'>): SpoolChip {
 export function spoolColour(spool: Pick<InventorySpool, 'rgba'>): SpoolColour | null {
   const chip = spoolChip(spool)
   return chip.kind === 'colour' ? { hex: chip.hex, translucent: chip.translucent } : null
+}
+
+/**
+ * The value a colour parameter takes from a spool: its `#RRGGBB`, plus its alpha
+ * (`#RRGGBBAA`) when it is translucent, so the preview draws the part see-through
+ * and the covers too. OpenSCAD gets the `#RRGGBB`; the render keeps the alpha for the part
+ * (`render/jobs.py` `part_alphas`). Null for a spool with no colour to give.
+ */
+export function spoolValue(spool: Pick<InventorySpool, 'rgba'>): string | null {
+  const colour = spoolColour(spool)
+  if (!colour) return null
+  if (!colour.translucent) return colour.hex
+  return `${colour.hex}${(spool.rgba ?? '').trim().slice(-2).toUpperCase()}`
 }
 
 /** "Bambu Lab PLA Basic — Hot Pink", as the print dialog names a spool. */

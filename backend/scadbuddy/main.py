@@ -463,18 +463,18 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(
-                sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+                sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
         else:
             failed = False
             try:
                 removed = await sweep_content(
-                    state.store.content, state.refs, grace=state.config.job_ttl
+                    state.store.content, state.refs, grace=state.config.sweep_grace
                 )
                 backend = state.store.content.backend
                 if isinstance(backend, UnrecordedSweeper):
                     # #701: an upload whose process died before its row was written.
-                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.sweep_grace)
                     index = state.store.content.index
                     swept = await backend.sweep_unrecorded(
                         cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)

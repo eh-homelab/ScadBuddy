@@ -26,7 +26,7 @@ vi.mock('@react-three/fiber', () => ({
       const pending = scene.pending.get(url)
       if (pending) throw pending.promise
       if (scene.failing.has(url)) throw new Error(`could not load ${url}`)
-      return { scene: scene.meshes.get(url) ?? { clone: () => ({ url }) } }
+      return { scene: scene.meshes.get(url) ?? { clone: () => ({ url, traverse: () => {} }) } }
     },
     { clear: () => {} },
   ),

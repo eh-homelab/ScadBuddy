@@ -77,16 +77,18 @@ describe('bambuddyBase', () => {
 })
 
 describe('pageMatch', () => {
-  // #6240: the two-label rule holds on both sides. A listed host whose rest is one label
-  // (`bambuddy.example`, with `example` standing for `com`) is nobody's sibling, and a
-  // page whose rest is one label looks for none.
+  // #6240: a page whose rest is one label (`scadbuddy.example`, with `example` standing
+  // for `com`) looks for no sibling. That page-side rule is what this test pins. A listed
+  // host matches only when its rest equals the page's, so a listed host whose rest is one
+  // label cannot match a page that passed the rule; the second assertion below is a
+  // regression guard for that case and passes with or without the rule (#6247).
   it('takes a listed sibling whose rest keeps two labels', () => {
     expect(pageMatch(['https://bambuddy.sso.example'], 'scadbuddy.sso.example')).toBe(
       'https://bambuddy.sso.example',
     )
   })
 
-  it('takes no listed host whose rest is a bare TLD, from either side', () => {
+  it('takes no sibling for a page whose rest is a bare TLD', () => {
     expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.example')).toBeNull()
     expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.sso.example')).toBeNull()
   })

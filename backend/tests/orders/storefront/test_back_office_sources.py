@@ -244,6 +244,13 @@ def test_the_back_office_never_checks_or_imports_on_a_visitors_cart(
     """Review of #6217: as a decline is, a check again and a retry of the import are
     refused on a cart not yet submitted (the back office never acts on one)."""
     order_id, source_id, _upload = ready(asks, worker)
+    # The file's check failed and its import reads stuck, so only the cart refuses.
+    with _state(asks.api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_sources SET check_status = 'failed', status_reason = %s"
+            " WHERE id = %s",
+            (IMPORT_STUCK, source_id),
+        )
     for action in ("check", "retry-import"):
         r = asks.api.post(f"{ORDERS}/{order_id}/sources/{source_id}/{action}")
         assert r.status_code == 409 and slug(r) == "order_not_submitted", (action, r.text)

@@ -8,6 +8,7 @@ import pytest
 from scadbuddy.core import config as config_module
 from scadbuddy.core.config import (
     ACTIVITY_TIMEOUT_MARGIN,
+    DEFAULT_JOB_TTL,
     Config,
     available_cpus,
     default_solid_concurrency,
@@ -361,3 +362,13 @@ def test_a_temporal_ui_url_that_is_not_http_is_refused_by_name(
     monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", value)
     with pytest.raises(ValueError, match="SCADBUDDY_TEMPORAL_UI_URL"):
         Settings()
+
+
+def test_a_job_ttl_of_0_keeps_renders_forever_but_never_sweeps_at_once(tmp_path: Path) -> None:
+    """#6236: 0 turns the render prune off. A sweep's grace never drops to 0, which would
+    race a write that has not recorded its reference yet."""
+    kept = Config(data_dir=tmp_path, job_ttl=0)
+    assert kept.sweep_grace == DEFAULT_JOB_TTL
+    assert Config(data_dir=tmp_path, job_ttl=600).sweep_grace == 600
+    with pytest.raises(ValueError, match="SCADBUDDY_JOB_TTL"):
+        Config(data_dir=tmp_path, job_ttl=-1)

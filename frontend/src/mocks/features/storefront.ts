@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
-import { problem } from '../handlers'
+import { mockModels, problem } from '../handlers'
 import * as orders from './orders/state'
 
 /**
@@ -18,6 +18,17 @@ const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
 const STORAGE_KEY = 'sb-mock-storefront-listings'
 
 let listings: StorefrontListing[] = []
+/** #6213 — the problem slug the next republish of a media PUT is refused with, once; see `refuseNextRepublish`. */
+let republishRefusal: string | null = null
+
+/**
+ * #6213 — the next `PUT …/media` of a published listing writes its pictures, then has its
+ * republish refused with 422 `slug`, as the backend's `change_media` does when a publish
+ * check fails: the pictures are kept, the last publish stays live.
+ */
+export function refuseNextRepublish(slug: string): void {
+  republishRefusal = slug
+}
 let ticks = 0
 
 function save(): void {
@@ -42,9 +53,9 @@ function stamp(): string {
   return new Date(Date.now() + ticks).toISOString()
 }
 
-function refused(status: number, slug: string, detail: string) {
+function refused(status: number, slug: string, detail: string, extensions: Record<string, unknown> = {}) {
   const title = status === 404 ? 'Not Found' : status === 422 ? 'Unprocessable Content' : 'Conflict'
-  return problem(status, title, detail, { type: PROBLEMS + slug })
+  return problem(status, title, detail, { type: PROBLEMS + slug, ...extensions })
 }
 
 /** The backend's 422 `listing_choice_empty` (`orders/storefront/listings.py` `_check_choices`), or null. */
@@ -52,6 +63,11 @@ function emptyChoice(body: StorefrontListingInput) {
   const name = Object.entries(body.params ?? {}).find(([, bound]) => bound.kind === 'choice' && bound.choices.length === 0)?.[0]
   if (name === undefined) return null
   return refused(422, 'listing_choice_empty', `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`)
+}
+
+/** #6213 — what a publish copies: one entry per picture, keyed by its media id. */
+function publishedMedia(listing: StorefrontListing): StorefrontListing['media'] {
+  return listing.media_ids.map((id) => ({ blob_key: `listing-media-${id}`, kind: 'image', media_type: 'image/png', caption: '', media_id: id }))
 }
 
 function sorted(): StorefrontListing[] {
@@ -137,6 +153,7 @@ function page(url: URL): StorefrontListingPage {
       place: place.get(l.id) ?? 0,
       published: l.published,
       media_id: l.media_ids[0] ?? null,
+      media_ids: l.media_ids,
       published_at: l.published_at,
       updated_at: l.updated_at,
     })),
@@ -213,6 +230,32 @@ export const handlers = [
     return HttpResponse.json(edited)
   }),
 
+  // #6213 — the pictures alone; a published listing is published again with them.
+  http.put(`${base}/:id/media`, async ({ params, request }) => {
+    const id = String(params['id'])
+    const { media_ids, updated_at } = (await request.json()) as { media_ids: string[]; updated_at: string }
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
+    if (new Set(media_ids).size !== media_ids.length) return refused(422, 'listing_media_duplicate', 'a picture is named twice')
+    // As `_check_pictures`: each id one of the template's images.
+    const media = mockModels().find((m) => m.slug === found.slug)?.media ?? []
+    for (const mediaId of media_ids) {
+      const item = media.find((m) => m.id === mediaId && !m.missing)
+      if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`, { name: mediaId })
+      if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`, { name: mediaId })
+    }
+    const at = stamp()
+    const next: StorefrontListing = { ...found, media_ids, updated_at: at }
+    const refusal = found.published ? republishRefusal : null
+    republishRefusal = null
+    const changed: StorefrontListing = found.published && refusal === null ? { ...next, media: publishedMedia(next), published_at: at } : next
+    listings = listings.map((l) => (l.id === id ? changed : l))
+    save()
+    if (refusal !== null) return refused(422, refusal, `the republish was refused: ${refusal}`, { pictures_saved: true })
+    return HttpResponse.json(changed)
+  }),
+
   http.post(`${base}/:id/publish`, ({ params }) => {
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
@@ -221,6 +264,7 @@ export const handlers = [
     const published: StorefrontListing = {
       ...found,
       published: true,
+      media: publishedMedia(found),
       published_at: at,
       updated_at: at,
       snapshot: {
@@ -261,6 +305,7 @@ export const handlers = [
 
 export function reset(): void {
   listings = []
+  republishRefusal = null
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {

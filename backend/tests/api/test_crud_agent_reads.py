@@ -49,8 +49,8 @@ def _run(
     *,
     status: str = "waiting",
     started_by: dict[str, Any] | None = None,
-    waiting_on: list[dict[str, Any]] | None = None,
-    steps: list[dict[str, Any]] | None = None,
+    waiting_on: list[Any] | None = None,
+    steps: list[Any] | None = None,
     superseded: list[str] | None = None,
     updated_at: datetime | None = None,
 ) -> None:
@@ -330,6 +330,33 @@ def test_a_runs_queue_is_its_parked_calls_steps_and_requested_grant(client: Test
     assert run["requested_grant"]["id"] == "asked"
     datetime.fromisoformat(run["requested_grant"]["created_at"])
     assert client.get(f"{BASE}/flow-runs/{OTHER}/queue", headers=agent).json() == {"run": None}
+
+
+def test_a_malformed_entry_is_left_out_not_a_500(client: TestClient) -> None:
+    """Review of #6234: one bad entry of a run's projection fails no list."""
+    agent = token(client)
+    live = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    _run(
+        client,
+        waiting_on=[
+            _waiting("c1", hop="parent", hop_until=live),
+            _waiting("c2", hop="parent", hop_until=live, kind="vote"),
+            {"call_id": "c3", "kind": "approval", "hop": "parent", "hop_until": live},
+            "not an object",
+        ],
+        steps=[{"seq": 1, "fn": "agent", "call_id": "c1", "status": "running"}, {"seq": "x"}, 7],
+    )
+    queue = client.get(f"{BASE}/flow-runs/{RUN}/queue", headers=agent)
+    assert queue.status_code == 200, queue.text
+    assert [w["call_id"] for w in queue.json()["run"]["waiting_on"]] == ["c1"]
+    assert [s["call_id"] for s in queue.json()["run"]["steps"]] == ["c1"]
+    steps = client.get(f"{BASE}/flow-runs/{RUN}/steps", headers=agent)
+    assert [s["call_id"] for s in steps.json()["steps"]] == ["c1"]
+    waiting = client.get(f"{BASE}/flow-runs/waiting", headers=agent)
+    assert [w["call_id"] for w in waiting.json()["runs"][0]["waiting_on"]] == ["c1"]
+    hops = client.get(f"{BASE}/flow-runs/parent-hop-approvals", headers=agent)
+    assert hops.status_code == 200, hops.text
+    assert [c["call_id"] for c in hops.json()["runs"][0]["calls"]] == ["c1"]
 
 
 def test_a_runs_steps_are_empty_for_no_run(client: TestClient) -> None:
