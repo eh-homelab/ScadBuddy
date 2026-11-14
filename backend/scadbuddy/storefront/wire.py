@@ -9,6 +9,10 @@ from typing import Final, Literal
 #: A listing id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``listing_not_found`` before a lookup.
 LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: The most cards one page of the public list holds (#6154).
+LISTINGS_MAX_PAGE: Final = 48
+#: The longest title search the public list takes.
+LISTINGS_MAX_QUERY: Final = 100
 #: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``item_not_found`` before a lookup.
 ITEM_ID: Final = LISTING_ID

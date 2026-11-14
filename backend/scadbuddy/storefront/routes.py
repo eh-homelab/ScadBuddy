@@ -60,6 +60,8 @@ from scadbuddy.storefront.wire import (
     ITEM_ID,
     JOB_ID,
     LISTING_ID,
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
     ORDER_VIEW_FIELDS,
     PAY_CHECKOUT_FIELDS,
     QUOTE_ID,
@@ -117,8 +119,20 @@ async def turnstile(request: Request, crud: Crud) -> Any:
 
 
 @visitor_router.get("/listings")
-async def listings(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    return await crud.listings(visitor_id=visitor_id, client=client)
+async def listings(
+    crud: Crud,
+    visitor_id: Visitor,
+    client: Client,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=LISTINGS_MAX_PAGE)] = None,
+    q: Annotated[str | None, Query(max_length=LISTINGS_MAX_QUERY)] = None,
+) -> Any:
+    """One page of the published listings (#6154): the edge checks the query's bounds
+    and sends on only these three."""
+    query = {"cursor": cursor, "limit": limit, "q": q}
+    return await crud.listings(
+        {k: v for k, v in query.items() if v is not None}, visitor_id=visitor_id, client=client
+    )
 
 
 @visitor_router.get("/listings/{listing_id}")

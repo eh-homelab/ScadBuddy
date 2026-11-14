@@ -134,7 +134,10 @@ from scadbuddy.orders.storefront.drafts import (
     requests_disabled,
 )
 from scadbuddy.orders.storefront.listings import (
+    cursor_after,
+    listing_cursor,
     problem,
+    public_card,
     public_content,
     public_listing,
     published_listing,
@@ -161,6 +164,8 @@ from scadbuddy.orders.storefront.turnstile import (
     verify,
 )
 from scadbuddy.orders.storefront.wire import (
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
     AccountOrder,
     AccountOrders,
     AccountView,
@@ -263,15 +268,30 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
 
 @router.get("/listings", name="crud_storefront_listings")
 async def listings(
-    state: StateDep, orders: OrdersDep, _visitor: Visitor, _client: StoreClient
+    state: StateDep,
+    orders: OrdersDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=LISTINGS_MAX_PAGE)] = 24,
+    q: Annotated[str | None, Query(max_length=LISTINGS_MAX_QUERY)] = None,
 ) -> PublicListings:
-    """The published listings, in the shop's order, and whether "Ask for a design" is on."""
+    """One page of the published listings as cards, in the shop's order, after
+    ``cursor`` and with ``q`` in the title when given, and whether "Ask for a design" is
+    on (#6154). A card presigns one picture; the whole listing is
+    ``…/listings/{id}``."""
     content = public_content(state)
-    published = await asyncio.to_thread(orders.listings.published)
+    after = cursor_after(cursor) if cursor else None
+    query = q.strip() if q else None
+    page = await asyncio.to_thread(
+        orders.listings.published, limit=limit + 1, after=after, query=query or None
+    )
     filaments = await asyncio.to_thread(_filaments, orders)
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    shown = page[:limit]
     return PublicListings(
-        listings=[await public_listing(content, item, filaments) for item in published],
+        listings=[await public_card(content, item, filaments) for item in shown],
+        next_cursor=listing_cursor(shown[-1]) if len(page) > limit else None,
         requests_enabled=snapshot.runtime.storefront_requests_enabled,
     )
 

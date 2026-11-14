@@ -133,6 +133,56 @@ def test_the_crud_side_lists_only_published_listings(
     assert unknown.json() == {**refused.json(), "instance": unknown.json()["instance"]}
 
 
+def test_the_public_list_is_cards_a_page_at_a_time(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    """#6154: a card per listing, in the shop's order, ``limit`` at a time; the cursor
+    reads the next page and the last page has none."""
+    made = [
+        publish(client, create(client, listing_body(template, pla_red, title=f"Box {n}"))["id"])
+        for n in range(3)
+    ]
+    first = crud.get("/listings?limit=2")
+    assert first.status_code == 200, first.text
+    page = first.json()
+    assert [c["id"] for c in page["listings"]] == [m["id"] for m in made[:2]]
+    card = page["listings"][0]
+    assert set(card) == {"id", "title", "description", "image", "available"}
+    assert card["available"] is True
+    assert card["image"]["kind"] == "image" and "Signature" in card["image"]["url"]
+    assert page["next_cursor"]
+    second = crud.get(f"/listings?limit=2&cursor={page['next_cursor']}").json()
+    assert [c["id"] for c in second["listings"]] == [made[2]["id"]]
+    assert second["next_cursor"] is None
+
+
+def test_the_public_list_searches_titles_and_takes_wildcards_literally(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    titles = ["Name Keychain", "Luggage tag", "100% Plant pot"]
+    for title in titles:
+        publish(client, create(client, listing_body(template, pla_red, title=title))["id"])
+    found = crud.get("/listings?q=KEY").json()["listings"]
+    assert [c["title"] for c in found] == ["Name Keychain"]
+    assert [c["title"] for c in crud.get("/listings?q=0%25").json()["listings"]] == [
+        "100% Plant pot"
+    ]
+    assert crud.get("/listings?q=_").json()["listings"] == []
+
+
+@pytest.mark.parametrize("cursor", ["x", "WzEsMl0", "WyJhIiwiYiJd", "W3RydWUsIjAwIl0"])
+def test_a_cursor_the_shop_never_gave_is_422(crud: CrudCaller, cursor: str) -> None:
+    r = crud.get(f"/listings?cursor={cursor}")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_cursor_invalid"
+
+
 def test_a_public_listing_shows_what_a_visitor_may_choose(
     crud: CrudCaller,
     published: dict[str, Any],

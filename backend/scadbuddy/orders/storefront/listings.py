@@ -25,7 +25,10 @@ public routes answer 503, since the fault is the operator's.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -60,6 +63,7 @@ from scadbuddy.orders.storefront.wire import (
     PublicChoice,
     PublicFilament,
     PublicListing,
+    PublicListingCard,
     PublicMedia,
     PublicNumber,
     PublicParam,
@@ -276,11 +280,27 @@ class ListingStore:
             ).fetchone()
         return None if row is None else _listing(row)
 
-    def published(self) -> list[Listing]:
-        """The published listings, in the shop's order."""
+    def published(
+        self, *, limit: int, after: tuple[int, str] | None = None, query: str | None = None
+    ) -> list[Listing]:
+        """At most ``limit`` published listings, in the shop's order (position, then id),
+        after the listing at ``after`` (its position and id), whose title has ``query`` in
+        it, any case (#6154). Keyset paging on ``storefront_listings_published_order``, so
+        a later page costs what the first does."""
+        where = ["published"]
+        args: list[Any] = []
+        if after is not None:
+            where.append("(position, id) > (%s, %s)")
+            args.extend(after)
+        if query:
+            where.append("title ILIKE %s ESCAPE '\\'")
+            args.append("%" + _like_escaped(query) + "%")
+        args.append(limit)
         with self.pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM storefront_listings WHERE published ORDER BY position, id"
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE {' AND '.join(where)}"
+                " ORDER BY position, id LIMIT %s",
+                args,
             ).fetchall()
         return [_listing(row) for row in rows]
 
@@ -821,6 +841,70 @@ async def _media_url(content: ContentStore, listing_id: str, key: str) -> str | 
     backend = content.backend
     assert isinstance(backend, S3ContentBackend)
     return await backend.presign_get(stat.ref.backend_id, PUBLIC_MEDIA_TTL)
+
+
+def _like_escaped(text: str) -> str:
+    """``text`` with LIKE's wildcards and its escape character taken literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def listing_cursor(listing: Listing) -> str:
+    """The public list's cursor after ``listing``: its position and id, base64url."""
+    raw = json.dumps([listing.position, listing.id], separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def cursor_after(cursor: str) -> tuple[int, str]:
+    """The position and id a `listing_cursor` names; 422 ``listing_cursor_invalid`` for
+    any other text."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        position, listing_id = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError):
+        position = listing_id = None
+    if (
+        not isinstance(position, int)
+        or isinstance(position, bool)
+        or not isinstance(listing_id, str)
+        or not LISTING_ID.fullmatch(listing_id)
+    ):
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "listing_cursor_invalid",
+            "This page of designs is not one the shop gave out.",
+        )
+    return position, listing_id
+
+
+async def public_card(
+    content: ContentStore, listing: Listing, filaments: Mapping[str, Filament]
+) -> PublicListingCard:
+    """``listing`` as a card of the public list (#6154): its first picture as the one
+    presigned GET, and whether every colour it offers still has a filament."""
+    assert listing.snapshot is not None
+    colours = {filaments[i].colour.casefold() for i in listing.colours if i in filaments}
+    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    available = True
+    for name, bound in listing.params.items():
+        shown = _public_param(name, bound, by_name, colours)
+        if isinstance(shown, PublicChoice) and shown.colour and not shown.choices:
+            available = False
+            break
+    image = None
+    for item in listing.media:
+        if item.kind != "image":
+            continue
+        url = await _media_url(content, listing.id, item.blob_key)
+        if url is not None:
+            image = PublicMedia(url=url, kind=item.kind, caption=item.caption)
+            break
+    return PublicListingCard(
+        id=listing.id,
+        title=listing.title,
+        description=listing.description,
+        image=image,
+        available=available,
+    )
 
 
 async def public_listing(
