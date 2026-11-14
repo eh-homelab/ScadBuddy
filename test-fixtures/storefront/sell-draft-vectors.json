@@ -82,7 +82,7 @@
     }
   },
   {
-    "name": "support settings stay internal: never offered, and a support colour picks neither the material nor a colour on offer",
+    "name": "support settings stay internal: never offered, and a support colour picks neither the material nor a colour on offer; its exact filament joins the listing, so publish takes the locked colour",
     "schema": {
       "groups": ["Supports", "Colours"],
       "parameters": [
@@ -100,7 +100,7 @@
     "expected": {
       "params": { "body": { "kind": "choice", "choices": [] } },
       "fixed": { "support_colour": "#F5F5DC", "supports": true, "support_note": "PVA" },
-      "colours": ["f-white"]
+      "colours": ["f-white", "f-pva"]
     }
   }
 ]

@@ -131,7 +131,13 @@ export function defaultsFor(
       fixed[param.name] = value
     }
   }
-  return { params, fixed, colours: offered.map((filament) => filament.id) }
+  // A locked support colour needs its filament on the listing, or publish refuses it
+  // (`listing_colour_unknown`); one the price book has exactly is added (#6140 review).
+  const support = shown
+    .filter((param) => param.type === 'color' && isSupport(param))
+    .flatMap((param) => filamentOf(valueOf(param), filaments) ?? [])
+    .filter((filament) => !offered.includes(filament))
+  return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
 }
 
 /** A colour of the listing that none of its filaments has: publish would refuse it. */

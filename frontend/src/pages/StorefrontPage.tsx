@@ -108,10 +108,12 @@ export function StorefrontPage() {
   const versions = useAsync(() => (slug ? api.listVersions(slug) : Promise.resolve([])), [slug])
   const schema = useAsync(() => (slug && commit ? api.getSchema(slug, commit) : Promise.resolve(undefined)), [slug, commit])
   const filaments = useMemo(() => book.data?.filaments ?? [], [book.data])
+  /** Whether the schema and the price book a saved body is built from are in: until then a saved listing reads as unchanged (#6140 review). */
+  const loaded = schema.data !== undefined && (book.data !== undefined || book.error !== undefined)
   const media = useMemo(() => models.data?.find((model) => model.slug === slug)?.media ?? [], [models.data, slug])
 
-  // A new listing starts on the first template, at its current version, with the
-  // whole of what the schema allows offered.
+  // A new listing starts on the first template, at its current version; the smart defaults
+  // (`defaultsFor`, design 2026-11-13 §4) fill in once its schema and the price book load.
   useEffect(() => {
     if (!open || open.id !== null) return
     const first = models.data?.[0]
@@ -158,7 +160,10 @@ export function StorefrontPage() {
     const started = openKey.current
     sellListing(sell, book.data?.filaments ?? [], models.data)
       .then((made) => {
-        if (openKey.current !== started) return
+        if (openKey.current !== started) {
+          setError({ key: PAGE, text: 'The listing from “Sell on storefront” was not opened, because another listing was opened meanwhile. Choose “Sell on storefront…” again to fill it in.' })
+          return
+        }
         setOpen(fresh(made))
         setValues({})
       })
@@ -166,7 +171,7 @@ export function StorefrontPage() {
       .finally(() => setSelling(false))
   }, [sell, models.data, book.data, book.error, setSearch])
   /** Whether the open listing holds what a save would write and has not: a new one once the person edited it, or "Sell on storefront" filled it in. */
-  const unsaved = open !== null && (open.id === null ? open.edited : open.saved !== savedKey(listingInput(open.draft, schema.data, filaments)))
+  const unsaved = open !== null && (open.id === null ? open.edited : loaded && open.saved !== savedKey(listingInput(open.draft, schema.data, filaments)))
   useEffect(() => {
     if (!listingParam || !listings.data) return
     const id = listingParam
@@ -347,7 +352,7 @@ export function StorefrontPage() {
   /** #6131 — why Publish and Save draft wait, said beside them. */
   const missing = !draft ? null : !draft.commit ? 'Choose a design and its version to publish.' : !draft.title.trim() ? 'Give the product a title to publish.' : null
   /** #6131 — a published listing with unsaved changes: saving it takes it off the store. */
-  const liveChanged = open !== null && open.published && draft !== undefined && open.saved !== savedKey(listingInput(draft, schema.data, filaments))
+  const liveChanged = open !== null && open.published && draft !== undefined && loaded && open.saved !== savedKey(listingInput(draft, schema.data, filaments))
 
   return (
     <div className="h-full overflow-y-auto" data-testid="storefront-page">

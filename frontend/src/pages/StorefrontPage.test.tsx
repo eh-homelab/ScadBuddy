@@ -466,6 +466,13 @@ describe('StorefrontPage (#5282)', () => {
       release()
       await waitFor(() => expect(screen.queryByText('Filling in the listing…')).toBeNull())
       expect(screen.getByLabelText('Title')).toHaveValue('Mine!')
+      // The person is told why their Sell click did nothing.
+      expect(screen.getByRole('alert')).toHaveTextContent('was not opened, because another listing was opened meanwhile')
+    })
+
+    it('says why a sell address that names nothing opens nothing', async () => {
+      renderPage(<StorefrontPage />, { route: '/storefront?sell=nonsense' })
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not fill in the listing: Nothing to sell: "nonsense" names no render or saved output.')
     })
 
     it('says why a listing could not be filled in', async () => {
