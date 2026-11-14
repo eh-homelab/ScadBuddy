@@ -198,6 +198,11 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
         // A sweep's delete, holding the row until it commits.
         await tx`DELETE FROM ai_session_file_bytes WHERE sha256 = ${digest}`
         written = files.write(ws, 'raced.txt', Buffer.from('raced'))
+        // A write that fails before it waits says why, at once, rather than as a timeout below.
+        let failed: unknown
+        written.catch((err: unknown) => {
+          failed = err
+        })
         // Until the write waits on that row's lock: only then does it take the path under test.
         const waiting = async () => {
           const [row] = await db.sql<{ n: number }[]>`
@@ -207,6 +212,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
           return (row?.n ?? 0) > 0
         }
         for (let i = 0; !(await waiting()); i += 1) {
+          if (failed !== undefined) throw failed
           if (i > 200) throw new Error('the write never waited on the deleted row')
           await new Promise((resolve) => setTimeout(resolve, 25))
         }
