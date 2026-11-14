@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Awaitable
 from contextlib import aclosing
@@ -74,11 +75,8 @@ def _colour(rgba: str | None) -> str | None:
 
 
 def _hex(text: str) -> bool:
-    try:
-        int(text, 16)
-    except ValueError:
-        return False
-    return True
+    """Hex digits only: ``int(text, 16)`` would also take ``0x``, ``_`` and a sign."""
+    return re.fullmatch(r"[0-9a-fA-F]+", text) is not None
 
 
 def _alpha(rgba: str | None) -> int:

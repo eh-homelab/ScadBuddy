@@ -438,6 +438,15 @@ class ImportRecord:
     spool_ids: list[int]
 
 
+@dataclass(frozen=True)
+class SpoolLink:
+    """A record's link to its spools at the last spool import (#6209): their ``#RRGGBB``
+    (``None`` before one) and Bambuddy ids."""
+
+    spool_colour: str | None
+    spool_ids: frozenset[int]
+
+
 class OrderStore:
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
@@ -890,6 +899,20 @@ class OrderStore:
             " WHERE archived_at IS NULL ORDER BY id FOR UPDATE"
         ).fetchall()
         return [ImportRecord(**row) for row in rows]
+
+    def spool_links(self, filament_ids: Sequence[str]) -> dict[str, SpoolLink]:
+        """Each record's :class:`SpoolLink`, by id; an id with no record is left out."""
+        if not filament_ids:
+            return {}
+        with self._read(None) as c:
+            rows = c.execute(
+                "SELECT id, spool_colour, spool_ids FROM filaments WHERE id = ANY(%s)",
+                (list(filament_ids),),
+            ).fetchall()
+        return {
+            str(row["id"]): SpoolLink(row["spool_colour"], frozenset(row["spool_ids"]))
+            for row in rows
+        }
 
     def set_import_look(
         self,

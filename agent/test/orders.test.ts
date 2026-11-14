@@ -1326,6 +1326,14 @@ describe('pricing tools (#4250)', () => {
       { method: 'ARCHIVE', body: null },
     ])
     await expect(tool('price_book_set').execute({}, ctx())).rejects.toThrow(ToolError)
+    // #6211: a new filament's colour is set by hand, so colour_source needs a filament_id.
+    await expect(
+      tool('price_book_set').execute(
+        { filament: { material: 'PLA', colour: '#FFFFFF', cost_per_kg: '20', colour_source: 'import' } },
+        ctx(),
+      ),
+    ).rejects.toThrow(/colour_source needs a filament_id/)
+    expect(sent).toHaveLength(3)
   })
 
   // #4977

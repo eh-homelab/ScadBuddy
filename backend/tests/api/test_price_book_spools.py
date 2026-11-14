@@ -262,3 +262,29 @@ def test_a_spool_with_a_corrected_material_is_another_filaments(client: TestClie
     old = book[made["filament_id"]]
     assert (old["material"], old["cost_per_kg"]) == ("PLA", "20")
     assert book[rows[(2,)]["filament_id"]]["material"] == "PETG"
+
+
+@respx.mock
+def test_a_split_group_never_takes_over_its_record(client: TestClient) -> None:
+    """#6211 review: one spool's colour corrected in Bambuddy splits a record's spools. The
+    record stays with the spools of its RGB, though the moved spool's group sorts first."""
+    configure(client)
+    no_density_sources()
+    red = {"rgba": "FF0000FF", "color_name": "Red"}
+    _inventory(*(spool(i, **red, cost_per_kg=20) for i in (1, 2, 3)))
+    made = client.post(IMPORT).json()["rows"][0]
+
+    blue = {"rgba": "0000FFFF", "color_name": "Blue"}
+    _inventory(
+        spool(1, **red, cost_per_kg=20),
+        spool(2, **red, cost_per_kg=20),
+        spool(3, **blue, cost_per_kg=25),
+    )
+    rows = client.post(IMPORT).json()["rows"]
+
+    assert [r["colour"] for r in rows] == ["#0000FF", "#FF0000"]
+    blue_row, red_row = rows
+    assert (blue_row["action"], red_row["filament_id"]) == ("created", made["filament_id"])
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    assert book[made["filament_id"]]["colour"] == "#FF0000"
+    assert book[blue_row["filament_id"]]["colour"] == "#0000FF"

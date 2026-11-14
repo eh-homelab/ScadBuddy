@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 from scadbuddy.orders.density import DensityTable, ProfileDensity, resolve
 from scadbuddy.orders.integrations import SpoolGroup
@@ -33,6 +34,8 @@ from scadbuddy.orders.models import (
     SpoolImportRow,
 )
 from scadbuddy.orders.store import ImportRecord, OrderStore
+
+SkipReason = Literal["no_colour", "no_price", "too_long"]
 
 #: ``filaments.cost_per_kg``'s ``numeric(12,4)``.
 PLACES = Decimal("0.0001")
@@ -94,6 +97,55 @@ def _match(
     )
 
 
+def _skip_reason(group: SpoolGroup) -> SkipReason | None:
+    """Why the import leaves ``group`` alone, before any record is matched."""
+    if group.colour is None:
+        return "no_colour"
+    if all(_price(raw) is None for _, raw in group.spools):
+        return "no_price"
+    names = (group.material, group.subtype, group.brand, group.colour_name)
+    if any(name is not None and len(name) > MAX_NAME for name in names):
+        return "too_long"
+    return None
+
+
+def _matches(groups: list[SpoolGroup], records: list[ImportRecord]) -> dict[int, ImportRecord]:
+    """Each group's record, by the group's place in ``groups`` (#6209, #6211 review). A
+    record linked to several groups (its spools split, as when one spool's colour was
+    corrected) goes first to the group whose RGB its spools had (``spool_colour``), so the
+    order of the groups never decides which keeps it; then every other group is matched
+    by :func:`_match`."""
+    matched: dict[int, ImportRecord] = {}
+    claimed: set[str] = set()
+    eligible = [(i, g) for i, g in enumerate(groups) if _skip_reason(g) is None]
+    for index, group in eligible:
+        assert group.colour is not None
+        names = _names(group.material, group.subtype, group.brand)
+        ids = {spool_id for spool_id, _ in group.spools}
+        kept = next(
+            (
+                r
+                for r in records
+                if r.id not in claimed
+                and _names(r.material, r.subtype, r.brand) == names
+                and ids & set(r.spool_ids)
+                and r.spool_colour == group.colour
+            ),
+            None,
+        )
+        if kept is not None:
+            matched[index] = kept
+            claimed.add(kept.id)
+    for index, group in eligible:
+        assert group.colour is not None
+        if index not in matched:
+            record = _match(group, group.colour, records, claimed)
+            if record is not None:
+                matched[index] = record
+                claimed.add(record.id)
+    return matched
+
+
 def _look(group: SpoolGroup, colour: str) -> dict[str, object]:
     return {
         "colour": colour,
@@ -115,8 +167,8 @@ def import_spools(
     rows: list[SpoolImportRow] = []
     with store.transaction() as conn:
         records = store.import_records(conn)
-        claimed: set[str] = set()
-        for group in groups:
+        matched = _matches(groups, records)
+        for index, group in enumerate(groups):
             spool_ids = [spool_id for spool_id, _ in group.spools]
             priced = [(i, p) for i, raw in group.spools if (p := _price(raw)) is not None]
             prices = {p for _, p in priced}
@@ -134,25 +186,19 @@ def import_spools(
                 min_cost_per_kg=_text(min(prices)) if len(prices) > 1 else None,
                 max_cost_per_kg=_text(max(prices)) if len(prices) > 1 else None,
             )
-            if group.colour is None:
-                rows.append(row.model_copy(update={"reason": "no_colour"}))
-                continue
-            if not priced:
-                rows.append(row.model_copy(update={"reason": "no_price"}))
-                continue
-            names = (group.material, group.subtype, group.brand, group.colour_name)
-            if any(name is not None and len(name) > MAX_NAME for name in names):
-                rows.append(row.model_copy(update={"reason": "too_long"}))
+            skip = _skip_reason(group)
+            if skip is not None or group.colour is None:
+                rows.append(row.model_copy(update={"reason": skip}))
                 continue
             colour = group.colour
             price = max(priced)[1]
-            record = _match(group, colour, records, claimed)
+            record = matched.get(index)
             # The colour the group would take is a colour another record of its names
             # holds (one a person set): a second record, or the change, would break the
             # identity index. A matched record has the group's names (`_match`).
             group_names = _names(group.material, group.subtype, group.brand)
             taken = any(
-                r is not record
+                r.id != (None if record is None else record.id)
                 and _names(r.material, r.subtype, r.brand) == group_names
                 and r.colour.upper() == colour
                 for r in records
@@ -181,7 +227,6 @@ def import_spools(
                     spool_colour=colour,
                     spool_ids=spool_ids,
                 )
-                claimed.add(made.id)
                 rows.append(
                     row.model_copy(
                         update={
@@ -195,14 +240,14 @@ def import_spools(
                     )
                 )
                 continue
-            claimed.add(record.id)
             current = store.filament(record.id, conn=conn)
             assert current is not None
             previous = Decimal(current.cost_per_kg)
             found = None if current.density_g_cm3 is not None else resolve(group, densities)
+            # A record whose colour cannot become the group's keeps its whole look, so it
+            # never takes one filament's RGB with another's alpha or effect.
+            keep_look = taken and current.colour.upper() != colour
             wanted = _look(group, colour)
-            if taken:
-                del wanted["colour"]
             look = (
                 {
                     name: value
@@ -213,7 +258,7 @@ def import_spools(
                         else value != getattr(current, name)
                     )
                 }
-                if current.colour_source == "import"
+                if current.colour_source == "import" and not keep_look
                 else {}
             )
             store.set_import_look(
@@ -246,6 +291,8 @@ def import_spools(
                 patch["density_g_cm3"] = found.density_g_cm3
                 update["density_g_cm3"] = found.density_g_cm3
                 update["density_profile"] = found.profile
+            if keep_look and current.colour_source == "import":
+                update["reason"] = "colour_taken"
             if not patch and not look:
                 rows.append(row.model_copy(update={**update, "action": "unchanged"}))
                 continue

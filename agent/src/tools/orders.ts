@@ -2523,6 +2523,7 @@ export const orderTools: Tool[] = [
         if (archive && unarchive) throw new ToolError('archive and unarchive cannot both be true')
         if (filament_id === undefined) {
           if (archive || unarchive) throw new ToolError(`${archive ? 'archive' : 'unarchive'} needs a filament_id`)
+          if (fields.colour_source !== undefined) throw new ToolError('colour_source needs a filament_id: a new filament\'s colour is set by hand')
           answer.filament = await ok(backend.POST('/api/v1/orders/price-book/filaments', { body: body as never }), 'add a filament')
         } else {
           const path = { filament_id }

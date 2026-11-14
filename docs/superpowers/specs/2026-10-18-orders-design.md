@@ -580,7 +580,7 @@ every quote; the filaments in a table of their own with an editor beside them):
   `archived_at`. This is the price of a filament, not a spool: `_filament_key`'s
   grouping (material, subtype, brand, colour; `bambuddy/farm.py:187-206`) is the
   identity, so with Bambuddy configured a record is matched to its spools by that key
-  (§8.3).
+  (§8.3; as built, #6209: by the record's link to its spools first, see §8.3).
 - `pricing_policy`: `machine_rate_per_hour` (decimal, may be 0), `setup_fee` (per
   plate, decimal), `labour_per_item` (decimal), `markup_percent` (decimal), `rounding`
   (`to_minor_unit`, the default: each line rounds as §3.6 says and the unit price is
@@ -749,8 +749,9 @@ queue paths (plan 2026-11-03 "Not in this plan").
 **As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
 `order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
 the check, which keys a retry's run as its first try's. A slot's filament is matched to
-spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
-upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+spools as the spool import matches them (§8.3, as built #6209): the same material, subtype
+and brand, upper-cased, and the record's link to the spool (`spool_ids`), else the spools'
+`#RRGGBB` at the last import (`spool_colour`), else the record's own `colour`. The run's printer is the request's `printer_id`, else its registry printer's
 Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
 and for a slot the item names no filament for, the plan stays as the request gave it.
 
@@ -1250,6 +1251,16 @@ catalogue (`orders/density.py`). `POST /orders/price-book/fill-densities` does t
 every record with no density, and a record added by hand with no density takes it too.
 `filaments.density_profile` keeps where each density came from. A density read Bambuddy
 refuses gives no density and fails nothing.
+
+**As built (#6209).** A record keeps the spools' whole colour: `colour` stays `#RRGGBB`
+(the render splits parts by it), beside `alpha`, `extra_colours` and `effect` from the
+spool's `rgba`, `extra_colors` and `effect_type`. `colour_source` says who set them: the
+import sets them again only while it is `import`; a person's change makes it `manual`. The
+import matches only a record of the group's material, subtype and brand: by its link to
+the group's spools (`spool_ids`, a record linked to several groups going to the group with
+its spools' RGB), else by the spools' `#RRGGBB` at the last import (`spool_colour`), else by
+its own `colour`, so a colour a person set makes no second record. An item print's spools
+are matched the same way (`orders/spools.py`).
 
 ### 8.4 Printers
 

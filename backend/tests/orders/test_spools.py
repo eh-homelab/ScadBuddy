@@ -12,7 +12,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.integrations import NOT_LINKED
 from scadbuddy.orders.models import Filament, FilamentInput
 from scadbuddy.orders.spools import ShelfSpool, SpoolChoiceError, fill_plan, item_plan
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import OrderStore, SpoolLink
 from tests.orders.test_lifecycle import BY, Shop
 
 NOW = datetime(2026, 11, 3, tzinfo=UTC)
@@ -88,6 +88,25 @@ def test_a_supplied_spool_must_be_the_slots_filament() -> None:
     assert (raised.value.slug, raised.value.slots) == ("spool_not_filament", [0])
     # One loaded elsewhere may be named by a person.
     assert fill_plan({0: filament()}, [spool(5, loaded_printer_id=99)], PRINTER, {1: 5}) == {1: 5}
+
+
+def test_a_colour_set_by_hand_still_finds_its_spools() -> None:
+    """#6211 review: spools are matched as the import matches them, by the record's link
+    (its spool ids, else the spools' RGB), so a hand-set colour never hides them."""
+    clear = filament("#EEF3F4")
+    links = {clear.id: SpoolLink("#000000", frozenset({4}))}
+    by_rgb = [spool(1, colour="#000000", remaining_g=300)]
+    assert fill_plan({0: clear}, by_rgb, PRINTER, {}, links) == {1: 1}
+    by_id = [spool(4, colour="#111111")]
+    assert fill_plan({0: clear}, by_id, PRINTER, {}, links) == {1: 4}
+    assert fill_plan({0: clear}, by_rgb, PRINTER, {1: 1}, links) == {1: 1}
+    # The spool's colour, not the record's hand-set one, and never another brand's.
+    with pytest.raises(SpoolChoiceError):
+        fill_plan({0: clear}, [spool(2, colour="#EEF3F4")], PRINTER, {}, links)
+    with pytest.raises(SpoolChoiceError):
+        fill_plan({0: clear}, [spool(4, colour="#000000", brand="Elegoo")], PRINTER, {}, links)
+    # With no link, the record's own colour, as before.
+    assert fill_plan({0: clear}, [spool(2, colour="#EEF3F4")], PRINTER, {}) == {1: 2}
 
 
 def test_a_slot_with_no_filament_is_left_as_given() -> None:

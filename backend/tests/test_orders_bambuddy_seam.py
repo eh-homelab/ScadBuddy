@@ -121,7 +121,7 @@ def test_a_group_carries_the_newest_spools_alpha_stops_and_effect() -> None:
     groups = spool_groups(
         [
             _spool(3, rgba="00000000", color_name="Clear", effect_type="translucent"),
-            _spool(5, rgba="ff0000", extra_colors="ff0000, #00ff0080,zz,123"),
+            _spool(5, rgba="ff0000", extra_colors="ff0000, #00ff0080,zz,123,0x1234,+12345,12_345"),
             _spool(6, rgba="00ff00ff", effect_type="Dual Color"),
             _spool(7, rgba="0000ffff", effect_type="shiny"),
             _spool(8, rgba="ffffffff", extra_colors=",".join(["abcdef"] * 9)),

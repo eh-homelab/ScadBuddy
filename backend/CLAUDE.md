@@ -1395,8 +1395,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `colour_source: "import"` in a PATCH hands it back. The import matches only a record of
   the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
   else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
-  it makes no duplicate, and a spool whose material was corrected is another filament's (`spool_import.py` `_match`; a group whose RGB is another record's hand-set
-  colour is skipped `colour_taken`).
+  it makes no duplicate, and a spool whose material was corrected is another filament's (`spool_import.py` `_matches`, `_match`: a record linked to several groups goes
+  first to the group with its spools' RGB, never to whichever group sorts first; a group
+  whose RGB is another record's hand-set colour is skipped `colour_taken`). An item
+  print's spools are matched the same way (`orders/spools.py` `_of`, the store's
+  `spool_links`), so a hand-set colour still finds its spools.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
