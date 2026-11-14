@@ -315,10 +315,11 @@ export function storedKey(listing: StorefrontListing): string {
  * often a colour parameter with every filament unchecked), which the backend refuses as
  * 422 `listing_choice_empty`.
  */
-export function unsaveable(body: StorefrontListingInput): string | null {
+export function unsaveable(body: StorefrontListingInput, schema?: CustomizerSchema): string | null {
   for (const [name, bound] of Object.entries(body.params ?? {})) {
     if (bound.kind === 'choice' && bound.choices.length === 0) {
-      return `'${name}' is offered with nothing to choose; for a colour parameter, choose at least one filament, or lock it`
+      const label = schema?.parameters?.find((param) => param.name === name)?.caption || name
+      return `“${label}” is offered with nothing to choose. Give the customer at least one choice (for a colour, tick a colour on offer that is not for supports only), or lock it.`
     }
   }
   return null

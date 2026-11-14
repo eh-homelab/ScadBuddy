@@ -196,20 +196,22 @@ function LockedField({
 }
 
 /** Why the customer cannot be given `param`, or null. */
-function whyNotOffered(param: Param, draft: ListingDraft): string | null {
+function whyNotOffered(param: Param, draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string | null {
   if (isSupport(param)) return 'Support settings are yours: a customer never sees them.'
   if (param.type === 'font') return 'A customer cannot choose a typeface.'
   if (!offerable(param)) return 'A customer cannot upload a file.'
-  if (param.type === 'color' && draft.colours.length === 0) return 'Tick a colour on offer first.'
+  if (param.type === 'color' && !filaments.some((filament) => draft.colours.includes(filament.id) && !isSupportOnly(filament, draft, schema))) {
+    return 'Tick a colour on offer first.'
+  }
   return null
 }
 
-function ParamRow({ param, draft, filaments, onChange }: { param: Param; draft: ListingDraft; filaments: readonly Filament[]; onChange: (draft: ListingDraft) => void }) {
+function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param; draft: ListingDraft; schema: CustomizerSchema | undefined; filaments: readonly Filament[]; onChange: (draft: ListingDraft) => void }) {
   const id = useId()
   const label = param.caption || param.name
   const bound = draft.params[param.name]
   const value = lockedValue(draft, param)
-  const why = bound ? null : whyNotOffered(param, draft)
+  const why = bound ? null : whyNotOffered(param, draft, schema, filaments)
 
   function lock() {
     const { [param.name]: _dropped, ...params } = draft.params
@@ -437,7 +439,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         )}
         <ul className="flex flex-col gap-2">
           {offered.map((param) => (
-            <ParamRow key={param.name} param={param} draft={draft} filaments={filaments} onChange={onChange} />
+            <ParamRow key={param.name} param={param} draft={draft} schema={schema} filaments={filaments} onChange={onChange} />
           ))}
         </ul>
         <div className="flex flex-col gap-1" role="group" aria-label="Colours on offer">
@@ -496,7 +498,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
           {showLocked && (
             <ul id={`${id}-locked`} className="flex flex-col gap-2">
               {locked.map((param) => (
-                <ParamRow key={param.name} param={param} draft={draft} filaments={filaments} onChange={onChange} />
+                <ParamRow key={param.name} param={param} draft={draft} schema={schema} filaments={filaments} onChange={onChange} />
               ))}
             </ul>
           )}

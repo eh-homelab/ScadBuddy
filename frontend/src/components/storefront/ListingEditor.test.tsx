@@ -5,7 +5,7 @@ import type { CustomizerSchema, Filament, Param } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { renderPage } from '../../test/utils'
 import { ListingEditor } from './ListingEditor'
-import { defaultsFor, emptyDraft, listingInput, previewListing, type ListingDraft } from './listingDraft'
+import { defaultsFor, emptyDraft, listingInput, previewListing, unsaveable, type ListingDraft } from './listingDraft'
 
 const COMMIT = 'a'.repeat(40)
 
@@ -117,6 +117,24 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
     expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
     expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+  })
+
+  it('does not offer a colour while the only ticked filament is for supports only (#6140 review)', async () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#F5F5DC' }],
+    }
+    const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
+    const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag', colours: [pva.id], fixed: { body_color: '#1B6CA8', text_color: '#E8532F' } }
+    const { user } = renderPage(<ListingEditor draft={draft} onChange={() => undefined} models={[]} versions={[]} schema={schema} filaments={[RED, pva]} media={[]} />)
+    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeDisabled()
+    expect(screen.getAllByText('Tick a colour on offer first.').length).toBeGreaterThan(0)
+  })
+
+  it('names an offered parameter with nothing to choose by its caption', () => {
+    const body = listingInput({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', params: { body_color: { kind: 'choice', choices: [] } } }, keychainSchema, [])
+    expect(unsaveable(body, keychainSchema)).toMatch(/^“Plate” is offered with nothing to choose\./)
   })
 
   it('gives an offered colour the listing filaments’ colours when it is saved', () => {
