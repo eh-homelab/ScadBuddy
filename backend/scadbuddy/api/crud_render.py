@@ -20,6 +20,7 @@ import logging
 import re
 import uuid
 from collections.abc import Callable
+from contextlib import aclosing
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -66,8 +67,13 @@ from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError, S
 from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import FolderFinder, FolderRole, Inbox, instance_key, render_target
+from scadbuddy.store.content_models import (
+    BlobCorruptError,
+    BlobMissingError,
+    BlobStat,
+    ReuseLostError,
+)
 from scadbuddy.store.content_models import BlobRef as IndexedRef
-from scadbuddy.store.content_models import BlobStat, ReuseLostError
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
 
@@ -103,18 +109,30 @@ API_OWNED_KEY = "api-owned-key"
 RENDER_KEY = re.compile(r"[0-9a-f]{64}|act-[0-9a-f]{40}|output-[0-9a-f]{32}-[0-9]+")
 #: The one kind a render job writes.
 RENDER_KIND = "piece"
+#: A library file's object that Arrange lays out (`bambuddy/library_objects.py`
+#: `piece_key`, stored by the API).
+LIBRARY_PIECE_KEY = re.compile(r"lib3-[0-9a-f]{48}-[0-9]+")
 #: The keys a render job holds (`RemoteBlobRefs`: `render_finish`'s blob keys,
-#: `TemplateActivities._hold`, an output's files): its own, and a library file's object
-#: that Arrange lays out (`bambuddy/library_objects.py` `piece_key`, stored by the API).
-HELD_KEY = re.compile(rf"{RENDER_KEY.pattern}|lib3-[0-9a-f]{{48}}-[0-9]+")
+#: `TemplateActivities._hold`, an output's files), fetches and touches (`CachedBlobStore`):
+#: its own, and a library file's object.
+HELD_KEY = re.compile(rf"{RENDER_KEY.pattern}|{LIBRARY_PIECE_KEY.pattern}")
+#: Beside those, the one key the render worker touches: the snapshot it renders from
+#: (`SnapshotStore`), so the sweep keeps it.
+TOUCHED_PREFIXES = ("src-",)
 #: Beside the keys it holds, the render worker reads a template revision's snapshot
 #: (`SnapshotStore`), a font family's copy (`FontMirror`) and an upload's (`RemoteAssets`).
 READ_PREFIXES = ("src-", "font-", "asset-")
-#: The kinds it lists (`FontMirror.sync`) or finds by SHA-256 (`ContentStore.put`).
+#: The kinds it lists (`FontMirror.sync`).
 READ_KINDS = frozenset({"piece", "snapshot", "font", "asset"})
+#: The one kind it finds by SHA-256: `ContentStore.put` of a piece, before it stores one.
+FOUND_KINDS = frozenset({RENDER_KIND})
 #: The owned keys a worker may have the API forget (the row only): `FontMirror.sync` and
 #: `SnapshotStore.materialize` forget a copy they cannot read, so the API stores it again.
+#: A library file's object (`LIBRARY_PIECE_KEY`) is forgotten only when the API cannot
+#: read it either (`index_forget_copy`).
 FORGETTABLE_PREFIXES = ("font-", "src-")
+#: A forget of a library file's object that the API reads whole: a 409.
+COPY_INTACT = "copy-intact"
 #: An adopt's own refusals, `crud/render.py` `RemoteAssetRows.adopt`: no copy of the upload
 #: in the blob store (a 404), or a copy of another kind or size (a 422).
 NO_COPY = "no-copy"
@@ -401,8 +419,8 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # swap, mark, delete or stale delete is a 403 unless every key is a render job's
 # (`RENDER_KEY`), the ref it writes is a ``piece`` and no row it finds is of another kind;
 # a read is a 403 for a key or kind the worker does not read (`HELD_KEY`,
-# `READ_PREFIXES`, `READ_KINDS`). A touch of any key is allowed (`SnapshotStore` touches
-# the snapshot it renders from, so the sweep keeps it).
+# `READ_PREFIXES`, `READ_KINDS`, `FOUND_KINDS`). A touch is a 403 for any key but one the
+# worker holds or the snapshot it renders from (`HELD_KEY`, `TOUCHED_PREFIXES`).
 
 
 class IndexPut(BaseModel):
@@ -521,10 +539,23 @@ def _worker_readable(key: str) -> None:
 
 
 def _worker_kinds(kinds: list[str] | None) -> None:
-    """Refuse a listing or a find of a kind the render worker never reads; any kind
-    (none named) too."""
+    """Refuse a listing of a kind the render worker never reads; any kind (none named)
+    too."""
     if kinds is None or not set(kinds) <= READ_KINDS:
         raise _owned(f"The render worker reads only {sorted(READ_KINDS)}.")
+
+
+def _worker_finds(kind: str) -> None:
+    """Refuse a find by SHA-256 of a kind the render worker never stores."""
+    if kind not in FOUND_KINDS:
+        raise _owned(f"The render worker finds only {sorted(FOUND_KINDS)} by SHA-256.")
+
+
+def _worker_touchable(key: str) -> None:
+    """Refuse a touch of a key the render worker neither holds nor renders from: a touch
+    keeps a row from its sweep."""
+    if not (HELD_KEY.fullmatch(key) or key.startswith(TOUCHED_PREFIXES)):
+        raise _owned(f"The render worker does not touch {key!r}.")
 
 
 def _json(model: BaseModel | None) -> dict[str, Any] | None:
@@ -561,9 +592,9 @@ async def index_stats(
 async def index_by_sha(
     state: StateDep, sha256: str = Query(), kind: str = Query(), backend: str = Query()
 ) -> IndexedRef | None:
-    """R13: an object already stored with these bytes, or null. A kind the worker does
-    not read is a 403 ``api-owned-key``."""
-    _worker_kinds([kind])
+    """R13: an object already stored with these bytes, or null. Any kind but a piece
+    (`FOUND_KINDS`) is a 403 ``api-owned-key``."""
+    _worker_finds(kind)
     return await asyncio.to_thread(_index(state).by_sha, sha256, kind, backend)
 
 
@@ -647,8 +678,9 @@ async def index_swap(
 ) -> Swapped:
     """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row).
     A key that is not a render job's, or a ref or row of another kind than a piece, is a
-    403 ``api-owned-key``. The row's kind is read in the swap's transaction, before it: a
-    swap that names ``expected`` then rewrites only a row that still names that object."""
+    403 ``api-owned-key``. The row's kind is read in the swap's transaction before the
+    swap, and checked again under the row's lock: a row that became another kind between
+    the two is not rewritten (``swapped`` false)."""
     _worker_writable(key, ref=body.ref)
 
     def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
@@ -661,6 +693,7 @@ async def index_swap(
             slug=body.slug,
             meta=body.meta,
             reuse=body.reuse,
+            only_kind=RENDER_KIND,
         )
         return {"swapped": swapped}
 
@@ -678,24 +711,67 @@ async def index_swap(
 
 @router.post("/blob-index/{key:path}/touch", name="crud_render_index_touch")
 async def index_touch(key: str, state: StateDep) -> None:
-    """R15: mark ``key`` wanted now. Natural: a resend stamps it again."""
+    """R15: mark ``key`` wanted now, so the sweeps keep it. Only a key the worker fetches
+    or claims (`CachedBlobStore`: `HELD_KEY`) or the snapshot it renders from
+    (`SnapshotStore`, ``src-``): any other is a 403 ``api-owned-key``, or a render
+    credential could keep any service's row from its sweep. Natural: a resend stamps
+    it again."""
+    _worker_touchable(key)
     await asyncio.to_thread(_index(state).touch, key)
 
 
 @router.post("/blob-index/{key:path}/forget-copy", name="crud_render_index_forget_copy")
 async def index_forget_copy(key: str, state: StateDep) -> BlobStat | None:
-    """A font's or snapshot's copy the worker could not read: the API drops its row
-    (`ContentStore.forget`, the object stays), so the API stores it again (`FontMirror`
-    `backfill`, `SnapshotStore.pin`). The row taken, or null. Served with the ``assets``
-    area. Any other key is a 403 ``api-owned-key``: the worker deletes its own keys
-    through the index routes. Natural: a resend finds no row."""
+    """A copy the worker could not read: the API drops its row (`ContentStore.forget`,
+    the object stays), so it is stored again. A font's or snapshot's is dropped at once
+    (`FontMirror` `backfill`, `SnapshotStore.pin` store it again). A library file's
+    object (``lib3-``, `LIBRARY_PIECE_KEY`) only when the API's own read finds its object
+    missing or not its SHA-256, so the next Arrange of the file writes it again
+    (`bambuddy/library_objects.py` `publish_library_pieces`); one the API reads whole is
+    a 409 ``copy-intact``, and its row stays. The row taken, or null. Served with the
+    ``assets`` area. Any other key is a 403 ``api-owned-key``: the worker deletes its own
+    keys through the index routes. Natural: a resend finds no row."""
+    if LIBRARY_PIECE_KEY.fullmatch(key):
+        return await _forget_unreadable(key, state)
     if not key.startswith(FORGETTABLE_PREFIXES):
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            "Only a font's or snapshot's copy is forgotten here.",
-            reason=API_OWNED_KEY,
-        )
+        raise _owned("Only a font's, snapshot's or library object's copy is forgotten here.")
     return await asyncio.to_thread(_index(state).delete, key)
+
+
+async def _forget_unreadable(key: str, state: AppState) -> BlobStat | None:
+    """Drop ``key``'s row only when the API cannot read its object whole: missing, or not
+    its SHA-256. The row is dropped only while it still names the object read."""
+    content = state.store.content
+    if content is None:
+        return None  # the local store keeps no index
+    index = _index(state)
+    stat = await asyncio.to_thread(index.get, key)
+    if stat is None:
+        return None
+    if stat.ref.backend != content.name:
+        # Mid `/store/migrate`: another backend's row, which this store cannot judge.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "The copy is on another backend; it is not forgotten.",
+            reason=COPY_INTACT,
+        )
+    try:
+        if not await content.backend.exists(stat.ref.backend_id):
+            # Checked first: a download cache could still hold the bytes.
+            raise BlobMissingError(key)
+        async with aclosing(content.get(stat.ref)) as chunks:
+            async for _ in chunks:
+                pass
+    except (BlobMissingError, BlobCorruptError):
+        held = await asyncio.to_thread(index.get, key)
+        if held is None or held.ref != stat.ref:
+            return None  # stored again meanwhile: that row stays
+        return await asyncio.to_thread(index.delete, key)
+    raise ApiError(
+        status.HTTP_409_CONFLICT,
+        "The API reads this copy whole; it is not forgotten.",
+        reason=COPY_INTACT,
+    )
 
 
 @router.delete("/blob-index/{key:path}/stale", name="crud_render_index_delete_stale")

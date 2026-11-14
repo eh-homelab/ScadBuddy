@@ -703,9 +703,10 @@ class StoredSettings(BambuddyIds):
         return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback. With
-        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
-        ``render_key_fallback``."""
+        """The key the API's own render store uses, and whether it is the full key by
+        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
+        as the view's ``render_key_fallback``. A standalone render worker never gets the
+        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
         if self.bambuddy_render_api_key:
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None

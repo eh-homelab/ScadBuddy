@@ -282,8 +282,11 @@ class BlobIndex:
         slug: str | None,
         meta: dict[str, Any],
         reuse: bool = False,
+        only_kind: str | None = None,
     ) -> bool:
-        """`swap` on ``conn``."""
+        """`swap` on ``conn``. With ``only_kind``, a row of another kind is not rewritten
+        (the swap answers false): the render worker's CRUD route passes ``piece``, checked
+        under the row's lock."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         with conn.transaction():
             self._locked(conn, key, ref, reuse=reuse, columns="backend, backend_id")
@@ -298,8 +301,9 @@ class BlobIndex:
                 cursor = conn.execute(
                     f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
                     " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
-                    " touched_at = now() WHERE key = %s AND sha256 = %s",
-                    (*_kept_copy(ref), *values, key, expected),
+                    " touched_at = now() WHERE key = %s AND sha256 = %s"
+                    " AND (%s::text IS NULL OR kind = %s)",
+                    (*_kept_copy(ref), *values, key, expected, only_kind, only_kind),
                 )
             return cursor.rowcount == 1
 

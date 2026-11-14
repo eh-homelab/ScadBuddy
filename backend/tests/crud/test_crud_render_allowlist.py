@@ -95,6 +95,36 @@ def test_only_the_kinds_the_worker_reads_are_listed() -> None:
             crud_render._worker_kinds(kinds)
 
 
+@pytest.mark.parametrize(
+    "kind", ["snapshot", "asset", "font", "slice", "library", "workspace", "media"]
+)
+def test_only_a_piece_is_found_by_sha(kind: BlobKind) -> None:
+    crud_render._worker_finds("piece")
+    with pytest.raises(ApiError) as refused:
+        crud_render._worker_finds(kind)
+    assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
+
+
+@pytest.mark.parametrize("key", [*RENDER, LIBRARY_PIECE, "src-demo-abc"])
+def test_the_worker_touches_what_it_holds_and_the_snapshot_it_renders_from(key: str) -> None:
+    crud_render._worker_touchable(key)
+
+
+@pytest.mark.parametrize("key", [*FOREIGN[:9], "quote-" + "a" * 64, "k"])
+def test_a_touch_of_another_services_key_is_refused(key: str) -> None:
+    """A touch keeps a row from its sweep: not for a font's or upload's copy either."""
+    with pytest.raises(ApiError) as refused:
+        crud_render._worker_touchable(key)
+    assert refused.value.status == 403
+    assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
+
+
+def test_only_a_library_object_is_forgotten_after_a_read() -> None:
+    assert crud_render.LIBRARY_PIECE_KEY.fullmatch(LIBRARY_PIECE)
+    for key in [*RENDER, *FOREIGN]:
+        assert crud_render.LIBRARY_PIECE_KEY.fullmatch(key) is None
+
+
 def _settings(*, render_key: bool) -> RenderStoreSettings:
     return RenderStoreSettings(
         store_backend="bambuddy",
