@@ -526,6 +526,9 @@ export type StorefrontListingInput = Defaulted<
   'description' | 'params' | 'fixed' | 'colours' | 'media_ids' | 'one_material'
 >
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
+/** #6157 — one row of the back office's list, and a page of them. */
+export type StorefrontListingRow = Schemas['ListingRow']
+export type StorefrontListingPage = Schemas['ListingPage']
 /** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
 export type NativeSpool = Schemas['NativeSpool']
 export type NativeSpoolCreate = Schemas['NativeSpoolCreate']

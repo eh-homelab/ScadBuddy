@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from typing import NoReturn
 
@@ -543,8 +544,18 @@ def test_one_process_holds_a_slice_claim_at_a_time(pg_conninfo: str) -> None:
         one.release("native:7:x")
         assert two.claim("native:7:x") is True
         two.close()
-        # Closing a process's connection frees every slice it held.
-        assert one.claim("native:8:x") is True
+        # Closing a process's connection frees every slice it held. The server frees them
+        # when its backend for that session ends, which can come just after the close
+        # returns (#6195), so the claim is tried again for a short time.
+        for _ in range(100):
+            if one.claim("native:8:x"):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("closing the connection did not free its slices")
+        # A claim that cannot reach Postgres also answers True: the slice was claimed only
+        # if the connection is still open (#6198).
+        assert one.open_connections() == 1
     finally:
         one.close()
         two.close()

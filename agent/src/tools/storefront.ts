@@ -139,7 +139,7 @@ export const storefrontTools: Tool[] = [
         offered: Object.keys(made.params ?? {}),
         colour_problems: colourProblems(listing, schema, filaments),
         notes,
-        page: `/storefront?listing=${encodeURIComponent(made.id)}`,
+        page: `/storefront/listings/${encodeURIComponent(made.id)}`,
       })
     },
   }),

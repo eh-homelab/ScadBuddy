@@ -11,10 +11,13 @@ dependencies that read them, and every route takes both but ``pay/checkout`` and
 ``storefront`` credential reaches these routes (`crud_router`), so no other caller can
 send either header here.
 
-Area ``listings``: ``GET …/listings`` and ``GET …/listings/{id}``, the published listings
-as the public site shows them (`orders/storefront/listings.py` `public_listing`), with
-each media file as a presigned GET of an hour. An unpublished or unknown listing is 404
-``…/storefront/listing_not_found``; any store but S3 is 503
+Area ``listings``: ``GET …/listings`` is one keyset page of published listing cards
+(`orders/storefront/listings.py` `public_card`: the first picture as a presigned GET of
+an hour, ``available``, ``next_cursor``), at most ``limit``, after ``cursor``, titles
+matching ``q``; a cursor the shop never gave is 422 ``…/storefront/listing_cursor_invalid``
+(#6154). ``GET …/listings/{id}`` is the full listing as the public site shows it
+(`public_listing`), with each media file as a presigned GET of an hour. An unpublished
+or unknown listing is 404 ``…/storefront/listing_not_found``; any store but S3 is 503
 ``…/storefront/storefront_needs_s3`` with reason ``not_configured`` and a text a visitor
 may read (the edge shows it).
 
@@ -49,8 +52,8 @@ edge's checks.
 
 Area ``models`` (#6133, `orders/storefront/model_requests.py`): a customer's own models.
 ``POST …/uploads`` (``Idempotency-Key`` required) answers a presigned PUT per file into the
-store's staging area; ``POST …/draft/models`` claims the uploads it names (a ``HEAD`` each,
-no byte read) and adds a request item with its files and links as text; ``GET
+store's staging area; ``POST …/draft/models`` claims the uploads it names (each frozen by a
+server-side copy, no byte read) and adds a request item with its files and links as text; ``GET
 …/uploads/config`` is the origin of those PUTs, for the edge's page CSP. Both writes are
 404 ``requests_disabled`` while "Ask for a design" is off (unless the key holds a committed
 answer), and every route is 503 ``storefront_needs_s3`` on a store that is not S3.
@@ -134,7 +137,10 @@ from scadbuddy.orders.storefront.drafts import (
     requests_disabled,
 )
 from scadbuddy.orders.storefront.listings import (
+    cursor_after,
+    listing_cursor,
     problem,
+    public_card,
     public_content,
     public_listing,
     published_listing,
@@ -161,6 +167,9 @@ from scadbuddy.orders.storefront.turnstile import (
     verify,
 )
 from scadbuddy.orders.storefront.wire import (
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     AccountOrder,
     AccountOrders,
     AccountView,
@@ -263,15 +272,32 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
 
 @router.get("/listings", name="crud_storefront_listings")
 async def listings(
-    state: StateDep, orders: OrdersDep, _visitor: Visitor, _client: StoreClient
+    state: StateDep,
+    orders: OrdersDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=LISTINGS_MAX_PAGE)] = 24,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
 ) -> PublicListings:
-    """The published listings, in the shop's order, and whether "Ask for a design" is on."""
+    """One page of the published listings as cards, in the shop's order, after
+    ``cursor`` and with ``q`` in the title when given, and whether "Ask for a design" is
+    on (#6154). A card presigns one picture; the whole listing is
+    ``…/listings/{id}``."""
     content = public_content(state)
-    published = await asyncio.to_thread(orders.listings.published)
+    after = cursor_after(cursor) if cursor else None
+    query = q.strip() if q else None
+    page = await asyncio.to_thread(
+        orders.listings.published, limit=limit + 1, after=after, query=query or None
+    )
     filaments = await asyncio.to_thread(_filaments, orders)
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    shown = page[:limit]
     return PublicListings(
-        listings=[await public_listing(content, item, filaments) for item in published],
+        listings=[await public_card(content, item, filaments) for item in shown],
+        next_cursor=listing_cursor(shown[-1]) if len(page) > limit else None,
         requests_enabled=snapshot.runtime.storefront_requests_enabled,
     )
 
@@ -605,8 +631,9 @@ async def draft_models(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> DraftView:
     """A "print my own model" request added to the visitor's draft (#6133,
-    `model_requests.add_model_request`): the uploads it names, claimed after a ``HEAD``
-    each, and its links as text. 404 ``requests_disabled`` as ``…/uploads``."""
+    `model_requests.add_model_request`): the uploads it names, each frozen by a
+    server-side copy and claimed, and its links as text. 404 ``requests_disabled`` as
+    ``…/uploads``."""
     key = required_key(idempotency_key)
     if not await asyncio.to_thread(_requests_enabled, state, key, MODELS_ROUTE):
         raise requests_disabled()

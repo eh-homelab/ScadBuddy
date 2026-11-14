@@ -9,8 +9,8 @@ import { useAsync } from '../../lib/useAsync'
 // #4975 phase 4 — Settings → System → Service credentials (spec 2026-11-01 §7.2): the bearer
 // credentials the API issues each service. Never a secret: created, expires, last used, with
 // revoke. The agent reads a sealed one, rotated on its own and by "Rotate now"; the print,
-// projects and render workers and the storefront get none of those (#5298, #5282): they
-// exchange a proof for each, listed here to be revoked.
+// projects and render workers, the storefront and the intake worker get none of those
+// (#5298, #5282, #6133): they exchange a proof for each, listed here to be revoked.
 
 type Section =
   | { caller: LegacyCaller; label: string; sealed: true }
@@ -22,6 +22,7 @@ const CALLERS: Section[] = [
   { caller: 'projects', label: 'Projects worker', sealed: false },
   { caller: 'render', label: 'Render worker', sealed: false },
   { caller: 'storefront', label: 'Storefront', sealed: false },
+  { caller: 'intake', label: 'Intake worker', sealed: false },
 ]
 
 const day = (iso: string) => new Date(iso).toLocaleDateString()

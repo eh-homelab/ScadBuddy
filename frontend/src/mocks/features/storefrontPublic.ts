@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
 
@@ -90,6 +90,27 @@ export const CHARM: Listing = {
 }
 
 const LISTINGS = [KEYCHAIN, TAG, CHARM]
+
+/** A listing as the public list shows it (#6154): its first picture, and whether it can be ordered. */
+export function card(listing: Listing): ListingCard {
+  const image = listing.media.find((media) => media.kind === 'image') ?? null
+  const available = !Object.values(listing.params).some((param) => param.kind === 'choice' && param.colour && param.choices.length === 0)
+  return { id: listing.id, title: listing.title, description: listing.description, image, available }
+}
+
+/** One page of `listings`, as the edge pages them: the cursor is the next card's index. */
+export function listingsPage(listings: readonly Listing[], url: URL, requestsEnabled = true) {
+  const q = url.searchParams.get('q')?.trim().toLowerCase() ?? ''
+  const limit = Number(url.searchParams.get('limit') ?? 24)
+  const start = Number(url.searchParams.get('cursor') ?? 0)
+  const matched = listings.filter((listing) => listing.title.toLowerCase().includes(q))
+  const page = matched.slice(start, start + limit)
+  return {
+    listings: page.map(card),
+    next_cursor: start + limit < matched.length ? String(start + limit) : null,
+    requests_enabled: requestsEnabled,
+  }
+}
 
 export const ESTIMATE: StoreEstimate = {
   estimate: true,
@@ -253,7 +274,7 @@ export const handlers = [
         })
       : new HttpResponse(null, { status: 404 })
   }),
-  http.get(`${base}/listings`, () => HttpResponse.json({ listings: LISTINGS, requests_enabled: true })),
+  http.get(`${base}/listings`, ({ request }) => HttpResponse.json(listingsPage(LISTINGS, new URL(request.url)))),
   http.get(`${base}/listings/:id`, ({ params }) => {
     const listing = LISTINGS.find((l) => l.id === params.id)
     return listing ? HttpResponse.json(listing) : refused(404, 'listing_not_found', 'There is no such listing.')

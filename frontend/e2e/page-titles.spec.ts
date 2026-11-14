@@ -39,6 +39,8 @@ const PAGES = [
   '/customers/c1a00000-0000-4000-8000-000000000001',
   // The storefront's listings (#4962): its tab is "Storefront · ScadBuddy".
   '/storefront',
+  // A listing's editor (#6157): its tab is the listing's title, "New listing" for a new one.
+  '/storefront/listings/new',
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]

@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final
+from urllib.parse import urlencode
 
 import anyio
 import httpx
@@ -191,9 +192,13 @@ class StorefrontCrud:
             "GET", "/account/orders", visitor_id=visitor_id, client=client, session=session
         )
 
-    async def listings(self, *, visitor_id: str, client: str) -> Any:
-        """``GET …/storefront/listings``: the published listings."""
-        return await self._call("GET", "/listings", visitor_id=visitor_id, client=client)
+    async def listings(
+        self, query: Mapping[str, str | int], *, visitor_id: str, client: str
+    ) -> Any:
+        """``GET …/storefront/listings``: one page of the published listings, with
+        ``query``'s ``cursor``, ``limit`` and ``q``, URL-encoded here."""
+        path = f"/listings?{urlencode(query)}" if query else "/listings"
+        return await self._call("GET", path, visitor_id=visitor_id, client=client)
 
     async def listing(self, listing_id: str, *, visitor_id: str, client: str) -> Any:
         """``GET …/storefront/listings/{id}``: one published listing. ``listing_id`` must
