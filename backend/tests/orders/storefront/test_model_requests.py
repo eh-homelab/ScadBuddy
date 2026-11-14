@@ -563,6 +563,30 @@ def test_a_reopen_within_the_grace_keeps_the_file_with_no_deadline(
     assert staged(s3_api, slot_id) == len(STL)
 
 
+def test_a_reopen_after_the_grace_keeps_the_reason_and_the_customer_uploads_again(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    """`reopen_order` has no time limit: past the grace the source stays declined with
+    `ENDED`, and the visitor sends the file again as a new request in a new cart."""
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+    assert s3_api.post(f"/api/v1/orders/{order_id}/cancel").status_code == 200
+    [order] = rows(s3_api, "SELECT cancelled_at FROM orders WHERE id = %s", order_id)
+    found = step(s3_api, slot_id, order["cancelled_at"] + ENDED_GRACE)
+    assert found.reason == "order_ended"
+    assert s3_api.post(f"/api/v1/orders/{order_id}/reopen").status_code == 200
+    [source] = rows(
+        s3_api, "SELECT status, status_reason FROM order_item_sources WHERE order_id = %s", order_id
+    )
+    assert source == {"status": "declined", "status_reason": ENDED}
+    [again] = uploaded(asks, [("cube.stl", STL, "model/stl")], key="m-again")
+    cart = ask(asks, {"uploads": [again]}, key="m2").json()
+    assert cart["id"] != order_id
+    assert staged(s3_api, again) == len(STL)
+
+
 def test_a_file_of_a_closed_order_is_kept_30_days_after_the_close(
     asks: CrudCaller,  # noqa: F811
     s3_api: TestClient,  # noqa: F811

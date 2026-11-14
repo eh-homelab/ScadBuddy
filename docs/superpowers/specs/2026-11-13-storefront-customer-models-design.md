@@ -306,10 +306,12 @@ done, or if the file times out." Each upload has one watcher, the workflow `Stag
   and ends only when the file is imported (§8.3), a person declines it, or the order ends.
   A file of an order cancelled or closed is cleaned up `ENDED_GRACE` after `cancelled_at` or
   `closed_at` (#6164): its source then reads `declined`, "The order ended; the staged file
-  was removed." A reopen within the grace clears those timestamps, so the next step reads
-  the order live again and the file goes back to no deadline. `reopen_order` has no time
-  limit, so a reopen after the grace finds the source declined and the shop asks the
-  customer for the file again. 30 days matches the cart TTL's default
+  was removed. Upload it again." A reopen within the grace clears those timestamps, so the
+  next step reads the order live again and the file goes back to no deadline.
+  `reopen_order` has no time limit, so a reopen after the grace finds the source declined
+  with that reason, which the customer's order page shows (§10.5). The customer uploads
+  the file again as a new request (§4: a new cart, sent as its own order), as files are
+  added to a cart only; the shop may also ask for it. 30 days matches the cart TTL's default
   (`storefront_draft_ttl_days`).
 - **Clean-up.** In one transaction: a cart's line reads `EXPIRED` (`check_status`
   `refused`), and the row is deleted. After the commit, the staging object and its preview
@@ -596,9 +598,12 @@ price a purchase. The customer's view sets `can_accept` false while the gate is 
 - `charges`: `kind`, `label`, `amount_minor` (so shipping and tax show too, which is
   intended: the customer must see what they pay);
 - `sources`: per request item, `kind`, `purpose`, `filename`, `url` (text), `note`, `status`,
-  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (a presigned `GET`).
+  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (a presigned `GET`),
+  and `customer_reason`: the `status_reason` only when ScadBuddy wrote it for the customer
+  (the ended order's `ENDED`, §6.5), else null.
 
-No cost entry, margin, staff name or import reason reaches the customer.
+No cost entry, margin, staff name or import reason reaches the customer. A source declined
+with `ENDED` shows its reason and an "Upload again" link to the storefront's model form.
 
 ## 11. The back office
 

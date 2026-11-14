@@ -94,7 +94,8 @@ MODEL_REQUEST_TITLE: Final = "Your models"
 #: The check reason of a staged file cleaned up from a cart not submitted.
 EXPIRED: Final = "This file expired before the order was sent; upload it again."
 #: The status reason of a staged file's source cleaned up `ENDED_GRACE` after its order ended.
-ENDED: Final = "The order ended; the staged file was removed."
+#: The customer's order page shows it (spec §10.5); a new request uploads the file again.
+ENDED: Final = "The order ended; the staged file was removed. Upload it again."
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 
 
