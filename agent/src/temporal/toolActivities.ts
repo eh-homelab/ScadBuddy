@@ -27,6 +27,7 @@ import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
 import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
+import { type FlowRunReads, SqlFlowRunReads } from '../flows/backendReads.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
@@ -116,9 +117,12 @@ type Responder = { kind?: unknown; id?: unknown }
 
 export class PgApprovalRecords implements ApprovalRecords {
   readonly #sql: Sql
+  readonly #grants: Pick<FlowRunReads, 'grantInForce'>
 
-  constructor(sql: Sql) {
+  /** `grants`: the backend's `flow_grants` (flows/backendReads.ts, #5299 D7); its SQL on `sql` by default. */
+  constructor(sql: Sql, grants?: Pick<FlowRunReads, 'grantInForce'>) {
     this.#sql = sql
+    this.#grants = grants ?? new SqlFlowRunReads(sql)
   }
 
   async approved(requestId: string, call?: ApprovalBinding): Promise<boolean> {
@@ -156,12 +160,9 @@ export class PgApprovalRecords implements ApprovalRecords {
     return typeof row.responder.id === 'string' ? row.responder.id : ''
   }
 
-  /** Whether the run grant is in force; the backend's table, read only for a grant's approval. */
+  /** Whether the run grant is in force; the backend's table, asked only for a grant's approval. */
   async #inForce(grantId: string): Promise<boolean> {
-    const rows = await this.#sql`
-      SELECT 1 FROM flow_grants
-      WHERE id = ${grantId} AND status = 'approved' AND revoked_at IS NULL AND now() < expires_at`
-    return rows.length > 0
+    return await this.#grants.grantInForce(grantId)
   }
 }
 
