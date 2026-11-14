@@ -255,7 +255,9 @@ async def test_remote_blobs_retries_store_unavailable_as_a_passing_failure(
 ) -> None:
     """Unlike ``not_configured``, the client retries it within its budget, then raises
     `CrudUnavailableError`, which the LAN upload's retry policy tries again."""
-    monkeypatch.setattr(output_reader, "TRANSFER_URL_BUDGET", 0.5)
+    # Room for a few tries on a loaded runner: at 0.5 s a first try slower than the
+    # 0.25 s backoff left no second one, and the test failed twice on #6220's CI.
+    monkeypatch.setattr(output_reader, "TRANSFER_URL_BUDGET", 3.0)
     content = _Content({}, failure=ClientError({"Error": {"Code": "SlowDown"}}, "HeadObject"))
     with pytest.raises(CrudUnavailableError) as raised:
         await _read(_blobs(_app(tmp_path, content)), KEY)
