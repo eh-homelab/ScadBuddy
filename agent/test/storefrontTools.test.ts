@@ -144,6 +144,7 @@ describe('storefront tools (#6131)', () => {
       fixed: owl.expected.fixed,
       colours: owl.expected.colours,
       media_ids: ['cover'],
+      one_material: false,
     })
     expect(result).toMatchObject({
       listing_id: LISTING,

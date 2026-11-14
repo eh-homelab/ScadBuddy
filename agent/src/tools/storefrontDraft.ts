@@ -17,6 +17,8 @@ type Value = boolean | number | string
 const HIDDEN_GROUP = 'Hidden'
 /** The longest text a customer may type (`orders/storefront/wire.py` `MAX_TEXT_LENGTH`). */
 const MAX_TEXT_LENGTH = 200
+/** A support material (`orders/storefront/wire.py` `SUPPORT_MATERIAL`, `frontend/src/storefront/params.ts`): change all together. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 export interface ListingDefaults {
   params: Record<string, Bound>
@@ -125,7 +127,7 @@ export function colourProblems(listing: ListingDefaults, schema: Schema, filamen
 /**
  * The body a save sends, as the page's `listingInput` writes it: a support parameter is never
  * offered (`isSupport`), and each offered colour takes the listing filaments' colours but a
- * colour only a support parameter uses.
+ * colour only a support parameter uses and a support material's colour.
  */
 export function withColourChoices(listing: ListingDefaults, schema: Schema, filaments: readonly Filament[]): Pick<ListingDefaults, 'params' | 'fixed'> {
   const byName = new Map((schema.parameters ?? []).map((param) => [param.name, param]))
@@ -158,7 +160,11 @@ export function withColourChoices(listing: ListingDefaults, schema: Schema, fila
     const same = listed.filter((filament) => sameColour(filament.colour, colour))
     return same.length > 0 && same.every((filament) => supportOnlyFilaments.includes(filament))
   })
-  const colours = listed.map((filament) => filament.colour).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+  // #6152: never the colour of a support material, which publish refuses on offer.
+  const colours = listed
+    .filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
+    .map((filament) => filament.colour)
+    .filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const name of Object.keys(params)) {
     if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
   }

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultsFor, emptyDraft, fixColour, listingInput, nearestFilaments, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultsFor, emptyDraft, fixColour, isSupport, listingInput, nearestFilaments, previewListing, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -210,6 +210,43 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
       colours: [BLUE.id, CORAL.id],
     }
     expect(listingInput(draft, schema, [BLUE, CORAL]).params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8', '#E8532F'] } })
+  })
+
+  it('reads the listing’s own label too, as publish does (#6152, backend `_sets_support`)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
+      params: { body: { kind: 'choice', choices: [], label: 'Interface plate colour' } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id],
+    }
+    expect(isSupport(schema.parameters![0]!, 'Interface plate colour')).toBe(true)
+    const body = listingInput(draft, schema, [BLUE])
+    expect(body.params).toEqual({})
+    expect(body.fixed).toEqual({ support_colour: '#E8532F', body: '#1b6ca8' })
+  })
+
+  it('shows no support material in the preview, as the public listing does (#6152)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
+      params: { body: { kind: 'choice', choices: [] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, SUPPORT.id],
+    }
+    expect(previewListing(draft, schema, [BLUE, SUPPORT], [], () => '').colours.map((f) => f.id)).toEqual([BLUE.id])
+  })
+
+  it('offers no colour of a support material ticked by hand (#6152)', () => {
+    const natural = { ...filament('pva-natural', '#F4F1E8', 'Natural'), material: 'PVA' }
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
+      params: { body: { kind: 'choice', choices: [] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, natural.id],
+    }
+    expect(listingInput(draft, schema, [BLUE, natural]).params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8'] } })
   })
 })
 

@@ -331,6 +331,63 @@ def test_a_bound_outside_the_schema_is_refused(bound: dict[str, Any]) -> None:
         checked(params=bound)
 
 
+SUPPORT_SCHEMA = CustomizerSchema.model_validate(
+    {
+        "parameters": [
+            {"name": "colour", "type": "color", "initial": "#FF0000"},
+            {"name": "support_colour", "type": "color", "initial": "#FFFFFF"},
+            {"name": "gap", "type": "number", "initial": 1, "caption": "Interface gap"},
+            {"name": "raft", "type": "number", "initial": 1, "group": "Supports"},
+        ]
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"support_colour": {"kind": "choice", "choices": ["#FF0000"]}},
+        # The schema's caption names it.
+        {"gap": {"kind": "number", "min": 0, "max": 2}},
+        # Only its group names it, as the page's `isSupport` reads it.
+        {"raft": {"kind": "number", "min": 0, "max": 2}},
+        # The listing's own label names it.
+        {"colour": {"kind": "choice", "choices": ["#FF0000"], "label": "Support colour"}},
+    ],
+)
+def test_a_support_parameter_is_never_offered(params: dict[str, Any]) -> None:
+    """#6152: support is the shop's choice. It may lock it, never offer it."""
+    with refused_as("listing_support_offered", 422):
+        checked_fixed(SUPPORT_SCHEMA, body(colours=[RED], params=params), COLOURS)
+
+
+def test_a_locked_support_colour_needs_no_listing_filament() -> None:
+    """#6152: the support colour is locked (here at its default) with no listing filament
+    of its colour; the customer's colour still must be one."""
+    fixed = checked_fixed(SUPPORT_SCHEMA, body(colours=[RED]), COLOURS)
+    assert fixed["support_colour"] == "#FFFFFF"
+    with refused_as("listing_colour_unknown", 422):
+        checked_fixed(SUPPORT_SCHEMA, body(colours=[BLUE]), COLOURS)
+
+
+def test_a_support_filament_is_no_customer_choice() -> None:
+    """#6152: an offered colour must be the colour of a listing filament that is not a
+    support material."""
+    params = {"colour": {"kind": "choice", "choices": ["#FF0000"]}}
+    with refused_as("listing_colour_unknown", 422):
+        checked_fixed(SCHEMA, body(colours=[RED], params=params), COLOURS, supports={RED})
+
+
+def test_one_material_is_kept(store: ListingStore) -> None:
+    """#6152: the switch is stored, and an edit replaces it."""
+    listing = store.create(body(one_material=True))
+    assert listing.one_material is True
+    edited = store.update(listing.id, body(), expected_updated_at=listing.updated_at)
+    assert edited.one_material is False
+    stored = store.get(listing.id)
+    assert stored is not None and stored.one_material is False
+
+
 def test_a_step_on_the_schemas_is_kept() -> None:
     fixed = checked(
         params={
