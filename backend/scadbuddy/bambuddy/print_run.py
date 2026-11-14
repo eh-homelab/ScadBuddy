@@ -2714,12 +2714,13 @@ async def _registry_path(
     report, which must be as fresh as `printers_now` needs it to call the printer
     online (#4442 I3): an older one is no report.
 
-    A print worker without the key cannot read the sliced blob over the LAN path (it
-    signs those reads; the API opens the access code, #5298 Task 29), so an ``auto`` row it
-    reaches through Bambuddy too takes that path (#4442 review): the run still queues
-    through Bambuddy until LAN printing lands (plan Task 9). Only a row set to
-    ``native`` is the key's 503. ``say_fallback`` logs that fallback: on for a run, off
-    for the dialog's checks, which would repeat it on every re-check."""
+    A print worker without the key takes Bambuddy's path: an ``auto`` row it reaches
+    through Bambuddy too takes that path (#4442 review), and only a row set to ``native``
+    is the key's 503. The key itself no longer serves the LAN path on the print worker
+    (the API opens the access code, #5298 Task 29, and mints the sliced blob's read URL,
+    Task 32); this check stays until #5298 Task 33 decides the worker's KEK.
+    ``say_fallback`` logs that fallback: on for a run, off for the dialog's checks, which
+    would repeat it on every re-check."""
     if printers is None or row is None:
         return "bambuddy", None
     report = None if reports is None else await asyncio.to_thread(reports.get, row.id)

@@ -146,6 +146,7 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
@@ -897,9 +898,9 @@ class RemotePrinterStore(PrinterStore):
     every method the worker calls is a route under ``…/print/printers`` (areas
     ``printer-ensure`` and ``printers``). A row is made or merged on the API, which
     announces a merge. ``kek`` is the worker's own: the API opens the access code (plan
-    D8), but the worker still needs its KEK for a virtual printer's sealed request
-    (`bambuddy/virtual_printers.py`) and a LAN print's transfer tokens (`RemoteBlobs`),
-    so `bambuddy/print_run.py` `_registry_path` still reads it."""
+    D8) and mints a LAN print's read URL (#5298 Task 32), but the worker still needs its
+    KEK for a virtual printer's sealed request (`bambuddy/virtual_printers.py`), and
+    `bambuddy/print_run.py` `_registry_path` still reads it."""
 
     def __init__(
         self, client: CrudSyncClient, kek: Kek | None, *, previous_kek: Kek | None = None
@@ -1523,9 +1524,10 @@ _refuse(RemoteNativeSpools, "NativeSpoolStore", NATIVE_SPOOLS_API_ONLY)
 
 
 #: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the
-#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), and its clear at
-#: the API's start (`slicing/component.py`).
-HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear")
+#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), its clear at
+#: the API's start (`slicing/component.py`), and the strip of credential keys at that
+#: start and after each refresh (`strip_kept`).
+HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear", "strip_kept")
 
 
 class RemoteHeldPresets(HeldPresetStore):
@@ -1549,7 +1551,13 @@ class RemoteHeldPresets(HeldPresetStore):
             return {}
         url = f"{BASE}/held-presets/documents?{urlencode({'id': unique}, doseq=True)}"
         body = (await self._client.request("GET", url)).json()
-        return {int(found): LocalPresetDetail.model_validate(doc) for found, doc in body.items()}
+        # The route already strips them; an older API's answer is stripped here.
+        return {
+            int(found): LocalPresetDetail.model_validate(
+                {**doc, "setting": strip_credentials(doc.get("setting") or {})}
+            )
+            for found, doc in body.items()
+        }
 
 
 _refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)

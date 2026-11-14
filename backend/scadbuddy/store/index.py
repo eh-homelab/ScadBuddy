@@ -227,7 +227,9 @@ class BlobIndex:
         meta: dict[str, Any],
         reuse: bool = False,
     ) -> BlobRef | None:
-        """`put` on ``conn``."""
+        """`put` on ``conn``. It writes ``meta`` whole, except that a row's ``output`` mark
+        (`slicing/transfer.py` `SLICED_OUTPUT_META`) stays: a slicer's input of the same
+        bytes as a marked output shares its key, and must not unmark it (#5298 Task 32)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         while True:
             with conn.transaction():
@@ -235,7 +237,9 @@ class BlobIndex:
                 if row is not None:
                     conn.execute(
                         f"UPDATE store_blobs SET {_KEEP_COPY}, sha256 = %s, kind = %s,"
-                        " backend = %s, backend_id = %s, size = %s, slug = %s, meta = %s,"
+                        " backend = %s, backend_id = %s, size = %s, slug = %s,"
+                        " meta = %s || jsonb_strip_nulls("
+                        "jsonb_build_object('output', store_blobs.meta -> 'output')),"
                         " touched_at = now() WHERE key = %s",
                         (*_kept_copy(ref), *values, key),
                     )
@@ -309,7 +313,8 @@ class BlobIndex:
 
     def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
         """Merge ``meta`` into the rows of ``keys`` on ``backend`` not touched since
-        ``cutoff``. A later `put` rewrites `meta`, which clears the mark."""
+        ``cutoff``. A later `put` rewrites `meta`, which clears the mark (all but an
+        ``output`` mark, which `put_in` keeps)."""
         self.retrying(
             ",".join(sorted(keys)),
             lambda conn: self.mark_in(conn, keys, backend=backend, cutoff=cutoff, meta=meta),

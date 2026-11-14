@@ -99,6 +99,30 @@ advisory lock), ``…/spools/refreshes/{provider}/failed``, ``…/native-spools/
 transaction here (plan D6). A failure, a start's uses and a slice's start are natural; a
 provider's records and a settle take an ``Idempotency-Key`` and run with their ledger row.
 
+A LAN print's sliced 3MF is read through a URL minted here (``POST /transfer-urls``, area
+``transfer-urls``, #5298 Task 32), for the print worker's `bambuddy/output_reader.py`
+`RemoteBlobs`: the worker holds no key to sign one. Only a key the content index holds,
+live, as a slicer's output gets one: kind ``slice`` (`SLICE_KIND`) with the mark
+`Transfers.finish_put` gives the slicer's ``sliced_3mf`` (`SLICED_OUTPUT_META`). Any
+other key (unknown, gone, of another kind such as a ``workspace`` file, or a slicer's
+input of kind ``slice``: the laid-out copy and the preset files) is 403
+``transfer-refused``. The inputs are left out as defence in depth: the preset files are
+written with every print-host credential key stripped (`core/credentials.py`
+`strip_credentials`), and an input is no file the print worker prints. The rule follows
+the blob's own life, not its `native_slices` row's: the slice sweep deletes a row 6 h
+after it finished, but a LAN run of several plates or copies reads each file again when it starts
+the next one, up to days later, until the content sweep collects it. Its cost: the print
+worker can read any live sliced output (a run's, the print dialog's or an order
+quote's). A hold of the run on its file (a print-run holder in `blob_refs`, released
+where each run ends) would bind the key to the run; no such hold exists yet (#6122). The
+URL is the internal blob route's (`slicing/transfer.py` `Transfers.internal_get`, good
+for `READ_TTL`), signed under the API's KEK, on every backend: the token reads that one
+key. A backend that fails the key's read (an S3 error other than a missing object, a
+Bambuddy that does not answer) is 503 ``store_unavailable``, logged by the error's type
+only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A read
+that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
+token (``no-store``, as every CRUD answer): never logged.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -160,6 +184,7 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import PrintOutcome, decode_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
@@ -197,7 +222,16 @@ from scadbuddy.printers.store import (
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.store import NativeSlice, SliceSubjectError
+from scadbuddy.slicing.transfer import (
+    READ_TTL,
+    SLICE_KIND,
+    SLICED_OUTPUT_META,
+    STORE_UNAVAILABLE,
+    TRANSFER_REFUSED,
+    TransferUnavailableError,
+)
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
 from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
@@ -1763,7 +1797,23 @@ async def held_presets(slicing: SlicingDep) -> list[HeldPresetRow]:
 async def held_preset_documents(
     slicing: SlicingDep, id: Annotated[list[int], Query(default_factory=list)]
 ) -> dict[int, LocalPresetDetail]:
-    return await slicing.held.documents(id)
+    """The kept local presets' documents, each with every print-host credential key
+    removed (`core/credentials.py` `strip_credentials`: ``printhost_apikey``,
+    ``printhost_password``, ``printhost_user``, and any key naming an API key, password,
+    secret or token, at any depth). ScadBuddy strips these keys whenever it parses a
+    preset, and never stores, forwards or writes them into a slicer file; no slice reads
+    them. The API strips the kept presets an older build stored at its start and
+    after each refresh
+    (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files
+    that older builds put in the content store keep the keys until the content sweep
+    collects them. The print worker, which holds the Bambuddy key, can still read Bambuddy's local
+    presets, including any such keys, in the bytes Bambuddy sends. What protects them is
+    the Bambuddy key's scope."""
+    documents = await slicing.held.documents(id)
+    return {
+        found: doc.model_copy(update={"setting": strip_credentials(doc.setting)})
+        for found, doc in documents.items()
+    }
 
 
 @router.post("/native-slices/start", name="crud_print_start_native_slice")
@@ -1782,3 +1832,44 @@ async def start_native_slice(body: SliceStartAsk, slicing: SlicingDep) -> Native
         )
     except SliceSubjectError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=SLICE_SUBJECT) from None
+
+
+class TransferUrlAsk(BaseModel):
+    key: str
+
+
+@router.post("/transfer-urls", name="crud_print_transfer_url")
+async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl:
+    """A read URL of ``key``, only if the content index holds it live as a slicer's
+    output (see the module docstring). Without a content store, an internal URL or a KEK on the
+    API it is 503 ``not_configured``, which the worker does not retry."""
+    try:
+        transfers = slicing.transfers()
+    except RuntimeError as error:  # no content store
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None
+    try:
+        stat = await transfers.content.stat(body.key)
+    except psycopg.Error:
+        raise  # the CRUD guard's: a passing one is 503 ``database-unavailable``
+    except Exception as error:
+        # The backend's own text may name the bucket or the object: kept out.
+        logger.warning("the content store did not read a transfer key: %s", type(error).__name__)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The blob store did not answer. Try again.",
+            reason=STORE_UNAVAILABLE,
+        ) from None
+    if (
+        stat is None
+        or stat.ref.kind != SLICE_KIND
+        or any(stat.meta.get(k) != v for k, v in SLICED_OUTPUT_META.items())
+    ):
+        raise ApiError(status.HTTP_403_FORBIDDEN, "transfer refused", reason=TRANSFER_REFUSED)
+    try:
+        return transfers.internal_get(body.key, READ_TTL)
+    except TransferUnavailableError as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
+        ) from None

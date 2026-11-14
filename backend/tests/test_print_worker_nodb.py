@@ -21,6 +21,7 @@ from scadbuddy import worker as worker_module
 from scadbuddy.auth.service_auth import ExchangeReader, ServiceCredentialConfigError
 from scadbuddy.auth.service_credentials import TokenReader
 from scadbuddy.bambuddy import operations as bambuddy_operations
+from scadbuddy.bambuddy.output_reader import RemoteBlobs
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.crud.print import (
     RemoteHeldPresets,
@@ -109,6 +110,11 @@ async def test_it_builds_with_no_database_and_holds_no_pool(
             if getattr(fn, "__temporal_activity_definition").name == "lan_print"
         ]
         assert isinstance(lan.__self__.d.native_spools, RemoteNativeSpools)  # type: ignore[attr-defined]
+        # With no KEK, a LAN print still reads its sliced file: the API mints the URL
+        # (#5298 Task 32).
+        assert settings.secret_key_file is None
+        blobs = lan.__self__.d.blobs  # type: ignore[attr-defined]
+        assert isinstance(blobs, RemoteBlobs) and blobs._crud is deps.crud
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

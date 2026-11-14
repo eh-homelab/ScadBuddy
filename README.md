@@ -1268,17 +1268,39 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   a printer's access code is opened on the API and answered to the print worker's
   credential alone (`…/printers/{id}/access-code`, `no-store`, logged without the code),
   so the worker's KEK opens no access code; it still unseals a virtual printer's request
-  and signs a LAN print's blob reads. The rack hotends' usage goes through them too
-  (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
+  and, with no exchange proof, its sealed service credential. The rack hotends' usage
+  goes through them too (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
   start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
   them too go the spools a native run's overlay reads and the native provider re-caches, ScadBuddy's
   own spools and what a LAN start uses of them, the kept copy of Bambuddy's local presets
   and a native slice's start (`…/spools`, `…/native-spools`, `…/held-presets`,
   `…/native-slices`; a provider's records and a run's settle take an `Idempotency-Key`).
-  The worker does not `LISTEN`. It waits until the API
-  lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
+  A LAN print reads a native slice's sliced 3MF by a URL the API mints for it
+  (`…/transfer-urls`, #5298 Task 32): the internal blob route's, its token signed under
+  the API's KEK and good for 10 minutes, on every `store_backend`, so the pod reaches the
+  API only. The API mints one only for a key its content index holds live as a slicer's
+  output (kind `slice` with the mark the slice's record step gives it), whether or not the
+  slice's row was swept since (6 h after it finished: a run's later plates start after
+  the earlier ones print). So the print worker can read any live sliced output (a run's,
+  the print dialog's or an order quote's); a print-run hold on its file would narrow that
+  to the run's own. The slicer's inputs share kind `slice` but are refused. ScadBuddy
+  strips print-host credential keys (`printhost_apikey`, `printhost_password`,
+  `printhost_user`, and any key naming an API key, password, secret or token, at any
+  depth) whenever it parses a preset, and never stores, forwards or writes them into a
+  slicer file (`core/credentials.py` `strip_credentials`). The API strips the kept
+  presets an older build stored at its start and after each refresh, with no Bambuddy call
+  (`slicing/held_presets.py` `strip_kept_logged`). One window remains: preset files that
+  older builds put in the content store keep the keys until the content sweep collects
+  them. The print worker, which holds
+  the Bambuddy key, can still read Bambuddy's local presets, including any such keys, in
+  the bytes Bambuddy sends. What protects them is the Bambuddy key's scope. Any other
+  key is 403
+  `transfer-refused`, which the print reports as "The sliced file is no longer stored.
+  Print again to slice it again.", without a retry. A blob store that fails the read is
+  503 `store_unavailable`, which the worker retries. The worker signs nothing. It does
+  not `LISTEN`. It waits until the API lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers`, `rack` and `spools`) before it serves. Its
+  `lan-imports`, `printers`, `rack`, `spools` and `transfer-urls`) before it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
@@ -2155,7 +2177,9 @@ What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822
 - The KEK (`SCADBUDDY_SECRET_KEY_FILE`) and `SCADBUDDY_API_INTERNAL_URL` on the API:
   every transfer URL's token is signed under a key derived from the KEK, and the URLs
   name the internal blob routes at that base. Without either, a native slice fails
-  saying which is missing. The slicer pod must reach that URL.
+  saying which is missing. The slicer pod must reach that URL, and so must the print
+  worker, whose LAN print reads its sliced file there by a URL the API mints
+  (`…/print/transfer-urls`; without either, that read fails with a 503 `not_configured`).
 - `store_backend` `s3` or `bambuddy`: `local` has no content store for the slices'
   blobs, and a native slice there fails with a 503.
 - The print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and
@@ -2191,8 +2215,9 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 
 1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
    render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API,
-   which seals the printer's access code and opens it for the print worker (#5298), and
-   on the print worker, which signs a LAN print's blob reads with it. Both count as native
+   which seals the printer's access code and opens it for the print worker (#5298) and
+   signs a LAN print's blob reads (#5298 Task 32), and on the print worker, which takes
+   Bambuddy's path for an `auto` printer without it. Both count as native
    (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
    copy among them, live in Bambuddy's library: those reads are the store's calls, outside
    the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of

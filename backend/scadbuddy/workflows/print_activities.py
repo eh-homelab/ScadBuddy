@@ -68,6 +68,7 @@ from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRuns
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.library.output_prints import OutputPrintStore
@@ -109,8 +110,6 @@ from scadbuddy.workflows.printing import CLIENT_ACCEPTING, UNWAITED
 
 logger = logging.getLogger(__name__)
 
-#: How often a slice wait tells Temporal it is alive (its heartbeat timeout is 30 s).
-HEARTBEAT_EVERY = 10.0
 #: Seconds ``print_finish`` gives remembering the project, well under its 60 s timeout:
 #: an attempt that timed out would be retried without limit (review #1061).
 REMEMBER_BUDGET = 20.0
@@ -226,19 +225,6 @@ def problem(error: ApiError) -> PrintRunError:
 
 def raised_as(error: ApiError, kind: str, *, non_retryable: bool = True) -> ApplicationError:
     return ApplicationError(error.detail, problem(error), type=kind, non_retryable=non_retryable)
-
-
-async def heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
-    """Await ``work``, telling Temporal every ``HEARTBEAT_EVERY`` that it is alive."""
-    task = asyncio.create_task(work)
-    try:
-        while True:
-            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_EVERY)
-            if done:
-                return task.result()
-            activity.heartbeat()
-    finally:
-        task.cancel()
 
 
 class PrintActivities:
