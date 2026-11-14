@@ -90,6 +90,9 @@ export async function downloadBlob(
  * is opened embedded or not. A blocked window rejects with `DownloadBlockedError`, one
  * closed before the URL arrived with `DownloadWindowClosedError`; neither falls back to
  * anything that could fail without a word. The window is closed when `load` fails.
+ * Once sent to an `attachment` URL the download starts and the blank tab stays open: no
+ * page loads in it to say when the download began, and closing it too early can cancel
+ * the download, so it is left for the person to close.
  */
 export async function downloadUrl(load: () => Promise<string>): Promise<void> {
   const popup = openDownloadWindow()

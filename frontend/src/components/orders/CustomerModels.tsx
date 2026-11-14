@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { DownloadIcon, ExternalLinkIcon } from 'lucide-react'
 import { api } from '../../api/client'
 import type { OrderDetail, OrderItemSource } from '../../api/types'
@@ -261,6 +261,8 @@ function SourceStatus({ source }: { source: OrderItemSource }) {
 function DeclineSource({ label, disabled, onDecline }: { label: string; disabled: boolean; onDecline: (reason: string) => Promise<boolean> }) {
   const [open, setOpen] = useState(false)
   const [reason, setReason] = useState('')
+  // One id per form: two forms open at once must not share it (review of #6217).
+  const inputId = useId()
   if (!open) {
     return (
       <Button size="sm" variant="outline" disabled={disabled} onClick={() => setOpen(true)}>
@@ -271,10 +273,10 @@ function DeclineSource({ label, disabled, onDecline }: { label: string; disabled
   return (
     <div className="flex w-full flex-wrap items-end gap-2">
       <div className="flex min-w-48 flex-1 flex-col gap-1">
-        <Label htmlFor={`decline-${label}`} className="text-xs font-normal text-muted-foreground">
+        <Label htmlFor={inputId} className="text-xs font-normal text-muted-foreground">
           Why the shop declines it
         </Label>
-        <Input id={`decline-${label}`} value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} />
+        <Input id={inputId} value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} />
       </div>
       <Button size="sm" disabled={disabled} onClick={() => void onDecline(reason).then((done) => done && setOpen(false))}>
         {label}

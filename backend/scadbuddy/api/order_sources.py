@@ -135,7 +135,8 @@ async def source_download(
         "For a file whose check failed (every attempt timed out or crashed): the file "
         "waits for its check again, and the check starts on the intake worker. A file "
         "already being checked has its check started again (a running one is joined). "
-        "409 `source_not_failed`, `source_not_staged`; 404 `source_not_found`."
+        "409 `source_not_failed`, `source_not_staged`, `order_not_submitted` (a visitor's "
+        "cart); 404 `source_not_found`."
     ),
 )
 async def source_check(
@@ -184,8 +185,8 @@ async def source_decline(
     summary="Retry a stuck import",
     description=(
         "For a file whose import has not finished an hour after the order was sent: its "
-        "watcher is told to run the import again. 409 `import_not_stuck`; 404 "
-        "`source_not_found`."
+        "watcher is told to run the import again. 409 `import_not_stuck`, "
+        "`order_not_submitted` (a visitor's cart); 404 `source_not_found`."
     ),
 )
 async def source_retry_import(
