@@ -17,6 +17,7 @@ import pytest
 import trimesh
 
 from scadbuddy.render import thumbnail
+from scadbuddy.render.colours import MIN_PART_ALPHA
 from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     MAX_BREAKDOWN_COLOURS,
@@ -619,6 +620,15 @@ def test_the_pick_image_stays_opaque_under_a_translucent_part() -> None:
     covered = pick[..., 3] > 0
     assert covered.any()
     assert (pick[covered, 3] == 255).all()
+
+
+def test_a_part_of_alpha_zero_draws_at_the_floor_never_nan() -> None:
+    """#6243 review: alone over nothing, alpha 0 would divide by zero coverage."""
+    alone = [ColourPart(1, "clear", "#FFFFFF", trimesh.creation.box(extents=(20, 20, 2)), alpha=0)]
+    image = read_png(render_view(alone, "top", 64))
+    centre = image[32, 32]
+    assert centre[0] == centre[1] == centre[2] > 200  # white, as lit; never NaN
+    assert abs(int(centre[3]) - MIN_PART_ALPHA) <= 1
 
 
 def test_a_view_draws_a_translucent_part_see_through() -> None:

@@ -277,6 +277,14 @@ def test_a_layout_keeps_a_translucent_parts_alpha(tmp_path: Path) -> None:
     loaded = PlateLayout.load(tmp_path / LAYOUT_NAME)
     assert [part.alpha for part in loaded.plates[0].parts] == [0x80]
 
+    # #6243 review: an alpha of 0, or one that is no byte, never loads as written.
+    for stored, read in ((0, MIN_PART_ALPHA), (300, 255), ("80", 255)):
+        document = json.loads((tmp_path / LAYOUT_NAME).read_text())
+        document["plates"][0]["parts"][0]["alpha"] = stored
+        (tmp_path / LAYOUT_NAME).write_text(json.dumps(document))
+        loaded = PlateLayout.load(tmp_path / LAYOUT_NAME)
+        assert [part.alpha for part in loaded.plates[0].parts] == [read]
+
 
 def test_a_malformed_colour_matches_no_part() -> None:
     """#187: a 5-digit hex is not truncated or padded into some other colour's match."""
