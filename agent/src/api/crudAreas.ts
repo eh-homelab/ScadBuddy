@@ -86,7 +86,8 @@ export class CrudAreas {
   #timer: NodeJS.Timeout | undefined
   #started = false
   #stopped = false
-  #waitLogged = false
+  /** The reasons for waiting already logged, each once. */
+  readonly #logged = new Set<string>()
 
   constructor(baseUrl: string, options: CrudAreasOptions) {
     this.#base = baseUrl
@@ -134,10 +135,17 @@ export class CrudAreas {
       }
       why = `missing ${this.#wanted.filter((a) => !this.#listed.has(a)).join(', ')}`
     } catch (error) {
-      why = (error as Error).message
+      const status = error instanceof CrudReadError ? error.status : undefined
+      if (status === 401 || status === 403) {
+        // Not an older pod: no live credential, or one without `crud.agent` (#6234 review).
+        why = `the backend refused the agent's service credential (HTTP ${status}); check SCADBUDDY_SERVICE_TOKEN_FILE or the credential view`
+      } else {
+        why = (error as Error).message
+      }
     }
-    if (!this.#waitLogged) {
-      this.#waitLogged = true
+    // Each reason once: a refused credential is not hidden behind an earlier "missing".
+    if (!this.#logged.has(why)) {
+      this.#logged.add(why)
       this.#log(`CRUD areas: waiting for the backend's agent areas (${why}); reading over SQL until it lists them`)
     }
     return false

@@ -84,6 +84,19 @@ describe('CrudAreas', () => {
     expect(logs[0]).toContain('no CRUD route answered its areas (HTTP 404)')
   })
 
+  it("names a refused credential, apart from waiting for an older pod (#6234 review)", async () => {
+    const logs: string[] = []
+    let status = 404
+    const fetchAreas: typeof fetch = async () => new Response('', { status, headers: status === 404 ? {} : { 'x-scadbuddy-crud': '1' } })
+    const areas = new CrudAreas(BASE, { fetch: fetchAreas, wanted: READ_AREAS, log: (m) => logs.push(m) })
+    await areas.refresh()
+    status = 401
+    await areas.refresh()
+    await areas.refresh()
+    expect(logs).toHaveLength(2)
+    expect(logs[1]).toContain("the backend refused the agent's service credential (HTTP 401)")
+  })
+
   it('reads again with back-off from the start until they are listed', async () => {
     let calls = 0
     const fetchAreas = api([
