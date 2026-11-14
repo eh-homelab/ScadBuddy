@@ -8,31 +8,23 @@ import type { Operation } from './registry.js'
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'GET /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
-  },
-  {
-    operation: 'POST /api/v1/storefront/listings',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/order',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'PUT /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
-  },
-  {
-    operation: 'POST /api/v1/storefront/listings/{listing_id}/publish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'DELETE /api/v1/storefront/listings/{listing_id}',
-    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
+    reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },
   {
     operation: 'POST /api/v1/parts',

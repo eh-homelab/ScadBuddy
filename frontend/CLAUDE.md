@@ -106,7 +106,8 @@ same way, `vite.config.ts`).
   saved one. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
   a support setting is never offered, `isSupport`), pinned by
-  `test-fixtures/storefront/sell-draft-vectors.json`; a
+  `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
