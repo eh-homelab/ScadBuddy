@@ -699,7 +699,18 @@ tabs, the browser and the agent) claim once, and a hold or cancel after the chec
 the claim, so only one print starts. The run is then attached (`attach_print`:
 `print_run_id`, the registry `printer`); a start the print path refuses (a 4xx) releases
 the claim (`release_print`, the item back to `approved` or `failed`), and one that may
-still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The
+still start (a 5xx) keeps it. A 5xx that says the start may still run (503
+`command-still-accepting`, or `temporal-unavailable`: Temporal busy or away) is sent again
+inside the run with the same `request_id`, which follows that run, on a backoff (1 s,
+doubled, at most 30 s) for `START_FOLLOW_S` (240 s, the print dialog's and the agent's own
+`CLIENT_ACCEPTING`, past which the print run refuses itself) (#6138). Before that fix the
+operation failed on the first such answer, nothing sent the start again, and the claim
+never got its run. When the bound runs out, the run's key is read once (as a retry reads
+it, below): a run there is attached; neither a run nor an open `print-<key>` workflow
+releases the claim; and when it cannot tell (the workflow still accepting, or Temporal
+away) the claim is kept, since a run may exist and a released claim would let a new print
+print the item twice, and the failure names the attempt to settle by hand. Any other 5xx
+(a start Temporal refused, 500) fails the operation at once with the claim kept. The
 `request_id` is made from the item and the key, and a claim found under it on another item
 is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
 claim has no run yet starts only while the claim still may print (the order not ended or on
@@ -1221,6 +1232,15 @@ The price book's filament records can be **imported from spools**: `POST
 `cost_per_kg` (the most recent spool's, with the spread shown when they differ) and
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.
+
+**As built (#6136).** The import also gives a record with no density one, and never
+changes a density a record has: the spools' preset id (`slicer_filament`, a K-profile's
+`setting_id`, the AMS tray's `tray_info_idx`), that preset's `filament_density`
+(Bambuddy's local preset, else the image's Bambu Studio preset), else Bambuddy's filament
+catalogue (`orders/density.py`). `POST /orders/price-book/fill-densities` does the same for
+every record with no density, and a record added by hand with no density takes it too.
+`filaments.density_profile` keeps where each density came from. A density read Bambuddy
+refuses gives no density and fails nothing.
 
 ### 8.4 Printers
 

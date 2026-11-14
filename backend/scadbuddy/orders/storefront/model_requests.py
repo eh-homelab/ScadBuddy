@@ -77,8 +77,13 @@ UPLOAD_URL_TTL: Final = timedelta(minutes=15)
 UNCLAIMED_GRACE: Final = timedelta(hours=1)
 #: A claimed file of a cart not submitted is cleaned up this long after its claim: an
 #: abandoned cart must not keep up to `MAX_MODEL_REQUEST_BYTES` staged for the cart TTL. A
-#: submitted order's file has no deadline.
+#: submitted order's file has no deadline while the order is live.
 STAGING_TTL: Final = timedelta(hours=72)
+#: A file of a submitted order that was cancelled or closed is cleaned up this long after
+#: the order ended, unless the order is reopened first (#6164). `reopen_order` has no time
+#: limit, so this matches the storefront's other abandonment bound, the cart TTL's
+#: default (`storefront_draft_ttl_days`, 30).
+ENDED_GRACE: Final = timedelta(days=30)
 #: The backstop deletes a staging object no row names, and restarts the watcher of a row
 #: whose watcher is not running, past this age.
 ORPHAN_AGE: Final = timedelta(days=1)
@@ -94,6 +99,9 @@ SWEEP_PASS_BATCHES: Final = 5
 MODEL_REQUEST_TITLE: Final = "Your models"
 #: The check reason of a staged file cleaned up from a cart not submitted.
 EXPIRED: Final = "This file expired before the order was sent; upload it again."
+#: The status reason of a staged file's source cleaned up `ENDED_GRACE` after its order ended.
+#: The customer's order page shows it (spec §10.5); a new request uploads the file again.
+ENDED: Final = "The order ended; the staged file was removed. Upload it again."
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 
 

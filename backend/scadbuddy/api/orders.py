@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
+    AppState,
     CatalogueDep,
     ConfigDep,
     FetcherDep,
@@ -66,6 +67,7 @@ from scadbuddy.orders.costs import (
     order_costs,
     order_margins,
 )
+from scadbuddy.orders.density import DensityTable, ProfileDensity, used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
@@ -93,6 +95,7 @@ from scadbuddy.orders.models import (
     ChargeInput,
     CostEntry,
     CostEntryInput,
+    DensityFill,
     Filament,
     FilamentInput,
     FilamentPatch,
@@ -144,6 +147,8 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
+from scadbuddy.orders.spool_import import density_for
+from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import (
     UNSET,
@@ -156,6 +161,7 @@ from scadbuddy.orders.store import (
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.links import LinkState
 from scadbuddy.orders.storefront.mail import ORDER_MAIL_MAX, OrderMail
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.credentials import KekMissingError
@@ -163,6 +169,7 @@ from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.slicing.profiles import ProfileError
 
 logger = logging.getLogger(__name__)
 
@@ -842,6 +849,38 @@ async def put_price_book(
     return await asyncio.to_thread(orders.price_book.snapshot)
 
 
+#: How long a filament added by hand waits for its density from Bambuddy (#6148
+#: review): its reads are the spools, the local presets, the assignments with a status
+#: read per printer, and the catalogue, each with the client's own timeout.
+DENSITY_LOOKUP_TIMEOUT = 10.0
+
+
+async def _vendor_densities(orders: OrdersComponent) -> DensityTable | None:
+    """The image's vendor densities; ``None``, logged, when the image's tree cannot be
+    read (a :class:`ProfileError`, or an ``OSError`` such as a tree with no ``VERSION``
+    file), so the add, the import and the fill go on with Bambuddy's sources only."""
+    try:
+        return await asyncio.to_thread(orders.densities)
+    except (ProfileError, OSError) as error:
+        logger.warning("no densities from the image's vendor presets: %s", error)
+        return None
+
+
+async def _hand_density(body: FilamentInput, orders: OrdersComponent) -> ProfileDensity | None:
+    """The density the inventory's spools of ``body``'s identity give; ``None`` when
+    Bambuddy refuses the spools' read or answers in another shape."""
+    try:
+        groups = await orders.integrations.spool_groups()
+    except ApiError as error:
+        logger.warning("a filament was added with no density: %s", error.detail)
+        return None
+    except ValidationError as error:
+        logger.warning("a filament was added with no density: %s", error)
+        return None
+    densities = await _vendor_densities(orders)
+    return density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
+
+
 @router.post(
     "/price-book/filaments",
     response_model=Filament,
@@ -850,9 +889,28 @@ async def put_price_book(
 )
 async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
     """409 ``filament_exists`` naming the record of the same material, subtype, brand
-    and colour (in any case)."""
+    and colour (in any case). Sent with no density while a Bambuddy is linked, it takes
+    the one Bambuddy's spools of its identity give (#6136, `orders/density.py`), with
+    ``density_profile`` saying where from; none when no source gives one, when Bambuddy
+    does not answer, or when the lookup takes longer than ``DENSITY_LOOKUP_TIMEOUT``
+    (the add never waits on it to succeed)."""
+    profile = None
+    if body.density_g_cm3 is None and orders.integrations.linked:
+        try:
+            found = await asyncio.wait_for(_hand_density(body, orders), DENSITY_LOOKUP_TIMEOUT)
+        except TimeoutError:
+            logger.warning(
+                "a filament was added with no density: the lookup took longer than %s s",
+                DENSITY_LOOKUP_TIMEOUT,
+            )
+            found = None
+        if found is not None:
+            body = body.model_copy(update={"density_g_cm3": found.density_g_cm3})
+            profile = found.profile
     try:
-        return await asyncio.to_thread(orders.store.insert_filament, body)
+        return await asyncio.to_thread(
+            lambda: orders.store.insert_filament(body, density_profile=profile)
+        )
     except FilamentExistsError as error:
         raise _filament_exists(error) from None
 
@@ -919,16 +977,41 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
     the most recent priced spool's ``cost_per_kg``; a row's ``min_cost_per_kg`` and
     ``max_cost_per_kg`` show the spread when its spools' prices differ. A filament known
     only by its colour's name, or with no priced spool, is ``skipped`` with its
-    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). 409 ``not_linked``
+    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). A record with no
+    density gets the one Bambuddy's link to its slicer preset gives (#6136,
+    `orders/density.py`); a density a record has is never changed. 409 ``not_linked``
     without a Bambuddy URL."""
     try:
         groups = await orders.integrations.spool_groups()
     except NotLinkedError:
         raise not_linked() from None
+    densities = await _vendor_densities(orders)
     try:
-        return await asyncio.to_thread(import_spools_into, orders.store, groups)
+        return await asyncio.to_thread(import_spools_into, orders.store, groups, densities)
     except FilamentExistsError as error:
         raise _filament_exists(error) from None
+
+
+@router.post(
+    "/price-book/fill-densities",
+    response_model=DensityFill,
+    summary="Fill the empty densities of the price book from Bambuddy",
+)
+async def fill_densities(orders: OrdersDep) -> DensityFill:
+    """Every record not archived with no density gets the one Bambuddy's link to the
+    slicer preset gives (#6136, `orders/density.py`), read from the inventory's spools of
+    the record's material, subtype, brand and colour: their preset id (``slicer_filament``,
+    a K-profile's ``setting_id``, the AMS tray's ``tray_info_idx``), that preset's
+    density (Bambuddy's local preset, else the image's Bambu Studio preset), else
+    Bambuddy's filament catalogue. One row per such record; a row with no
+    ``density_g_cm3`` is one no source covers, which still has none. A density a record
+    has is never changed. 409 ``not_linked`` without a Bambuddy URL."""
+    try:
+        groups = await orders.integrations.spool_groups()
+    except NotLinkedError:
+        raise not_linked() from None
+    densities = await _vendor_densities(orders)
+    return await asyncio.to_thread(fill_densities_in, orders.store, densities, groups)
 
 
 # -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------
@@ -939,20 +1022,28 @@ async def estimate(
     output_id: str, filament_id: str, orders: OrdersDep, outputs: OutputsDep
 ) -> OrderEstimate:
     """The output's parts' enclosed volumes over every plate, times the filament's
-    density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3). A
-    read: nothing is recorded. 404 for an unknown output or filament, 422
-    ``filament_density`` for a filament with no density."""
+    density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3);
+    ``densities`` says which density was used and where it came from (#6136). A read:
+    nothing is recorded. 404 for an unknown output or filament, 422
+    ``filament_density`` for a filament with no density, whose text says how to fill it."""
     check_path(output_id, filament_id)
     record = await asyncio.to_thread(orders.store.filament, filament_id)
     if record is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
-    if record.density_g_cm3 is None:
+    try:
+        used_density(record)
+    except ValueError as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"filament {filament_id} has no density, so there is no estimate",
+            str(error),
             type_=PROBLEMS + "filament_density",
-            errors=[{"loc": ["query", "filament_id"], "msg": "the filament has no density"}],
-        )
+            errors=[
+                {
+                    "loc": ["query", "filament_id"],
+                    "msg": "the filament has no density",
+                }
+            ],
+        ) from None
     await asyncio.to_thread(require_output, outputs, output_id)
 
     def measured() -> list[EstimatedPart]:
@@ -1349,19 +1440,32 @@ def _ensured(task: asyncio.Task[Any], number: str) -> None:
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
 async def cancel_order(
-    order_id: str, orders: OrdersDep, service: PaymentsDep, body: CancelBody | None = None
+    order_id: str,
+    orders: OrdersDep,
+    service: PaymentsDep,
+    state: StateDep,
+    body: CancelBody | None = None,
 ) -> Order:
     """The open and failed payment requests end with the order (a pending one refuses the
-    cancel, `payment_in_flight`); their pages close after the commit."""
+    cancel, `payment_in_flight`); their pages close after the commit. A customer's staged
+    files are kept `ENDED_GRACE` (30 days) for a reopen (#6164)."""
     check_path(order_id)
     by = current_actor()
     reason = body.reason if body else None
     try:
-        return await service.service.cancel_order(
+        order = await service.service.cancel_order(
             order_id, lambda: orders.lifecycle.cancel_order(order_id, by, reason)
         )
     except LifecycleError as error:
         raise refused(error) from None
+    await _tell_staged(state, order_id, "closed")
+    return order
+
+
+async def _tell_staged(state: AppState, order_id: str, signal: str) -> None:
+    """Wake the watchers of the order's staged files after an end or a reopen; each reads
+    the order again, so a lost signal costs time, never a file (#6164)."""
+    await poke(state, await asyncio.to_thread(uploads_of, state, order_id=order_id), signal)
 
 
 @router.post("/{order_id}/hold", response_model=Order, summary="Put an order on hold")
@@ -1379,12 +1483,15 @@ async def release_order(order_id: str, orders: OrdersDep) -> Order:
 
 
 @router.post("/{order_id}/close", response_model=Order, summary="Close an order")
-async def close_order(order_id: str, orders: OrdersDep) -> Order:
+async def close_order(order_id: str, orders: OrdersDep, state: StateDep) -> Order:
     """§3.5's close rule: refused with ``order_not_closable`` naming every item still
-    open and every fulfilled item no shipment covers."""
+    open and every fulfilled item no shipment covers. A customer's staged files are kept
+    `ENDED_GRACE` (30 days) for a reopen (#6164)."""
     check_path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.close_order(order_id, by))
+    order = await _run(lambda: orders.lifecycle.close_order(order_id, by))
+    await _tell_staged(state, order_id, "closed")
+    return order
 
 
 @router.post(
@@ -1401,10 +1508,16 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
         "(#5281). 409 `order_not_ended` for an order neither closed nor cancelled."
     ),
 )
-async def reopen_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
+async def reopen_order(
+    order_id: str, orders: OrdersDep, service: PaymentsDep, state: StateDep
+) -> Order:
     check_path(order_id)
     by = current_actor()
-    return await _run_linked(lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service)
+    order = await _run_linked(
+        lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service
+    )
+    await _tell_staged(state, order_id, "retry")
+    return order
 
 
 # -- the customer link (#5283, storefront spec §5.2) ---------------------------------------

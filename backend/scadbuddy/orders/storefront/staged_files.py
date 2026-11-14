@@ -14,9 +14,13 @@ due, in the same transaction:
 - a claimed upload whose line is gone (``removed``);
 - a claimed upload of a cart not submitted `STAGING_TTL` after its claim (``expired``: the
   line reads `EXPIRED`);
-- an upload of a submitted order a person declined (``declined``).
+- an upload of a submitted order a person declined (``declined``);
+- an upload of a submitted order cancelled or closed `ENDED_GRACE` ago (``order_ended``: the
+  source reads ``declined``, `ENDED`). A reopen within the grace clears the order's
+  ``cancelled_at``/``closed_at``, so the next step reads it live again (#6164).
 
-A submitted order's file has no deadline: only its import (a later PR) or a decline ends it.
+A live submitted order's file has no deadline: only its import (a later PR), a decline or
+the order's end ends it.
 A clean-up deletes the row, commits, then deletes the staging object and its preview (a
 missing object is no error); a step retried after a crash in between finds no row and
 deletes them again (``gone``). It never reads a byte of the file (#5295, #5296).
@@ -50,6 +54,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.model_requests import (
     CHECK_STALE,
+    ENDED,
+    ENDED_GRACE,
     EXPIRED,
     ORPHAN_AGE,
     STAGING_TTL,
@@ -184,6 +190,15 @@ def staged_backend(state: AppState) -> S3ContentBackend | None:
     return backend if isinstance(backend, S3ContentBackend) else None
 
 
+def _ended_at(order: Any) -> datetime | None:
+    """When a cancelled or closed order ended; None while it is live."""
+    if order["status"] == "cancelled":
+        return order["cancelled_at"]  # type: ignore[no-any-return]
+    if order["status"] == "closed":
+        return order["closed_at"]  # type: ignore[no-any-return]
+    return None
+
+
 def _decide(state: AppState, upload_id: str, now: datetime) -> tuple[StagedFileState, Any]:
     """The file's state, and the order changed by a clean-up (or None). A file due for
     clean-up loses its row in this transaction; the caller deletes its objects."""
@@ -199,7 +214,8 @@ def _decide(state: AppState, upload_id: str, now: datetime) -> tuple[StagedFileS
         if found["order_id"] is not None:
             # The order's lock first, as a claim, a line's removal and a submit take it.
             order = conn.execute(
-                "SELECT id, status, submitted_at FROM orders WHERE id = %s FOR UPDATE",
+                "SELECT id, status, submitted_at, cancelled_at, closed_at FROM orders"
+                " WHERE id = %s FOR UPDATE",
                 (found["order_id"],),
             ).fetchone()
         row = conn.execute(
@@ -235,7 +251,18 @@ def _decide(state: AppState, upload_id: str, now: datetime) -> tuple[StagedFileS
         elif row["status"] == "declined":
             reason = "declined"
         else:
-            return StagedFileState(phase="submitted"), None
+            ended = _ended_at(order)
+            if ended is None:
+                return StagedFileState(phase="submitted"), None
+            due = ended + ENDED_GRACE
+            if now < due:
+                return StagedFileState(phase="submitted", due=due), None
+            reason = "order_ended"
+            conn.execute(
+                "UPDATE order_item_sources SET status = 'declined', status_reason = %s,"
+                " updated_at = now() WHERE id = %s",
+                (ENDED, row["source_id"]),
+            )
         conn.execute("DELETE FROM storefront_uploads WHERE id = %s", (upload_id,))
         return StagedFileState(phase="ended", reason=reason), order
 

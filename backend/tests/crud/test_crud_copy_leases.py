@@ -1,7 +1,7 @@
 """The print worker's copy lease through its CRUD routes (#5298 Task 27): the worker's
 `RemoteUploadStore.copy_lock` and the API's exclude each other, a record under a lease
-another holder took is 409 ``lease-lost`` and `LeaseLostError` on the worker, a held old
-advisory lock makes the route's acquire busy, and the store holds no pool."""
+another holder took is 409 ``lease-lost`` and `LeaseLostError` on the worker, and the
+store holds no pool."""
 
 from __future__ import annotations
 
@@ -10,11 +10,10 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
-import psycopg
 import pytest
 
 from scadbuddy.api.crud_areas import CRUD_AREAS
-from scadbuddy.bambuddy.copy_leases import COPY_LOCK_PREFIX, CopyLease, CopyLeases, LeaseLostError
+from scadbuddy.bambuddy.copy_leases import CopyLease, CopyLeases, LeaseLostError
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
@@ -146,15 +145,3 @@ async def test_the_acquire_bounds_its_lease_and_wait(
     with pytest.raises(CrudRefusedError) as refused:
         await crud.request("POST", URL, json={"token": str(uuid.uuid4()), **body})
     assert refused.value.status == 422
-
-
-async def test_an_old_holder_of_the_advisory_lock_makes_the_acquire_busy(
-    crud: CrudClient, pg_conninfo: str
-) -> None:
-    leases = RemoteCopyLeases(crud)
-    with psycopg.connect(pg_conninfo, autocommit=True) as old_pod:
-        old_pod.execute(
-            "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK_PREFIX + KEY,)
-        )
-        assert await leases.acquire(KEY, str(uuid.uuid4()), 60, 0.3) is None
-    assert await leases.acquire(KEY, str(uuid.uuid4()), 60, 0) is not None

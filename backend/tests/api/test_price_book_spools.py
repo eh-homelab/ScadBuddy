@@ -32,6 +32,13 @@ def spool(spool_id: int, **fields: Any) -> dict[str, Any]:
     }
 
 
+def no_density_sources() -> None:
+    """Bambuddy's filament catalogue and AMS assignments, which the import reads for a
+    density (#6136), empty."""
+    respx.get(f"{API}/filament-catalog/").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(200, json=[]))
+
+
 def test_without_bambuddy_there_is_nothing_to_import(client: TestClient) -> None:
     assert client.get(BOOK).json()["spool_import"] is False
     response = client.post(IMPORT)
@@ -42,6 +49,7 @@ def test_without_bambuddy_there_is_nothing_to_import(client: TestClient) -> None
 @respx.mock
 def test_spools_make_and_update_the_records(client: TestClient) -> None:
     configure(client)
+    no_density_sources()
     # Set without a restart: the seam follows the running settings.
     assert client.get(BOOK).json()["spool_import"] is True
     priced = add_filament(client, brand="BAMBU", subtype="basic", cost_per_kg="10")
@@ -99,6 +107,7 @@ def test_spools_make_and_update_the_records(client: TestClient) -> None:
 def test_two_alphas_of_one_colour_price_one_record_once(client: TestClient) -> None:
     """#5159 review: FFFFFFFF and FFFFFF80 are one record, priced from the newest spool."""
     configure(client)
+    no_density_sources()
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(
             200,

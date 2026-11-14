@@ -12,16 +12,16 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
 `auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
-Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
-empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
-holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
+revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
+Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
 view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
 warning; the API opens every sealed value it needs (area `access-codes`: whether the API
 opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
-(#5298): they reach their data through CRUD routes. The projects worker has no grant
-list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
-every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
-(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
+(#5298): they reach their data through CRUD routes. Neither has a grant list. The API
+and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
+the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
 worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
@@ -157,11 +157,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
   backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
-  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
-  and `grant_role`, which every caller's list goes through; the render worker holds no
-  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
-  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
+  backend's migrations); the render worker holds no database (#5298,
+  `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
+  every start, `auth/revoke.py`, and every caller's grant list goes through
+  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -1378,6 +1378,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+  A record with no density gets one there, from a manual add sent with no density, and
+  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
+  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
+  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  person's density clears it. An estimate reads only the record's own density.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
@@ -1409,9 +1417,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   under the order's lock and cleans it up when due, in the same transaction, then deletes
   the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
   expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
-  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file. A
-  submitted order's file has no deadline. The routes signal it after their commits
-  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`), but the database is the truth,
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file, and a
+  file of a submitted order cancelled or closed `ENDED_GRACE` (30 days) before (#6164; its
+  source reads `declined`, `ENDED`; a reopen within the grace clears `cancelled_at` and
+  `closed_at`, so the file waits again). A live submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`; an order's cancel and close
+  `closed`, its reopen `retry`), but the database is the truth,
   so a lost signal costs time, never a file; the step retries with no limit.
   `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
