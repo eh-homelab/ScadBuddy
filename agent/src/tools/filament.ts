@@ -3,7 +3,8 @@ import { ok } from './call.js'
 import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // ScadBuddy's own filament inventory (#6261, epic #6260): the catalogs a spool type or a
-// spool picks from. Write tier: nothing leaves ScadBuddy.
+// spool picks from, the spool types, and the spools with their tags and ledger. Write
+// tier: nothing leaves ScadBuddy.
 // Routes: backend/scadbuddy/api/filament.py.
 
 const SOURCE = "ScadBuddy's own filament inventory"
@@ -226,6 +227,228 @@ export const filamentTools: Tool[] = [
             body: k_values as never,
           }),
           `set the K values of spool type ${type_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_list',
+    label: 'List filament spools',
+    description:
+      "ScadBuddy's spools (one physical reel each) by number, each with its `effective` values (its own " +
+      "override, else its type's), the fields it `overridden`, and `grams_left` from its ledger. " +
+      '`needs_type: true` lists only spools with no type yet, `false` only typed ones. Archived spools only ' +
+      'with `include_archived`.',
+    input: z.object({
+      include_archived: z.boolean().default(false),
+      needs_type: z.boolean().optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools'],
+    handler: async ({ include_archived, needs_type }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools', { params: { query: { include_archived, needs_type } } }),
+          'list the spools',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_get',
+    label: 'Read a spool',
+    description: 'One spool (archived too) with its effective values and `grams_left`.',
+    input: z.object({ spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list") }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}'],
+    handler: async ({ spool_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }),
+          `read spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_upsert',
+    label: 'Add or edit a spool',
+    description:
+      'Add a spool (no `spool_id`), or edit one: only the `fields` given change, and `null` on an override ' +
+      "clears it so the spool takes its type's value again. A new spool needs a `type_id` (filament_type_list) " +
+      'or, while it needs a type, a `material_id`; `grams_left` is its first reading. Each edit is one `edited` ' +
+      'ledger event. To record a weighing use filament_spool_add_event; to archive use filament_spool_archive. ' +
+      '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
+      'material. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_id: z.string().uuid().optional().describe("A spool's `id`; omit to add"),
+      fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools', 'PATCH /api/v1/filament/spools/{spool_id}'],
+    summarize: ({ spool_id }) => (spool_id ? `Edit spool ${spool_id}` : 'Add a spool'),
+    handler: async ({ spool_id, fields }, { backend }) => {
+      if (spool_id === undefined) {
+        return json(await ok(backend.POST('/api/v1/filament/spools', { body: fields as never }), 'add a spool'))
+      }
+      return json(
+        await ok(
+          backend.PATCH('/api/v1/filament/spools/{spool_id}', {
+            params: { path: { spool_id } },
+            body: fields as never,
+          }),
+          `edit spool ${spool_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_spool_archive',
+    label: 'Archive or restore a spool',
+    description:
+      '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
+      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/archive'],
+    summarize: ({ spool_id, archived }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}`,
+    handler: async ({ spool_id, archived }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/archive', {
+            params: { path: { spool_id } },
+            body: { archived },
+          }),
+          `archive spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_delete',
+    label: 'Delete a spool',
+    description:
+      'Delete a spool that never printed (one added by mistake), with its ledger and tag bindings. 409 when its ' +
+      'ledger holds a print: use filament_spool_archive instead. Only when the user asks. Writes ScadBuddy only.',
+    input: z.object({ spool_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/spools/{spool_id}'],
+    summarize: ({ spool_id }) => `Delete spool ${spool_id}`,
+    handler: async ({ spool_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/filament/spools/{spool_id}', { params: { path: { spool_id } } }),
+        `delete spool ${spool_id}`,
+      )
+      return json({ deleted: spool_id })
+    },
+  }),
+
+  defineTool({
+    name: 'filament_spool_bind_tag',
+    label: 'Put a tag on a spool',
+    description:
+      'Bind an RFID or NFC tag to a spool, by its `tag_uid`, its `tray_uuid`, or both (as a tray reports them). ' +
+      'A tag not seen before is made with `kind`. A tag on another spool moves to this one, and a tag this ' +
+      "spool had comes off; both spools' ledgers record it. Only what the user says. Writes ScadBuddy only.",
+    input: z.object({
+      spool_id: z.string().uuid(),
+      tag_uid: z.string().optional(),
+      tray_uuid: z.string().optional(),
+      kind: z.enum(['bambu_mifare', 'ntag_openspool', 'ntag_opentag', 'other']).default('other'),
+      override: z.boolean().default(false).describe('The user moves the tag on purpose'),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/tags'],
+    summarize: ({ spool_id, tag_uid, tray_uuid }) => `Put tag ${tag_uid ?? tray_uuid ?? ''} on spool ${spool_id}`,
+    handler: async ({ spool_id, tag_uid, tray_uuid, kind, override }, { backend }) => {
+      if (tag_uid === undefined && tray_uuid === undefined) throw new ToolError('give a tag_uid or a tray_uuid')
+      return json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/tags', {
+            params: { path: { spool_id } },
+            body: { tag_uid, tray_uuid, kind, override },
+          }),
+          `bind a tag to spool ${spool_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_tag_unbind',
+    label: 'Take a tag off its spool',
+    description:
+      "Take a tag off the spool it is bound to; the spool's ledger records it. `tag_id` is a binding's " +
+      '`tag_id`. 404 when the tag is on no spool. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ tag_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/tags/{tag_id}/binding'],
+    summarize: ({ tag_id }) => `Take tag ${tag_id} off its spool`,
+    handler: async ({ tag_id }, { backend }) =>
+      json(
+        await ok(
+          backend.DELETE('/api/v1/filament/tags/{tag_id}/binding', { params: { path: { tag_id } } }),
+          `unbind tag ${tag_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_events',
+    label: "Read a spool's ledger",
+    description:
+      'Every event of a spool, oldest first: readings (scale, person, AMS, Bambuddy) in `grams_after`, print ' +
+      'use in `delta_g`, edits, tags, drying. `grams_left` is the newest reading less the later use.',
+    input: z.object({ spool_id: z.string().uuid() }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/events'],
+    handler: async ({ spool_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools/{spool_id}/events', { params: { path: { spool_id } } }),
+          `read the ledger of spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_add_event',
+    label: 'Record a weighing or a drying',
+    description:
+      'Record on a spool a weighing (`kind: weighed`, `grams` = the filament left, without the empty spool; ' +
+      '`grams_left` starts again from it) or a drying (`kind: dried`, `temp_c`, `hours`). Only what the user ' +
+      'says. Writes ScadBuddy only.',
+    input: z.object({
+      spool_id: z.string().uuid(),
+      kind: z.enum(['weighed', 'dried']),
+      source: z.enum(['person', 'scale']).default('person'),
+      grams: z.number().min(0).optional(),
+      temp_c: z.number().int().min(0).optional(),
+      hours: z.string().optional().describe('A decimal, e.g. `8`'),
+      note: z.string().optional(),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/events'],
+    summarize: ({ spool_id, kind, grams }) =>
+      kind === 'weighed' ? `Record ${grams ?? '?'} g on spool ${spool_id}` : `Record a drying of spool ${spool_id}`,
+    handler: async ({ spool_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+            params: { path: { spool_id } },
+            body: body as never,
+          }),
+          `record on spool ${spool_id}`,
         ),
       ),
   }),

@@ -1,6 +1,7 @@
 """`/api/v1/filament` (#6261, epic #6260): ScadBuddy's own filament inventory. This
 module holds the catalogs a spool type or a spool picks from (plain reads and writes
-over `filament/catalog.py`) and the spool types (`filament/types.py`). Nothing here
+over `filament/catalog.py`), the spool types (`filament/types.py`), and the spools,
+their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Nothing here
 reaches Bambuddy."""
 
 from __future__ import annotations
@@ -9,9 +10,11 @@ import asyncio
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Body, status
+from fastapi import APIRouter, Body, Response, status
 from pydantic import BaseModel, ValidationError
 
+from scadbuddy.auth.component import CallerDep
+from scadbuddy.auth.models import Caller, Person, PersonalToken, Service
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import (
@@ -21,6 +24,12 @@ from scadbuddy.filament.catalog import (
     CatalogSpec,
 )
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.spools import (
+    SpoolInUseError,
+    SpoolTypelessError,
+    TagKeysClashError,
+    TagUnnamedError,
+)
 from scadbuddy.filament.types import TypeRowsDuplicateError, TypeTempError
 from scadbuddy.orders.store import FilamentExistsError
 
@@ -67,7 +76,9 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 def _refused(exc: ValueError) -> ApiError:
     code = (
         status.HTTP_409_CONFLICT
-        if isinstance(exc, CatalogExistsError | FilamentExistsError)
+        if isinstance(
+            exc, CatalogExistsError | FilamentExistsError | SpoolInUseError | TagKeysClashError
+        )
         else status.HTTP_422_UNPROCESSABLE_CONTENT
     )
     return ApiError(code, str(exc))
@@ -271,3 +282,235 @@ async def put_type_k_values(
     if saved is None:
         raise _no_type(type_id)
     return saved
+
+
+# -- spools, tags, the ledger ---------------------------------------------------------
+
+_SPOOL_REFUSED = (
+    CatalogRefError,
+    TypeTempError,
+    SpoolTypelessError,
+    SpoolInUseError,
+    TagUnnamedError,
+    TagKeysClashError,
+)
+
+
+def _actor(caller: Caller) -> str:
+    """Who a ledger event names: a person by name (else email, else principal), a token
+    by its person's principal, a service by its name."""
+    if isinstance(caller, Person):
+        session = caller.session
+        return session.name or session.email or session.principal
+    if isinstance(caller, PersonalToken):
+        return caller.principal
+    if isinstance(caller, Service):
+        return f"service:{caller.caller}"
+    return "anonymous"
+
+
+def _no_spool(spool_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no spool {spool_id}")
+
+
+@router.get(
+    "/spools",
+    response_model=list[m.Spool],
+    summary="List spools",
+    description=(
+        "The spools by number, each with its `effective` values (its own override, else its "
+        "type's, else its subtype's and material's print defaults) and the names of the "
+        "fields it `overridden`. `needs_type=true` keeps only spools with no type yet, "
+        "`false` only typed ones. Archived spools only with `include_archived`."
+    ),
+)
+async def list_spools(
+    filament: FilamentDep, include_archived: bool = False, needs_type: bool | None = None
+) -> list[m.Spool]:
+    return await asyncio.to_thread(
+        filament.spools.list, include_archived=include_archived, needs_type=needs_type
+    )
+
+
+@router.post(
+    "/spools",
+    response_model=m.Spool,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a spool",
+    description=(
+        "A spool names a `type_id`, or, while it needs a type, its own `material_id`. Every "
+        "other value overrides the type's. `grams_left` is the first reading on its ledger. "
+        "422 for a bad field, a row it points at that does not exist, or an effective "
+        "minimum temperature above its maximum."
+    ),
+)
+async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
+    try:
+        return await asyncio.to_thread(filament.spools.create, body, actor=_actor(caller))
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+
+
+@router.get(
+    "/spools/{spool_id}",
+    response_model=m.Spool,
+    summary="Read a spool",
+    description="One spool (archived too) with its effective values. 404 for none.",
+)
+async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.Spool:
+    found = await asyncio.to_thread(filament.spools.get, spool_id)
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.patch(
+    "/spools/{spool_id}",
+    response_model=m.Spool,
+    summary="Change a spool",
+    description=(
+        "Only the fields sent change; `null` on an override clears it, and the spool takes "
+        "its type's value again. One `edited` ledger event records each change as `[before, "
+        "after]`. `archived` takes the spool off the lists or puts it back. 404 for no such "
+        "spool, 422 for a bad field, a patch that leaves neither `type_id` nor "
+        "`material_id`, or an effective minimum temperature above its maximum."
+    ),
+)
+async def patch_spool(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolPatch
+) -> m.Spool:
+    try:
+        changed = await asyncio.to_thread(
+            filament.spools.update, spool_id, body, actor=_actor(caller)
+        )
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if changed is None:
+        raise _no_spool(spool_id)
+    return changed
+
+
+@router.delete(
+    "/spools/{spool_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a spool",
+    description=(
+        "Only a spool that never printed: its ledger, tag bindings and Bambuddy link go "
+        "with it. 404 for no such spool, 409 when its ledger holds a print; archive it "
+        "instead."
+    ),
+)
+async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
+    try:
+        deleted = await asyncio.to_thread(filament.spools.delete, spool_id)
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if not deleted:
+        raise _no_spool(spool_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/spools/{spool_id}/archive",
+    response_model=m.Spool,
+    summary="Archive or restore a spool",
+    description=(
+        "`archived: true` takes the spool off the lists, `false` puts it back; each writes "
+        "an `archived` or `restored` ledger event. 404 for no such spool."
+    ),
+)
+async def archive_spool(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolArchive
+) -> m.Spool:
+    changed = await asyncio.to_thread(
+        filament.spools.archive, spool_id, body.archived, actor=_actor(caller)
+    )
+    if changed is None:
+        raise _no_spool(spool_id)
+    return changed
+
+
+@router.post(
+    "/spools/{spool_id}/tags",
+    response_model=m.TagBinding,
+    status_code=status.HTTP_201_CREATED,
+    summary="Put a tag on a spool",
+    description=(
+        "The tag is found by its `tag_uid` or `tray_uuid` (cleaned to hex as a tray reports "
+        "them), or made with `kind`. A binding the tag had to another spool, or the spool "
+        "had to another tag, is closed, with a `tag_unbound` ledger event on that spool and "
+        "`tag_bound` on this one. 404 for no such spool, 409 when the two keys name two "
+        "tags, 422 when neither key is left once cleaned."
+    ),
+)
+async def bind_spool_tag(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.TagBind
+) -> m.TagBinding:
+    try:
+        bound = await asyncio.to_thread(
+            lambda: filament.spools.bind_tag(
+                spool_id,
+                tag_uid=body.tag_uid,
+                tray_uuid=body.tray_uuid,
+                kind=body.kind,
+                override=body.override,
+                actor=_actor(caller),
+            )
+        )
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if bound is None:
+        raise _no_spool(spool_id)
+    return bound
+
+
+@router.delete(
+    "/tags/{tag_id}/binding",
+    response_model=m.TagBinding,
+    summary="Take a tag off its spool",
+    description=(
+        "Closes the tag's open binding, with a `tag_unbound` ledger event on its spool, "
+        "and answers the closed binding. 404 when the tag is on no spool."
+    ),
+)
+async def unbind_tag(filament: FilamentDep, caller: CallerDep, tag_id: UUID) -> m.TagBinding:
+    closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=_actor(caller))
+    if closed is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
+    return closed
+
+
+@router.get(
+    "/spools/{spool_id}/events",
+    response_model=list[m.SpoolEvent],
+    summary="Read a spool's ledger",
+    description=(
+        "Every event of the spool, oldest first: readings (`scale`, `person`, `ams_remain`, "
+        "`bb`) in `grams_after`, print use in `delta_g`. `grams_left` is the newest reading "
+        "less the later use. 404 for no such spool."
+    ),
+)
+async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.SpoolEvent]:
+    if await asyncio.to_thread(filament.spools.get, spool_id) is None:
+        raise _no_spool(spool_id)
+    return await asyncio.to_thread(filament.spools.events, spool_id)
+
+
+@router.post(
+    "/spools/{spool_id}/events",
+    response_model=m.SpoolEvent,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record a weighing or a drying",
+    description=(
+        "`weighed` with `grams` (the filament left, without the empty spool) is a new "
+        "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`. "
+        "404 for no such spool, 422 for a field the kind does not take."
+    ),
+)
+async def add_spool_event(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolEventAdd
+) -> m.SpoolEvent:
+    made = await asyncio.to_thread(filament.spools.add_event, spool_id, body, actor=_actor(caller))
+    if made is None:
+        raise _no_spool(spool_id)
+    return made

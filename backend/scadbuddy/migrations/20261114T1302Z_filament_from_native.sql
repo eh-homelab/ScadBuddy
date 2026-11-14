@@ -103,8 +103,15 @@ BEGIN
 END
 $$;
 
+-- The `created` reading is the weight before any applied use: `remaining_g` already has
+-- those uses taken off, and the ledger takes each `print_actual` below off the reading
+-- again (`filament/ledger.py` `grams_left`), which then gives `remaining_g` back.
 INSERT INTO filament_spool_events (spool_id, at, kind, source, grams_after)
-SELECT coalesce(l.physical_spool_id, s.id), s.created_at, 'created', 'person', s.remaining_g
+SELECT coalesce(l.physical_spool_id, s.id), s.created_at, 'created', 'person',
+       s.remaining_g + coalesce((
+           SELECT sum(u.grams) FROM native_spool_uses u
+           WHERE u.spool_id = s.id AND u.settled_at IS NOT NULL AND u.applied IS TRUE
+       ), 0)
 FROM native_spools s
 LEFT JOIN spool_record_links l ON l.provider = 'native' AND l.record_id = s.id::text;
 

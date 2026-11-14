@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
+from scadbuddy.filament.ledger import refresh_derived
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 
 pg = pytest.mark.requires_postgres
@@ -120,7 +122,8 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
         ).fetchall()
         assert len(created) == 4
         mine = next(c for c in created if c[0] == live[0])
-        assert mine[1:3] == ("person", 600)
+        # 600 left after the applied 12.5 g: the reading is the weight before it.
+        assert mine[1:3] == ("person", 612.5)
         assert mine[3].isoformat().startswith("2026-11-01T10:00:00")
 
         uses = conn.execute(
@@ -132,3 +135,12 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             ("print_started", "print_estimate", -3, "print_run", "r2/s/1", None),
             ("print_ended", "print_actual", 0, "print_run", "r3/s/2", "not_applied"),
         ]
+
+        # The ledger gives the native weight back, less the print still running.
+        conn.commit()
+    with psycopg.connect(pg_conninfo, row_factory=dict_row) as rows:
+        refresh_derived(rows, live[0])
+        left = rows.execute(
+            "SELECT grams_left FROM filament_spools WHERE id = %s", (live[0],)
+        ).fetchone()
+        assert left == {"grams_left": 597}

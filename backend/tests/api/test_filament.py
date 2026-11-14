@@ -1,7 +1,8 @@
-"""`/api/v1/filament/catalog/{kind}` (#6261): the filament catalogs."""
+"""`/api/v1/filament` (#6261): the filament catalogs, spool types and spools."""
 
 from __future__ import annotations
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -49,7 +50,8 @@ TYPES = "/api/v1/filament/types"
 
 def _material_id(client: TestClient) -> str:
     rows = client.get(f"{URL}/materials").json()
-    return next(row["id"] for row in rows if row["name"] == "PLA")
+    found: str = next(row["id"] for row in rows if row["name"] == "PLA")
+    return found
 
 
 def _type(client: TestClient, **over: object) -> dict[str, object]:
@@ -61,7 +63,8 @@ def _type(client: TestClient, **over: object) -> dict[str, object]:
     } | over
     made = client.post(TYPES, json=body)
     assert made.status_code == 201, made.text
-    return made.json()
+    row: dict[str, object] = made.json()
+    return row
 
 
 def test_a_type_is_made_read_changed_and_archived(client: TestClient) -> None:
@@ -110,3 +113,83 @@ def test_presets_and_k_values_are_replaced(client: TestClient) -> None:
     k = {"printer_id": MISSING, "extruder": 0, "nozzle_diameter": "0.4", "k_value": "0.02"}
     unknown = client.put(f"{TYPES}/{made['id']}/k-values", json=[k])
     assert unknown.status_code == 422, unknown.text
+
+
+SPOOLS = "/api/v1/filament/spools"
+
+
+def _spool(client: TestClient, **over: object) -> dict[str, object]:
+    made = client.post(SPOOLS, json={"material_id": _material_id(client)} | over)
+    assert made.status_code == 201, made.text
+    row: dict[str, object] = made.json()
+    return row
+
+
+def test_a_spool_is_made_read_changed_and_weighed(client: TestClient) -> None:
+    made = _spool(client, grams_left=500, note="a")
+    assert made["grams_left"] == 500
+    one = f"{SPOOLS}/{made['id']}"
+    assert client.get(one).json()["note"] == "a"
+    patched = client.patch(one, json={"note": "b"})
+    assert patched.status_code == 200, patched.text
+    listed = client.get(SPOOLS, params={"needs_type": True}).json()
+    assert [s["id"] for s in listed] == [made["id"]]
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created", "edited"]
+    weighed = client.post(f"{one}/events", json={"kind": "weighed", "grams": 420})
+    assert weighed.status_code == 201, weighed.text
+    assert client.get(one).json()["grams_left"] == 420
+
+
+def test_a_spool_that_is_typeless_or_backwards_is_422(client: TestClient) -> None:
+    assert client.post(SPOOLS, json={"note": "x"}).status_code == 422
+    one = f"{SPOOLS}/{_spool(client)['id']}"
+    typeless = client.patch(one, json={"material_id": None})
+    assert typeless.status_code == 422, typeless.text
+    backwards = client.patch(one, json={"bed_temp_min": 90, "bed_temp_max": 60})
+    assert backwards.status_code == 422, backwards.text
+
+
+def test_a_spool_with_prints_is_not_deleted(client: TestClient, pg_conninfo: str) -> None:
+    made = _spool(client)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO filament_spool_events (spool_id, kind, source, delta_g)"
+            " VALUES (%s, 'print_ended', 'print_actual', -3)",
+            (made["id"],),
+        )
+    one = f"{SPOOLS}/{made['id']}"
+    refused = client.delete(one)
+    assert refused.status_code == 409, refused.text
+    assert client.get(one).status_code == 200
+    archived = client.post(f"{one}/archive", json={"archived": True})
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["archived_at"] is not None
+    fresh = f"{SPOOLS}/{_spool(client)['id']}"
+    assert client.delete(fresh).status_code == 204
+    assert client.get(fresh).status_code == 404
+
+
+def test_a_tag_is_bound_moved_and_unbound(client: TestClient) -> None:
+    a, b = _spool(client), _spool(client)
+    tag = {"tag_uid": "AABBCCDD", "kind": "bambu_mifare"}
+    first = client.post(f"{SPOOLS}/{a['id']}/tags", json=tag)
+    assert first.status_code == 201, first.text
+    moved = client.post(f"{SPOOLS}/{b['id']}/tags", json=tag)
+    assert moved.json()["tag_id"] == first.json()["tag_id"]
+    binding = f"/api/v1/filament/tags/{first.json()['tag_id']}/binding"
+    unbound = client.delete(binding)
+    assert unbound.status_code == 200, unbound.text
+    assert client.delete(binding).status_code == 404
+    assert client.post(f"{SPOOLS}/{a['id']}/tags", json={"kind": "other"}).status_code == 422
+
+
+def test_a_missing_spool_is_404(client: TestClient) -> None:
+    one = f"{SPOOLS}/{MISSING}"
+    assert client.get(one).status_code == 404
+    assert client.patch(one, json={"note": "x"}).status_code == 404
+    assert client.delete(one).status_code == 404
+    assert client.post(f"{one}/archive", json={"archived": True}).status_code == 404
+    assert client.get(f"{one}/events").status_code == 404
+    assert client.post(f"{one}/events", json={"kind": "weighed", "grams": 1}).status_code == 404
+    tag = {"tag_uid": "AA", "kind": "other"}
+    assert client.post(f"{one}/tags", json=tag).status_code == 404

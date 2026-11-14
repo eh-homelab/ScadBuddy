@@ -636,7 +636,7 @@ class Spool(_Row):
     last_dried_hours: Decimal | None
     last_used_at: datetime | None
     archived_at: datetime | None
-    #: The values the spool has after its overrides over its type's (Task 5 fills it).
+    #: The values the spool has after its overrides over its type's.
     effective: EffectiveValues = Field(default_factory=EffectiveValues)
     #: The names of the fields the spool overrides.
     overridden: list[str] = Field(default_factory=list)
@@ -765,6 +765,51 @@ class SpoolEvent(BaseModel):
     ref_id: str | None
     actor: str | None
     data: dict[str, Any]
+
+
+class SpoolEventAdd(_In):
+    """What a person records on a spool: a weighing (``grams`` is the filament left,
+    without the empty spool) or a drying (its temperature and hours)."""
+
+    kind: Literal["weighed", "dried"]
+    source: Literal["person", "scale"] = "person"
+    at: datetime | None = None
+    grams: Grams | None = None
+    temp_c: Temp | None = None
+    hours: Hours | None = None
+    note: Note | None = None
+
+    @model_validator(mode="after")
+    def _fits_kind(self) -> SpoolEventAdd:
+        if self.kind == "weighed" and self.grams is None:
+            raise ValueError("a weighing needs grams")
+        if self.kind == "weighed" and (self.temp_c is not None or self.hours is not None):
+            raise ValueError("a weighing has no temp_c or hours")
+        if self.kind == "dried" and self.grams is not None:
+            raise ValueError("a drying has no grams; record a weighing for that")
+        return self
+
+
+class SpoolArchive(_In):
+    #: ``True`` takes the spool off the lists, ``False`` puts it back.
+    archived: bool = True
+
+
+class TagBind(_In):
+    """The tag to put on a spool, by its UID, its tray UUID, or both. A tag not seen
+    before is made with ``kind``."""
+
+    tag_uid: Text | None = None
+    tray_uuid: Text | None = None
+    kind: TagKind = "other"
+    #: Recorded on the binding: a person moved the tag on purpose.
+    override: bool = False
+
+    @model_validator(mode="after")
+    def _named(self) -> TagBind:
+        if self.tag_uid is None and self.tray_uuid is None:
+            raise ValueError("a tag needs a tag_uid or a tray_uuid")
+        return self
 
 
 class BbLinkCreate(_In):

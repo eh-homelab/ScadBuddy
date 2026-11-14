@@ -164,3 +164,100 @@ describe('filament type tools', () => {
     expect(bodies).toEqual([presets, k_values])
   })
 })
+
+const SPOOLS = `${BACKEND}/api/v1/filament/spools`
+const SPOOL = `${SPOOLS}/${ROW}`
+
+describe('filament spool tools', () => {
+  it.each([
+    ['filament_spool_list', 'read'],
+    ['filament_spool_get', 'read'],
+    ['filament_spool_events', 'read'],
+    ['filament_spool_upsert', 'write'],
+    ['filament_spool_archive', 'write'],
+    ['filament_spool_delete', 'write'],
+    ['filament_spool_bind_tag', 'write'],
+    ['filament_tag_unbind', 'write'],
+    ['filament_spool_add_event', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists the spools that need a type, reads one and its ledger', async () => {
+    server.use(
+      http.get(SPOOLS, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('needs_type')).toBe('true')
+        return HttpResponse.json([{ id: ROW }])
+      }),
+      http.get(SPOOL, () => HttpResponse.json({ id: ROW })),
+      http.get(`${SPOOL}/events`, () => HttpResponse.json([{ kind: 'created' }])),
+    )
+    const listed = await runTool(tool('filament_spool_list'), { needs_type: true }, ctx())
+    expect(firstText(listed)).toEqual([{ id: ROW }])
+    expect(firstText(await runTool(tool('filament_spool_get'), { spool_id: ROW }, ctx()))).toEqual({ id: ROW })
+    const events = await runTool(tool('filament_spool_events'), { spool_id: ROW }, ctx())
+    expect(firstText(events)).toEqual([{ kind: 'created' }])
+  })
+
+  it('adds a spool, edits it, archives it and deletes another', async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.post(SPOOLS, async ({ request }) => {
+        calls.push(['add', await request.json()])
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(SPOOL, async ({ request }) => {
+        calls.push(['edit', await request.json()])
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.post(`${SPOOL}/archive`, async ({ request }) => {
+        calls.push(['archive', await request.json()])
+        return HttpResponse.json({ id: ROW })
+      }),
+      http.delete(SPOOL, () => {
+        calls.push(['delete'])
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const fields = { type_id: ROW, grams_left: 1000 }
+    expect((await runTool(tool('filament_spool_upsert'), { fields }, ctx())).isError).toBeFalsy()
+    const edit = { spool_id: ROW, fields: { rgba: null } }
+    expect((await runTool(tool('filament_spool_upsert'), edit, ctx())).isError).toBeFalsy()
+    expect((await runTool(tool('filament_spool_archive'), { spool_id: ROW }, ctx())).isError).toBeFalsy()
+    const deleted = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
+    expect(firstText(deleted)).toEqual({ deleted: ROW })
+    expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
+  })
+
+  it('says why a spool that printed is not deleted', async () => {
+    server.use(http.delete(SPOOL, () => HttpResponse.json({ detail: 'archive it instead' }, { status: 409 })))
+    const refused = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
+  it('binds and unbinds a tag, and records a weighing', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/tags`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ tag_id: ROW }, { status: 201 })
+      }),
+      http.delete(`${BACKEND}/api/v1/filament/tags/${ROW}/binding`, () => HttpResponse.json({ tag_id: ROW })),
+      http.post(`${SPOOL}/events`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ kind: 'weighed' }, { status: 201 })
+      }),
+    )
+    const bind = { spool_id: ROW, tag_uid: 'AABBCCDD', kind: 'bambu_mifare' }
+    expect((await runTool(tool('filament_spool_bind_tag'), bind, ctx())).isError).toBeFalsy()
+    expect((await runTool(tool('filament_tag_unbind'), { tag_id: ROW }, ctx())).isError).toBeFalsy()
+    const weigh = { spool_id: ROW, kind: 'weighed', grams: 640 }
+    expect((await runTool(tool('filament_spool_add_event'), weigh, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { tag_uid: 'AABBCCDD', kind: 'bambu_mifare', override: false },
+      { kind: 'weighed', source: 'person', grams: 640 },
+    ])
+    expect((await runTool(tool('filament_spool_bind_tag'), { spool_id: ROW }, ctx())).isError).toBe(true)
+  })
+})

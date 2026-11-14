@@ -10,6 +10,7 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
 
 
@@ -17,6 +18,7 @@ from scadbuddy.filament.types import SpoolTypeStore
 class Filament:
     catalog: CatalogStore
     types: SpoolTypeStore
+    spools: FilamentSpoolStore
 
 
 FILAMENT: Key[Filament] = Key("filament")
@@ -24,7 +26,9 @@ FILAMENT: Key[Filament] = Key("filament")
 
 def _build(core: Core, components: Components) -> Filament:
     pool = core.settings_store.pool
-    return Filament(catalog=CatalogStore(pool), types=SpoolTypeStore(pool))
+    return Filament(
+        catalog=CatalogStore(pool), types=SpoolTypeStore(pool), spools=FilamentSpoolStore(pool)
+    )
 
 
 COMPONENT = Component(FILAMENT, build=_build)
