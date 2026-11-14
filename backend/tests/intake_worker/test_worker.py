@@ -103,12 +103,22 @@ def test_the_worker_imports_nothing_that_touches_the_database() -> None:
 
 
 def test_healthz_answers_200() -> None:
+    assert _get(b"/healthz").startswith(b"HTTP/1.1 200 OK")
+
+
+def test_metrics_count_the_checks_the_sandbox_never_answered() -> None:
+    answer = _get(b"/metrics")
+    assert answer.startswith(b"HTTP/1.1 200 OK")
+    assert b"scadbuddy_intake_sandbox_unanswered_total" in answer
+
+
+def _get(path: bytes) -> bytes:
     async def probe() -> bytes:
         server = await asyncio.start_server(_healthz, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            writer.write(b"GET /healthz HTTP/1.1\r\n\r\n")
+            writer.write(b"GET " + path + b" HTTP/1.1\r\n\r\n")
             await writer.drain()
             answer = await reader.read()
             writer.close()
@@ -116,4 +126,4 @@ def test_healthz_answers_200() -> None:
         finally:
             server.close()
 
-    assert asyncio.run(probe()).startswith(b"HTTP/1.1 200 OK")
+    return asyncio.run(probe())

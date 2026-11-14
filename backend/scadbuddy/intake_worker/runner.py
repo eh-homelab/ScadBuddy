@@ -1,24 +1,31 @@
-"""Runs one check in a child process (`child.py`): its own process group, an address-space
-cap it sets on itself, its own namespaces where the kernel allows them, and a timeout, past
-which (or on cancellation) the whole group is killed, as `workflows/template_process.py`
-runs template Python (spec 2026-11-13 §7).
+"""Runs one check in a child process (`child.py`) started through its launcher
+(`confine.py`: its own namespaces with the spool hidden, no capabilities, no new privileges,
+a seccomp filter): its own process group, an address-space cap it sets on itself, and a
+timeout, past which (or on cancellation) the whole group is killed, as
+`workflows/template_process.py` runs template Python (spec 2026-11-13 §7).
 
 Two ways to reach the child:
 
 - the sandbox container (``SCADBUDDY_INTAKE_SANDBOX=true``, the deployment's): the worker
   only hands the job over a spool directory it shares with a second container of the pod
   (`sandbox.py`), which runs as another user with no service-account token, no proof and a
-  read-only root, and starts the child there. The worker never runs the parse.
+  read-only root, and starts the child there with ``--strict``: a launcher step refused is
+  a failed check, never an unconfined parse. The worker never runs the parse.
 - local (``SCADBUDDY_INTAKE_SANDBOX=unsafe-local``, development and tests only): the worker
-  starts the child itself, in the job's directory.
+  starts the child itself, in the job's directory, and a launcher step refused is reported
+  in the verdict's ``isolation``.
 
-The spool protocol. The worker makes the job's directory (the check's scratch folder) and,
-in it, ``upload.bin``, ``request.json`` (checked against `check_request`), an empty
-``out/`` and, last, ``ready``. It holds a descriptor of the job's directory from then on and
-reaches every name through it, never by path. The sandbox claims the job by making
-``taken`` (``O_EXCL``), copies the upload into a ``box/`` of its own (mode 0700), runs the
-child there, copies the child's ``verdict.json`` and ``preview.png`` into ``out/`` as files
-it makes itself, removes its box and writes ``done`` (the child's exit, or ``timeout``).
+The spool protocol. The worker builds the job inside the check's scratch folder, which is
+its own and mode 0700, so no other user reaches it: a ``job/`` directory holding
+``upload.bin``, ``request.json`` (checked against `check_request`) and an empty ``out/``.
+Then it hands the job over with one ``rename`` into the spool's ``jobs/`` (mode 0750, the
+worker's own: the sandbox can list it but not add to it), so the sandbox sees a job whole
+or not at all. It holds descriptors of the job's directory and of ``out/`` from before the
+hand-over and reaches every name through them, never by path. The sandbox claims the job by
+making ``taken`` (``O_EXCL``), copies the upload into a ``box/`` of its own (mode 0700),
+runs the child there, copies the child's ``verdict.json`` and ``preview.png`` into ``out/``
+as files it makes itself, removes its box and writes ``done`` (the child's exit, or
+``timeout``). The worker removes the job once it has read the answer.
 The worker waits for ``done`` up to the child's timeout plus `SPOOL_GRACE`; past it, or on
 cancellation, it writes ``cancel``, which the sandbox answers by killing the child's group.
 
@@ -37,6 +44,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import signal
 import stat
 import struct
@@ -47,6 +55,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from prometheus_client import Counter
+
+from scadbuddy.intake_worker import confine
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
 from scadbuddy.intake_worker.wire import MAX_PREVIEW_BYTES, FileFacts
 
@@ -75,7 +86,10 @@ SPOOL_DIR_MODE: Final = 0o770
 SPOOL_FILE_MODE: Final = 0o640
 BOX_MODE: Final = 0o700
 REQUEST: Final = "request.json"
-READY: Final = "ready"
+#: The spool's hand-over directory, and a job's name inside its scratch folder until then.
+JOBS: Final = "jobs"
+JOBS_MODE: Final = 0o750
+JOB: Final = "job"
 TAKEN: Final = "taken"
 DONE: Final = "done"
 CANCEL: Final = "cancel"
@@ -87,6 +101,13 @@ _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 #: Whether a refused namespace isolation was logged yet (once per process).
 _isolation_logged = False
+
+#: Checks the sandbox container never answered: it is down, or refused to start
+#: (`sandbox.main` exits when a check cannot be confined).
+SANDBOX_UNANSWERED: Final = Counter(
+    "scadbuddy_intake_sandbox_unanswered",
+    "Checks handed to the intake sandbox container that it never answered in time.",
+)
 
 
 class CheckCrashedError(RuntimeError):
@@ -189,25 +210,22 @@ async def run_child(
     box: str | Path,
     filename: str,
     *,
-    hide: str | None,
+    hide: str,
+    strict: bool,
     timeout: float = CHILD_TIMEOUT,
     address_space: int = CHILD_ADDRESS_SPACE,
     cancelled: asyncio.Event | None = None,
 ) -> int:
-    """The child run in ``box`` (its working directory, holding ``upload.bin``), with an
-    empty tmpfs over ``hide`` in its own mount namespace; its exit code.
+    """The child run in ``box`` (its working directory, holding ``upload.bin``) through its
+    launcher, with an empty tmpfs over ``hide`` in its own mount namespace (`confine.py`;
+    with ``strict``, a step refused exits 126 with no parse); its exit code.
     `CheckCrashedError` past ``timeout``; the group is killed then, on cancellation and
     when ``cancelled`` is set."""
+    # -I: the box (its working directory, which holds the customer's file) and the
+    # environment never reach its import path.
+    parser = [sys.executable, "-I", "-m", "scadbuddy.intake_worker.child"]
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        # -I: the box (its working directory, which holds the customer's file) and the
-        # environment never reach its import path.
-        "-I",
-        "-m",
-        "scadbuddy.intake_worker.child",
-        filename,
-        str(address_space),
-        hide or "",
+        *confine.command(hide, [*parser, filename, str(address_space)], strict=strict),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
@@ -271,6 +289,19 @@ def _make(dir_fd: int, name: str, data: bytes, mode: int) -> None:
         os.close(fd)
 
 
+def _jobs_dir(work: Path) -> int:
+    """The spool's ``jobs/``, made here (mode 0750), by descriptor; `CheckCrashedError`
+    when a directory of that name is not this process's own."""
+    with suppress(FileExistsError):
+        os.mkdir(work / JOBS, JOBS_MODE)
+    fd = open_dir(work / JOBS)
+    if os.fstat(fd).st_uid != os.geteuid():
+        os.close(fd)
+        raise CheckCrashedError("the spool's jobs/ is not this worker's own")
+    os.fchmod(fd, JOBS_MODE)
+    return fd
+
+
 async def _run_spooled(
     scratch: Path,
     filename: str,
@@ -281,16 +312,25 @@ async def _run_spooled(
 ) -> Verdict:
     """The job handed to the sandbox container (the module docstring); its verdict."""
     request = check_request(filename, timeout, address_space)
-    job_fd = open_dir(scratch)
+    scratch_fd = open_dir(scratch)
+    jobs_fd: int | None = None
+    job_fd: int | None = None
     out_fd: int | None = None
+    handed = False
     try:
+        jobs_fd = _jobs_dir(scratch.parent)
+        os.mkdir(JOB, 0o700, dir_fd=scratch_fd)
+        job_fd = open_dir(JOB, dir_fd=scratch_fd)
+        os.rename(UPLOAD, UPLOAD, src_dir_fd=scratch_fd, dst_dir_fd=job_fd)
         os.chmod(UPLOAD, SPOOL_FILE_MODE, dir_fd=job_fd)
         os.mkdir(OUT, SPOOL_DIR_MODE, dir_fd=job_fd)
         out_fd = open_dir(OUT, dir_fd=job_fd)
         os.fchmod(out_fd, SPOOL_DIR_MODE)
         _make(job_fd, REQUEST, json.dumps(request).encode(), SPOOL_FILE_MODE)
         os.fchmod(job_fd, SPOOL_DIR_MODE)
-        _make(job_fd, READY, b"", SPOOL_FILE_MODE)
+        # The hand-over: one rename out of the worker's own scratch folder.
+        os.rename(JOB, scratch.name, src_dir_fd=scratch_fd, dst_dir_fd=jobs_fd)
+        handed = True
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout + SPOOL_GRACE
         try:
@@ -301,6 +341,7 @@ async def _run_spooled(
                 except FileNotFoundError:
                     pass
                 if loop.time() > deadline:
+                    SANDBOX_UNANSWERED.inc()
                     raise CheckCrashedError("the sandbox gave no answer in time")
                 await asyncio.sleep(SPOOL_POLL)
         except BaseException:
@@ -312,9 +353,16 @@ async def _run_spooled(
             raise CheckCrashedError(f"the check exited with {answer.strip()[:32]}")
         return read_verdict(out_fd, sandbox_uid)
     finally:
-        if out_fd is not None:
-            os.close(out_fd)
-        os.close(job_fd)
+        for fd in (out_fd, job_fd):
+            if fd is not None:
+                os.close(fd)
+        if handed and jobs_fd is not None:
+            # A box the sandbox still holds is its own to remove.
+            with suppress(OSError):
+                shutil.rmtree(scratch.name, dir_fd=jobs_fd)
+        if jobs_fd is not None:
+            os.close(jobs_fd)
+        os.close(scratch_fd)
 
 
 async def run_check(
@@ -337,7 +385,12 @@ async def run_check(
             scratch, filename, timeout=timeout, address_space=address_space, sandbox_uid=sandbox_uid
         )
     code = await run_child(
-        scratch, filename, hide=str(scratch.parent), timeout=timeout, address_space=address_space
+        scratch,
+        filename,
+        hide=str(scratch.parent),
+        strict=False,
+        timeout=timeout,
+        address_space=address_space,
     )
     if code != 0:
         raise CheckCrashedError(f"the check exited with {code}")

@@ -6,11 +6,14 @@ spool (``SCADBUDDY_INTAKE_WORK_DIR``, an emptyDir) with the worker; the protocol
 `runner`'s docstring. It refuses to start with a database secret, the KEK or a proof
 (`check_sandbox_environment`), and makes itself non-dumpable (`hardening.forbid_dumping`).
 
-Each job's child runs in a box of its own (``box/``, mode 0700) and, where the kernel
-allows it, in its own mount namespace with an empty tmpfs over the spool, so it reaches no
-other job's directory (`hardening.isolate`). At start the sandbox tries that isolation once
-(`probe_isolation`); where it is refused, it runs one job at a time, so no two children's
-jobs are open at once.
+Each job's child runs in a box of its own (``box/``, mode 0700) through its launcher with
+``--strict`` (`confine.py`): its own user, network and mount namespaces with an empty tmpfs
+over the spool, so it reaches no other job's directory, then no capabilities, no new
+privileges and a seccomp filter. It fails closed: at start the sandbox runs the launcher
+once (`probe_isolation`), and where any step is refused it logs why and exits 3 without
+serving a job, so the pod never parses a file unconfined (the worker counts the checks it
+then hands over unanswered, `runner.SANDBOX_UNANSWERED`). A job is the spool's
+``jobs/<name>``, which the worker moves in whole (`runner`'s docstring).
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pathlib import Path
 from typing import Final
 
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.intake_worker import confine
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
 from scadbuddy.intake_worker.hardening import forbid_dumping
 from scadbuddy.intake_worker.runner import (
@@ -37,10 +41,10 @@ from scadbuddy.intake_worker.runner import (
     BOX_MODE,
     CANCEL,
     DONE,
+    JOBS,
     MAX_REQUEST_BYTES,
     MAX_VERDICT_BYTES,
     OUT,
-    READY,
     REQUEST,
     SPOOL_FILE_MODE,
     SPOOL_POLL,
@@ -76,21 +80,18 @@ def check_sandbox_environment(environ: Mapping[str, str]) -> None:
 
 
 def probe_isolation(spool: Path) -> str | None:
-    """Whether a child can take its namespaces here: None when it can, else why not."""
-    code = (
-        "import sys; from scadbuddy.intake_worker.hardening import isolate;"
-        " print(isolate(sys.argv[1]) or '')"
-    )
+    """Whether a check can be confined here (`confine.py --strict`, running a program
+    that does nothing): None when it can, else why not."""
     out = subprocess.run(
-        [sys.executable, "-I", "-c", code, str(spool)],
+        confine.command(str(spool), [sys.executable, "-I", "-c", "pass"], strict=True),
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
     if out.returncode != 0:
-        return f"the probe exited with {out.returncode}"
-    return out.stdout.strip() or None
+        return out.stderr.strip() or f"the launcher exited with {out.returncode}"
+    return None
 
 
 def _make(dir_fd: int, name: str, data: bytes) -> None:
@@ -211,6 +212,7 @@ async def _run_claimed(job_fd: int, spool: Path) -> None:
             f"/proc/{os.getpid()}/fd/{box_fd}",
             checked["filename"],
             hide=str(spool),
+            strict=True,
             timeout=checked["timeout"],
             address_space=checked["address_space"],
             cancelled=cancelled,
@@ -250,8 +252,7 @@ async def serve(spool: Path, concurrency: int, stop: asyncio.Event) -> None:
             slots.release()
 
     while not stop.is_set():
-        for ready in sorted(spool.glob(f"*/{READY}")):
-            job = ready.parent
+        for job in sorted((spool / JOBS).glob("*")):
             if (job / DONE).exists() or (job / BOX).exists() or slots.locked():
                 continue
             with suppress(OSError):
@@ -293,10 +294,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     refused = probe_isolation(spool)
     if refused is not None:
-        logger.warning(
-            "a check cannot take its own namespaces (%s): one check at a time", refused[:200]
+        logger.error(
+            "the intake sandbox refuses to start: a check cannot be confined here (%s)."
+            " Allow unshare(CLONE_NEWUSER) for this container (its seccomp profile).",
+            refused[:300],
         )
-        concurrency = 1
+        return 3
     asyncio.run(_main(spool, concurrency))
     return 0
 

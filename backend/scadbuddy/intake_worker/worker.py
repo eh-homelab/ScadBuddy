@@ -6,7 +6,8 @@ credential (`exchange_source`), waits until the CRUD service serves its areas, t
 ``customer-files`` for `CustomerFileCheck` runs. It imports no database code
 (`tests/intake_worker/test_worker.py`); each file is parsed only in a child process.
 It is not versioned (no worker deployment), so a change to the workflow goes behind
-`workflow.patched`. ``/healthz`` on `HEALTH_PORT` answers 200 while it runs.
+`workflow.patched`. ``/healthz`` on `HEALTH_PORT` answers 200 while it runs, and ``/metrics``
+there its metrics.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import logging
 import signal
 from contextlib import suppress
 
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from temporalio.client import Client
 from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -32,10 +34,23 @@ logger = logging.getLogger(__name__)
 
 
 async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Any request is answered 200: the process runs and its loop turns."""
+    """``GET /metrics`` is answered with the process's metrics
+    (`runner.SANDBOX_UNANSWERED` among them); any other request 200: the process runs and
+    its loop turns."""
     with suppress(Exception):
-        await asyncio.wait_for(reader.readline(), 5)
-        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        line = await asyncio.wait_for(reader.readline(), 5)
+        if line.split(b" ")[1:2] == [b"/metrics"]:
+            body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
+        else:
+            body, kind = b"ok", b"text/plain"
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: "
+            + kind
+            + b"\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
         await writer.drain()
     writer.close()
 

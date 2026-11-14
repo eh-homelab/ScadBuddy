@@ -417,21 +417,15 @@ behind `workflow.patched`. It serves `/healthz` on 9090. Its child gets no inher
 descriptor but its three standard streams, all `/dev/null` (`close_fds`), so it cannot
 reach the worker's sockets.
 
-**The child's sandbox.** Three layers keep a parser exploit away from the worker's
-credential (`intake_worker/hardening.py`, `runner.py`, `sandbox.py`):
+**The child's sandbox.** These layers keep a parser exploit away from the worker's
+credential and from other customers' files (`intake_worker/hardening.py`, `confine.py`,
+`runner.py`, `sandbox.py`). The design rule: a step that cannot be taken stops the check,
+it never runs weaker.
 
 - The worker makes itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`), before it
   reads its proof, so no process of its user can `ptrace` it or read its
   `/proc/<pid>/mem` or `environ`
   ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)); the child does the same.
-- The child calls `unshare(CLONE_NEWUSER | CLONE_NEWNET)` before it reads the file: a new
-  network namespace has only a loopback device that is down, so the parse reaches no socket
-  ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)).
-  A container runtime's default seccomp profile may refuse it; the check then goes on, and
-  the worker logs the refusal once (the verdict's `isolation`). Measured on WSL2
-  (Linux 6.6.87.2) on 2026-11-14 by `tests/intake_worker/test_runner.py`
-  `test_an_isolated_child_reaches_no_socket`: allowed, and a connect to a host loopback
-  listener fails.
 - The deployment runs the child in a second container of the pod, `sandbox` (`python -m
   scadbuddy.intake_worker.sandbox`): another `runAsUser`, no ServiceAccount token, no proof
   volume, `readOnlyRootFilesystem`, sharing with the worker only an `emptyDir` (the spool)
@@ -439,33 +433,90 @@ credential (`intake_worker/hardening.py`, `runner.py`, `sandbox.py`):
   (`SCADBUDDY_INTAKE_SANDBOX=true` on the worker; the protocol is `runner.py`'s docstring).
   The variable has no default: the worker refuses to start without it, so a missing value
   never falls back to the weaker mode; `unsafe-local` (development only) starts the child
-  in the worker's own container.
-  The worker also needs `SCADBUDDY_INTAKE_SANDBOX_UID`, the sandbox container's `runAsUser`
-  (not root, not the worker's own). The sandbox refuses to start with a database secret, the
-  KEK or a proof.
-- The spool protocol never follows a name it did not make. The worker makes each job's
-  directory, `upload.bin`, `request.json` (the filename, the timeout and the address-space
-  cap, each checked finite, positive and within its cap on both sides) and an empty `out/`,
-  and keeps descriptors of the job and `out/`. The sandbox claims the job (`taken`, made
-  `O_EXCL`), makes a `box/` (0700, its own), copies the upload into it with `O_NOFOLLOW`, and
-  runs the child with the box as its working directory, named by the sandbox's own descriptor
-  (`/proc/<pid>/fd/<n>`). The child also moves into a new mount namespace and puts an empty
-  tmpfs over the spool, so it reaches only its box, not another job's directory
-  ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
-  The sandbox reads the box's outputs and writes fresh files into `out/`; the worker reads
-  them by its `out/` descriptor. Every read of an output opens it with
-  `O_NOFOLLOW | O_NONBLOCK` relative to a directory descriptor, then checks with `fstat` that
-  it is a regular file with one link, owned by the user that should have written it (the
-  sandbox's), and reads at most the cap: the verdict 1 MiB and validated, the preview 4 MiB,
-  which must start with the PNG signature and an `IHDR` chunk of sides 1 to 4096
-  ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)). A symlink, a hard link, a FIFO or a
-  file of another owner fails the check. Where the runtime refuses the child's namespaces,
-  the sandbox (which probes once at start) runs one check at a time, so no two jobs are open
-  at once; a child that escaped its process group could still reach a later job's directory
-  then. With `unsafe-local` (development, tests) the worker starts the child itself. The
-  two containers share the pod's network namespace, so where the runtime refuses the child's
-  own namespace, the pod's NetworkPolicy (DNS, the CRUD port, Temporal and the bucket host
-  only) bounds what an exploited parse can reach; it holds no credential for the CRUD port.
+  in the worker's own container. The worker also needs `SCADBUDDY_INTAKE_SANDBOX_UID`, the
+  sandbox container's `runAsUser` (not root, not the worker's own). The sandbox refuses to
+  start with a database secret, the KEK or a proof.
+- Each parse starts through a small launcher, `confine.py` (standard library only, run
+  with `-I -S`, so it is single-threaded), which confines itself and then `execv`s the
+  parser in place:
+  1. `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)` with its own uid and gid mapped
+     to themselves: a network namespace with only a loopback device that is down
+     ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
+     and a mount namespace where an empty tmpfs (mode 0) covers the spool and the job's box
+     is bind-mounted onto `<spool>/box` inside it, the process's new working directory
+     ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
+     The bind matters: a working directory left below the covered spool still reached a
+     sibling job by `../../<job>`, which the cover alone does not stop (found by
+     `test_a_confined_child_reaches_only_its_own_box`, 2026-11-14);
+  2. `prctl(PR_SET_NO_NEW_PRIVS, 1)`;
+  3. a seccomp filter that answers `EPERM` to `mount`, `umount2`, `pivot_root`, `chroot`,
+     the new mount API, `unshare`, `setns`, `clone` with a namespace flag, `ptrace`,
+     `keyctl`, `add_key`, `request_key`, `bpf`, `perf_event_open` and `userfaultfd`, and
+     `ENOSYS` to `clone3` and `io_uring_setup`
+     ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html));
+  4. `execv` of the parser. The creator of a user namespace holds every capability inside
+     it, enough to unmount the cover; an `execve` by a uid that is not 0 in the namespace
+     clears them all ([capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html)),
+     so the parser runs with none. The launcher refuses root with `--strict`.
+
+  Measured on WSL2 (Linux 6.6.87.2), 2026-11-14, by `tests/intake_worker/test_runner.py`:
+  the parser's `CapEff` and `CapPrm` are 0, `NoNewPrivs` 1, `Seccomp` 2; `umount2` of the
+  cover, `mount`, `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` each fail with
+  `EPERM`; a connect to a host loopback listener fails; the spool's other jobs are
+  unreachable by absolute path and by `..`.
+- It fails closed. The sandbox runs the launcher with `--strict`, where any refused step
+  exits 126 and no parse runs; at start it runs the launcher once (`probe_isolation`), and
+  where that is refused it logs why and exits 3 without serving a job. The pod then
+  crash-loops and every check it is handed fails; the worker counts them in
+  `scadbuddy_intake_sandbox_unanswered_total` (`/metrics` on its health port). A container
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the clusters PR
+  gives the sandbox container a profile that allows it. Only `unsafe-local` runs a parse
+  whose launcher step was refused (reported in the verdict's `isolation`).
+- The spool protocol never follows a name it did not make. The worker builds each job in
+  its own scratch folder (mode 0700, no other user reaches it): `job/` with `upload.bin`,
+  `request.json` (the filename, the timeout and the address-space cap, each checked finite,
+  positive and within its cap on both sides) and an empty `out/`, and keeps descriptors of
+  the job and `out/`. It hands the job over with one `rename` into the spool's `jobs/`
+  (mode 0750, the worker's own: the sandbox lists it but cannot add to it), so no job is
+  readable by the sandbox's user before it is whole. The sandbox claims a job (`taken`,
+  made `O_EXCL`), makes a `box/` (0700, its own), copies the upload into it with
+  `O_NOFOLLOW`, and starts the launcher with the box as its working directory, named by
+  the sandbox's own descriptor (`/proc/<pid>/fd/<n>`). It reads the box's outputs and
+  writes fresh files into `out/`, then `done`; the worker reads `done` and the outputs by
+  its descriptors and removes the job. Every read of an output opens it with
+  `O_NOFOLLOW | O_NONBLOCK` relative to a directory descriptor, then checks with `fstat`
+  that it is a regular file with one link, owned by the user that should have written it
+  (the sandbox's uid, for the worker), and reads at most the cap: the verdict 1 MiB and
+  validated, the preview 4 MiB, which must start with the PNG signature and an `IHDR`
+  chunk of sides 1 to 4096 ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)). A
+  symlink, a hard link, a FIFO or a file of another owner fails the check.
+- No gVisor or Kata. The production cluster (`primary`, containerd 2.2.7-k3s1, Ubuntu
+  kernels 6.8) offers the RuntimeClasses `crun`, `nvidia` and `nvidia-experimental` only
+  (`kubectl get runtimeclass`, 2026-11-14), so the sandbox container runs on the host
+  kernel; a gVisor RuntimeClass would be the strongest layer, and the clusters PR should
+  use one if the cluster ever offers it.
+
+**Residual risk.** Accepted, and what would remove each:
+
+- A kernel bug reachable from the parser's allowed syscalls escapes everything above;
+  only a sandboxed kernel (gVisor, Kata) removes that.
+- The sandbox process itself (trusted code, not the parser) reads every waiting job. A
+  parser that escaped its confinement through such a bug would run as the sandbox's user
+  and could read the jobs then waiting, the customers' files of the same minutes. The
+  hand-over rename keeps jobs out of its reach only until they are handed over.
+- The two containers share the pod's network namespace. The parser has a namespace of its
+  own (fail closed), so this matters only after an escape; then the pod's NetworkPolicy
+  (DNS, the CRUD port, Temporal and the bucket host only) bounds what it reaches, and it
+  holds no credential for the CRUD port.
+- The parser's memory and time are capped (`RLIMIT_AS` 4 GiB, 5 minutes); the pod's memory
+  limit bounds the rest.
+- On Ubuntu 24.04 hosts, `kernel.apparmor_restrict_unprivileged_userns` may refuse the
+  launcher's namespace inside a container unless its AppArmor profile allows it; the
+  sandbox then refuses to start, which is safe and visible, and the clusters PR fixes the
+  profile. Not yet measured on the cluster's nodes.
+
+With `unsafe-local` (development, tests) the worker starts the launcher itself, without
+`--strict`.
 
 **Serving the preview (PR 4).** The preview is bytes the untrusted check made. ScadBuddy
 never decodes, resizes or re-encodes it, and serves it only as `Content-Type: image/png`,

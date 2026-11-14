@@ -2365,6 +2365,14 @@ holds the manifest (spec §12).
   `readOnlyRootFilesystem`. The two share only the work volume, an `emptyDir` mounted at
   `SCADBUDDY_INTAKE_WORK_DIR` in both, with a pod `fsGroup` both users are in (the spool's
   files are group read-write). Both take the same `SCADBUDDY_INTAKE_CONCURRENCY`.
+- **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
+  user, network and mount namespaces, no capabilities, no new privileges, a seccomp
+  filter) and exits 3 at start, logging why, when any step is refused. A container
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so give the
+  `sandbox` container a seccomp profile that allows it (and, on Ubuntu 24.04 nodes, an
+  AppArmor profile that allows unprivileged user namespaces). While the sandbox is down,
+  every check fails and the worker counts it in `scadbuddy_intake_sandbox_unanswered_total`
+  (`/metrics` on port 9090); alert on it and on the container's restarts.
 - **Pod:** `runAsNonRoot`, `readOnlyRootFilesystem` in both containers, and no ServiceAccount
   token automount: the only token is the projected one the worker container's proof needs,
   mounted in that container only.

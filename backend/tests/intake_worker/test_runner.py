@@ -11,13 +11,14 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from scadbuddy.intake_worker import runner, sandbox
+from scadbuddy.intake_worker import confine, runner, sandbox
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
 from scadbuddy.intake_worker.runner import CheckCrashedError, run_check
 from scadbuddy.intake_worker.wire import MAX_PREVIEW_BYTES
@@ -195,6 +196,28 @@ def _hardened(code: str, *args: str) -> str:
     return out.stdout.strip()
 
 
+def _confined(hide: Path, code: str, *args: str, cwd: Path | None = None) -> str:
+    """``code`` run through the launcher with ``--strict``, as the sandbox runs a parse."""
+    out = subprocess.run(
+        confine.command(str(hide), [sys.executable, "-I", "-c", code, *args], strict=True),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=cwd,
+    )
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+#: Why a check cannot be confined on this machine (a container's default seccomp profile
+#: refuses ``unshare(CLONE_NEWUSER)``), or None. Where it is refused, the sandbox refuses
+#: to start, so the tests that need it skip.
+_REFUSED = sandbox.probe_isolation(Path(tempfile.gettempdir()))
+needs_confinement = pytest.mark.skipif(
+    _REFUSED is not None, reason=f"confinement refused: {_REFUSED}"
+)
+
+
 def test_the_worker_makes_itself_non_dumpable() -> None:
     code = (
         "from scadbuddy.intake_worker import hardening as h;"
@@ -203,56 +226,78 @@ def test_the_worker_makes_itself_non_dumpable() -> None:
     assert _hardened(code) == "True False"
 
 
-def test_an_isolated_child_reaches_no_socket() -> None:
+@needs_confinement
+def test_a_confined_child_reaches_no_socket(tmp_path: Path) -> None:
     """In its own network namespace the child reaches nothing, the host's loopback
-    included. Where the kernel refuses the namespace, the test skips (the check goes on)."""
+    included."""
     with socket.create_server(("127.0.0.1", 0)) as server:
         port = server.getsockname()[1]
         code = (
-            "import socket; from scadbuddy.intake_worker import hardening as h\n"
-            "refused = h.isolate()\n"
-            "if refused:\n"
-            "    print('refused', refused)\n"
-            "else:\n"
-            "    try:\n"
-            f"        socket.create_connection(('127.0.0.1', {port}), timeout=2)\n"
-            "        print('reached')\n"
-            "    except OSError:\n"
-            "        print('isolated')"
+            "import socket\n"
+            "try:\n"
+            f"    socket.create_connection(('127.0.0.1', {port}), timeout=2)\n"
+            "    print('reached')\n"
+            "except OSError:\n"
+            "    print('isolated')"
         )
-        answer = _hardened(code)
-    if answer.startswith("refused"):
-        pytest.skip(answer)
-    assert answer == "isolated"
+        assert _confined(tmp_path, code) == "isolated"
 
 
-def test_an_isolated_child_reaches_only_its_own_box(tmp_path: Path) -> None:
+@needs_confinement
+def test_a_confined_child_reaches_only_its_own_box(tmp_path: Path) -> None:
     """With the tmpfs over the spool, a child in one job's box sees no other job's
     directory, by path or by ``..``, and still reads its own box."""
     spool = tmp_path / "spool"
-    mine, other = spool / "check-a" / "box", spool / "check-b"
+    mine, other = spool / "jobs" / "check-a" / "box", spool / "jobs" / "check-b"
     mine.mkdir(parents=True)
     other.mkdir()
     (mine / UPLOAD).write_text("mine")
     (other / "secret").write_text("another job's")
     code = (
-        "import os, sys; from scadbuddy.intake_worker import hardening as h\n"
-        "os.chdir(sys.argv[1])\n"
-        "refused = h.isolate(sys.argv[2])\n"
-        "if refused:\n"
-        "    print('refused', refused); raise SystemExit\n"
+        "import sys\n"
         "seen = [open('upload.bin').read()]\n"
-        "for path in (sys.argv[3], '../../check-b/secret'):\n"
+        "for path in (sys.argv[1], '../../check-b/secret'):\n"
         "    try:\n"
         "        seen.append(open(path).read())\n"
         "    except OSError:\n"
         "        seen.append('hidden')\n"
         "print(','.join(seen))"
     )
-    answer = _hardened(code, str(mine), str(spool), str(other / "secret"))
-    if answer.startswith("refused"):
-        pytest.skip(answer)
-    assert answer == "mine,hidden,hidden"
+    assert _confined(spool, code, str(other / "secret"), cwd=mine) == "mine,hidden,hidden"
+
+
+@needs_confinement
+def test_a_confined_child_holds_no_capability_and_cannot_mount(tmp_path: Path) -> None:
+    """The parser's exec as a uid that is not 0 in its user namespace clears every
+    capability, so it cannot unmount the tmpfs that hides the spool (or mount, or make a
+    namespace of its own); the seccomp filter refuses those calls besides."""
+    target = tmp_path / "target"
+    target.mkdir()
+    code = (
+        "import ctypes, os, sys\n"
+        "libc = ctypes.CDLL(None, use_errno=True)\n"
+        "libc.mount.argtypes = [ctypes.c_char_p] * 3 + [ctypes.c_ulong, ctypes.c_char_p]\n"
+        "def errno(rc):\n"
+        "    return 'ok' if rc == 0 else os.strerror(ctypes.get_errno())\n"
+        "status = dict(line.split(':', 1) for line in open('/proc/self/status'))\n"
+        "print(status['CapEff'].strip(), status['CapPrm'].strip(),"
+        " status['NoNewPrivs'].strip(), status['Seccomp'].strip())\n"
+        "print(errno(libc.umount2(sys.argv[1].encode(), 2)))\n"
+        "print(errno(libc.mount(b'tmpfs', sys.argv[2].encode(), b'tmpfs', 0, None)))\n"
+        "print(errno(libc.unshare(0x10000000)))\n"
+        "print(errno(libc.syscall(56 if os.uname().machine == 'x86_64' else 220,"
+        " 0x10000000 | 17, 0, 0, 0, 0)))"
+    )
+    lines = _confined(tmp_path, code, str(tmp_path), str(target)).splitlines()
+    assert lines[0] == "0000000000000000 0000000000000000 1 2"
+    assert lines[1:] == ["Operation not permitted"] * 4
+
+
+def test_the_launcher_refuses_root_with_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "getuid", lambda: 0)
+    with pytest.raises(SystemExit) as stopped:
+        confine.main(["--strict", "/nowhere", "--", "/bin/true"])
+    assert stopped.value.code == 126
 
 
 def test_the_childs_verdict_says_whether_it_was_isolated(tmp_path: Path) -> None:
@@ -281,34 +326,71 @@ def _spooled(job: Path, **kwargs: Any) -> runner.Verdict:
     return asyncio.run(go())
 
 
+@needs_confinement
 def test_the_sandbox_container_runs_a_spooled_check(tmp_path: Path) -> None:
     job = _job(tmp_path, box_stl())
     verdict = _spooled(job)
     assert verdict.outcome == "ready" and verdict.facts is not None
     assert verdict.preview is not None and verdict.preview.startswith(runner.PNG_MAGIC)
-    assert (job / runner.TAKEN).exists() and (job / runner.DONE).read_text() == "0"
-    assert job.stat().st_mode & 0o777 == runner.SPOOL_DIR_MODE
-    # The sandbox's box is gone; what came back is in the worker's own out/.
-    assert not (job / runner.BOX).exists()
-    assert sorted(p.name for p in (job / runner.OUT).iterdir()) == [PREVIEW, VERDICT]
+    # The job was moved out of the scratch folder whole, and removed once answered.
+    jobs = job.parent / runner.JOBS
+    assert jobs.stat().st_mode & 0o777 == runner.JOBS_MODE
+    assert list(jobs.iterdir()) == [] and list(job.iterdir()) == []
 
 
+def test_a_job_is_handed_over_whole_by_one_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until the rename the job sits in the worker's own 0700 scratch folder, which no
+    other user reaches; after it, ``jobs/<name>`` holds everything the sandbox reads."""
+    monkeypatch.setattr(runner, "SPOOL_GRACE", 0.5)
+    job = _job(tmp_path, box_stl())
+    assert job.stat().st_mode & 0o777 == 0o700
+    seen: list[list[str]] = []
+
+    async def go() -> None:
+        checking = asyncio.create_task(
+            run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1)
+        )
+        handed = job.parent / runner.JOBS / job.name
+        while not handed.exists():
+            await asyncio.sleep(0.01)
+        seen.append(sorted(p.name for p in handed.iterdir()))
+        with pytest.raises(CheckCrashedError):
+            await checking
+
+    asyncio.run(go())
+    assert seen == [sorted([UPLOAD, runner.REQUEST, runner.OUT])]
+
+
+def test_a_planted_jobs_symlink_is_never_followed(tmp_path: Path) -> None:
+    job = _job(tmp_path, box_stl())
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (job.parent / runner.JOBS).symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN))
+    assert list(elsewhere.iterdir()) == []
+
+
+@needs_confinement
 def test_a_spooled_out_dir_swapped_for_a_symlink_is_refused(tmp_path: Path) -> None:
     """The worker reads ``out/`` through a descriptor it opened when it made it; a
     directory swapped in later by name is never the one it reads."""
     job = _job(tmp_path, box_stl())
+    handed = job.parent / runner.JOBS / job.name
 
     async def go() -> runner.Verdict:
         stop = asyncio.Event()
 
         async def swap_then_serve() -> None:
-            while not (job / runner.READY).exists():
-                await asyncio.sleep(0.05)
+            while not handed.exists():
+                await asyncio.sleep(0.01)
             decoy = tmp_path / "decoy"
             decoy.mkdir()
             (decoy / VERDICT).write_text('{"outcome": "refused", "reason": "decoy"}')
-            (job / runner.OUT).rename(tmp_path / "moved")
-            (job / runner.OUT).symlink_to(decoy)
+            (handed / runner.OUT).rename(tmp_path / "moved")
+            (handed / runner.OUT).symlink_to(decoy)
             await sandbox.serve(job.parent, 1, stop)
 
         serving = asyncio.create_task(swap_then_serve())
@@ -324,49 +406,56 @@ def test_a_spooled_out_dir_swapped_for_a_symlink_is_refused(tmp_path: Path) -> N
         asyncio.run(go())
 
 
+@needs_confinement
 def test_a_spooled_check_past_its_timeout_is_killed(tmp_path: Path) -> None:
     with pytest.raises(CheckCrashedError, match="exited with timeout"):
         _spooled(_job(tmp_path, box_stl()), timeout=0.01)
 
 
-def test_a_spooled_check_no_sandbox_took_is_cancelled(
+def test_a_spooled_check_no_sandbox_took_is_counted_and_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(runner, "SPOOL_GRACE", 0.3)
+    before = runner.SANDBOX_UNANSWERED._value.get()
     job = _job(tmp_path, box_stl())
     with pytest.raises(CheckCrashedError, match="no answer"):
         asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1))
-    assert (job / runner.CANCEL).exists()
+    assert runner.SANDBOX_UNANSWERED._value.get() == before + 1
+    assert list((job.parent / runner.JOBS).iterdir()) == []
 
 
+@needs_confinement
 def test_a_spooled_answer_of_another_owner_is_refused(tmp_path: Path) -> None:
     with pytest.raises(CheckCrashedError, match="sandbox's own"):
-        job = _job(tmp_path, box_stl())
-        spool = job.parent
+        _spooled_as(_job(tmp_path, box_stl()), OWN + 1)
 
-        async def go() -> runner.Verdict:
-            stop = asyncio.Event()
-            serving = asyncio.create_task(sandbox.serve(spool, 1, stop))
-            try:
-                return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN + 1)
-            finally:
-                stop.set()
-                await serving
 
-        asyncio.run(go())
+def _spooled_as(job: Path, uid: int) -> runner.Verdict:
+    async def go() -> runner.Verdict:
+        stop = asyncio.Event()
+        serving = asyncio.create_task(sandbox.serve(job.parent, 1, stop))
+        try:
+            return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=uid)
+        finally:
+            stop.set()
+            await serving
+
+    return asyncio.run(go())
 
 
 def test_the_sandbox_answers_a_bad_request_without_running_it(tmp_path: Path) -> None:
-    job = _job(tmp_path, box_stl())
+    spool = tmp_path / "work"
+    job = spool / runner.JOBS / "check-1"
+    job.mkdir(parents=True)
+    (job / UPLOAD).write_bytes(box_stl())
     (job / runner.REQUEST).write_text(
         json.dumps({"filename": "box.stl", "timeout": "Infinity", "address_space": 1})
     )
     (job / runner.OUT).mkdir()
-    (job / runner.READY).touch()
 
     async def go() -> None:
         stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(job.parent, 1, stop))
+        serving = asyncio.create_task(sandbox.serve(spool, 1, stop))
         while not (job / runner.DONE).exists():
             await asyncio.sleep(0.05)
         stop.set()
@@ -375,6 +464,19 @@ def test_the_sandbox_answers_a_bad_request_without_running_it(tmp_path: Path) ->
     asyncio.run(go())
     assert (job / runner.DONE).read_text() == "bad-request"
     assert not (job / runner.BOX).exists()
+
+
+def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It fails closed: no job is served by a sandbox whose checks would run unconfined."""
+    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "unshare: refused")
+    monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
+    served: list[object] = []
+    monkeypatch.setattr(sandbox, "_main", lambda *args: served.append(args))
+    assert sandbox.main([]) == 3
+    assert served == []
+    assert "refuses to start" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", sandbox.SANDBOX_FORBIDDEN_ENV)
