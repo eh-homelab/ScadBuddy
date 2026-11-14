@@ -22,13 +22,14 @@ from collections.abc import Collection, Mapping, Sequence
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.bambuddy.process_overrides import (
     ProcessInput,
     ProcessScalar,
     joined_text,
     scalar_text,
+    without_host_side,
 )
 from scadbuddy.render.bambu3mf import PartOverrides
 from scadbuddy.render.colours import colour_hex
@@ -72,11 +73,20 @@ def parts_set_only(
 class PartSettings(BaseModel):
     """The process settings for the parts of one slot; each omitted one is the
     process's. Any Bambu Studio key (#2998): the named fields are the dialog's first six,
-    and every other key is kept as sent."""
+    and every other key is kept as sent, but a host-side key
+    (``process_overrides.HOST_SIDE_KEYS``), which is dropped."""
 
     model_config = ConfigDict(extra="allow")
-    #: Every other key: a value, or a list for a per-extruder option.
-    __pydantic_extra__: dict[str, ProcessInput] = Field(init=False)
+    #: Every other key: a value, or a list for a per-extruder option; null is unset, as
+    #: for the named fields.
+    __pydantic_extra__: dict[str, ProcessInput | None] = Field(init=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_host_side(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return without_host_side(data, where="part_settings")
 
     top_shell_layers: ProcessScalar | None = None
     bottom_shell_layers: ProcessScalar | None = None

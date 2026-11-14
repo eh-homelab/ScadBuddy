@@ -88,6 +88,7 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   // #2998 — a slicer setting the process preset has no value for, or a list over one value:
   // sent as set, and the slicer judges it.
   'process-override-unchecked': 'text-warn',
+  'host-setting-dropped': 'text-warn',
   // #3628 — a prime tower chosen for an already-sliced file, which queues as it is;
   // #3962 — a tower asked for that Bambuddy's slicer dropped from the slice.
   'prime-tower-not-applied': 'text-warn',

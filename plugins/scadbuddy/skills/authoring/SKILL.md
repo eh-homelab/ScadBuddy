@@ -58,6 +58,11 @@ A template that prints best with a process setting changed says so in `model.jso
 
 - Any Bambu Studio process key (issue #2998: no allowlist). ScadBuddy refuses no key
   and no value; the slicer judges them, and a slice it refuses fails the print.
+  The one exception: the host-side settings, which act on the machine that slices
+  (`post_process`, `filename_format`, `bed_custom_texture`, `bed_custom_model` and the
+  print host's, `print_host*`, `printhost_*`, `host_type`), are dropped with a warning
+  (`HOST_SIDE_KEYS` in `backend/scadbuddy/bambuddy/process_overrides.py`). Custom
+  G-code (`*_gcode`) is kept.
 - Write values as Bambu Studio's configs store them (`"1"` for a switch, `"tree(auto)"`,
   `"5"`); the keys and the values each takes are Bambu Studio's
   [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp).

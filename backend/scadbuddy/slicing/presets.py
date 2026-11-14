@@ -82,6 +82,7 @@ from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, ProcessValue
+from scadbuddy.bambuddy.process_overrides import without_host_side
 from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.profiles import (
@@ -109,6 +110,12 @@ class PresetFiles(BaseModel):
     #: preset's document), for :func:`native_preset_key`. A file the image's tree built
     #: is not in it.
     from_bambuddy: dict[str, str] = Field(default_factory=dict)
+
+
+def _host_safe(document: Flat, where: str) -> Flat:
+    """``document`` without print-host credentials (``strip_credentials``) or any other
+    host-side setting (``process_overrides.without_host_side``)."""
+    return without_host_side(strip_credentials(document), where=where)
 
 
 def apply_overrides(process: Flat, overrides: Mapping[str, ProcessValue]) -> Flat:
@@ -333,13 +340,22 @@ async def build_presets(
         (apply_overrides(filament, plan.filament_overrides.get(slot, {})), held)
         for slot, (filament, held) in enumerate(filaments, start=1)
     ]
-    process = apply_overrides(process, plan.process_overrides)
+    # #2998: a host-side setting never reaches the slicer, even from a plan whose request
+    # skipped validation (one in a workflow's history from before it, say).
+    process = apply_overrides(
+        process, without_host_side(plan.process_overrides, where="slice plan")
+    )
     if plan.bed_type:
         process["curr_bed_type"] = plan.bed_type
-    # No print-host credential reaches a slicer file, whichever tree or document it came from.
-    machine_document = _document(strip_credentials(machine))
-    process_document = _document(strip_credentials(process))
-    filament_documents = [_document(strip_credentials(filament)) for filament, _ in filaments]
+    # No print-host credential reaches a slicer file, whichever tree or document it came
+    # from, nor any setting that acts on the machine that slices: `post_process` would run
+    # a command in the slicer's pod (#2998, `process_overrides.HOST_SIDE_KEYS`). A local
+    # preset Bambuddy holds may carry one too.
+    machine_document = _document(_host_safe(machine, "printer preset"))
+    process_document = _document(_host_safe(process, "process preset"))
+    filament_documents = [
+        _document(_host_safe(filament, "filament preset")) for filament, _ in filaments
+    ]
     from_bambuddy: dict[str, str] = {}
     if machine_held:
         from_bambuddy["printer"] = _digest(machine_document)

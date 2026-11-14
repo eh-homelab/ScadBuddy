@@ -19,12 +19,23 @@ profiles only, Dockerfile ``slicer-dist``) nor the repo has them as data. So the
 check is against the resolved process preset's own values (:func:`override_warnings`): a
 key the preset has no value for, or a list over a single value, is a warning, never a
 refusal.
+
+One exception: the host-side keys (:data:`HOST_SIDE_KEYS`). The owner's "allow
+everything" covers what the slicer does with the print, not commands or files on the
+machine that slices (ScadBuddy's native slicer pod, Bambuddy's slicer sidecar). Those
+keys are stripped wherever a setting comes in (this module's :func:`normalised_overrides`,
+``PartSettings``' extra keys, a template's ``print_settings``) and again where the slice
+is built (``slicing/presets.py`` ``build_presets``, ``dispatch.slice_request``), each
+time logged with the key and the reason; a print's check and run name them in a
+``host-setting-dropped`` warning. Custom G-code (``*_gcode``) stays allowed: it changes
+what the printer does and runs nothing on our servers.
 """
 
 from __future__ import annotations
 
+import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Annotated, Any
 
 from pydantic import Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -40,6 +51,83 @@ ProcessInput = ProcessScalar | list[ProcessScalar]
 ProcessKey = Annotated[str, Field(min_length=1, max_length=200)]
 #: What a request's ``process_overrides`` holds.
 ProcessOverrides = dict[ProcessKey, ProcessInput]
+
+logger = logging.getLogger(__name__)
+
+_RUNS = "runs a command on the machine that slices"
+_WRITES = "names a file or path on the machine that slices"
+_HOST = "points the slicer at a print host to upload to"
+_CREDENTIAL = "is a print host's credential"
+
+#: The settings ScadBuddy never passes to a slicer, each with why: every option of
+#: ``PrintConfigDef`` in Bambu Studio v02.08.02.61's ``src/libslic3r/PrintConfig.cpp``
+#: (https://github.com/bambulab/BambuStudio/blob/v02.08.02.61/src/libslic3r/PrintConfig.cpp,
+#: read 2026-11-14) that runs a command, names a file or path, or reaches a print host.
+#: ``post_process`` (line 4616: "list their absolute paths here … Scripts will be passed
+#: the absolute path to the G-code file"); ``filename_format`` (line 4534, the exported
+#: file's name); ``bed_custom_texture`` and ``bed_custom_model`` (lines 1006, 1012, file
+#: paths); the print host's options (lines 1065-1138, 4467: ``print_host``,
+#: ``print_host_webui``, ``printhost_*``, ``host_type``). The ``CLI*ConfigDef`` options
+#: there (``export_*``, ``outputdir``, ``datadir`` …) are command-line flags, which no
+#: preset file sets. Any other key whose name starts ``printhost_`` or ``print_host`` is
+#: stripped too (:func:`is_host_side`).
+HOST_SIDE_KEYS: dict[str, str] = {
+    "post_process": _RUNS,
+    "filename_format": _WRITES,
+    "bed_custom_texture": _WRITES,
+    "bed_custom_model": _WRITES,
+    "printhost_cafile": _WRITES,
+    "print_host": _HOST,
+    "print_host_webui": _HOST,
+    "printhost_port": _HOST,
+    "printhost_ssl_ignore_revoke": _HOST,
+    "printhost_authorization_type": _HOST,
+    "host_type": _HOST,
+    "printhost_apikey": _CREDENTIAL,
+    "printhost_user": _CREDENTIAL,
+    "printhost_password": _CREDENTIAL,
+}
+_HOST_SIDE_PREFIXES = ("printhost_", "print_host")
+
+
+def is_host_side(key: str) -> bool:
+    """Whether ``key`` is one :data:`HOST_SIDE_KEYS` strips, spelled in any case, with
+    spaces around it, or as another ``printhost_``/``print_host`` option."""
+    lowered = key.strip().lower()
+    return lowered in HOST_SIDE_KEYS or lowered.startswith(_HOST_SIDE_PREFIXES)
+
+
+def host_side_keys(keys: Iterable[str]) -> list[str]:
+    """The keys of ``keys`` that :func:`is_host_side` strips, sorted."""
+    return sorted(key for key in keys if is_host_side(key))
+
+
+def host_side_reason(key: str) -> str:
+    """Why ``key`` is stripped."""
+    return HOST_SIDE_KEYS.get(key.strip().lower(), _HOST)
+
+
+def host_side_message(keys: Iterable[str]) -> str | None:
+    """One sentence naming each stripped key and why; ``None`` for none."""
+    named = [f"{key} ({host_side_reason(key)})" for key in keys]
+    if not named:
+        return None
+    return (
+        f"Not sent to the slicer: {'; '.join(named)}. ScadBuddy passes every slicer"
+        " setting except those that act on the machine that slices."
+    )
+
+
+def without_host_side[V](values: Mapping[str, V], *, where: str) -> dict[str, V]:
+    """``values`` without its host-side keys (:func:`is_host_side`), each one dropped
+    logged with ``where`` it came in and why."""
+    dropped = host_side_keys(values)
+    if dropped:
+        logger.warning(
+            "host-side slicer settings dropped",
+            extra={"where": where, "keys": dropped, "reason": host_side_message(dropped)},
+        )
+    return {key: value for key, value in values.items() if not is_host_side(key)}
 
 
 def scalar_text(value: Any) -> str:
@@ -66,10 +154,12 @@ def value_text(value: Any) -> ProcessValue:
 
 def normalised_overrides(value: Mapping[str, Any] | None) -> dict[str, ProcessValue] | None:
     """``value`` in the stored shape, sorted by key; ``None`` for none, so a request that
-    sets nothing keys as one that sent no field (``runs.run_key``)."""
-    if not value:
+    sets nothing keys as one that sent no field (``runs.run_key``). A host-side key
+    (:data:`HOST_SIDE_KEYS`) is dropped."""
+    kept = without_host_side(value or {}, where="process_overrides")
+    if not kept:
         return None
-    return {key: value_text(value[key]) for key in sorted(value)}
+    return {key: value_text(kept[key]) for key in sorted(kept)}
 
 
 def joined_text(value: Any) -> str:

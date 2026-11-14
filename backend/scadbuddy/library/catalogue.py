@@ -33,7 +33,12 @@ from pydantic import (
 )
 
 from scadbuddy.bambuddy.part_settings import ColourParameter, PartSettings
-from scadbuddy.bambuddy.process_overrides import ProcessInput, joined_text, scalar_text
+from scadbuddy.bambuddy.process_overrides import (
+    ProcessInput,
+    joined_text,
+    scalar_text,
+    without_host_side,
+)
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
@@ -417,10 +422,14 @@ class ModelMeta(BaseModel):
         """Every key is taken (#2998): the slicer, not ScadBuddy, judges a key and its
         value. A number, a boolean or a list is written as the string a Bambu config
         stores; only a value that is no setting at all (an object, null) fails the
-        field's type."""
+        field's type. A host-side key (``process_overrides.HOST_SIDE_KEYS``:
+        ``post_process``, the print host's) is dropped and logged: a template, which may
+        come from an import, never runs a command on the machine that slices, nor reaches
+        a downloaded 3MF's ``project_settings.config``."""
         if not isinstance(value, dict):
             return value
-        return {key: _print_setting_text(setting) for key, setting in value.items()}
+        kept = without_host_side(value, where="print_settings")
+        return {key: _print_setting_text(setting) for key, setting in kept.items()}
 
     #: The template's slicer settings per colour part (#5626): each key a ``// color``
     #: parameter of its source, each value the settings for the parts of that colour,
