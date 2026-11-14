@@ -251,7 +251,7 @@ def test_the_listing_routes_round_trip(
     assert client.delete(f"{LISTINGS}/{made['id']}").status_code == 409
     listed = client.get(LISTINGS).json()
     assert [listing["id"] for listing in listed["items"]] == [made["id"], other["id"]]
-    assert (listed["total"], listed["limit"], listed["offset"]) == (2, 50, 0)
+    assert (listed["total"], listed["places"], listed["limit"], listed["offset"]) == (2, 2, 50, 0)
     # The order is the one given, and survives a read.
     ordered = client.put(f"{LISTINGS}/order", json={"ids": [other["id"], made["id"]]})
     assert ordered.status_code == 200, ordered.text

@@ -95,12 +95,22 @@ export function StorefrontPage() {
 
   const rows = useMemo(() => page.data?.items ?? [], [page.data])
   const total = page.data?.total ?? 0
+  /** How many listings the shop has: the last place "Move to position…" can name, whatever the filter. */
+  const places = page.data?.places ?? 0
   const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const modelName = useMemo(() => new Map((models.data ?? []).map((model) => [model.slug, model.name])), [models.data])
   const materials = useMemo(() => [...new Set((book.data?.filaments ?? []).map((f) => f.material.toUpperCase()))].sort(), [book.data])
 
   // A selection is of the rows shown: a new page, search or filter clears it.
   useEffect(() => setSelected(new Set()), [apiParams])
+
+  // A page past the last (its rows deleted, or an old link) moves to the last page, so the
+  // list never reads empty while listings match.
+  const loaded = page.data
+  useEffect(() => {
+    if (!loaded || loaded.items.length > 0 || loaded.total === 0 || query.page <= lastPage) return
+    setParams(toListingsParams({ ...query, page: lastPage }), { replace: true })
+  }, [loaded, query, lastPage, setParams])
 
   // "/" puts the cursor in the search, as on other lists; never while typing elsewhere.
   useEffect(() => {
@@ -504,7 +514,7 @@ export function StorefrontPage() {
 
       <MoveDialog
         row={moving}
-        total={total}
+        places={places}
         onClose={() => setMoving(null)}
         onMove={(row, place) => {
           setMoving(null)
@@ -518,12 +528,12 @@ export function StorefrontPage() {
 /** "Move to position…": a place from 1, typed; past the end puts the listing last. */
 function MoveDialog({
   row,
-  total,
+  places,
   onClose,
   onMove,
 }: {
   row: StorefrontListingRow | null
-  total: number
+  places: number
   onClose: () => void
   onMove: (row: StorefrontListingRow, place: number) => void
 }) {
@@ -547,8 +557,8 @@ function MoveDialog({
             if (row && valid) onMove(row, place)
           }}
         >
-          <Label htmlFor={inputId}>New place (1 to {total.toLocaleString()})</Label>
-          <Input id={inputId} type="number" inputMode="numeric" min={1} max={total} value={text} onChange={(event) => setText(event.target.value)} autoFocus />
+          <Label htmlFor={inputId}>New place in the shop (1 to {places.toLocaleString()})</Label>
+          <Input id={inputId} type="number" inputMode="numeric" min={1} max={places} value={text} onChange={(event) => setText(event.target.value)} autoFocus />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel

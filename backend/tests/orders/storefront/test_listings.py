@@ -189,7 +189,11 @@ def test_the_list_pages_searches_filters_and_sorts(store: ListingStore, pg_pool:
     owl = store.create(body(title="Owl Cup", slug="owl-cup", colours=[petg["id"]]))
     odd = store.create(body(title="100% _odd_", slug="odd", media_ids=["m1", "m2"]))
     everything = store.page(ListingQuery())
-    assert ids_of(everything) == [star.id, owl.id, odd.id] and everything.total == 3
+    assert (
+        ids_of(everything) == [star.id, owl.id, odd.id]
+        and everything.total == 3
+        and everything.places == 3
+    )
     assert everything.items[2].media_id == "m1" and everything.items[0].media_id is None
     # The search reads the title and the slug, whatever the case.
     assert ids_of(store.page(ListingQuery(q="KEYCHAIN"))) == [star.id]
@@ -208,9 +212,12 @@ def test_the_list_pages_searches_filters_and_sorts(store: ListingStore, pg_pool:
     backwards = store.page(ListingQuery(sort="position", dir="desc"))
     assert ids_of(backwards) == [odd.id, owl.id, star.id]
     second = store.page(ListingQuery(sort="title", limit=2, offset=2))
-    assert ids_of(second) == [star.id] and second.total == 3
+    assert ids_of(second) == [star.id] and second.total == 3 and second.places == 3
     # A row's place is its place in the whole order, filtered or not.
-    assert [row.place for row in store.page(ListingQuery(q="owl")).items] == [2]
+    owls = store.page(ListingQuery(q="owl"))
+    assert [row.place for row in owls.items] == [2]
+    # `places` counts the whole shop, the last place a move can name, filtered or not.
+    assert (owls.total, owls.places) == (1, 3)
 
 
 def test_a_published_listing_is_not_deleted(

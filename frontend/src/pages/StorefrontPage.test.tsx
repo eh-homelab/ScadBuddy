@@ -158,6 +158,27 @@ describe('StorefrontPage (#5282, #6157)', () => {
     expect((await stored()).map((l) => l.title)).toEqual(['A', 'B', 'D', 'C'])
   })
 
+  it('moves a listing found by a search to a place past the matches (#6157 review)', async () => {
+    for (const title of ['A', 'B', 'C', 'Owl']) await seed(title)
+    const { user } = renderStorefront('/storefront?q=owl')
+    await screen.findByRole('link', { name: 'Owl' })
+    await user.click(screen.getByRole('button', { name: 'Actions for Owl' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Move to position…' }))
+    // One match, but four listings: the places are the shop's.
+    const place = await screen.findByLabelText('New place in the shop (1 to 4)')
+    await user.clear(place)
+    await user.type(place, '2{Enter}')
+    await waitFor(async () => expect((await stored()).map((l) => l.title)).toEqual(['A', 'Owl', 'B', 'C']))
+  })
+
+  it('moves to the last page when the page asked for is past it (#6157 review)', async () => {
+    for (let i = 1; i <= 3; i += 1) await seed(`Listing ${i}`)
+    renderStorefront('/storefront?page=4')
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/storefront$/))
+    await waitFor(() => expect(titles()).toEqual(['Listing 1', 'Listing 2', 'Listing 3']))
+    expect(screen.getByTestId('storefront-range')).toHaveTextContent('1–3 of 3')
+  })
+
   it('puts the cursor in the search on "/"', async () => {
     await seed('Owl cup')
     const { user } = renderStorefront()

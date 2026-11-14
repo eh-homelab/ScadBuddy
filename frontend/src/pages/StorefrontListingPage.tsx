@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
@@ -9,7 +9,9 @@ import { sellListing, type SellListing } from '../components/storefront/sellSour
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
 import type { ParamValue } from '../storefront/api/client'
 import { useAsync } from '../lib/useAsync'
+import { useLeaveGuard } from '../lib/useLeaveGuard'
 import { listingPath } from '../components/storefront/listingsQuery'
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -80,7 +82,6 @@ interface BackState {
 export function StorefrontListingPage() {
   const { id: routeId = 'new' } = useParams()
   const location = useLocation()
-  const navigate = useNavigate()
   const back = (location.state as BackState | null)?.back ?? ''
   const listPath = `/storefront${back}`
   const models = useAsync(() => api.listModels(), [])
@@ -115,18 +116,18 @@ export function StorefrontListingPage() {
   const edited = useRef(false)
   /** Whether the open listing holds edits a save has not written: leaving it asks first. */
   const dirty = useRef(false)
+  /** `dirty` as state, for the guard that holds every in-app navigation away while it is set. */
+  const [leaving, setLeaving] = useState(false)
+  // Every in-app link, `navigate()` and Back away from this listing asks first while it
+  // holds unsaved edits (#6157 review); the sidebar's links too, not only "Back to listings".
+  const guard = useLeaveGuard(leaving)
 
   // The address names the listing: read it, unless it is the one already open (a new
-  // listing's first save moves the address to its id and keeps its edits).
+  // listing's first save moves the address to its id and keeps its edits). Unsaved edits
+  // are never dropped for a link without asking (#6140 review): the leave guard holds it.
   useEffect(() => {
-    const here = open?.id ?? 'new'
-    if (open && here !== routeId && dirty.current) {
-      // Unsaved edits are never dropped for a link (#6140 review): the address goes back.
-      setError('Save the open listing first, then open the link again.')
-      void navigate(open.id ? listingPath(open.id) : '/storefront/listings/new', { replace: true, state: location.state })
-      return
-    }
     if (routeId === 'new') {
+      if (!(open && open.id === null)) edited.current = false
       setOpen((cur) => (cur && cur.id === null ? cur : fresh()))
       setLoadError(null)
       return
@@ -260,7 +261,8 @@ export function StorefrontListingPage() {
   /** A new listing's first save moves the address to its id, keeping the list's query for Back,
    * while that listing is still the open one. */
   function settle(key: symbol, saved: StorefrontListing) {
-    if (openKey.current === key && routeId !== saved.id) void navigate(listingPath(saved.id), { replace: true, state: location.state })
+    // Saved, so the guard's `dirty` has not caught up yet in this render: leave without asking.
+    if (openKey.current === key && routeId !== saved.id) guard.leaveTo(listingPath(saved.id), { replace: true, state: location.state })
   }
 
   /** The open listing saved if it changed; the saved listing, or null when nothing changed. */
@@ -317,7 +319,7 @@ export function StorefrontListingPage() {
     await act(async () => {
       await api.deleteStorefrontListing(id)
       // Back to the list only while this listing is still the one shown.
-      if (openKey.current === key) void navigate(listPath)
+      if (openKey.current === key) guard.leaveTo(listPath)
     })
   }
 
@@ -327,9 +329,11 @@ export function StorefrontListingPage() {
   const liveChanged = open !== null && open.published && draft !== undefined && loaded && open.saved !== savedKey(listingInput(draft, schema.data, filaments))
   /** Whether the open listing holds what a save would write and has not: a new one always does. */
   const unsaved = open !== null && (open.id === null || (loaded && open.saved !== savedKey(listingInput(open.draft, schema.data, filaments))))
+  // An edit always changes `open`, so this runs after each one.
   useEffect(() => {
     dirty.current = edited.current && unsaved
-  })
+    setLeaving(dirty.current)
+  }, [open, unsaved])
   // Closing the tab or reloading with unsaved edits asks first.
   useEffect(() => {
     function onUnload(event: BeforeUnloadEvent) {
@@ -348,12 +352,7 @@ export function StorefrontListingPage() {
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="ghost" size="sm" asChild>
-            <Link
-              to={listPath}
-              onClick={(event) => {
-                if (dirty.current && !window.confirm('Leave this listing without saving your changes?')) event.preventDefault()
-              }}
-            >
+            <Link to={listPath}>
               <ArrowLeftIcon />
               Back to listings
             </Link>
@@ -435,6 +434,21 @@ export function StorefrontListingPage() {
           </div>
         )}
       </div>
+
+      <AlertDialog open={guard.pending !== null} onOpenChange={(next) => !next && guard.stay()}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>Your changes to this listing have not been saved, and will be lost. Save first to keep them.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <Button type="button" variant="destructive" onClick={guard.leave}>
+              Leave without saving
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

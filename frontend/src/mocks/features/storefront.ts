@@ -120,6 +120,7 @@ function page(url: URL): StorefrontListingPage {
       updated_at: l.updated_at,
     })),
     total: matched.length,
+    places: ordered.length,
     limit,
     offset,
   }

@@ -323,13 +323,15 @@ class ListingStore:
         return [_listing(row) for row in rows]
 
     def page(self, query: ListingQuery) -> ListingPage:
-        """One page of the listings that match ``query`` (#6157), and how many match.
-        Each row's ``place`` is its place in the shop's whole order, filtered or not."""
+        """One page of the listings that match ``query`` (#6157), how many match, and how
+        many there are in all (``places``). Each row's ``place`` is its place in the shop's
+        whole order, filtered or not."""
         where: list[str] = []
         args: list[object] = []
         if query.q.strip():
-            pattern = f"%{_like_escaped(query.q.strip().lower())}%"
-            where.append("(lower(title) LIKE %s OR lower(slug) LIKE %s)")
+            # ILIKE on the raw pattern: Postgres folds the case of both sides the same way.
+            pattern = f"%{_like_escaped(query.q.strip())}%"
+            where.append("(title ILIKE %s OR slug ILIKE %s)")
             args += [pattern, pattern]
         if query.status is not None:
             where.append("published" if query.status == "published" else "NOT published")
@@ -345,9 +347,15 @@ class ListingStore:
         filtered = f"WHERE {' AND '.join(where)}" if where else ""
         direction = "DESC" if query.dir == "desc" else "ASC"
         order = ", ".join(f"{column} {direction}" for column in _SORTS[query.sort])
-        with self.pool.connection() as conn:
-            total_row = conn.execute(
-                f"SELECT count(*) AS n FROM storefront_listings {filtered}", args
+        matches = " AND ".join(where) or "TRUE"
+        # One snapshot for the counts and the rows, so a write between them cannot make the
+        # total disagree with the page.
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            counts = conn.execute(
+                f"SELECT count(*) FILTER (WHERE {matches}) AS n, count(*) AS places"
+                " FROM storefront_listings",
+                args,
             ).fetchone()
             rows = conn.execute(
                 "SELECT id, slug, commit, title, place, published, media_ids[1] AS media_id,"
@@ -357,10 +365,11 @@ class ListingStore:
                 f") ranked {filtered} ORDER BY {order} LIMIT %s OFFSET %s",
                 [*args, query.limit, query.offset],
             ).fetchall()
-        assert total_row is not None
+        assert counts is not None
         return ListingPage(
             items=[ListingRow.model_validate(row) for row in rows],
-            total=total_row["n"],
+            total=counts["n"],
+            places=counts["places"],
             limit=query.limit,
             offset=query.offset,
         )

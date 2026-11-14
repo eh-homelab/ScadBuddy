@@ -111,12 +111,14 @@ same way, `vite.config.ts`).
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
-  server searches, filters, sorts and pages (`GET /storefront/listings` answers 50 rows and a
-  total); `components/storefront/listingsQuery.ts` keeps that state in the URL. Bulk
+  server searches, filters, sorts and pages (`GET /storefront/listings` answers 50 rows, the
+  matches' `total` and the shop's `places`, the last place a move can name; a page past the
+  last moves to the last); `components/storefront/listingsQuery.ts` keeps that state in the URL. Bulk
   Publish, Unpublish and Delete run one listing at a time. "Move to top" and "Move to
   position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
   `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
-  links pass its query in the history state, which "Back to listings" returns to. The old
+  links pass its query in the history state, which "Back to listings" returns to. While it
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks. The old
   `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.

@@ -239,10 +239,12 @@ class ListingRow(BaseModel):
 
 
 class ListingPage(BaseModel):
-    """A page of ``GET …/listings``: its rows and how many match in all."""
+    """A page of ``GET …/listings``: its rows, how many match in all (``total``), and how
+    many listings the shop has (``places``: the last place a move can name)."""
 
     items: list[ListingRow]
     total: int
+    places: int
     limit: int
     offset: int
 

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes, useLocation, useNavigate } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import type { StorefrontListing } from '../api/types'
 import { resetMockState } from '../mocks/handlers'
@@ -310,8 +310,14 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.clear(title)
     await user.type(title, 'Mine')
     await user.click(screen.getByRole('button', { name: 'Go' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Save the open listing first')
+    // The link is held, and the page asks (#6157 review): Stay keeps the edits.
+    const ask = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
+    await user.click(within(ask).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('Title')).toHaveValue('Mine')
+    // Leave opens the link.
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Leave without saving' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
   })
 
   it('keeps an edited saved listing when its design’s settings fail to load (#6140 review)', async () => {
@@ -323,19 +329,21 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await waitFor(() => expect(title).toHaveValue('Open'))
     await user.type(title, ' edited')
     await user.click(screen.getByRole('button', { name: 'Go' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Save the open listing first')
+    expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
     expect(screen.getByLabelText('Title')).toHaveValue('Open edited')
   })
 
-  it('asks before Back drops unsaved edits', async () => {
+  it('asks before Back, or any other link, drops unsaved edits (#6157 review)', async () => {
     const listing = await seed('Edited')
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`, <a href="/models">Models</a>)
     await user.type(await screen.findByLabelText('Title'), '!')
     await user.click(screen.getByRole('link', { name: 'Back to listings' }))
-    expect(confirm).toHaveBeenCalledOnce()
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).getByRole('button', { name: 'Stay' }))
     expect(screen.getByLabelText('Title')).toHaveValue('Edited!')
-    confirm.mockRestore()
+    // A link outside the editor, as the sidebar's, is held too.
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Edited!')
   })
 
   it('warns that saving a published listing takes it off the store', async () => {
