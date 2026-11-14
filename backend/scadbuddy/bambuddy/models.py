@@ -98,6 +98,10 @@ class LocalPreset(BambuddyModel):
     default_filament_colour: str | None = None
     compatible_printers: str | None = None
     inherits: str | None = None
+    #: The preset's density in g/cm³ as Bambuddy stores it, text
+    #: (``backend/app/models/local_preset.py`` at v1.3.2b1-daily.20261113; ``"1.275"`` in
+    #: ``tests/bambuddy/recordings/local-presets.json``), #6136.
+    filament_density: str | None = None
     #: When Bambuddy last wrote the row, as it sends it: its model's ``updated_at`` is
     #: ``onupdate=func.now()`` (``backend/app/models/local_preset.py`` at
     #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the kept
@@ -1025,6 +1029,26 @@ class SliceJob(BambuddyModel):
         return "Bambuddy did not say why"
 
 
+class SpoolKProfile(BambuddyModel):
+    """A spool's K-profile, as ``GET /inventory/spools`` nests it: only the preset it
+    names (#6136)."""
+
+    setting_id: str | None = None
+
+
+class CatalogFilament(BambuddyModel):
+    """A row of ``GET /api/v1/filament-catalog/`` (``FilamentResponse`` in Bambuddy's
+    ``backend/app/schemas/filament.py`` at v1.3.2b1-daily.20261113): a filament type
+    with its cost and properties, not a spool. ``density`` is g/cm³."""
+
+    id: int
+    name: str
+    type: str
+    brand: str | None = None
+    color_hex: str | None = None
+    density: float | None = None
+
+
 class Spool(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools`` — Bambuddy's own spool inventory.
 
@@ -1062,6 +1086,10 @@ class Spool(BambuddyModel):
     #: or ``None``, for a spool with no tag (``tests/bambuddy/recordings/inventory-spools.json``).
     tag_uid: str | None = None
     tray_uuid: str | None = None
+    #: Its pressure-advance calibrations, each naming the ``setting_id`` of the preset it
+    #: was made with (#6136; ``SpoolKProfileResponse`` in Bambuddy's
+    #: ``backend/app/schemas/spool.py`` at v1.3.2b1-daily.20261113).
+    k_profiles: list[SpoolKProfile] = Field(default_factory=list)
 
     @property
     def remaining_g(self) -> float:

@@ -12,7 +12,13 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, part_volumes, rough_estimate
+from scadbuddy.orders.estimate import (
+    EstimatedPart,
+    StoreEstimate,
+    filament_estimate,
+    part_volumes,
+    rough_estimate,
+)
 from scadbuddy.orders.models import Filament, PricingPolicy
 from scadbuddy.orders.pricing import Plate, PlateFilament, PricingError, price
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -93,6 +99,47 @@ def test_a_filament_with_no_density_has_no_estimate() -> None:
         rough_estimate(
             [part(1, 1, "#FF0000", 1000.0)], lambda _c: plain, POLICY, currency="USD", factor="1"
         )
+
+
+def test_a_colour_with_no_volume_needs_no_density() -> None:
+    """A colour whose parts all have no volume weighs nothing, so its filament needs no
+    density, as before #6136."""
+    plain = filament("plain", "#0000FF", "20", density=None)
+    by_colour = {"#ff0000": RED, "#0000ff": plain}
+    est = rough_estimate(
+        [part(1, 1, "#FF0000", 10000.0), part(1, 2, "#0000FF", None)],
+        lambda c: by_colour[c.casefold()],
+        POLICY,
+        currency="USD",
+        factor="1",
+    )
+    assert est.unknown_parts == 1
+    assert [d.filament_id for d in est.densities] == [RED.id]
+
+
+def test_the_estimate_says_which_density_it_used() -> None:
+    """#6136: each filament's density, and where a filled one came from."""
+    filled = filament("filled", "#FF0000", "20", density="1.32").model_copy(
+        update={"density_profile": "Bambu PLA Silk @base (spool preset GFA05)"}
+    )
+    by_colour = {"#ff0000": filled, "#0000ff": BLUE}
+    est = rough_estimate(
+        [part(1, 1, "#FF0000", 10000.0), part(1, 2, "#0000FF", 10000.0)],
+        lambda c: by_colour[c.casefold()],
+        POLICY,
+        currency="USD",
+        factor="1",
+    )
+    # 10 cm3 x 1.32 + 10 cm3 x 1.24.
+    assert est.grams == "25.60"
+    assert [(d.filament_id, d.density_g_cm3, d.profile) for d in est.densities] == [
+        ("filled", "1.32", "Bambu PLA Silk @base (spool preset GFA05)"),
+        ("blue", "1.24", None),
+    ]
+    alone = filament_estimate([part(1, 1, "#FF0000", 10000.0)], filled, currency="USD", factor="1")
+    assert (alone.grams, alone.densities[0].density_g_cm3) == ("13.20", "1.32")
+    # A visitor never reads which density, as before.
+    assert "densities" not in est.public().model_dump()
 
 
 def test_part_volumes_reads_every_plate(tmp_path: Path) -> None:

@@ -1378,6 +1378,14 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+  A record with no density gets one there, from a manual add sent with no density, and
+  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
+  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
+  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  person's density clears it. An estimate reads only the record's own density.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
