@@ -360,8 +360,8 @@ async def test_a_native_lan_print_runs_on_a_worker_with_no_database_and_no_kek(
     fake_lan: FakeLan,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The plate is uploaded to the printer and started: the registry row, its access
-    code (opened by the API) and the rack's hotends seen go through the CRUD routes."""
+    """The plate is uploaded to the printer and started: the registry row and its access
+    code (opened by the API) go through the CRUD routes."""
     monkeypatch.delenv("SCADBUDDY_DATABASE_URL", raising=False)
     monkeypatch.delenv("SCADBUDDY_SECRET_KEY_FILE", raising=False)
     printers = PrinterStore(api_store.pool, KEK)
