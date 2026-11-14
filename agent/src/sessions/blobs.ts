@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserImage } from './images.js'
-import { FORK_EVENT_TYPES, forkChain } from './eventLog.js'
-import type { ImageRef, SentImage } from './protocol.js'
+import { forkChain } from './eventLog.js'
+import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 
 // The images a session's tool results carried (#782, design
 // docs/superpowers/specs/2026-10-08-friendly-tool-calls-design.md §3.1), in
@@ -152,6 +152,9 @@ export class SessionBlobs {
   }
 }
 
+/** The events a fork takes that can name an image (forkPoint.ts `blobNames`), all among eventLog.ts `FORK_EVENT_TYPES`. */
+const IMAGE_EVENT_TYPES: readonly ServerEvent['type'][] = ['tool.result', 'user.turn']
+
 async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, name: string): Promise<StoredBlob | undefined> {
   const [row] = await sql<{ media_type: ImageMediaType; data: Buffer }[]>`
     ${forkChain(sql, sessionId)}
@@ -159,7 +162,7 @@ async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, nam
      WHERE c.depth = 0 OR EXISTS (
        SELECT 1 FROM chain r JOIN ai_session_events e ON e.session_id = r.id
         WHERE r.depth > 0 AND e.seq <= r.bound AND strpos(e.event, ${name}) > 0
-          AND e.event::jsonb->>'type' = ANY(${sql.array(FORK_EVENT_TYPES as string[])}))
+          AND e.event::jsonb->>'type' = ANY(${sql.array(IMAGE_EVENT_TYPES as string[])}))
      ORDER BY c.depth LIMIT 1`
   return row ? { mediaType: row.media_type, bytes: row.data } : undefined
 }

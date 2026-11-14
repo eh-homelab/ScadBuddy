@@ -848,6 +848,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const texts = (await m.events.read(child.id)).flatMap(({ event: e }) => (e.type === 'user.turn' ? [e.text] : e.type === 'assistant.text.delta' ? [e.delta] : []))
       expect(texts).toEqual(['make a box', 'a box'])
       expect(await m.store.load({ projectKey: '', sessionId: child.id })).toBeNull()
+      // So its first turn starts a transcript rather than resuming one (turnRunner.ts, warm.ts).
+      expect(await m.store.exists(child.id)).toBe(false)
 
       // Its first turn runs on its own AgentSession.
       const turn = await m.send(child.id, browser, 'and a lid')

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner, type ServerEvent } from '../src/sessions/protocol.js'
-import { copyForkRanges } from '../src/sessions/store.js'
+import { copyForkRanges, hasForks } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
@@ -164,14 +164,16 @@ describe.skipIf(!TEST_DATABASE_URL)(`fork event logs and images${TEST_DATABASE_U
     ])
     await log.append(parent, [event({ type: 'tool.result', sessionId: parent, id: 'toolu_1', ok: true, summary: 'ok', images: [{ name: IMAGE, mediaType: 'image/png' }] })])
     await t.db.sql`INSERT INTO ai_session_blobs (session_id, name, media_type, data) VALUES (${parent}, ${IMAGE}, 'image/png', ${PNG})`
-    const cut = (await log.lastSeq(parent))
+    const cut = await log.lastSeq(parent)
     expect(done).toBeLessThan(cut)
     const child = await fork(parent, cut)
     await log.append(child, turn(child, 'c'))
     const before = await all(child)
 
+    // Its transcript cut is 0 (session()), so it takes no entries to seal: no keys are needed.
+    expect(await hasForks(t.db.sql, parent)).toBe(false)
     await t.db.sql.begin(async (tx) => {
-      expect(await copyForkRanges(tx, testPayloadKeys(t.db.sql), parent)).toBe(1)
+      expect(await copyForkRanges(tx, undefined, parent)).toBe(1)
     })
     const [link] = await t.db.sql<{ parent: string | null; cut: string | null }[]>`
       SELECT fork_parent_id::text AS parent, fork_event_cut::text AS cut FROM ai_sessions WHERE id = ${child}`
@@ -181,5 +183,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`fork event logs and images${TEST_DATABASE_U
 
     expect(await all(child)).toEqual(before)
     expect((await blobs.get(child, IMAGE))?.bytes).toEqual(PNG)
+  })
+
+  it("a fork cut inside its parent's inherited range keeps it when the grandparent is forgotten", async () => {
+    const a = await session()
+    const [, , , doneA1] = await log.append(a, turn(a, 'a1'))
+    await log.append(a, turn(a, 'a2'))
+    const b = await fork(a, await log.lastSeq(a))
+    await log.append(b, turn(b, 'b1'))
+    // C cuts B at a1's end: a seq of A's, inside the range B takes from A.
+    const c = await fork(b, doneA1!)
+    const before = await all(c)
+    expect(texts(before).filter((x) => x.startsWith('turn:'))).toEqual(['turn:a1'])
+
+    await t.db.sql.begin(async (tx) => {
+      expect(await copyForkRanges(tx, testPayloadKeys(t.db.sql), a)).toBe(1)
+    })
+    await t.db.sql`DELETE FROM ai_session_events WHERE session_id = ${a}`
+
+    // B holds A's range as its own rows now, at A's seqs, and C still reads a1 through B.
+    expect(await all(c)).toEqual(before)
+    expect(texts(await all(b)).filter((x) => x.startsWith('turn:'))).toEqual(['turn:a1', 'turn:a2', 'turn:b1'])
   })
 })

@@ -279,12 +279,17 @@ export class PostgresSessionStore implements SessionStore {
 
 type KeyOf = (sessionId: string, create: boolean) => Promise<Buffer>
 
-/** Whether `sessionId` has a main transcript to resume: rows of its own, or the parent a fork reads through. */
+/**
+ * Whether `sessionId` has a main transcript to resume: rows of its own, or entries a fork takes
+ * through its link. A cut above 0 was taken from a transcript that had that many entries, which
+ * stay reachable (through the chain, or copied in when an ancestor is forgotten); a fork with a
+ * cut of 0 (of a closed DurableSession, #4212) takes none.
+ */
 export async function transcriptExists(sql: Sql, sessionId: string): Promise<boolean> {
   const [row] = isUuid(sessionId)
     ? await sql<{ found: boolean }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '')
-          OR EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND fork_parent_id IS NOT NULL) AS found`
+          OR EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND fork_parent_id IS NOT NULL AND fork_cut > 0) AS found`
     : await sql<{ found: boolean }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS found`
   return row?.found === true
@@ -405,9 +410,9 @@ export class ForksNeedKeys extends Error {
   }
 }
 
-/** Whether a fork reads its transcript through `parentId`. */
+/** Whether a fork reads entries of its transcript through `parentId` (a cut of 0 reads only its log). */
 export async function hasForks(sql: Sql, parentId: string): Promise<boolean> {
-  const rows = await sql`SELECT 1 FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid LIMIT 1`
+  const rows = await sql`SELECT 1 FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid AND fork_cut > 0 LIMIT 1`
   return rows.length > 0
 }
 
@@ -418,15 +423,17 @@ export async function hasForks(sql: Sql, parentId: string): Promise<boolean> {
  * cleared, so it needs neither the parent's rows nor its key again. A fork being forgotten itself
  * gets no rows, only its link cleared. `keys` opens
  * the parent's transcript (its own ancestors' too) and seals the copies; without them a parent
- * with forks is not forgotten. How many forks there were.
+ * with forks that take entries of it is not forgotten (forks with a cut of 0 need none). How many
+ * forks there were.
  */
 export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | undefined, parentId: string): Promise<number> {
   const children = await tx<{ id: string; cut: number }[]>`
     SELECT id::text AS id, fork_cut AS cut FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid ORDER BY id FOR UPDATE`
   if (children.length === 0) return 0
-  if (!keys) throw new ForksNeedKeys(parentId)
-  const keyOf: KeyOf = (sessionId, create) => keys.keyFor(`session-${sessionId}`, create)
-  const transcript = await openSegments(keyOf, await segmentsOf(tx, parentId))
+  const takesEntries = children.some((child) => child.cut > 0)
+  if (takesEntries && !keys) throw new ForksNeedKeys(parentId)
+  const keyOf: KeyOf = (sessionId, create) => keys!.keyFor(`session-${sessionId}`, create)
+  const transcript = takesEntries ? await openSegments(keyOf, await segmentsOf(tx, parentId)) : []
   for (const child of children) {
     const range = transcript.slice(0, child.cut)
     const subject = `session-${child.id}`
