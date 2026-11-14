@@ -65,7 +65,7 @@ def _offered_colours(listing: Listing, filaments: Mapping[str, Filament]) -> set
     return {filaments[f].colour.casefold() for f in listing.colours if f in filaments}
 
 
-def _same(choice: ParamValue, value: ParamValue) -> bool:
+def same_value(choice: ParamValue, value: ParamValue) -> bool:
     """Equal in type and value: ``True`` is not ``1``."""
     return isinstance(choice, bool) == isinstance(value, bool) and choice == value
 
@@ -119,7 +119,7 @@ def value_reason(
                 isinstance(c, str) and c.casefold() == value.casefold() for c in bound.choices
             )
         else:
-            allowed = any(_same(choice, value) for choice in bound.choices)
+            allowed = any(same_value(choice, value) for choice in bound.choices)
         reason = None if allowed else "choice"
     else:
         assert isinstance(bound, TextBound)

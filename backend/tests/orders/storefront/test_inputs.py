@@ -404,3 +404,11 @@ def test_a_number_default_outside_its_bound_is_not_shown(
     bounds["width"] = bounds["width"].model_copy(update=update)
     shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
     assert shown["width"].default is None
+
+
+def test_a_choice_default_is_matched_as_publish_matches_it(listing: Listing) -> None:
+    """``True`` is not ``1`` (`same_value`): the page shows no default publish would refuse."""
+    bounds = dict(listing.params)
+    bounds["shape"] = bounds["shape"].model_copy(update={"choices": [1], "default": True})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["shape"].default is None

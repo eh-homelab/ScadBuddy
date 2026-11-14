@@ -50,7 +50,12 @@ from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, 
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.storefront.inputs import effective_default, value_reason
+from scadbuddy.orders.storefront.inputs import (
+    InputReason,
+    effective_default,
+    same_value,
+    value_reason,
+)
 from scadbuddy.orders.storefront.wire import (
     ChoiceBound,
     Listing,
@@ -627,6 +632,18 @@ def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> Non
         )
 
 
+#: Why a default is outside its bounds, as the shop reads it (`value_reason`, #6144).
+_WHY: dict[InputReason, str] = {
+    "unknown": "the template has no such parameter",
+    "locked": "the parameter is locked",
+    "range": "it is outside the minimum and maximum",
+    "step": "it is not on the step",
+    "choice": "it is not one of the choices",
+    "length": "it is longer than the maximum length",
+    "colour": "no listing filament has that colour",
+}
+
+
 def _check_default(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
     """The value an unpicked render of ``parameter`` takes (`effective_default`) as one
     the listing allows, or 422: ``listing_colour_unknown`` for a colour no listing
@@ -637,11 +654,12 @@ def _check_default(parameter: Parameter, bound: ParamBound, colours: Collection[
         return
     if parameter.type == "color":
         _check_colour(name, value, colours)
-    if value_reason(parameter, bound, value, {c.casefold() for c in colours}) is not None:
+    reason = value_reason(parameter, bound, value, {c.casefold() for c in colours})
+    if reason is not None:
         whose = "the listing's" if bound.default is not None else "the template's"
         raise _unprocessable(
             "listing_default_invalid",
-            f"{name!r} starts at {whose} default {value!r}, which its bounds do not allow",
+            f"{name!r} starts at {whose} default {value!r}, outside its bounds: {_WHY[reason]}",
             name,
         )
 
@@ -836,10 +854,10 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
-    ``listing_colour_unknown``, ``listing_media_unknown``, ``listing_reference`` or
-    ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
-    back; 409 ``listing_changed`` when it
-    was edited while it was being published; 409 ``listing_publishing`` while another
+    ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
+    the price book does not back; 409 ``listing_changed`` when it was edited while it was
+    being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
@@ -940,7 +958,9 @@ def _public_param(
         ]
         if not (isinstance(start, str) and start.casefold() in colours):
             fields["default"] = None
-    elif isinstance(bound, ChoiceBound) and start not in bound.choices:
+    elif isinstance(bound, ChoiceBound) and not any(
+        same_value(choice, start) for choice in bound.choices if start is not None
+    ):
         # Publish refuses such a default; a listing saved before #6144 may still hold one.
         fields["default"] = None
     elif (
