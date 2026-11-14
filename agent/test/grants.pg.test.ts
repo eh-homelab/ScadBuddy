@@ -8,9 +8,9 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throw
 // #5210: the agent owns its ai_* tables and grants the backend's roles what they use of them.
 
 it('takes the same advisory lock as the backend grants', () => {
-  const source = readFileSync(new URL('../../backend/scadbuddy/render/worker_role.py', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../../backend/scadbuddy/auth/caller_grants.py', import.meta.url), 'utf8')
   const found = /^GRANT_LOCK = (0x[0-9A-Fa-f_]+)$/m.exec(source)
-  expect(found, 'GRANT_LOCK in worker_role.py').not.toBeNull()
+  expect(found, 'GRANT_LOCK in caller_grants.py').not.toBeNull()
   expect(BigInt(found![1]!.replaceAll('_', ''))).toBe(GRANT_LOCK)
 })
 

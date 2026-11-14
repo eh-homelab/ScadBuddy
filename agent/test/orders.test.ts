@@ -949,10 +949,15 @@ describe('pricing tools (#4250)', () => {
 
   it('tiers the book, the quote and the estimate as Ruling 11 does', () => {
     expect(
-      ['price_book_get', 'price_book_set', 'price_book_import_spools', 'order_estimate', 'order_item_quote'].map(
-        (n) => tool(n).risk,
-      ),
-    ).toEqual(['read', 'write', 'write', 'read', 'write'])
+      [
+        'price_book_get',
+        'price_book_set',
+        'price_book_import_spools',
+        'price_book_fill_densities',
+        'order_estimate',
+        'order_item_quote',
+      ].map((n) => tool(n).risk),
+    ).toEqual(['read', 'write', 'write', 'write', 'read', 'write'])
   })
 
   // #4253 §8.3
@@ -966,6 +971,30 @@ describe('pricing tools (#4250)', () => {
       }),
     )
     expect(firstText(await tool('price_book_import_spools').execute({}, ctx()))).toEqual({ rows })
+    expect(posted).toBe(1)
+  })
+
+  // #6136
+  it("fills the empty densities from Bambuddy's preset links", async () => {
+    const rows = [
+      {
+        filament_id: FILAMENT,
+        material: 'PLA',
+        subtype: 'Basic',
+        colour: '#FF0000',
+        density_g_cm3: '1.26',
+        density_profile: 'Bambu PLA Basic @base (spool preset GFA00)',
+      },
+      { filament_id: 'f22a0000-1111-4222-8333-944455556666', material: 'PLA', subtype: 'Dual Color', colour: '#00FF00', density_g_cm3: null, density_profile: null },
+    ]
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/price-book/fill-densities`, () => {
+        posted += 1
+        return HttpResponse.json({ rows })
+      }),
+    )
+    expect(firstText(await tool('price_book_fill_densities').execute({}, ctx()))).toEqual({ rows })
     expect(posted).toBe(1)
   })
 

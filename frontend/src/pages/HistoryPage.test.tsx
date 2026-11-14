@@ -115,6 +115,13 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Add to order' })).toBeInTheDocument()
   })
 
+  it('offers "Sell on storefront" on an output, linking the listing filled in from it (#6131)', async () => {
+    noPrints()
+    const { user } = render()
+    const entry = await menuItem(user, await row('Reagan'), 'Sell Reagan on the storefront')
+    expect(entry).toHaveAttribute('href', `/storefront?sell=output%3A${outputs[0]!.id}`)
+  })
+
   it('shows a pipeline output\'s bill of materials and links its files', async () => {
     const first = outputs[0]!
     server.use(

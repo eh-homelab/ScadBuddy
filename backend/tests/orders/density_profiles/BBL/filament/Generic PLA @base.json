@@ -1,0 +1,11 @@
+{
+    "type": "filament",
+    "name": "Generic PLA @base",
+    "from": "system",
+    "instantiation": "false",
+    "inherits": "fdm_filament_pla",
+    "filament_id": "GFL99",
+    "filament_vendor": [
+        "Generic"
+    ]
+}

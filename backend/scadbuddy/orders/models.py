@@ -888,6 +888,11 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
+    #: Where ``density_g_cm3`` came from when the spool import, "Fill densities" or a
+    #: manual add with no density read it from Bambuddy's link to the slicer preset
+    #: (#6136, `orders/density.py`): the preset and the id that named it. ``None`` for
+    #: a density a person set, or none.
+    density_profile: str | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -952,6 +957,36 @@ class SpoolImportRow(BaseModel):
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
     spool_ids: list[int]
+    #: The record's density after the import (#6136): its own, or the one the import
+    #: read through Bambuddy when it had none.
+    density_g_cm3: str | None = None
+    #: The record's ``density_profile`` after the import: where this import read
+    #: ``density_g_cm3`` from, or where a density it kept was read from before;
+    #: ``None`` for a density a person set, or none.
+    density_profile: str | None = None
+
+
+class DensityFillRow(BaseModel):
+    """One record of the book that had no density, and what filled it (#6136)."""
+
+    filament_id: str
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    colour: str
+    #: The density written; ``None`` when no source gives one, so the record still has
+    #: none and an estimate of it is refused.
+    density_g_cm3: str | None = None
+    #: Where it was read from.
+    density_profile: str | None = None
+
+
+class DensityFill(BaseModel):
+    """`POST /orders/price-book/fill-densities`: one row per record that had no
+    density, in the book's order."""
+
+    rows: list[DensityFillRow]
 
 
 class SpoolImport(BaseModel):

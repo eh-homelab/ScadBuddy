@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Bambu PETG-CF @BBL X1C",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_filament_pet",
+    "filament_id": "GFG50",
+    "filament_vendor": [
+        "Bambu Lab"
+    ],
+    "include": [
+        "fdm_filament_template_direct_dual"
+    ]
+}
