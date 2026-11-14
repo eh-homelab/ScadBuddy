@@ -249,6 +249,25 @@ async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client
     return await crud.upload_slots(body, key=key, visitor_id=visitor_id, client=client)
 
 
+#: The fields of a filament the form shows (`orders/storefront/wire.py` `PublicFilament`):
+#: the edge sends on these only, so no price reaches a visitor.
+FILAMENT_FIELDS: Final = frozenset({"id", "colour", "colour_name", "material"})
+
+
+@visitor_router.get("/models/colours")
+async def model_colours(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1)."""
+    answer = await crud.model_colours(visitor_id=visitor_id, client=client)
+    filaments = answer.get("filaments", []) if isinstance(answer, dict) else []
+    return {
+        "filaments": [
+            {k: v for k, v in f.items() if k in FILAMENT_FIELDS}
+            for f in filaments
+            if isinstance(f, dict)
+        ]
+    }
+
+
 @visitor_router.post("/draft/models")
 async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the

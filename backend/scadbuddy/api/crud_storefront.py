@@ -179,6 +179,7 @@ from scadbuddy.orders.storefront.wire import (
     CustomerOrderView,
     DraftView,
     ModelRequestBody,
+    PublicFilament,
     PublicListing,
     PublicListings,
     RenderBody,
@@ -590,6 +591,26 @@ class UploadConfig(BaseModel):
     """What the edge's page CSP needs for the browser's direct uploads (#6133)."""
 
     origin: str
+
+
+class ModelColours(BaseModel):
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1): the price
+    book's filaments not archived, never a price."""
+
+    filaments: list[PublicFilament]
+
+
+@router.get("/models/colours", name="crud_storefront_model_colours")
+async def model_colours(orders: OrdersDep, _visitor: Visitor, _client: StoreClient) -> ModelColours:
+    """The filaments a customer may ask for on an own-model request; the request takes at
+    most `MAX_COLOUR_CHOICES` of their ids (`model_requests._checked_colours`)."""
+    filaments = await asyncio.to_thread(_filaments, orders)
+    return ModelColours(
+        filaments=[
+            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            for f in filaments.values()
+        ]
+    )
 
 
 @router.get("/uploads/config", name="crud_storefront_upload_config")

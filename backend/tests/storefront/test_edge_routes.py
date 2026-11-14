@@ -1968,6 +1968,19 @@ def test_an_order_sources_preview_takes_the_readers_body(
     assert sent.content == b'{"token":"' + LINK.encode() + b'"}'
 
 
+def test_the_forms_colours_carry_no_price(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    red = {"id": "f1", "colour": "#ff0000", "colour_name": "Red", "material": "PLA"}
+    crud_mock.get("/api/v1/internal/crud/storefront/models/colours").respond(
+        200, json={"filaments": [{**red, "cost_per_kg": "20.00"}]}, headers=CRUD
+    )
+    r = edge.get("/api/store/v1/models/colours")
+    assert r.status_code == 200
+    assert r.json() == {"filaments": [red]}
+
+
 def test_a_refused_preview_is_a_bare_404(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

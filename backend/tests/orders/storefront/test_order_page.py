@@ -326,6 +326,27 @@ def test_the_view_is_allowlisted() -> None:
         assert not [w for w in words if banned in w.split("_")], banned
 
 
+def test_the_sources_and_charges_carry_exactly_their_fields() -> None:
+    """#6133 PR 4, spec 2026-11-13 §10.5: a customer's files, links and charges reach the
+    page with these fields only, never a cost entry, a margin, a staff name or the
+    import's own reason."""
+    assert set(ORDER_VIEW_FIELDS["items.sources"]) == {
+        "kind",
+        "purpose",
+        "filename",
+        "url",
+        "note",
+        "status",
+        "amount_minor",
+        "shop_note",
+        "preview_url",
+        "customer_reason",
+    }
+    assert set(ORDER_VIEW_FIELDS["charges"]) == {"kind", "label", "amount_minor"}
+    assert "sources" in ORDER_VIEW_FIELDS["items"]
+    assert "charges" in ORDER_VIEW_FIELDS[""]
+
+
 def test_the_answer_holds_only_allowlisted_fields(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud)
     with _orders(api).store.transaction() as conn:

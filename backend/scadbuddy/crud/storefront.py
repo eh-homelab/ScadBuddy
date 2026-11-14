@@ -393,6 +393,10 @@ class StorefrontCrud:
         verdict = answer.get("verdict") if isinstance(answer, dict) else None
         return verdict if isinstance(verdict, str) else "unavailable"
 
+    async def model_colours(self, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/models/colours`` (#6133): the filaments the form offers."""
+        return await self._call("GET", "/models/colours", visitor_id=visitor_id, client=client)
+
     async def draft_source_preview(
         self, source_id: str, *, visitor_id: str, client: str
     ) -> CrudStream:

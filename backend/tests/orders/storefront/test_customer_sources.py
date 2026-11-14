@@ -84,6 +84,27 @@ def slug(response: Any) -> str:
     return str(response.json()["type"]).removeprefix(STOREFRONT_PROBLEMS)
 
 
+# -- the form ----------------------------------------------------------------------------
+
+
+def test_the_form_offers_the_price_books_colours_without_prices(asks: CrudCaller) -> None:  # noqa: F811
+    made = asks.api.post(
+        "/api/v1/orders/price-book/filaments",
+        json={
+            "material": "PLA",
+            "colour": "#ff0000",
+            "colour_name": "Red",
+            "cost_per_kg": "20.00",
+        },
+    )
+    assert made.status_code in (200, 201), made.text
+    r = asks.get("/models/colours")
+    assert r.status_code == 200, r.text
+    [red] = [f for f in r.json()["filaments"] if f["colour_name"] == "Red"]
+    assert set(red) == {"id", "colour", "colour_name", "material"}
+    assert red["material"] == "PLA"
+
+
 # -- the cart ----------------------------------------------------------------------------
 
 
