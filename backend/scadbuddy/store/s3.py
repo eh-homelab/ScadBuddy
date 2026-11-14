@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, BinaryIO, get_args
+from typing import TYPE_CHECKING, BinaryIO, Final, get_args
 
 from aiobotocore.config import AioConfig
 from aiobotocore.session import get_session
@@ -45,6 +45,23 @@ _OBJECT = re.compile(
 
 def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
     return f"{prefix}/{kind}/{sha256}"
+
+
+#: The storefront's staging area (#6133, spec 2026-11-13 §6): an upload slot's object, and
+#: its preview beside it. Nothing here is content-addressed, so `sweep_unrecorded` (which
+#: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it.
+_STAGED = re.compile(r"staging/[0-9a-f]{32}(?:\.png)?")
+
+
+#: The canned ACL every staging object is written with, signed into its presigned PUT.
+STAGED_ACL: Final = "private"
+#: The headers a presigned staging PUT carries beside ``Content-Type``.
+STAGED_PUT_HEADERS: Final = {"x-amz-acl": STAGED_ACL}
+
+
+def staging_key(prefix: str, upload_id: str, *, preview: bool = False) -> str:
+    """The staging object of the upload slot ``upload_id``, or of its preview."""
+    return f"{prefix}/staging/{upload_id}{'.png' if preview else ''}"
 
 
 def _missing(error: ClientError) -> bool:
@@ -77,6 +94,7 @@ class S3ContentBackend:
             self.config = self.config.merge(config)
         self._exits = AsyncExitStack()
         self._client: S3Client | None = None
+        self._signer: S3Client | None = None
         self._opening = asyncio.Lock()
 
     def _key(self, backend_id: str) -> str:
@@ -104,6 +122,25 @@ class S3ContentBackend:
                 )
             return client
 
+    async def _v4(self) -> S3Client:
+        """A client that signs with Signature V4 whatever the region: only V4 signs a
+        presigned PUT's length and type (`presign_put`), and botocore presigns with V2
+        for a client with no region. Kept apart so the other calls sign as before."""
+        async with self._opening:
+            signer = self._signer
+            if signer is None:
+                signer = self._signer = await self._exits.enter_async_context(
+                    get_session().create_client(
+                        "s3",
+                        endpoint_url=self.settings.endpoint,
+                        region_name=self.settings.region,
+                        aws_access_key_id=self.settings.access_key_id,
+                        aws_secret_access_key=self.settings.secret_access_key,
+                        config=self.config.merge(AioConfig(signature_version="s3v4")),
+                    )
+                )
+            return signer
+
     async def client(self) -> S3Client:
         """The backend's client, opened on first use."""
         return await self._s3()
@@ -111,6 +148,7 @@ class S3ContentBackend:
     async def aclose(self) -> None:
         await self._exits.aclose()
         self._client = None
+        self._signer = None
 
     async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
         sha256, size = await asyncio.to_thread(blob_digest, data)
@@ -211,6 +249,84 @@ class S3ContentBackend:
         key = self._key(backend_id)
         client = await self._s3()
         await client.delete_object(Bucket=self.settings.bucket, Key=key)
+
+    def _staged(self, key: str) -> str:
+        prefix = f"{self.settings.prefix}/"
+        # fullmatch: `$` would also accept a key ending in a newline.
+        if not (key.startswith(prefix) and _STAGED.fullmatch(key.removeprefix(prefix))):
+            raise ValueError(f"not a staging key: {key!r}")
+        return key
+
+    async def presign_put(self, key: str, *, size: int, media_type: str, expires: timedelta) -> str:
+        """A URL that PUTs exactly ``size`` bytes of ``media_type`` to the staging object
+        ``key`` without credentials until ``expires`` from now. botocore signs the length,
+        the type and the canned ACL ``private``
+        (``X-Amz-SignedHeaders=content-length;content-type;host;x-amz-acl``), so the store
+        refuses a body of any other length or type, and a PUT that asks for any other ACL
+        (``public-read``) fails the signature: the browser sends `STAGED_PUT_HEADERS`. The
+        query carries the signature: never log it."""
+        params = {
+            "Bucket": self.settings.bucket,
+            "Key": self._staged(key),
+            "ContentType": media_type,
+            "ContentLength": size,
+            "ACL": STAGED_ACL,
+        }
+        client = await self._v4()
+        return await client.generate_presigned_url(
+            "put_object", Params=params, ExpiresIn=int(expires.total_seconds())
+        )
+
+    async def presign_staged_get(
+        self,
+        key: str,
+        expires: timedelta,
+        *,
+        media_type: str | None = None,
+        disposition: str | None = None,
+    ) -> str:
+        """`presign_get` of a staging object."""
+        params: dict[str, str] = {"Bucket": self.settings.bucket, "Key": self._staged(key)}
+        if media_type is not None:
+            params["ResponseContentType"] = media_type
+        if disposition is not None:
+            params["ResponseContentDisposition"] = disposition
+        client = await self._s3()
+        return await client.generate_presigned_url(
+            "get_object", Params=params, ExpiresIn=int(expires.total_seconds())
+        )
+
+    async def staged_size(self, key: str) -> int | None:
+        """The staging object's size by a ``HEAD``, or None when there is none. No byte of
+        it is read."""
+        checked = self._staged(key)
+        client = await self._s3()
+        try:
+            head = await client.head_object(Bucket=self.settings.bucket, Key=checked)
+        except ClientError as error:
+            if _missing(error):
+                return None
+            raise
+        return int(head["ContentLength"])
+
+    async def remove_staged(self, key: str) -> None:
+        """The staging object deleted (none is no error: S3's delete is idempotent)."""
+        checked = self._staged(key)
+        client = await self._s3()
+        await client.delete_object(Bucket=self.settings.bucket, Key=checked)
+
+    async def staged_objects(self) -> AsyncGenerator[tuple[str, datetime]]:
+        """Every staging object's key and its last write."""
+        prefix = f"{self.settings.prefix}/staging/"
+        client = await self._s3()
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=self.settings.bucket, Prefix=prefix
+        )
+        async for page in pages:
+            for item in page.get("Contents", []):
+                key = item["Key"]
+                if _STAGED.fullmatch(key.removeprefix(f"{self.settings.prefix}/")):
+                    yield key, item["LastModified"]
 
     async def sweep_unrecorded(self, *, cutoff: datetime, recorded: Callable[[str], bool]) -> int:
         """Delete every object under the prefix last written before ``cutoff`` that
