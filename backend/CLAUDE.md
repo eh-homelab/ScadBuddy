@@ -12,16 +12,16 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
 `auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
-Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
-empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
-holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
+revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
+Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
 view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
 warning; the API opens every sealed value it needs (area `access-codes`: whether the API
 opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
-(#5298): they reach their data through CRUD routes. The projects worker has no grant
-list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
-every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
-(`render/worker_role.py`) is empty until #5298 Task 22 revokes its role. The render
+(#5298): they reach their data through CRUD routes. Neither has a grant list. The API
+and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
+every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
+the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
 worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
@@ -157,11 +157,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
   backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, now empty, which the
-  API grants the unused role `scadbuddy_render` at start until #5298 Task 22 revokes it,
-  and `grant_role`, which every caller's list goes through; the render worker holds no
-  database, #5298, `tests/test_render_worker_nodb.py`: it reads the store settings and
-  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it). The legacy in-process queue, its file and Postgres stores
+  backend's migrations); the render worker holds no database (#5298,
+  `tests/test_render_worker_nodb.py`; the API revokes its old role `scadbuddy_render` at
+  every start, `auth/revoke.py`, and every caller's grant list goes through
+  `auth/caller_grants.py` `grant_role`): it reads the store settings and
+  writes its job rows, their events and activity rows, their blob refs, the piece geometry, the blob index, its uploads' `assets` rows (`library/assets.py` `RemoteAssetStore`, the files on its own volume) and its library leases, pin holds and install slots (`RemoteCheckoutLeases`, `RemoteInstallSlots`, under the API's `REMOVAL_LOCK`) only through the API's CRUD routes, `crud/render.py`, where the API also finds the Bambuddy store's folders for it. The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -202,7 +202,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
-  requests stay in-process (`render/previews.py` `PreviewScheduler`).
+  requests stay in-process (`render/previews.py` `PreviewScheduler`). A customer's staged
+  file (#6133): `staged_file.py` (`StagedFile`, one watcher per upload on the same queue,
+  started by the presign route, not a sweep; "A customer's own models" below).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
   has it is current, #4139, told by `registered.py` `RegisteredActivities`),
@@ -997,7 +999,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   seen since; one transaction per cart, `FOR UPDATE SKIP LOCKED`, checked again under the
   order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
-  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run. A cancelled order reopened past `quoted`
+  the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run, then
+  the backstop of a customer's staged files (#6133, `staged_files.sweep_staged`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -1375,6 +1378,51 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
   live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
   or updates filament records from the spools, on click only (`PriceBook.spool_import`).
+  A record with no density gets one there, from a manual add sent with no density, and
+  from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
+  `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
+  empty and fails nothing. `filaments.density_profile` keeps where it came from; a
+  person's density clears it. An estimate reads only the record's own density.
+- A customer's own models (#6133, spec 2026-11-13; migration
+  `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
+  CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files
+  never pass through ScadBuddy (#5295): `presign_uploads` writes one `storefront_uploads` row
+  per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
+  `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
+  signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
+  uploads (each the visitor's, unclaimed, and a `HEAD` of exactly its declared size; no byte
+  read) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  for) and its `order_item_sources` (files `checking`; links as text only, typed by
+  `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
+  `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
+  print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
+  requests' `UploadAllowance` and Turnstile action `model`; the page's CSP names the bucket
+  in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
+  `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
+  Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
+  queue, id `staged-file:<upload id>`, AUTO_UPGRADE as `VersionedStagedFile`, so a change to
+  its commands goes behind `workflow.patched`), which owns the file's life. The presign
+  starts it before it answers any URL (`staged_files.watch`; a failed start is 503
+  `uploads_unavailable`, no URL, the new rows dropped). Its one activity,
+  `staged_file_step` (`orders/storefront/staged_files.py` `step`), reads the file's state
+  under the order's lock and cleans it up when due, in the same transaction, then deletes
+  the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
+  expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file, and a
+  file of a submitted order cancelled or closed `ENDED_GRACE` (30 days) before (#6164; its
+  source reads `declined`, `ENDED`; a reopen within the grace clears `cancelled_at` and
+  `closed_at`, so the file waits again). A live submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`; an order's cancel and close
+  `closed`, its reopen `retry`), but the database is the truth,
+  so a lost signal costs time, never a file; the step retries with no limit.
+  `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
+  row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
+  running gets one started again, each counted in `scadbuddy_staged_files_repaired`. A pass
+  checks at most 1000 rows (`SWEEP_PASS_BATCHES`) and the next goes on from there.
+  `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

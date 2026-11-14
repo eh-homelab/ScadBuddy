@@ -319,6 +319,8 @@ export const handlers = [
       labels: Object.fromEntries(Object.keys(body.values ?? {}).map((name) => [name, checked.params[name]?.label ?? name])),
       notes: null,
       attachments: [],
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)
@@ -412,6 +414,8 @@ export const handlers = [
       labels: {},
       notes: text,
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)

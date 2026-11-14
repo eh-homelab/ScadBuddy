@@ -1,0 +1,14 @@
+{
+    "type": "filament",
+    "name": "Generic PETG @BBL H2C",
+    "from": "system",
+    "instantiation": "true",
+    "inherits": "fdm_filament_pet",
+    "filament_id": "GFG99",
+    "filament_vendor": [
+        "Generic"
+    ],
+    "filament_density": [
+        "1.28"
+    ]
+}

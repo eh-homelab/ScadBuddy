@@ -138,7 +138,7 @@ class FilamentExistsError(ValueError):
 _CUSTOMER = "id, display_name, company, notes, tags, created_at, updated_at, archived_at"
 _FILAMENT = (
     "id, material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3,"
-    " archived_at, created_at, updated_at"
+    " density_profile, archived_at, created_at, updated_at"
 )
 _CONTACT = 'id, kind, value, label, "primary", position'
 _ADDRESS = (
@@ -744,9 +744,16 @@ class OrderStore:
         ).fetchone()
         return None if row is None else str(row["id"])
 
-    def insert_filament(self, body: FilamentInput, *, conn: Conn | None = None) -> Filament:
+    def insert_filament(
+        self,
+        body: FilamentInput,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
+    ) -> Filament:
         """A new record; :class:`FilamentExistsError` for an identity a record in the book
-        holds (an archived one frees its identity: the index is partial)."""
+        holds (an archived one frees its identity: the index is partial).
+        ``density_profile`` names the slicer preset its density was read from (#6136)."""
         values = (
             body.material,
             body.subtype,
@@ -755,12 +762,14 @@ class OrderStore:
             body.colour,
             Decimal(body.cost_per_kg),
             None if body.density_g_cm3 is None else Decimal(body.density_g_cm3),
+            None if body.density_g_cm3 is None else density_profile,
         )
         try:
             with self._write(conn) as c:
                 row = c.execute(
                     "INSERT INTO filaments (material, subtype, brand, colour_name, colour,"
-                    " cost_per_kg, density_g_cm3) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    " cost_per_kg, density_g_cm3, density_profile)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                     f" RETURNING {_FILAMENT}",
                     values,
                 ).fetchone()
@@ -777,9 +786,17 @@ class OrderStore:
         raise FilamentExistsError(existing or "")
 
     def update_filament(
-        self, filament_id: str, patch: FilamentPatch, *, conn: Conn | None = None
+        self,
+        filament_id: str,
+        patch: FilamentPatch,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
     ) -> Filament | None:
-        """The fields ``patch`` sends; ``None`` for no such record."""
+        """The fields ``patch`` sends; ``None`` for no such record. A density sent that
+        differs from the record's is a person's (``density_profile`` cleared), unless
+        ``density_profile`` names the slicer preset it was read from (#6136); the same
+        density sent back, as the editor's save does, keeps its preset."""
         sent = patch.model_fields_set
         fields: dict[str, Any] = {}
         for name in ("material", "colour", "cost_per_kg"):
@@ -794,6 +811,18 @@ class OrderStore:
                 )
         try:
             with self._write(conn) as c:
+                if "density_g_cm3" in sent:
+                    density = fields["density_g_cm3"]
+                    fields["density_profile"] = None if density is None else density_profile
+                    if density_profile is None and density is not None:
+                        # A preset's density sent back unchanged keeps its preset.
+                        was = c.execute(
+                            "SELECT density_g_cm3, density_profile FROM filaments"
+                            " WHERE id = %s FOR UPDATE",
+                            (filament_id,),
+                        ).fetchone()
+                        if was is not None and was["density_g_cm3"] == density:
+                            fields["density_profile"] = was["density_profile"]
                 row = _update(c, "filaments", filament_id, fields, _FILAMENT)
         except errors.UniqueViolation:
             current = self.filament(filament_id)
@@ -829,23 +858,38 @@ class OrderStore:
             self._raise_exists(current.material, current.subtype, current.brand, current.colour)
         return None if row is None else _filament_of(row)
 
-    def filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+    def filament(
+        self, filament_id: str, *, conn: Conn | None = None, lock: bool = False
+    ) -> Filament | None:
+        """``lock`` (in a transaction, ``conn``) holds the row until it ends, so a write
+        decided from what was read is not lost to one in between (#6136 review)."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s", (filament_id,)
+                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s{' FOR UPDATE' if lock else ''}",
+                (filament_id,),
             ).fetchone()
         return None if row is None else _filament_of(row)
 
     def filaments(
-        self, *, include_archived: bool = False, conn: Conn | None = None
+        self,
+        *,
+        include_archived: bool = False,
+        conn: Conn | None = None,
+        lock: bool = False,
+        no_density: bool = False,
     ) -> list[Filament]:
-        """By material, brand and colour name."""
-        where = "" if include_archived else " WHERE archived_at IS NULL"
+        """By material, brand and colour name; ``lock`` as :meth:`filament`'s;
+        ``no_density`` only the records with no density, so a lock takes no other row."""
+        conditions = ([] if include_archived else ["archived_at IS NULL"]) + (
+            ["density_g_cm3 IS NULL"] if no_density else []
+        )
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_FILAMENT} FROM filaments{where}"
                 " ORDER BY upper(material), upper(coalesce(subtype, '')),"
                 " upper(coalesce(brand, '')), upper(coalesce(colour_name, colour)), id"
+                + (" FOR UPDATE" if lock else "")
             ).fetchall()
         return [_filament_of(row) for row in rows]
 

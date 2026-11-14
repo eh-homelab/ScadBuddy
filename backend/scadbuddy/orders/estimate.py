@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.density import UsedDensity, used_density
 from scadbuddy.orders.models import Filament, Money, PricingPolicy, QuoteLine
 from scadbuddy.orders.pricing import Plate, PlateFilament, estimate_grams, price, to_minor
 from scadbuddy.render.geometry import analyze_3mf
@@ -49,6 +50,8 @@ class OrderEstimate(BaseModel):
     parts: list[EstimatedPart]
     #: How many parts have no volume and are left out of ``grams``.
     unknown_parts: int
+    #: The density each filament was weighed with, and where it came from (#6136).
+    densities: list[UsedDensity] = []
 
 
 class RoughEstimate(OrderEstimate):
@@ -109,20 +112,19 @@ def part_volumes(model_3mf: Path, plates: int, warnings: Sequence[str]) -> list[
     return parts
 
 
-def _density(record: Filament) -> str:
-    if record.density_g_cm3 is None:
-        raise ValueError(f"filament {record.id} has no density, so there is no estimate")
-    return record.density_g_cm3
-
-
 def filament_estimate(
-    parts: Sequence[EstimatedPart], record: Filament, *, currency: str, factor: str
+    parts: Sequence[EstimatedPart],
+    record: Filament,
+    *,
+    currency: str,
+    factor: str,
 ) -> OrderEstimate:
-    """Every part at one filament (the back office's estimate). ``ValueError`` for a
-    filament with no density."""
+    """Every part at one filament (the back office's estimate), weighed with its
+    density. ``ValueError`` for a filament with no density."""
+    used = used_density(record)
     grams = estimate_grams(
         [part.volume_mm3 for part in parts if part.volume_mm3 is not None],
-        _density(record),
+        used.density_g_cm3,
         factor,
     )
     return OrderEstimate(
@@ -133,6 +135,7 @@ def filament_estimate(
         factor=factor,
         parts=list(parts),
         unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
+        densities=[used],
     )
 
 
@@ -152,23 +155,27 @@ def rough_estimate(
     slots: dict[str, int] = {}
     records: dict[int, Filament] = {}
     volumes: dict[tuple[int, int], list[float]] = {}
+    used: dict[int, UsedDensity] = {}
     for part in parts:
         record = filament_for(part.colour)
         slot = slots.setdefault(record.id, len(slots) + 1)
         records[slot] = record
         if part.volume_mm3 is not None:
+            # Only a colour that weighs something needs its filament's density.
+            if slot not in used:
+                used[slot] = used_density(record)
             volumes.setdefault((part.plate, slot), []).append(part.volume_mm3)
     plates: list[Plate] = []
     total = Decimal(0)
     for index in sorted({part.plate for part in parts}):
-        used: list[PlateFilament] = []
+        weighed: list[PlateFilament] = []
         for slot in sorted(records):
             if (index, slot) not in volumes:
                 continue
-            grams = estimate_grams(volumes[index, slot], _density(records[slot]), factor)
+            grams = estimate_grams(volumes[index, slot], used[slot].density_g_cm3, factor)
             total += grams
-            used.append(PlateFilament(slot=slot, used_g=grams))
-        plates.append(Plate(index=index, print_seconds=0, filaments=used))
+            weighed.append(PlateFilament(slot=slot, used_g=grams))
+        plates.append(Plate(index=index, print_seconds=0, filaments=weighed))
     priced = price(plates, records, policy, currency=currency, quantity=quantity, estimated=True)
     return RoughEstimate(
         grams=format(total, "f"),
@@ -180,4 +187,5 @@ def rough_estimate(
         unknown_parts=sum(1 for part in parts if part.volume_mm3 is None),
         price_minor=priced.total_minor,
         lines=priced.lines,
+        densities=[used[slot] for slot in sorted(used)],
     )
