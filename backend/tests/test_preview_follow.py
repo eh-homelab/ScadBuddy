@@ -49,10 +49,12 @@ def running(progress: int | None = None) -> SlicePreview:
 
 
 async def settle(follows: PreviewFollows) -> None:
-    for _ in range(200):
+    # Real time, not loop turns: a follow releases its claim on a thread, which a busy CI
+    # runner can keep from finishing within any fixed number of turns.
+    for _ in range(500):
         if follows.following == 0:
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("the follow did not end")
 
 
