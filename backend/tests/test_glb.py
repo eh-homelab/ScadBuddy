@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import trimesh
 
+from scadbuddy.render.colours import MIN_PART_ALPHA
 from scadbuddy.render.glb import bounding_box, read_glb, write_glb
 from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.split import ColourPart, Paint, painted_pieces
@@ -102,6 +103,15 @@ def test_a_translucent_parts_alpha_is_its_meshs_extra_and_reads_back(tmp_path: P
     # The material stays opaque: the extra is the one source.
     assert _material_factors(out)["Color 1"][3] == 1.0
     assert {part.name: part.alpha for part in read_glb(out)} == {"Color 1": 128, "Color 2": 255}
+
+
+def test_a_glb_alpha_of_zero_reads_back_at_the_floor(tmp_path: Path) -> None:
+    """#6243 review: a file written otherwise never gives a part alpha 0, which the
+    covers would divide by."""
+    out = tmp_path / "preview.glb"
+    clear = ColourPart(1, "Color 1", "#FFFFFF", trimesh.creation.box(extents=(1, 1, 1)), alpha=0)
+    write_glb([clear], out)
+    assert [part.alpha for part in read_glb(out)] == [MIN_PART_ALPHA]
 
 
 def test_a_preview_written_before_1319_reads_back_its_srgb_colour(tmp_path: Path) -> None:

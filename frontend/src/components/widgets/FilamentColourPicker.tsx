@@ -25,14 +25,19 @@ function order(a: InventorySpool, b: InventorySpool): number {
  * (the colour popover opens), never on page load. A clear spool with no recorded tint
  * has no colour to take and is listed disabled; a translucent one gives its tint. `onPick`
  * gets the hex and the parameter value (`spoolValue`: with the alpha of a translucent spool).
+ * With `alpha`, `value` is such a value, and the spool marked as the colour now is the one
+ * whose value it is (#6243 review: a clear and an opaque spool of one tint are told
+ * apart); without, the one whose hex it is.
  */
 export function FilamentColourPicker({
   label,
   value,
+  alpha = false,
   onPick,
 }: {
   label: string
   value: string
+  alpha?: boolean
   onPick: (hex: string, value: string) => void
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
@@ -83,7 +88,7 @@ export function FilamentColourPicker({
           {state.spools.map((spool) => {
             const colour = spoolColour(spool)
             const name = spoolName(spool)
-            const chosen = colour !== null && colour.hex === value
+            const chosen = colour !== null && (alpha ? spoolValue(spool) : colour.hex) === value
             // The printer too: on a farm, two spools can both be in AMS-A slot 1.
             const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
             const detail =

@@ -1,4 +1,5 @@
-import { render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
@@ -78,6 +79,63 @@ describe('a colour from a filament (#1026)', () => {
     await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
     await user.click(await screen.findByRole('option', { name: /White/ }))
     expect(onChange).toHaveBeenCalledWith('#FFFFFF')
+  })
+
+  it('marks only the clear spool when the colour has its alpha, and the opaque one when not (#6243 review)', async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () =>
+        HttpResponse.json({
+          spools: [
+            { ...SPOOL_INVENTORY[0], id: 60, color_name: 'Clear Tint', rgba: 'FFFFFF80', remaining_g: 900 },
+            { ...SPOOL_INVENTORY[0], id: 61, color_name: 'White', rgba: 'FFFFFFFF', remaining_g: 800 },
+          ],
+          slots: [],
+        }),
+      ),
+    )
+    const clear = setup('#FFFFFF80')
+    await clear.user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    expect(await screen.findByRole('option', { name: /Clear Tint/ })).toHaveTextContent('(the colour now)')
+    expect(screen.getByRole('option', { name: /White/ })).not.toHaveTextContent('(the colour now)')
+  })
+
+  it('keeps a typed alpha, and sends nothing for the same colour spelt otherwise (#6243 review)', async () => {
+    // Controlled, as the form holds it: each sent value comes back as the value.
+    const sent: string[] = []
+    function Form() {
+      const [value, setValue] = useState('#1B6CA8')
+      return (
+        <ColorWidget
+          param={param}
+          value={value}
+          onChange={(next) => {
+            sent.push(next)
+            setValue(next)
+          }}
+        />
+      )
+    }
+    const user = userEvent.setup()
+    const { unmount } = render(<Form />)
+    const field = screen.getByRole('textbox', { name: 'Plate' })
+    await user.clear(field)
+    await user.type(field, '#FFFFFF80')
+    expect(sent.at(-1)).toBe('#FFFFFF80')
+    expect(field).toHaveValue('#FFFFFF80')
+    unmount()
+
+    const { onChange, user: again } = setup('#ffffff80')
+    await again.click(screen.getByRole('textbox', { name: 'Plate' }))
+    await again.tab()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.getByRole('textbox', { name: 'Plate' })).toHaveValue('#FFFFFF80')
+  })
+
+  it("keeps a translucent value's alpha when Any colour picks a new tint (#6289 review)", async () => {
+    const { onChange, user } = setup('#FFFFFF80')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    fireEvent.change(screen.getByLabelText('Plate picker'), { target: { value: '#ff0000' } })
+    expect(onChange).toHaveBeenCalledWith('#FF000080')
   })
 
   it('marks the spool whose colour the parameter already has', async () => {

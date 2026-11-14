@@ -7,6 +7,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
+from scadbuddy.render.colours import stored_alpha
 from scadbuddy.render.split import ColourPart, painted_pieces
 
 # OpenSCAD is Z-up, glTF (and three.js) are Y-up.
@@ -136,14 +137,13 @@ def read_glb(path: Path) -> list[ColourPart]:
             continue
         mesh = geometry.copy()
         mesh.apply_transform(y_up_to_z_up @ transform)
-        alpha = geometry.metadata.get(ALPHA_EXTRA)
         parts.append(
             ColourPart(
                 index,
                 str(geometry_name),
                 _colour_of(geometry),
                 mesh,
-                alpha=alpha if isinstance(alpha, int) and 0 <= alpha < 255 else 255,
+                alpha=stored_alpha(geometry.metadata.get(ALPHA_EXTRA)),
             )
         )
     return parts
