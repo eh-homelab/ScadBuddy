@@ -861,6 +861,8 @@ def cursor_after(cursor: str) -> tuple[int, str]:
     if (
         not isinstance(position, int)
         or isinstance(position, bool)
+        # ``position`` is an ``integer`` column: a cursor past it was never given out.
+        or not -(2**31) <= position < 2**31
         or not isinstance(listing_id, str)
         or not LISTING_ID.fullmatch(listing_id)
     ):

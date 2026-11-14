@@ -179,6 +179,7 @@ def test_the_public_list_searches_titles_and_takes_wildcards_literally(
 @pytest.mark.parametrize(
     "cursor",
     [
+        "5b323134373438333634382c202230303030303030302d303030302d303030302d303030302d303030303030303030303030225d",
         "x",
         "5b312c20325d",
         "5b2261222c202262225d",

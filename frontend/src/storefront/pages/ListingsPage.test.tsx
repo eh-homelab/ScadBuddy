@@ -107,4 +107,29 @@ describe('ListingsPage', () => {
     server.events.removeAllListeners()
     expect(asked).toEqual(['k'.repeat(100)])
   })
+
+  it('never adds the last search’s next page to a new search', async () => {
+    const many = Array.from({ length: 30 }, (_, n) => ({ ...KEYCHAIN, id: `l${n + 10}`, title: n % 2 ? `Key ${n}` : `Tag ${n}` }))
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/store/v1/listings', async ({ request }) => {
+        const url = new URL(request.url)
+        if (url.searchParams.get('q')) await held
+        return HttpResponse.json(listingsPage(many, url))
+      }),
+    )
+    const { user } = renderPage(<ListingsPage debounceMs={10} />)
+    await screen.findByRole('heading', { name: 'Tag 0' })
+    await user.type(screen.getByLabelText('Search designs'), 'key')
+    await screen.findByText('Searching…')
+    expect(screen.queryByRole('button', { name: 'Show more designs' })).toBeNull()
+    release()
+    await screen.findByRole('heading', { name: 'Key 1' })
+    const titles = screen.getAllByRole('article').map((card) => within(card).getByRole('heading').textContent)
+    expect(titles.every((title) => title?.startsWith('Key'))).toBe(true)
+    expect(new Set(titles).size).toBe(titles.length)
+  })
 })

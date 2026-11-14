@@ -24,12 +24,13 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
   const [requestsEnabled, setRequestsEnabled] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [more, setMore] = useState(false)
-  /** The search the cards on screen are of: a page of an older one is dropped. */
-  const shownQuery = useRef(query)
+  /** Counts the searches this page started: a page of an older one is dropped. */
+  const searches = useRef(0)
 
   useEffect(() => {
     let live = true
-    shownQuery.current = query
+    searches.current += 1
+    setNext(null)
     // A search from outside the box (the shop's mark, Back): the box shows it.
     if (query !== wrote.current) {
       wrote.current = query
@@ -66,16 +67,16 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
   }, [typed, query, setParams, debounceMs])
 
   const showMore = async () => {
-    if (!next) return
-    const asked = query
+    if (!next || loading) return
+    const search = searches.current
     setMore(true)
     try {
-      const answer = await store.listings({ cursor: next, q: asked })
-      if (shownQuery.current !== asked) return
+      const answer = await store.listings({ cursor: next, q: query })
+      if (searches.current !== search) return
       setCards((before) => [...(before ?? []), ...answer.listings])
       setNext(answer.next_cursor)
     } catch (caught) {
-      if (shownQuery.current === asked) setError(errorText(caught))
+      if (searches.current === search) setError(errorText(caught))
     } finally {
       setMore(false)
     }
@@ -117,7 +118,7 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
           ))}
         </div>
       )}
-      {next && (
+      {next && !loading && (
         <div className="sf-more">
           <button type="button" className="sf-button sf-button-quiet" disabled={more} onClick={() => void showMore()}>
             {more ? 'Loading…' : 'Show more designs'}
