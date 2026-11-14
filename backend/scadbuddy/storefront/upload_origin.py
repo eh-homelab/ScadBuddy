@@ -80,7 +80,8 @@ class UploadOrigin:
                 self._read = (now, None)
                 self._failed_at = None
                 return None
-            except (CrudUnavailableError, TimeoutError) as error:
+            except (CrudUnavailableError, TimeoutError, ValueError) as error:
+                # ValueError: a body that is not JSON, read as a failed read.
                 logger.warning("could not read the upload origin (%s)", type(error).__name__)
                 self._failed_at = now
                 return None if self._read is None else self._read[1]

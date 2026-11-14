@@ -418,6 +418,13 @@ def test_no_url_is_answered_when_no_watcher_can_start(
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{WATCH_UNAVAILABLE}"
     assert "uploads" not in r.json()
     assert rows(s3_api, "SELECT id FROM storefront_uploads") == []
+    # The retry the 503 asks for, with the same key, makes its slots afresh.
+    watcher.refuse = False
+    again = slots(asks, [("cube.stl", STL, "model/stl")])
+    assert again.status_code == 200, again.text
+    [slot] = again.json()["uploads"]
+    assert watcher.started == [slot["id"]]
+    assert [r["id"] for r in rows(s3_api, "SELECT id FROM storefront_uploads")] == [slot["id"]]
 
 
 def test_a_slot_never_claimed_is_cleaned_up_an_hour_past_its_url(
@@ -556,6 +563,23 @@ def test_the_backstop_restarts_a_watcher_that_stopped(
     assert watcher.started[-1] == lost
     assert watcher.started.count(fine) == 1
     assert sweep(s3_api, later) == 0
+
+
+def test_the_backstop_walks_every_old_row_a_batch_at_a_time(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the first batch too: healthy old rows (a submitted file waits for days) never
+    hide a newer row whose watcher stopped."""
+    monkeypatch.setattr(staged_files, "SWEEP_BATCH", 1)
+    files = [("a.stl", STL, "model/stl"), ("b.stl", STL, "model/stl"), ("c.stl", STL, "model/stl")]
+    ids = uploaded(asks, files)
+    newest = rows(s3_api, "SELECT id FROM storefront_uploads ORDER BY created_at DESC, id DESC")
+    watcher.stopped = {newest[0]["id"]}
+    assert sweep(s3_api, datetime.now(UTC) + timedelta(days=2)) == 1
+    assert watcher.started[len(ids) :] == [newest[0]["id"]]
 
 
 def test_the_backstop_does_nothing_on_another_store(api: TestClient) -> None:  # noqa: F811

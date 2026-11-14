@@ -35,7 +35,7 @@ from fastapi import status
 from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
+from scadbuddy.crud.idempotency import Replay, forget, idempotent_write, stored
 from scadbuddy.orders.attachments import clean_filename
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.customer_links import LinkInvalidError, checked_link, link_type
@@ -191,7 +191,8 @@ async def presign_uploads(
     """One upload slot per file: a row and a presigned PUT of its staging key. A retry of
     the same key answers the same slots with new URLs (those still unclaimed). Each slot's
     watcher is started before any URL is answered. Refusals: 503 ``storefront_needs_s3``,
-    ``uploads_unavailable`` (no watcher could be started; the new rows are dropped); 422
+    ``uploads_unavailable`` (no watcher could be started; the new rows and the key's reply
+    are dropped, so a retry starts afresh); 422
     ``upload_name``, ``upload_total``."""
     from scadbuddy.orders.storefront.staged_files import watch
 
@@ -200,8 +201,7 @@ async def presign_uploads(
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, UPLOADS_ROUTE, asked)
     if reply is not None:
-        ids: list[str] = reply.body["ids"]
-        again = await asyncio.to_thread(_slots, state, ids, renew=True)
+        again = await asyncio.to_thread(_slots, state, reply.body["ids"], renew=True)
         await watch(state, [slot.id for slot in again])
         return await _signed(backend, again)
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
@@ -217,7 +217,7 @@ async def presign_uploads(
         for ask, name in zip(body.files, names, strict=True)
     ]
 
-    def write() -> None:
+    def write() -> list[str]:
         expires_at = datetime.now(UTC) + UPLOAD_URL_TTL
 
         def insert(conn: Any) -> Replay:
@@ -239,23 +239,34 @@ async def presign_uploads(
             return Replay(200, {"ids": [slot.id for slot in made]})
 
         with state.projection.pool.connection() as conn:
-            idempotent_write(conn, "storefront", key, UPLOADS_ROUTE, asked, lambda: insert(conn))
+            done = idempotent_write(
+                conn, "storefront", key, UPLOADS_ROUTE, asked, lambda: insert(conn)
+            )
+        ids: list[str] = done.body["ids"]
+        return ids
 
-    await asyncio.to_thread(write)
+    ids = await asyncio.to_thread(write)
+    if ids != [slot.id for slot in made]:
+        # A first send of the same key committed meanwhile: answer its slots.
+        again = await asyncio.to_thread(_slots, state, ids, renew=False)
+        await watch(state, [slot.id for slot in again])
+        return await _signed(backend, again)
     try:
-        await watch(state, [slot.id for slot in made])
+        await watch(state, ids)
     except ApiError:
-        # No URL without a watcher. A replay of the key re-signs only rows that remain.
-        await asyncio.to_thread(_drop, state, [slot.id for slot in made])
+        # No URL without a watcher: the rows and the key's reply go together, so a retry
+        # of the key makes its slots afresh.
+        await asyncio.to_thread(_drop, state, key, ids)
         raise
     return await _signed(backend, made)
 
 
-def _drop(state: AppState, ids: Sequence[str]) -> None:
-    with state.projection.pool.connection() as conn:
+def _drop(state: AppState, key: str, ids: Sequence[str]) -> None:
+    with state.projection.pool.connection() as conn, conn.transaction():
         conn.execute(
             "DELETE FROM storefront_uploads WHERE id = ANY(%s) AND claimed_at IS NULL", (list(ids),)
         )
+        forget(conn, "storefront", key, UPLOADS_ROUTE)
 
 
 async def upload_origin(state: AppState) -> str:

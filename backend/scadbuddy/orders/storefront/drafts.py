@@ -424,7 +424,7 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
 
         def remove(conn: Any) -> Replay:
             # The staged files the line held, for their watchers (#6133).
-            freed.extend(uploads_of(state, item_id=item_id))
+            freed.extend(uploads_of(state, item_id=item_id, conn=conn))
             orders.lifecycle.delete_item(draft.id, item_id, by, cart_of=visitor.id, conn=conn)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None

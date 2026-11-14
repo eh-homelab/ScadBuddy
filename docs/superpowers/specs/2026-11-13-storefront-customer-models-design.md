@@ -220,7 +220,7 @@ Edge route `POST /api/store/v1/uploads`, JSON
 `UploadAllowance` (the design requests' allowance, shared, so the two forms do not add up);
 Turnstile, a new action `model`, after the allowance. No `UploadGate`: no body bytes pass.
 
-CRUD route `POST /api/v1/crud/storefront/uploads` (area `draft`, service credential): needs
+CRUD route `POST /api/v1/crud/storefront/uploads` (area `models`, service credential): needs
 the S3 store (`listings.py` `public_content`; any other backend is 503 `storefront_needs_s3`,
 as public media is), checks each entry (a name ending `.stl` or `.3mf` that agrees with
 `media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, starts one watcher per row (§6.5), and only then answers per file
@@ -247,7 +247,7 @@ completes ([AWS, presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/use
 Edge route `POST /api/store/v1/draft/models`, JSON
 `{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}` (Turnstile is not
 asked again; the allowance was spent at presign). CRUD route
-`POST /api/v1/crud/storefront/draft/models` (area `draft`): each upload must be the
+`POST /api/v1/crud/storefront/draft/models` (area `models`): each upload must be the
 visitor's, unclaimed and not cleaned up; a `HEAD` of its key must answer exactly the declared size
 (else 422 `upload_missing` or `upload_size`, naming the file). Then one transaction adds the
 request item, its sources and a `checking` state per file, and claims the uploads. After

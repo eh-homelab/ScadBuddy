@@ -145,17 +145,20 @@ async def poke(state: AppState, upload_ids: Sequence[str], signal: str) -> None:
 
 
 def uploads_of(
-    state: AppState, *, order_id: str | None = None, item_id: str | None = None
+    state: AppState,
+    *,
+    order_id: str | None = None,
+    item_id: str | None = None,
+    conn: Any = None,
 ) -> list[str]:
-    """The staged uploads the order's (or the item's) sources name."""
+    """The staged uploads the order's (or the item's) sources name; on ``conn`` when given
+    (the caller's transaction and its locks), else on a connection of its own."""
     column, value = ("order_id", order_id) if item_id is None else ("item_id", item_id)
-    with state.projection.pool.connection() as conn:
-        rows = conn.execute(
-            f"SELECT upload_id FROM order_item_sources WHERE {column} = %s"
-            " AND upload_id IS NOT NULL",
-            (value,),
-        ).fetchall()
-    return [row["upload_id"] for row in rows]
+    sql = f"SELECT upload_id FROM order_item_sources WHERE {column} = %s AND upload_id IS NOT NULL"
+    if conn is not None:
+        return [row["upload_id"] for row in conn.execute(sql, (value,)).fetchall()]
+    with state.projection.pool.connection() as own:
+        return [row["upload_id"] for row in own.execute(sql, (value,)).fetchall()]
 
 
 # -- the watcher's step -----------------------------------------------------------------
@@ -263,13 +266,20 @@ def staged_file_activities(state: AppState) -> list[Any]:
 # -- the backstop -----------------------------------------------------------------------
 
 
-def _old_rows(state: AppState, now: datetime) -> list[str]:
+def _old_rows(
+    state: AppState, now: datetime, after: tuple[datetime, str] | None
+) -> list[tuple[datetime, str]]:
+    """The next `SWEEP_BATCH` rows older than `ORPHAN_AGE`, in (``created_at``, ``id``)
+    order after ``after``: the backstop walks every old row, a batch at a time."""
+    floor = (datetime.min.replace(tzinfo=UTC), "") if after is None else after
     with state.projection.pool.connection() as conn:
         rows = conn.execute(
-            "SELECT id FROM storefront_uploads WHERE created_at < %s ORDER BY created_at LIMIT %s",
-            (now - ORPHAN_AGE, SWEEP_BATCH),
+            "SELECT created_at, id FROM storefront_uploads"
+            " WHERE created_at < %s AND (created_at, id) > (%s, %s)"
+            " ORDER BY created_at, id LIMIT %s",
+            (now - ORPHAN_AGE, floor[0], floor[1], SWEEP_BATCH),
         ).fetchall()
-    return [row["id"] for row in rows]
+    return [(row["created_at"], row["id"]) for row in rows]
 
 
 def _named(state: AppState, keys: Sequence[str]) -> set[str]:
@@ -302,14 +312,17 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
                 state.metrics.staged_files_repaired.labels("orphan_object").inc()
                 repaired += 1
     watching = watcher(state)
-    for upload_id in await asyncio.to_thread(_old_rows, state, now):
-        if await watching.running(upload_id) is False:
-            logger.warning("staged file %s had no running watcher; starting one", upload_id)
-            try:
-                await watching.watch([upload_id])
-            except Exception:
-                logger.warning("could not start the watcher of staged file %s", upload_id)
-                continue
-            state.metrics.staged_files_repaired.labels("unwatched_row").inc()
-            repaired += 1
+    after: tuple[datetime, str] | None = None
+    while batch := await asyncio.to_thread(_old_rows, state, now, after):
+        for _created, upload_id in batch:
+            if await watching.running(upload_id) is False:
+                logger.warning("staged file %s had no running watcher; starting one", upload_id)
+                try:
+                    await watching.watch([upload_id])
+                except Exception:
+                    logger.warning("could not start the watcher of staged file %s", upload_id)
+                    continue
+                state.metrics.staged_files_repaired.labels("unwatched_row").inc()
+                repaired += 1
+        after = batch[-1]
     return repaired

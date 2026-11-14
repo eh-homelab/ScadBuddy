@@ -94,6 +94,9 @@ class StagedFile:
     async def run(self, upload_id: str) -> str:
         """Why the file's life ended."""
         while True:
+            # Cleared before the step, so a signal that lands while it runs wakes the
+            # next wait at once instead of being lost.
+            self._woken = False
             found: StagedFileState = await workflow.execute_activity(
                 STEP_ACTIVITY,
                 upload_id,
@@ -107,7 +110,6 @@ class StagedFile:
                 wait = SUBMITTED_RECHECK
             else:
                 wait = max(found.due - workflow.now(), timedelta(0)) + DEADLINE_MARGIN
-            self._woken = False
             with suppress(TimeoutError):
                 await workflow.wait_condition(lambda: self._woken, timeout=wait)
             if workflow.info().get_current_history_length() > HISTORY_LIMIT:

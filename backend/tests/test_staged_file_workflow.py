@@ -110,6 +110,38 @@ async def test_a_signal_wakes_the_watcher_before_its_deadline(client: Client, qu
         await terminate_open_workflows(client, queue)
 
 
+async def test_a_signal_during_the_step_is_not_lost(client: Client, queue: str) -> None:
+    """A line removed while the step runs: the next wait ends at once, not at the
+    deadline an hour away."""
+    upload_id = uuid.uuid4().hex
+    in_step = asyncio.Event()
+    signalled = asyncio.Event()
+    answered = 0
+
+    @activity.defn(name=STEP_ACTIVITY)
+    async def staged_file_step(upload_id: str) -> StagedFileState:
+        nonlocal answered
+        answered += 1
+        if answered > 1:
+            return StagedFileState(phase="ended", reason="removed")
+        in_step.set()
+        await signalled.wait()
+        return StagedFileState(phase="claimed", due=soon(3600))
+
+    try:
+        async with Worker(
+            client, task_queue=queue, workflows=[StagedFile], activities=[staged_file_step]
+        ):
+            handle = await start(client, queue, upload_id)
+            await asyncio.wait_for(in_step.wait(), 30)
+            await TemporalWatcher(client, queue).poke([upload_id], "unclaimed")
+            await asyncio.sleep(0.5)
+            signalled.set()
+            assert await asyncio.wait_for(handle.result(), 30) == "removed"
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
 async def test_a_submitted_file_waits_with_no_deadline_until_it_is_done(
     client: Client, queue: str
 ) -> None:

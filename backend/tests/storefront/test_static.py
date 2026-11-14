@@ -25,7 +25,7 @@ from scadbuddy.storefront.static import (
     TURNSTILE_ORIGIN,
     StorefrontStatic,
 )
-from scadbuddy.storefront.upload_origin import bare_origin
+from scadbuddy.storefront.upload_origin import ORIGIN_TTL, UploadOrigin, bare_origin
 from tests.storefront.test_edge import (  # noqa: F401  (fixtures)
     CLIENT,
     CRUD,
@@ -154,6 +154,25 @@ def test_every_page_may_put_to_the_upload_origin(dist: Path) -> None:
 )
 def test_only_a_bare_origin_reaches_the_csp(value: str | None, expected: str | None) -> None:
     assert bare_origin(value) == expected
+
+
+def test_an_answer_that_is_not_json_keeps_the_last_origin() -> None:
+    """A garbled answer is a failed read, never an error on every page load."""
+    now = [0.0]
+    answers: list[Any] = ["https://bucket.example", ValueError("Expecting value")]
+
+    class Crud:
+        async def upload_origin(self) -> str | None:
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return str(answer)
+
+    origin = UploadOrigin(clock=lambda: now[0])
+    crud: Any = Crud()
+    assert asyncio.run(origin.get(crud)) == "https://bucket.example"
+    now[0] = ORIGIN_TTL + 1
+    assert asyncio.run(origin.get(crud)) == "https://bucket.example"
 
 
 def test_the_pay_path_keeps_the_bot_check_origin_while_a_site_key_is_set(dist: Path) -> None:
