@@ -71,8 +71,10 @@ async def list_purchases(order_id: str, orders: OrdersDep) -> list[PurchaseSourc
         'amount that the customer pays, labelled "Bought for your project: <the '
         "customer's note, or the link's host>\", and the link `recorded`. The handling fee "
         "(Settings → Orders) and the auto tax are recomputed. A second record of a "
-        "recorded link returns it as it is and writes nothing (200). 409 "
-        "`purchase_locked` once the order is past `quoted`, `purchase_not_pending` for a "
+        "recorded link with the same `amount_minor` and `cost_kind` returns it as it is and "
+        "writes nothing (200); one that differs is 409 `purchase_recorded` (change it with "
+        "`PATCH …/purchases/{source_id}`). 409 `purchase_locked` once the order is past "
+        "`quoted`, `purchase_not_pending` for a "
         "link marked not needed, `order_not_submitted` on a storefront cart; 404 "
         "`source_not_found`."
     ),

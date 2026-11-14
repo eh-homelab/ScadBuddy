@@ -67,6 +67,9 @@ def test_a_purchase_is_listed_recorded_changed_and_declined(
     made = client.post(f"{path}/record", json=body, headers=AGENT)
     again = client.post(f"{path}/record", json=body, headers=AGENT)
     assert (made.status_code, again.status_code) == (201, 200), made.text
+    other = client.post(f"{path}/record", json={**body, "amount_minor": 600}, headers=AGENT)
+    assert other.status_code == 409, other.text
+    assert other.json()["type"].endswith("/purchase_recorded")
     assert (made.json()["status"], made.json()["amount_minor"]) == ("recorded", 500)
     detail = client.get(f"/api/v1/orders/{order_id}").json()
     assert [(c["kind"], c["amount_minor"]) for c in detail["charges"]] == [

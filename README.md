@@ -2380,8 +2380,10 @@ holds the manifest (spec §12).
   `FORBIDDEN_ENV` set, and (exit 2) with any file under `/var/run/secrets/`, so its pod
   must set `automountServiceAccountToken: false` and mount no secret there. The worker
   reads every answer as untrusted. The sandbox runs one check at a time and answers a
-  second request 503 (the worker tries again for up to 60 s), so give it as many replicas
-  as the worker.
+  second request 503 (the worker tries again for up to 60 s). Give it at least as many
+  replicas as the worker: the Service sends each call to a random sandbox pod, so with
+  fewer sandboxes a check can spend its whole 60 s on busy pods and lose one of its three
+  attempts.
 - **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
   minutes, so size the sandbox's memory limit for one such child and its work volume for
   one 256 MiB upload; size the worker's work volume for one 256 MiB download.
@@ -2408,6 +2410,10 @@ holds the manifest (spec §12).
   sandbox's ingress admits the worker's pods on 8090 only, and its egress allows nothing.
   The policies ship in the eh-homelab/clusters PR, with a check that fails without the
   sandbox's.
+- **Deploy:** `deploy.reusable.yml` pins `applications/scadbuddy/scadbuddy-intake.yaml`
+  (`MANIFEST_INTAKE`) like the other workers, once that file is in clusters. The sandbox's
+  Deployment has no image line of its own: clusters copies the worker's with a kustomize
+  replacement, so one pin moves both.
 
 ### Switching continuous deploy off
 

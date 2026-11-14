@@ -520,7 +520,9 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   check's mount namespace, as it covers the spool and `/proc` (`confine.py --cover`,
   `sandbox.covered_dirs`; the start's probe covers it too, so a refusal stops the start).
   The file is not unlinked, because a Secret volume is read-only. Test:
-  `test_a_confined_child_cannot_read_the_rpc_token`.
+  `test_a_confined_child_cannot_read_the_rpc_token`. The launcher also covers the
+  container's `/dev/shm` (a tmpfs of mode 1777) the same way, so a parse can neither fill
+  pod memory there nor leave a file for a later check (`test_a_confined_child_cannot_write_a_covered_folder`).
 - The request deadline. A request's head and its whole body must arrive within
   `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
   is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the
@@ -877,7 +879,8 @@ price a purchase. The customer's view sets `can_accept` false while the gate is 
 **As built (PR 3, #6133).** `record_purchase(order_id, source_id, body, by)` also takes
 the order id, for its lock. Record, update and decline work only while the order is
 `draft` or `quoted` (`purchase_locked` after, so record too); a second record of a
-recorded link and a second decline write nothing; a record of a `not_needed` link is
+recorded link with the same amount and cost kind, and a second decline, write nothing; a
+second record that differs is 409 `purchase_recorded` (a change is the update); a record of a `not_needed` link is
 409 `purchase_not_pending`, an update of a link not recorded 409
 `purchase_not_recorded`. A cost entry with a `purchase:` source cannot be added by hand
 either (`purchase_cost_linked`). The routes are `GET /orders/{id}/purchases`, `POST
@@ -888,7 +891,10 @@ source and the link's state make a repeat safe. The agent also gets `order_purch
 sends its things to buy as the multipart part `purchase_links` (a JSON list of `{url,
 note}`). The fee settings are env-seeded and live, as `orders_tax_percent` is. The
 `purchase_pending` problem names the pending links in `sources` and their items in
-`items`. Sources: `backend/scadbuddy/orders/lifecycle.py`, `api/order_purchases.py`,
+`items`. The gate counts only links of items not cancelled: a cancelled item's link
+stops nothing until the item is reopened. A change to a fee setting reprices an order's
+`handling` row only at that order's next record, update or decline. Sources:
+`backend/scadbuddy/orders/lifecycle.py`, `api/order_purchases.py`,
 `storefront/uploads.py`; `backend/tests/orders/test_purchases.py`.
 
 ### 10.5 What the customer sees

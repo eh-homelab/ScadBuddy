@@ -212,6 +212,30 @@ async def test_a_second_check_while_one_runs_is_503(tmp_path: Path, sleeper: Pat
         await _until(lambda: not box.busy, "the sandbox stayed busy")
 
 
+async def test_a_busy_sandbox_refuses_a_large_upload_with_an_answer(
+    tmp_path: Path, sleeper: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy refusal of a large upload reaches the worker as busy (503), never as a reset
+    of the half-sent body, which would fail the attempt as a transport error."""
+    monkeypatch.setattr(runner, "BUSY_WAIT", 0.5)
+    job = _job(tmp_path, box_stl())
+    large = _job(tmp_path, box_stl() + b"\0" * (64 << 20), "check-large")
+    async with _served(tmp_path / "spool") as (url, _):
+        first = asyncio.create_task(
+            run_check(
+                job / UPLOAD, "box.stl", job, sandbox_url=url, sandbox_token=TOKEN, timeout=30.0
+            )
+        )
+        await _until(sleeper.exists, "the first check's child never started")
+        before = _failed("busy")
+        with pytest.raises(CheckCrashedError, match="503"):
+            await run_check(large / UPLOAD, "box.stl", large, sandbox_url=url, sandbox_token=TOKEN)
+        assert _failed("busy") == before + 1
+        first.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+
+
 async def test_a_busy_sandbox_fails_the_check_once_its_wait_is_spent(
     tmp_path: Path, sleeper: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -843,8 +867,9 @@ def test_the_sandbox_refuses_a_token_directory_that_holds_the_spool(
     start_env: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A tmpfs over a directory hides it only from above: a cover that holds the spool
-    (or lies in it) would leave the token reachable by ``..`` from the box, so the start
-    refuses it."""
+    would hide the spool, and one in it would stay reachable by ``..`` from the box, so the
+    start refuses either, naming the covered directory."""
     start_env.setenv("SCADBUDDY_INTAKE_WORK_DIR", str(tmp_path / "rpc" / "spool"))
     assert sandbox.main([]) == 2
-    assert "token" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"a covered directory {tmp_path / 'rpc'} and the spool" in out

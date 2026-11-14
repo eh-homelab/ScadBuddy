@@ -883,6 +883,37 @@ def test_a_request_forwards_its_things_to_buy(
     assert b'"url":"https://parts.example.com/x"' in sent and b'"note":"hooks"' in sent
 
 
+def test_the_edge_forwards_five_longest_astral_links_within_the_cap(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #6200: the forwarded part is UTF-8, so it stays under the CRUD side's cap."""
+    from scadbuddy.storefront.wire import (
+        MAX_LINK_CHARS,
+        MAX_LINK_NOTE,
+        MAX_PURCHASE_LINKS,
+        MAX_PURCHASE_LINKS_BYTES,
+    )
+
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    host = "https://parts.example.com/"
+    url = host + "\U0001f600" * (MAX_LINK_CHARS - len(host))
+    link = {"url": url, "note": "\U0001f9f2" * MAX_LINK_NOTE}
+    links = json.dumps([link] * MAX_PURCHASE_LINKS, ensure_ascii=False)
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    sent = route.calls.last.request.content
+    start = sent.index(b'name="purchase_links"\r\n\r\n') + len(b'name="purchase_links"\r\n\r\n')
+    part = sent[start : sent.index(b"\r\n--", start)]
+    assert len(part) <= MAX_PURCHASE_LINKS_BYTES
+    assert json.loads(part)[0]["note"] == link["note"]
+
+
 def test_the_edge_refuses_six_things_to_buy_before_the_crud_call(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

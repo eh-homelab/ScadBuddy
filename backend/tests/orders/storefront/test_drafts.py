@@ -43,6 +43,8 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.storefront import uploads
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    MAX_LINK_CHARS,
+    MAX_PURCHASE_LINKS,
     SESSION_HEADER,
     STOREFRONT_PROBLEMS,
     VISITOR_HEADER,
@@ -810,6 +812,31 @@ def test_the_edges_multipart_carries_the_things_to_buy(asks: CrudCaller) -> None
     assert r.status_code == 200, r.text
     [source] = r.json()["items"][0]["sources"]
     assert (source["url"], source["note"]) == ("https://parts.example.com/x", "hooks")
+
+
+def test_five_longest_links_of_astral_characters_reach_the_crud_side(asks: CrudCaller) -> None:
+    """Review of #6200: the edge's part is UTF-8, so what the edge took fits the cap here
+    too (a ``json.dumps`` with ``ensure_ascii`` made each such character 12 bytes)."""
+    from scadbuddy.storefront.uploads import PurchaseLinkAsk
+
+    host = "https://parts.example.com/"
+    links = [
+        PurchaseLinkAsk(
+            url=host + "\U0001f600" * (MAX_LINK_CHARS - len(host)), note="\U0001f9f2" * 500
+        )
+        for _ in range(MAX_PURCHASE_LINKS)
+    ]
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [], links)])
+
+    headers = asks._headers(TOKEN_A, "r34")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    sources = r.json()["items"][0]["sources"]
+    assert len(sources) == MAX_PURCHASE_LINKS
+    assert all(s["note"] == "\U0001f9f2" * 500 for s in sources)
 
 
 def test_requests_are_off_by_default(requests_off: CrudCaller) -> None:

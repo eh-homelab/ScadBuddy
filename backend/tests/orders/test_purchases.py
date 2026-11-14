@@ -143,7 +143,7 @@ def test_a_repeated_record_writes_once(shop: RulesShop) -> None:
     events = len(shop.rows.events(order.id))
 
     view, written = shop.lifecycle.record_purchase(
-        order.id, source_id, PurchaseRecordInput(amount_minor=700), BY
+        order.id, source_id, PurchaseRecordInput(amount_minor=500), BY
     )
 
     assert not written
@@ -436,6 +436,52 @@ def test_a_pending_purchase_stops_the_order_accept_until_it_is_recorded(shop: Ru
     assert shop.get(order).status == "quoted"
     record(shop, order, source_id, 100)
     assert shop.lifecycle.accept_order(order.id, BY).status == "accepted"
+
+
+def test_a_cancelled_items_pending_purchase_does_not_shut_the_gate(shop: RulesShop) -> None:
+    """Review of #6200: a link of an item the shop cancelled is not priced, and does not
+    stop the rest of the order; a reopen of the item brings the gate back."""
+    order, _ = quoted(shop)
+    other = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Hook", quantity=1, unit_price_minor=500, accept=True
+    )
+    purchase(shop, order, other)
+    assert refused(lambda: shop.lifecycle.accept_order(order.id, BY)).slug == "purchase_pending"
+    shop.lifecycle.cancel_item(order.id, other.id, BY)
+    with shop.rows.transaction() as conn:
+        assert shop.rows.pending_purchases(conn, order.id) == []
+    shop.lifecycle.reopen_item(order.id, other.id, BY)
+    assert refused(lambda: shop.lifecycle.accept_order(order.id, BY)).slug == "purchase_pending"
+    shop.lifecycle.cancel_item(order.id, other.id, BY)
+    assert shop.lifecycle.accept_order(order.id, BY).status == "accepted"
+
+
+def test_an_items_delete_names_the_decline_for_a_recorded_purchase(shop: RulesShop) -> None:
+    """Review of #6200: `item_has_entries` points at the one way a purchase's entry goes."""
+    order = shop.lifecycle.create_order(shop.customer.id, BY, currency="USD")
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Box", quantity=1, unit_price_minor=1000, accept=False
+    )
+    record(shop, order, purchase(shop, order, item), 500)
+    error = refused(lambda: shop.lifecycle.delete_item(order.id, item.id, BY))
+    assert error.slug == "item_has_entries"
+    assert f"/orders/{order.id}/purchases/" in str(error)
+    assert "/decline" in str(error)
+
+
+def test_a_repeated_record_with_another_amount_is_refused(shop: RulesShop) -> None:
+    """Review of #6200: a repeat that differs was not the first call's retry."""
+    order, item = quoted(shop)
+    source_id = purchase(shop, order, item)
+    record(shop, order, source_id, 500)
+    error = refused(lambda: record(shop, order, source_id, 700))
+    assert error.slug == "purchase_recorded"
+    other = refused(
+        lambda: shop.lifecycle.record_purchase(
+            order.id, source_id, PurchaseRecordInput(amount_minor=500, cost_kind="other"), BY
+        )
+    )
+    assert other.slug == "purchase_recorded"
 
 
 def test_a_pending_purchase_stops_a_quote_accept(shop: RulesShop) -> None:

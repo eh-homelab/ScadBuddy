@@ -2780,11 +2780,14 @@ class OrderStore:
 
     def pending_purchases(self, conn: Conn, order_id: str) -> list[tuple[str, str]]:
         """The order's purchase links still ``pending``, as (source id, item id), by item
-        and position (index ``order_item_sources_pending_purchase``)."""
+        and position (index ``order_item_sources_pending_purchase``). A link of a
+        cancelled item is left out: nothing is bought for it while it stays cancelled."""
         rows = conn.execute(
-            "SELECT id, item_id FROM order_item_sources"
-            " WHERE order_id = %s AND purpose = 'purchase' AND status = 'pending'"
-            " ORDER BY item_id, position",
+            "SELECT s.id, s.item_id FROM order_item_sources s"
+            " JOIN order_items i ON i.id = s.item_id"
+            " WHERE s.order_id = %s AND s.purpose = 'purchase' AND s.status = 'pending'"
+            " AND i.status <> 'cancelled'"
+            " ORDER BY s.item_id, s.position",
             (order_id,),
         ).fetchall()
         return [(row["id"], row["item_id"]) for row in rows]

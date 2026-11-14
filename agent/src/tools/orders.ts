@@ -471,7 +471,9 @@ const address = z
 const AUTO_TAX =
   'The auto tax row (#5281, `auto: true` in order_get) is not part of the list: leave it out and the order keeps it ' +
   'and recomputes it. Sent back as read, with its `id` and `auto`, it stays the auto row and is recomputed, ' +
-  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row.'
+  'whatever the amount. Any other `tax` charge, whatever its label, is a typed tax and replaces the auto row. ' +
+  'The `purchase` and `handling` rows (#6133) are not part of the list either: leave them out, and the order keeps ' +
+  'them; only order_purchase_record, order_purchase_update and order_purchase_decline change them.'
 const charge = z
   .object({
     kind: z.enum(['shipping', 'discount', 'fee', 'tax']),
@@ -1382,7 +1384,8 @@ export const orderTools: Tool[] = [
       "Record what the shop paid for one purchase link, in the order's minor units: one cost entry on the link's " +
       'item (`material` for parts, `other` for a paid model file) and a `purchase` charge of the same amount that ' +
       "the customer pays, labelled \"Bought for your project: …\". The handling fee (Settings → Orders) and the " +
-      'auto tax are recomputed. A second call for a recorded link returns it as it is and writes nothing. Only ' +
+      'auto tax are recomputed. A second call for a recorded link with the same amount and cost_kind returns it as ' +
+      'it is and writes nothing; one that differs is 409 purchase_recorded (use order_purchase_update). Only ' +
       'while the order is `draft` or `quoted` (409 purchase_locked after); 409 purchase_not_pending for a link ' +
       'marked not needed.',
     input: z.object({
