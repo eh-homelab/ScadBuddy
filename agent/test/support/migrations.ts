@@ -3,52 +3,26 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Sql, TransactionSql } from 'postgres'
 
-// Schema for the `ai_*` tables the agent service owns (design spec §9:
-// "All AI state lives in the #241 database, in `ai_*` tables owned and
-// migrated by the agent service").
+// The agent's own migration runner, kept for the tests only (#5299 D6). In production
+// the API applies the agent's files (backend/scadbuddy/render/agent_migrations.py, a port
+// of this module) and the agent waits for them (src/db/schema.ts). The tests make their
+// schemas with this one (support/postgres.ts), and test/schema.test.ts checks that both
+// runners read the same files with the same checksums, so the two cannot drift.
 //
-// Same approach as the backend's (backend/scadbuddy/render/pg_store.py): one
-// file per migration, applied inside one transaction under a transaction-scoped
-// advisory lock so two starting pods cannot race, each recorded once by its
-// file id. The ledger is the agent's own `ai_migrations`, not the backend's
-// `scadbuddy_migrations`: the two services migrate independently.
-//
-// RULES FOR ADDING ONE (#491)
-//   - Add a NEW file to ./migrations/, named `<UTC timestamp>_<slug>.sql`,
-//     e.g. `20260928T0612Z_mcp_tokens.sql` (`date -u +%Y%m%dT%H%MZ`). The
-//     stem is its id in `ai_migrations`. Nothing else is edited, so two PRs
-//     adding migrations never conflict.
-//   - Files apply in timestamp order, and a file is applied whenever it is not
-//     in the ledger yet: one with an OLDER timestamp that merges later (a branch
-//     cut earlier) still runs, after the newer ones already applied. So a
-//     migration may depend only on files already on main when it is written,
-//     never on another in-flight branch.
-//   - Never edit, rename or remove a file that has merged. `migrate` records
-//     each file's SHA-256 and refuses to start when an applied file's bytes have
-//     changed, so an edit fails loudly (even whitespace counts; .editorconfig
-//     leaves this directory's whitespace alone for that reason).
-//   - One story per file, named in a leading comment. Prefix every table `ai_`.
-//   - Plain SQL, no parameters (it runs through the simple query protocol, so
-//     several statements per file are fine).
-//   - Secrets are never stored in the clear: use the envelope columns of the
-//     credentials migration (`*_sealed bytea` + `dek_sealed bytea` + `kek_id
-//     text`, sealed by src/secrets.ts). Tokens that are only ever compared (MCP
-//     bearer tokens, #251) are stored hashed instead, per spec §8.1.
-//
-// The files ship next to the compiled module: `pnpm build` copies
-// src/db/migrations/ to dist/db/migrations/, and MIGRATIONS is read at import,
-// so an image without them fails at start instead of migrating nothing.
+// The files are backend/scadbuddy/migrations_agent/; the rules for adding one are in
+// agent_migrations.py's docstring. Never edit, rename or remove a merged file: `migrate`
+// records each file's SHA-256 and refuses an applied file whose bytes have changed.
 
 /** `pg_advisory_xact_lock` key ("SCADAGNT" in ASCII); distinct from the backend's "SCADBDDY". */
 export const MIGRATION_LOCK = 0x5343_4144_4147_4e54n
 
-/** One file in ./migrations/: `id` is its name without `.sql`. */
+/** One migration file: `id` is its name without `.sql`. */
 export type Migration = { id: string; sql: string }
 
 /** `<yyyymmdd>T<hhmm>Z_<slug>`; fixed width, so sorting ids sorts by time. */
 export const MIGRATION_ID = /^\d{8}T\d{4}Z_[a-z0-9_]+$/
 
-export const MIGRATIONS_DIR = new URL('./migrations/', import.meta.url)
+export const MIGRATIONS_DIR = new URL('../../../backend/scadbuddy/migrations_agent/', import.meta.url)
 
 /**
  * The migration files of `dir`, in timestamp order. Anything in the directory
@@ -92,8 +66,7 @@ export function migrationChecksum(migration: Migration): string {
 
 /**
  * An applied file's SQL no longer matches what was recorded: someone edited a
- * merged migration. Permanent, so main.ts stops the process on it rather than
- * retrying.
+ * merged migration. Permanent: the API's port refuses to start on it.
  */
 export class MigrationChecksumError extends Error {
   override name = 'MigrationChecksumError'
@@ -114,8 +87,8 @@ export type MigrateOptions = {
   /**
    * Postgres `lock_timeout` while migrating. Bounds the wait for the advisory
    * lock (another pod migrating, or one stuck holding it) and for table locks;
-   * a timeout fails this attempt, and `ready()` (db.ts) tries again on its
-   * next call.
+   * a timeout fails this attempt, and a test's `ready()` (support/postgres.ts)
+   * tries again on its next call.
    */
   lockTimeoutMs?: number
   /** Postgres `statement_timeout` for each statement of the migration. */
@@ -172,7 +145,7 @@ export async function migrate(
           throw new MigrationChecksumError(
             `ai migration ${migration.id} was applied with different SQL ` +
               `(recorded sha256 ${was.slice(0, 12)}…, now ${checksum.slice(0, 12)}…). Merged files in ` +
-              'agent/src/db/migrations/ must never be edited: restore it and add a new file instead.',
+              'backend/scadbuddy/migrations_agent/ must never be edited: restore it and add a new file instead.',
           )
         }
         continue

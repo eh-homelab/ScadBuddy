@@ -1,0 +1,390 @@
+[
+  {
+    "id": "20260927T2349Z_credentials_settings",
+    "sha256": "6e2ec704499aed89d132836b34717b1a7ccfafb7a4a1654340ee1b7fc477b613"
+  },
+  {
+    "id": "20260928T0107Z_sessions",
+    "sha256": "117ed74ea5125fe163247bd88e3e99c0e75e085d22ec7b220fa99fd4e84bce80"
+  },
+  {
+    "id": "20260928T0734Z_approvals",
+    "sha256": "7b83726fc644bc3ab0de4150d3cbef1406c641c6d08c06e5f8ca1412b4fc8811"
+  },
+  {
+    "id": "20260928T0734Z_mcp_tokens",
+    "sha256": "a389a4608ec6e87afc46d768a37f9a71e773c68574d22fd7168a20dfb3e75da9"
+  },
+  {
+    "id": "20260928T0735Z_plugins",
+    "sha256": "521a6cc2d8a640046009d01349b85662507708131696685fc71daf93549e1c7f"
+  },
+  {
+    "id": "20260928T0750Z_plugin_packages",
+    "sha256": "726a864bc871ab2f4d41321e9df1f722ef4ab0bdf52537386d291ab63c328e35"
+  },
+  {
+    "id": "20260928T0812Z_headless_grants",
+    "sha256": "83d7652a226861d936d954d04094f1fac312e8ab8de3e45983e9c747ff1ea390"
+  },
+  {
+    "id": "20260928T0950Z_audit",
+    "sha256": "74f1c1c408a3a5e5807a4285cc3cbaed0aa2318571af1a4f2530d4d372d9e27e"
+  },
+  {
+    "id": "20260929T0249Z_mcp_token_approval_grant",
+    "sha256": "8d55d0ebe7d389cf0b1767e155bc8353f59e3f761e484692a57e6e08ec31f5a0"
+  },
+  {
+    "id": "20260929T1330Z_browser_pairings",
+    "sha256": "41952cee9821f614e8feee5da32424b2dc9aa145be65999f6bb08ead2a86ba28"
+  },
+  {
+    "id": "20260929T1825Z_session_handoff_offers",
+    "sha256": "53927ad3fa1bff81a2cfd821c7ed7ebd13ac74cad3ce6b3001a2c2f90768b4f3"
+  },
+  {
+    "id": "20260929T2258Z_approval_requested_tiers",
+    "sha256": "45ab9e4274de318b998431d30e8908071d7e7cdc8ac93326feeb935123d7ba00"
+  },
+  {
+    "id": "20260930T0342Z_browser_origins",
+    "sha256": "85e4e702fb1eaac79b5771dbfec8531ef203cdcf6659f1a830e59de33bd8c603"
+  },
+  {
+    "id": "20260930T0511Z_audit_memory_kind",
+    "sha256": "5929f132f3185f8e8db09ba0efcb25e6ad63064866ea3d10179d0210c87d864b"
+  },
+  {
+    "id": "20260930T0632Z_audit_http_kind",
+    "sha256": "9ae83075dcd65b24f6e5d354f95b7eb8c83210ebb7e79b66f647fcf03c181ea9"
+  },
+  {
+    "id": "20261001T1824Z_session_resources",
+    "sha256": "50270450245b3c6fba6fb2f17fcd88fa175c6c64d926dd0d61e4f4e3bafea855"
+  },
+  {
+    "id": "20261001T1826Z_questions",
+    "sha256": "7df19c748dbcd3b67a61c3b2f58496a04a61011e862c6841bbca9530acca7316"
+  },
+  {
+    "id": "20261003T1400Z_audit_question_kind",
+    "sha256": "71cc97343b230e961014e806eb6c73930382c4cb6b3c685a1bb66a274aa7733f"
+  },
+  {
+    "id": "20261003T1500Z_approval_traceparent",
+    "sha256": "d0cd403e22c3b414f1616c91a4bbd65fca32f7cb2de2ca663c9d126818b74419"
+  },
+  {
+    "id": "20261003T1500Z_questions_tool",
+    "sha256": "a0eed29c57ab7f888115d9355d5d6b801812dc4f66fd50115de58cb0eaf6e9bd"
+  },
+  {
+    "id": "20261003T1617Z_credential_priority",
+    "sha256": "e89b5168274510af85f181731dcff27a236e7804c4557364d8298bb36141d037"
+  },
+  {
+    "id": "20261003T2114Z_oauth_credential_kind",
+    "sha256": "68e80318637af577182c13e596ddbe8f0958c5d118f7f66466ef968dd512635b"
+  },
+  {
+    "id": "20261004T0738Z_attention_requests",
+    "sha256": "092116bc81134c7cdb68656ce181be6313737f306d023553daf8c99aa40f47d3"
+  },
+  {
+    "id": "20261004T1330Z_session_mode",
+    "sha256": "2d9790d919f4e75ac238c85d308d285951d75a03d147dbc595fe6821afe4dba9"
+  },
+  {
+    "id": "20261004T1345Z_operations",
+    "sha256": "4ec16ac24ce9c895ae205564f16ac84d3ba4e06989a1c8bb9bd7b7c63bc132c3"
+  },
+  {
+    "id": "20261004T1411Z_attention_reconnected",
+    "sha256": "a49a6fd0680f1a909bb4fc7f98300854ebe64adc96df922185c7ed2e14f54e98"
+  },
+  {
+    "id": "20261004T1413Z_session_resource_kinds",
+    "sha256": "22736271857653ba02c55a926d1a5e07acd2b8efac740df3de043b66ecf31ac7"
+  },
+  {
+    "id": "20261005T1200Z_attention_done",
+    "sha256": "b140f90c3bf44151c00e410c149e9129220ac68229e9aefa0f551c1ce690bfe7"
+  },
+  {
+    "id": "20261005T1800Z_attention_done_null_checks",
+    "sha256": "0ef0ca2c59c4832a689f01ebfc360ba23666cbbfc052b8538b3dae03ae8a1df5"
+  },
+  {
+    "id": "20261006T0100Z_session_budget_root",
+    "sha256": "090f2df89d21138dc447a9bcfb941b5e7f661d913b89989cc7e3f4cf511adcc9"
+  },
+  {
+    "id": "20261006T1612Z_session_unpriced_cost",
+    "sha256": "74bec6fd4c6618e49b3a19666d42af5439610440e84cdcd0c7b7d8a6c466c663"
+  },
+  {
+    "id": "20261007T2158Z_plugin_package_allow_refused",
+    "sha256": "1b0bdf6b976213e97ba360ef9dc2b9279c81282acea693848d796a80d4a6effc"
+  },
+  {
+    "id": "20261008T0154Z_plugin_package_any_name",
+    "sha256": "a40b80a19fe90335658d9afff3b7da8937235cf8f0635b4b213944096f640ef6"
+  },
+  {
+    "id": "20261009T0052Z_pending_input",
+    "sha256": "141282ea49780162ad646e76ba8348dca47a05383314c19217a6514615d44a73"
+  },
+  {
+    "id": "20261009T0109Z_session_blobs",
+    "sha256": "779ee3b0cf84cf223888a74b028ee3aa74881acb769e0766ad1300d689bd9a37"
+  },
+  {
+    "id": "20261009T0421Z_payload_keys",
+    "sha256": "1caaebd9c9016940e2eefd2a8f5f43b0edfd7581c0d4b470d75b70ed2c19b05d"
+  },
+  {
+    "id": "20261009T0444Z_session_durable_offset",
+    "sha256": "3f5a9eaa9be9cad5f72cdf48a5970a9f2ff5b8706a1d0c90f1ec7337b720b3be"
+  },
+  {
+    "id": "20261009T0536Z_attachments",
+    "sha256": "cb53d3b438e3f11141c62245d9a74ff2ec185531513785def7000ecf23f07854"
+  },
+  {
+    "id": "20261009T0924Z_audit_turn_cost",
+    "sha256": "22e1f75df425f76ac988f9cc3e1c6d406bf6a843d4fb545ef06bb7831812d3cc"
+  },
+  {
+    "id": "20261009T1900Z_bridge_messages",
+    "sha256": "073d861890753a2e2b34b37d03da38a5ddb2cd3e74a709b7d26ddeab1612a684"
+  },
+  {
+    "id": "20261010T0600Z_mcp_sessions",
+    "sha256": "8b06c6d8387fbb0405c056cb042455bd618a315d3fca220f52c651da60dd5422"
+  },
+  {
+    "id": "20261010T0610Z_session_tabs",
+    "sha256": "22ac0f8f1bb01ea9666d68b5d6998ab967b4c2286e9b7c17ec45267f59f9e1ae"
+  },
+  {
+    "id": "20261010T0933Z_session_archive",
+    "sha256": "87b47b0c167c83b981737d01321d111f48afd82405d4a857e3e7b1daabb552ad"
+  },
+  {
+    "id": "20261011T1348Z_session_turn_tiers",
+    "sha256": "3f9fb66131b6e2e50aa34f4df579bbca29359589e28cc5bdac751e749452c874"
+  },
+  {
+    "id": "20261011T1421Z_durable_headless_browser",
+    "sha256": "09eecaa27e10bdc6bfca5d68e101ae1016d05b4f1098261672cf23407765e5a3"
+  },
+  {
+    "id": "20261011T1502Z_session_files",
+    "sha256": "c6ac548482edf03317bfc4376bb0d4475330c970bdf17c5e8c64eb8764ca7adc"
+  },
+  {
+    "id": "20261011T1521Z_session_files_streaming",
+    "sha256": "5bda87f10f2dffd52bd2618b2fead815535cfbc85ad725be4bcfbb09823dff67"
+  },
+  {
+    "id": "20261012T0221Z_flow_blobs",
+    "sha256": "80745315378a7dc75af6a7a2f3a7cafe4487e91f5ba68819728ab0598fd03dbd"
+  },
+  {
+    "id": "20261012T0226Z_images_by_pointer",
+    "sha256": "9ecf940b6166f466df34c94715c175ed0b6f57c59544af84bbc57ea657c73d91"
+  },
+  {
+    "id": "20261012T0454Z_drop_headless_browser",
+    "sha256": "79403e929b5954c340ae1e1add3f7839638dc13cc10a26f1bfb866533f773537"
+  },
+  {
+    "id": "20261012T2016Z_session_tool_images",
+    "sha256": "de9cc7eca5239b032f4c22ebe1d49b5243a1cd7cd112b972855e437a2244bb27"
+  },
+  {
+    "id": "20261013T0406Z_input_escalation_hops",
+    "sha256": "5e9288ba02c877bb41ec7f1330491686413cf3fa5c76c87bd748d4d2e54498f7"
+  },
+  {
+    "id": "20261013T0445Z_background_tasks",
+    "sha256": "6a65d6d9d3d8a339507d365a657b78627ac3469accacf199222c35e67daad5b8"
+  },
+  {
+    "id": "20261013T0454Z_escalation_deliveries",
+    "sha256": "814c7a3fab155f62b66791463f8d28d03d8879b3d7d9abbed086bcc3a5f59a4b"
+  },
+  {
+    "id": "20261013T0456Z_activity",
+    "sha256": "7ddb5a64598c62b723cc773ae8c053211ed286babb9b03fb02e02e36801030f4"
+  },
+  {
+    "id": "20261013T0531Z_background_events",
+    "sha256": "8c09f59b870978fa728f9fafbc5bc834759205f338656bd236a9e1fe93b1b4f7"
+  },
+  {
+    "id": "20261013T0654Z_workflow_calls",
+    "sha256": "c295a5e9553853cf7d8ff754c25699ee88cf1b55f01947880aa2367dafecc222"
+  },
+  {
+    "id": "20261013T0723Z_activity_repair_indexes",
+    "sha256": "236d0e939c50fb09abcc551f0719e36ce358979a1ca66e736e4ec92b4536713e"
+  },
+  {
+    "id": "20261013T0835Z_session_agent_settings",
+    "sha256": "0ff9a912b1f1606aa460f3b8fe01db53f6cd43aa84b987a038fca8101c748ca0"
+  },
+  {
+    "id": "20261013T1530Z_session_http_bodies",
+    "sha256": "673ddfddd392c06f6be2e74719210a67851b945ff60683bb66af88b71f85a4ad"
+  },
+  {
+    "id": "20261013T2240Z_escalation_claim_lease",
+    "sha256": "813c7f512cbedd4c103d6c41646c5399f22eb29d51d2283d8f157474ec58ded9"
+  },
+  {
+    "id": "20261014T0338Z_plugin_sessions",
+    "sha256": "fc9253fedc1c64ab48c44017ea9f83eb82bbc12f6a6414a46e6e1866d4fa2262"
+  },
+  {
+    "id": "20261014T0837Z_session_runtime",
+    "sha256": "d0ee6d3134eb3b523f4132fe2bfec936c9296ea37dd6defe69a767de874f2c76"
+  },
+  {
+    "id": "20261014T0900Z_session_entries_sealed",
+    "sha256": "ed132aa61950200ce8e7419b723df458c400c487da46132c0c82c655bbabffe7"
+  },
+  {
+    "id": "20261014T1654Z_session_turn_attempt",
+    "sha256": "ecdc133f8f29fc475f7ff146a6e96203404395ea11d29e7256a8ef9b930b8ef3"
+  },
+  {
+    "id": "20261014T2221Z_workflow_children",
+    "sha256": "5fc9d38f737b7cfce6ef15f48bf16b4a7efe3e58aa91fd1abfc25ee7fa150d03"
+  },
+  {
+    "id": "20261014T2227Z_browser_session_origins",
+    "sha256": "b36167d9f5bedec030e930bda4320ae528a6541bcfb787a9755efccfffea0d4b"
+  },
+  {
+    "id": "20261015T1500Z_input_response_hash",
+    "sha256": "eeea4913eccf0b478f2b4c426b5c6b9072ae9df374cba5750d8aa3635bee4273"
+  },
+  {
+    "id": "20261023T0615Z_session_resource_library_file",
+    "sha256": "f8849a5be8ce1e832916b8bc0a4bba47a68c22027ecdf7a3cb248331e6dd0da5"
+  },
+  {
+    "id": "20261026T2200Z_access",
+    "sha256": "c0c4d0dbe4db8b0cca7f62d04f0a6b37d8695777ee170d909a506abad6e96834"
+  },
+  {
+    "id": "20261026T2201Z_access_copy",
+    "sha256": "d39a539cddae424a406f93badb9d63905c87673554423b0b268a0fbb66133528"
+  },
+  {
+    "id": "20261027T0103Z_tab_owners",
+    "sha256": "60590bca67a2f38b2fcb700e857679e97740dadab894595a68330061e93d99b1"
+  },
+  {
+    "id": "20261027T0114Z_session_files_blobs",
+    "sha256": "e59cee05d4b4807e7aadb2cf7755ceae4bb23d8d0c899e0d218f1185ed621ebb"
+  },
+  {
+    "id": "20261027T1137Z_bridge_payload_keys",
+    "sha256": "5585d96ccf4f833137fac2bd6d12fd29dc479c2bba41bec8e0c097d65561fe25"
+  },
+  {
+    "id": "20261029T0839Z_tool_listings_truncated",
+    "sha256": "f02ccf96302dfad0f6bd91ff90296916ffa4750ba2edb0aef260801445f6da84"
+  },
+  {
+    "id": "20261030T0841Z_input_responses_tool",
+    "sha256": "11bc5088ae25cd1698c5a01b5e7911ee0d56238e53413968bb07212017f1e5c1"
+  },
+  {
+    "id": "20261030T1020Z_access_drop_mirrors",
+    "sha256": "910e65e000340e697210e79ee8ac18440f17ee1cf504007d33007a4d42ed555b"
+  },
+  {
+    "id": "20261031T2253Z_input_traceparent",
+    "sha256": "7deae489ca4d7b938cc9659a269574bf5625f21d10a7a8f1c3e12aca33aa4623"
+  },
+  {
+    "id": "20261101T0158Z_session_turn_started_at",
+    "sha256": "2dd42b7d9d8a499bf9e8044e5dad11c892124a0ece7233fe3231f4090e8ef9dd"
+  },
+  {
+    "id": "20261101T0514Z_session_fork_cut",
+    "sha256": "6207b9e92951e2089fc9bc703c9f2385871966c4e547c80e392c01efec9b17d9"
+  },
+  {
+    "id": "20261101T1303Z_pending_input_record",
+    "sha256": "2ef7f47a76363acd0218c77b7952eef0f0f8295835e2a017c2f6ceb69b107d3b"
+  },
+  {
+    "id": "20261101T1527Z_access_drop_columns",
+    "sha256": "f5bb05d1427a80bfa828c20731349bef28ca28f303bcf10a92793ac01f5a80cd"
+  },
+  {
+    "id": "20261101T1813Z_tab_images",
+    "sha256": "8f52e7af9cbad25ade0f6791047dfb6136f8d9e77b7963e0a561606c557cd691"
+  },
+  {
+    "id": "20261101T1823Z_plugin_oauth",
+    "sha256": "4748b38b8be1d178515147a84783c3d20998ed8fedf0acb3331e76370f281a5a"
+  },
+  {
+    "id": "20261101T2000Z_drop_durable_settings",
+    "sha256": "cd040e684da7c75366a5c69b8b6e0a6ea57d52471a4e530d7dd677cce3ba6415"
+  },
+  {
+    "id": "20261101T2300Z_drop_session_mode",
+    "sha256": "7687035b36a033c01c15dedf02ed679ff01e52385f666f0b11366398a975badb"
+  },
+  {
+    "id": "20261102T0038Z_drop_bridge_messages",
+    "sha256": "34923b1992623e19d373b45bd200377a16e66508914c5670d815744666ee51f6"
+  },
+  {
+    "id": "20261103T1944Z_pending_input_notify",
+    "sha256": "7e89b01eb2f12aa54ba4e82f819732e74c0a24dd006043bb007c3fbbfe992e6c"
+  },
+  {
+    "id": "20261103T2000Z_web_push",
+    "sha256": "00f2a38cc5932d30680c7f26fa789bd74e802ffa8e6fcb22e306ae3167e0ed23"
+  },
+  {
+    "id": "20261103T2031Z_notify_channels",
+    "sha256": "022c53f86509090b2c76900a56aaf865a48958a8c3ae276578fe920546ac4de1"
+  },
+  {
+    "id": "20261108T0021Z_session_order_costs",
+    "sha256": "23ce6007121e7ec8e032153ec4475ed57b16d441bb6354b635cd8c315915e16d"
+  },
+  {
+    "id": "20261108T1538Z_session_order_costs_tried",
+    "sha256": "e678b835a7b837eb5c31dfd20f6fd368209cfb5a457bfb72c289bff00ac5c9b6"
+  },
+  {
+    "id": "20261108T2231Z_credential_name",
+    "sha256": "ec4d7a1d229f893edf4f6eec2b9ee45ecb2a16da25f7f3c06c29a8ae7544c8ba"
+  },
+  {
+    "id": "20261110T0112Z_drop_session_files_hold_blob",
+    "sha256": "0e0cacad04865ba1a4abab941ce85956cd3fdcd367e02f1a025d12676ad467a1"
+  },
+  {
+    "id": "20261110T0443Z_session_background_tools",
+    "sha256": "46842a06e20d96355ac5285fb09ee997f799bab51088ebb98a586cfc582e3d98"
+  },
+  {
+    "id": "20261114T0019Z_session_fork_event_cut",
+    "sha256": "668ea1b7e7a2fb6ae13f18a70d4bec1431e35a6b8f9232372b1df78a3c666202"
+  },
+  {
+    "id": "20261114T1609Z_session_file_bytes",
+    "sha256": "5e40d76dd8c6e8d68e265e915d478677cc5163b67e781299afd159d60f103755"
+  }
+]

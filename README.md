@@ -1900,13 +1900,15 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and restart again. A row the old key cannot open is left as it is and
   counted in that log line.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
-  `ai_*` migrations have applied (`agent/src/db/migrations/`, run at start
-  under an advisory lock with a lock timeout, retried on the next call), the
-  key is loaded and a Claude credential is saved. Otherwise `ai` names the
-  first missing piece; each database step is bounded (2 s), so a stuck lock
-  shows as `"unavailable (database timed out)"` instead of a hung probe. An
-  edited, already-applied migration stops the service at start with a message
-  naming it (each file's sha256 is recorded).
+  `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
+  the API applies at its start; the agent waits for them, up to 30 s a try,
+  retried on the next call, #5299), the key is loaded and a Claude credential is
+  saved. Otherwise `ai` names the first missing piece; each database step is
+  bounded (2 s), so an API that has not migrated yet shows as
+  `"unavailable (waiting for the API to apply the database migrations)"`, and any
+  other stuck step as `"unavailable (database timed out)"`, instead of a hung probe. An edited,
+  already-applied migration stops the API at start, and the agent, with a
+  message naming it (each file's sha256 is recorded).
 - The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from
   `claude setup-token`, or gateway base URLs plus tokens) are set in
   Settings → Assistant → **Claude credentials**, a list in the order the

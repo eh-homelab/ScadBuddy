@@ -26,7 +26,7 @@ import type { Principal } from '../auth/principal.js'
 //
 // The code is single-use and short-lived (REQUEST_TTL_MS); MAX_ATTEMPTS wrong
 // codes deny the request. Persistence is Postgres only (spec §9), in
-// `ai_browser_pairings` (db/migrations/20260929T1330Z_browser_pairings.sql).
+// `ai_browser_pairings` (backend/scadbuddy/migrations_agent/20260929T1330Z_browser_pairings.sql).
 
 /** How long a pairing request can be accepted. */
 export const REQUEST_TTL_MS = 5 * 60_000

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { migrate, MIGRATIONS } from '../src/db/migrations.js'
+import { migrate, MIGRATIONS } from './support/migrations.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 

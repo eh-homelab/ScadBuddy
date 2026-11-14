@@ -31,7 +31,7 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
 (hashed)" live in the database). The implementation is `PostgresTokenStore` in
 [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
-([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
+([`backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql`](../../backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql)).
 
 - **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
   makes a leaked token recognisable to secret scanners.
@@ -781,7 +781,7 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
 - **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
   `http_request_enabled` and `printer_camera_enabled`, and the dropped `ai_plugins` columns
   `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migration
-  [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
+  [`20261026T2201Z_access_copy.sql`](../../backend/scadbuddy/migrations_agent/20261026T2201Z_access_copy.sql)
   carried their values into `ai_access`. `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the
   mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
   `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the `ai_plugins` columns and deleted the four keys again.
@@ -1134,7 +1134,7 @@ Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credenti
 spec asks the same of a client: "Log tool usage for audit purposes"
 ([MCP tools, Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)).
 The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
-([`agent/src/db/migrations/20260928T0950Z_audit.sql`](../../agent/src/db/migrations/20260928T0950Z_audit.sql)).
+([`backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql`](../../backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql)).
 
 | Kind | Recorded by | When |
 |---|---|---|
@@ -1146,7 +1146,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
 | `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
 | `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
-| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../agent/src/db/migrations/20261009T0924Z_audit_turn_cost.sql)) |
+| `turn` | `turnCostEntry()` (`audit/turn.ts`), written by `SessionManager.finish()` (`sessions/manager.ts`) | every session turn as it ends (#1922): the action is the result's subtype, `interrupted` or `failed`, and the row carries what the turn cost: `cost_usd` (its share of the session's spend), `cost_priced` (false when no result came back, so Claude Code never priced it) and `cost_estimated_usd` (the part ScadBuddy priced itself: the request a stopped turn was cut off in, `sessions/unpricedSpend.ts`). Only `turn` rows have the cost columns ([`20261009T0924Z_audit_turn_cost.sql`](../../backend/scadbuddy/migrations_agent/20261009T0924Z_audit_turn_cost.sql)) |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,

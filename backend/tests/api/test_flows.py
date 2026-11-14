@@ -26,10 +26,10 @@ from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 from scadbuddy.workflows import payload_codec
+from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
-MIGRATIONS = Path(__file__).parent.parent / "fixtures" / "agent-migrations"
 AGENT = {"X-ScadBuddy-Agent-Author": "token:p1", "X-ScadBuddy-Agent-Author-Session": "s1"}
 
 
@@ -39,7 +39,7 @@ def settings(settings: Settings, tmp_path: Path, pg_conninfo: str) -> Settings:
     key = tmp_path / "kek"
     key.write_text(base64.b64encode(b"\x07" * 32).decode())
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-        for sql in sorted(MIGRATIONS.glob("*.sql")):
+        for sql in AGENT_KEY_MIGRATIONS:
             conn.execute(sql.read_text().encode())
     return settings.model_copy(update={"secret_key_file": key})
 

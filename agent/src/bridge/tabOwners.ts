@@ -1,7 +1,7 @@
 import type { Sql } from 'postgres'
 
 // Which replica holds each tab's bridge socket (#4780,
-// db/migrations/20261027T0103Z_tab_owners.sql), named by that replica's own queue
+// backend/scadbuddy/migrations_agent/20261027T0103Z_tab_owners.sql), named by that replica's own queue
 // (`agent-tools.<identity>`, main.ts HOST_QUEUE). A browser_* call made on another
 // replica runs as an activity on that queue (bridge/relay.ts).
 

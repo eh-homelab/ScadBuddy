@@ -30,6 +30,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
@@ -68,6 +69,16 @@ trace.set_tracer_provider(_provider)
 #: Every app a test starts binds its CRUD listener to a free port (#5298): on the fixed
 #: default, two xdist workers' apps (or a developer's own API) would collide.
 settings_module.DEFAULT_CRUD_PORT = 0
+
+
+@pytest.fixture(autouse=True)
+def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API applies the agent's migrations at start (#5299 D6), about a second per
+    schema. Most tests' apps read no `ai_*` table, and the ones that do make the few they
+    read by hand, so a test's app skips them unless the test is marked `agent_migrations`
+    (`tests/api/test_agent_migrations_at_start.py`)."""
+    if request.node.get_closest_marker("agent_migrations") is None:
+        monkeypatch.setattr(scadbuddy_main, "_migrate_agent_at_start", lambda state: None)
 
 
 @pytest.fixture(autouse=True)

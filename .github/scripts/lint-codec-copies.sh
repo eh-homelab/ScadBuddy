@@ -5,7 +5,8 @@
 # (TypeScript), agent-durable/ and backend/ (Python). The payload vectors pin the
 # bytes; this pins the rest (plan 2026-10-09-durable-phase-6-flows.md Ruling 10):
 #  - the backend's tests run in an image holding only backend/, so they read copies
-#    of the agent's vectors and key migration, which must equal the originals;
+#    of the agent's vectors, which must equal the originals (the agent's migrations
+#    live in backend/scadbuddy/migrations_agent/ itself, #5299);
 #  - the two Python codecs must be the same code apart from their imports,
 #    docstrings (module, class and function ones) and converter function (the key lock and tombstone logic that no
 #    vector covers).
@@ -19,8 +20,6 @@ same() {
 }
 same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vectors.json
 same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
-same agent/src/db/migrations/20261009T0421Z_payload_keys.sql \
-  backend/tests/fixtures/agent-migrations/20261009T0421Z_payload_keys.sql
 
 if ! python3 - "$root" <<'PY'
 import ast

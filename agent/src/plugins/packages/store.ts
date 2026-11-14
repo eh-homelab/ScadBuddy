@@ -7,7 +7,7 @@ import { diffFiles, type FileDiff, type FileList } from './hash.js'
 import type { PackageSource } from './source.js'
 import type { PackageReview } from './vet.js'
 
-// `ai_plugin_packages` (src/db/migrations/20260928T0750Z_plugin_packages.sql):
+// `ai_plugin_packages` (backend/scadbuddy/migrations_agent/20260928T0750Z_plugin_packages.sql):
 // the one authoritative record of an installed plugin package. What is on
 // disk (cache.ts) is rebuilt from `fetch_url`, `fetch_path` and
 // `commit_sha`, and used only when it hashes to `content_hash`.

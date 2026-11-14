@@ -137,6 +137,7 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
+from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
@@ -1159,6 +1160,17 @@ def _rotate_service_credentials(state: AppState) -> None:
     auth.credentials.delete_expired()
 
 
+def _migrate_agent_at_start(state: AppState) -> None:
+    """The agent's migrations (`render/agent_migrations.py`, #5299 D6), after the
+    backend's: the agent no longer migrates, and waits until `ai_migrations` holds the
+    files it expects (`agent/src/db/schema.ts`). Neither set reads the other's tables, so
+    the order is the start's, not the schema's. A failure stops the start."""
+    with state.settings_store.pool.connection() as conn:
+        applied = migrate_agent(conn)
+    if applied:
+        logger.info("applied the agent's database migrations", extra={"versions": applied})
+
+
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
     caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
@@ -1989,6 +2001,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
+    # Then the agent's (#5299 D6), which the agent waits for.
+    try:
+        await asyncio.to_thread(_migrate_agent_at_start, state)
+    except BaseException:
+        await asyncio.to_thread(state.settings_store.close)
+        raise
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.

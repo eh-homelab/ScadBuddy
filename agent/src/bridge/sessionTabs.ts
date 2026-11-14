@@ -1,7 +1,7 @@
 import type { Sql } from 'postgres'
 
 // Which tab each chat session pairs with, shared by every agent replica (#2086,
-// db/migrations/20261010T0610Z_session_tabs.sql). The hub keeps its own copy
+// backend/scadbuddy/migrations_agent/20261010T0610Z_session_tabs.sql). The hub keeps its own copy
 // for the calls made where the pairing happened; this is for the ones that run
 // elsewhere: a durable session's tool calls are activities on `agent-tools`,
 // and any replica's worker may take one.

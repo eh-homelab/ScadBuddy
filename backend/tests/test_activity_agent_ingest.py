@@ -9,7 +9,7 @@ import pytest
 from scadbuddy.activity.index import ActivityIndex
 from tests.conftest import PgPool
 
-#: `agent/src/db/migrations/20261004T1345Z_operations.sql` plus the columns the agent's
+#: `backend/scadbuddy/migrations_agent/20261004T1345Z_operations.sql` plus the columns the agent's
 #: attribution migration adds (principal, session, via_tool).
 AGENT_TABLES = """
 CREATE TABLE ai_operations (

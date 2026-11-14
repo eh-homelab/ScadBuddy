@@ -39,13 +39,12 @@ from scadbuddy.workflows.payload_codec import (
     seal_payload,
     subject_of,
 )
+from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 from tests.support.temporal import temporal_available, temporal_server
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 #: agent/test/fixtures/payload-vectors.json
 VECTORS = FIXTURES / "payload-vectors.json"
-#: The agent migration that creates ai_payload_keys and ai_forgotten_subjects.
-MIGRATIONS = FIXTURES / "agent-migrations"
 SUBJECT = "session-0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
 FLOW = "flow-0b0e2a0c-1111-4222-8333-444455556666"
 
@@ -160,7 +159,7 @@ async def agent_db() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
     try:
         await conn.execute(f'CREATE SCHEMA "{schema}"'.encode())
         await conn.execute(f'SET search_path TO "{schema}"'.encode())
-        for sql in sorted(MIGRATIONS.glob("*.sql")):
+        for sql in AGENT_KEY_MIGRATIONS:
             await conn.execute(sql.read_text().encode())
         yield conn
     finally:
