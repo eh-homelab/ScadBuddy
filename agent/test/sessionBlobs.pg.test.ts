@@ -195,6 +195,20 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })
 
+  it('a fork whose parent is forgotten between its insert and its log goes whole (#4212)', async () => {
+    const id = await withImage()
+    await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    // The workspace copy runs after the insert and before the log is written: forget the parent there.
+    const files = (m as unknown as { files: { copy(from: string, to: string): Promise<void> } }).files
+    const copy = files.copy.bind(files)
+    files.copy = async (from, to) => {
+      await copy(from, to)
+      await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
+    }
+    await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'not_found' })
+    expect(await db.sql`SELECT 1 FROM ai_sessions WHERE parent_id = ${id}`).toHaveLength(0)
+  })
+
   it('records which images a durable tool call produced, in order, and a retry replaces them (#2478)', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     const blobs = new SessionBlobs(db.sql)

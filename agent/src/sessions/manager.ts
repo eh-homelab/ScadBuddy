@@ -1794,11 +1794,23 @@ export class SessionManager {
       mode: child.mode,
     })
     const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
-    const seqs = await this.deps.sql.begin(async (tx) => {
-      const first = await this.events.append(childId, [started], tx)
-      await this.events.inheritThrough(childId, eventCut, tx)
-      return [...first, ...(await this.events.append(childId, [idle], tx))]
-    })
+    let seqs: number[]
+    try {
+      seqs = await this.deps.sql.begin(async (tx) => {
+        // Under the parent's lock, shared, as the insert was: a forget of the parent since the insert
+        // has copied the child's transcript and cleared its link, and the log it reads through is gone.
+        await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(`session-${id}`)}))`
+        const [linked] = await tx`SELECT 1 FROM ai_sessions WHERE id = ${childId}::uuid AND fork_parent_id = ${id}::uuid`
+        if (!linked) throw new SessionError('not_found', `session ${id} was forgotten while it was forked`)
+        const first = await this.events.append(childId, [started], tx)
+        await this.events.inheritThrough(childId, eventCut, tx)
+        return [...first, ...(await this.events.append(childId, [idle], tx))]
+      })
+    } catch (err) {
+      // A fork with no log is no fork: it goes whole, as one whose files could not be copied.
+      await this.dropFailedFork(childId)
+      throw err
+    }
     this.events.committed(childId, [started, idle], seqs)
     // Recorded once the child is complete (#2159): a fork that failed after the insert has only
     // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
