@@ -197,7 +197,9 @@ async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
 async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int, str]:
     """The ``tray_info_idx`` of each loaded spool that names no preset, by spool id:
     one read of the assignments, then the status reads of the printers that hold one,
-    at once, so the slowest printer bounds them, not their sum."""
+    at once, so the slowest printer bounds them, not their sum. A printer whose read
+    Bambuddy refuses gives no tray, logged; the other printers' trays are kept, and no
+    read is left running when this returns."""
     unnamed = {
         s.id
         for s in spools
@@ -208,9 +210,16 @@ async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int
         return {}
     loaded = [a for a in await client.spool_assignments() if a.spool_id in unnamed]
     printer_ids = sorted({a.printer_id for a in loaded})
-    statuses = await asyncio.gather(*(client.printer_status(p) for p in printer_ids))
+    statuses = await asyncio.gather(
+        *(client.printer_status(p) for p in printer_ids), return_exceptions=True
+    )
     found: dict[int, str] = {}
     for printer_id, status in zip(printer_ids, statuses, strict=True):
+        if isinstance(status, ApiError | ValidationError):
+            logger.warning("no AMS trays from Bambuddy's printer %s: %s", printer_id, status)
+            continue
+        if isinstance(status, BaseException):
+            raise status
         for assignment in loaded:
             if assignment.printer_id != printer_id:
                 continue
@@ -291,18 +300,31 @@ class BambuddyIntegrations:
         numeric id, the AMS trays (``GET /inventory/assignments`` and each such
         printer's ``GET /printers/{id}/status``) only for the spools that name no
         preset (a group uses a tray's id only after its own preset ids), and the
-        filament catalogue (``GET /filament-catalog/``). A density read Bambuddy
-        refuses gives no density, logged; only the spools' read fails the call."""
+        filament catalogue (``GET /filament-catalog/``). The three density reads run at
+        once after the spools' read, so the slowest bounds them, not their sum (#6148
+        review). A density read Bambuddy refuses gives no density, logged; only the
+        spools' read fails the call."""
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             spools = [s for s in await client.spools() if s.archived_at is None]
-            local: dict[str, LocalDensity] = {}
-            if any((s.slicer_filament or "").strip().isdigit() for s in spools):
-                presets = await _density_read(client.local_presets(), "local presets")
-                local = _local_densities(presets.filament) if presets is not None else {}
-            trays = await _density_read(_tray_presets(client, spools), "AMS trays") or {}
-            catalogue = await _density_read(client.filament_catalog(), "filament catalogue")
-            return spool_groups(spools, local=local, trays=trays, catalogue=catalogue or [])
+            async with asyncio.TaskGroup() as reads:
+                presets = (
+                    reads.create_task(_density_read(client.local_presets(), "local presets"))
+                    if any((s.slicer_filament or "").strip().isdigit() for s in spools)
+                    else None
+                )
+                trays = reads.create_task(_density_read(_tray_presets(client, spools), "AMS trays"))
+                catalogue = reads.create_task(
+                    _density_read(client.filament_catalog(), "filament catalogue")
+                )
+            local_read = None if presets is None else presets.result()
+            local = _local_densities(local_read.filament) if local_read is not None else {}
+            return spool_groups(
+                spools,
+                local=local,
+                trays=trays.result() or {},
+                catalogue=catalogue.result() or [],
+            )
 
     async def spool_inventory(self) -> list[ShelfSpool]:
         """``GET /inventory/spools`` (archived ones included, so a named one is known)

@@ -857,10 +857,11 @@ DENSITY_LOOKUP_TIMEOUT = 10.0
 
 async def _vendor_densities(orders: OrdersComponent) -> DensityTable | None:
     """The image's vendor densities; ``None``, logged, when the image's tree cannot be
-    read, so the add, the import and the fill go on with Bambuddy's sources only."""
+    read (a :class:`ProfileError`, or an ``OSError`` such as a tree with no ``VERSION``
+    file), so the add, the import and the fill go on with Bambuddy's sources only."""
     try:
         return await asyncio.to_thread(orders.densities)
-    except ProfileError as error:
+    except (ProfileError, OSError) as error:
         logger.warning("no densities from the image's vendor presets: %s", error)
         return None
 

@@ -1233,6 +1233,15 @@ The price book's filament records can be **imported from spools**: `POST
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.
 
+**As built (#6136).** The import also gives a record with no density one, and never
+changes a density a record has: the spools' preset id (`slicer_filament`, a K-profile's
+`setting_id`, the AMS tray's `tray_info_idx`), that preset's `filament_density`
+(Bambuddy's local preset, else the image's Bambu Studio preset), else Bambuddy's filament
+catalogue (`orders/density.py`). `POST /orders/price-book/fill-densities` does the same for
+every record with no density, and a record added by hand with no density takes it too.
+`filaments.density_profile` keeps where each density came from. A density read Bambuddy
+refuses gives no density and fails nothing.
+
 ### 8.4 Printers
 
 Until #3823's registry, an attempt's `printer` is the Bambuddy printer id and name the
