@@ -1,0 +1,29 @@
+"""Filament as a component (`core/components.py`): ScadBuddy's own filament inventory
+(#6261, epic #6260). Every store is built over the settings store's pool, as the native
+spool provider's is."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Annotated
+
+from scadbuddy.api.components import component_dep
+from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.filament.catalog import CatalogStore
+
+
+@dataclass
+class Filament:
+    catalog: CatalogStore
+
+
+FILAMENT: Key[Filament] = Key("filament")
+
+
+def _build(core: Core, components: Components) -> Filament:
+    return Filament(catalog=CatalogStore(core.settings_store.pool))
+
+
+COMPONENT = Component(FILAMENT, build=_build)
+
+FilamentDep = Annotated[Filament, component_dep(FILAMENT)]
