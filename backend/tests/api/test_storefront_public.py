@@ -162,7 +162,14 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
         },
     }
     assert listing["colours"] == [
-        {"id": pla_red, "colour": "#FF0000", "colour_name": None, "material": "PLA"}
+        {
+            "id": pla_red,
+            "colour": "#FF0000",
+            "colour_name": None,
+            "material": "PLA",
+            "subtype": None,
+            "brand": None,
+        }
     ]
     # Nothing the shop keeps to itself: no price, snapshot or blob key.
     assert set(listing) == {
