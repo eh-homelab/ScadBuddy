@@ -10,7 +10,7 @@ from scadbuddy.api import crud_render
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import RenderStoreSettings
 from scadbuddy.store.bambuddy import render_target
-from scadbuddy.store.content_models import BlobRef
+from scadbuddy.store.content_models import BlobKind, BlobRef
 
 FOREIGN = [
     "library-file-1",
@@ -34,11 +34,11 @@ RENDER = ["0123456789abcdef" * 4, "act-" + "a" * 40, "output-" + "a" * 32 + "-12
 LIBRARY_PIECE = "lib3-" + "a" * 48 + "-0"
 
 
-def _ref(kind: str) -> BlobRef:
+def _ref(kind: BlobKind) -> BlobRef:
     return BlobRef(sha256="a" * 64, kind=kind, backend="s3", backend_id="x", size=1)
 
 
-@pytest.mark.parametrize("key", FOREIGN + [LIBRARY_PIECE])
+@pytest.mark.parametrize("key", [*FOREIGN, LIBRARY_PIECE])
 def test_a_write_of_any_key_but_a_render_jobs_is_refused(key: str) -> None:
     with pytest.raises(ApiError) as refused:
         crud_render._worker_writable(key)
@@ -54,7 +54,7 @@ def test_a_render_jobs_piece_is_written(key: str) -> None:
 
 
 @pytest.mark.parametrize("kind", ["slice", "asset", "font", "snapshot", "library", "workspace"])
-def test_a_ref_of_another_kind_is_refused(kind: str) -> None:
+def test_a_ref_of_another_kind_is_refused(kind: BlobKind) -> None:
     with pytest.raises(ApiError) as refused:
         crud_render._worker_writable(RENDER[0], ref=_ref(kind))
     assert refused.value.status == 403
