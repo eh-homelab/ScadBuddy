@@ -378,14 +378,22 @@ def test_a_slow_bambuddy_never_holds_up_an_add(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProfileImageError("the profile file BBL.json cannot be read"),
+        # A tree with BBL.json but no VERSION file (`Profiles.version`).
+        FileNotFoundError("VERSION"),
+    ],
+)
 def test_an_unreadable_vendor_tree_leaves_bambuddys_sources(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     """#6148 review: a vendor tree that cannot be read is no density from it; the add,
     the import and the fill go on with Bambuddy's own sources."""
 
     def broken(root: object) -> None:
-        raise ProfileImageError("the profile file BBL.json cannot be read")
+        raise error
 
     monkeypatch.setattr(orders_component, "density_table", broken)
     configure(client)
@@ -420,3 +428,39 @@ def test_an_unreadable_vendor_tree_leaves_bambuddys_sources(
     filled = client.post(FILL)
     assert filled.status_code == 200, filled.text
     assert [row["density_g_cm3"] for row in filled.json()["rows"]] == [None]
+
+
+@respx.mock
+def test_a_printer_bambuddy_cannot_read_keeps_the_other_printers_trays(
+    client: TestClient,
+) -> None:
+    """#6148 review: the printers' status reads run at once; one Bambuddy refuses gives
+    no tray, and the trays of the printers that answered are still read."""
+    configure(client)
+    bambuddy(
+        [
+            spool(1, cost_per_kg=20),
+            spool(2, rgba="0000FFFF", cost_per_kg=20),
+        ],
+        assignments=[
+            {"id": 1, "spool_id": 1, "printer_id": 1, "ams_id": 0, "tray_id": 0},
+            {"id": 2, "spool_id": 2, "printer_id": 2, "ams_id": 0, "tray_id": 0},
+        ],
+        status={
+            "id": 1,
+            "name": "H2C",
+            "connected": True,
+            "ams": [{"id": 0, "tray": [{"id": 0, "tray_type": "PLA", "tray_info_idx": "GFA00"}]}],
+        },
+    )
+    respx.get(f"{API}/printers/2/status").mock(return_value=httpx.Response(503))
+
+    response = client.post(IMPORT)
+
+    assert response.status_code == 200, response.text
+    rows = {row["spool_ids"][0]: row for row in response.json()["rows"]}
+    assert (rows[1]["density_g_cm3"], rows[1]["density_profile"]) == (
+        "1.26",
+        "Bambu PLA Basic @base (AMS tray preset GFA00)",
+    )
+    assert (rows[2]["action"], rows[2]["density_g_cm3"]) == ("created", None)
