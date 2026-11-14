@@ -106,3 +106,31 @@ export function shownLabel(name: string, label: string | null | undefined, capti
   return name
 }
 
+
+/** A support material: the shop's choice, never the customer's (owner rule, 2026-11-13). */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
+
+/** Of `filaments`, those a customer may pick: never a support material. */
+export function customerFilaments(filaments: readonly Filament[]): Filament[] {
+  return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
+}
+
+/**
+ * What the customer reads for each of `filaments`, by id: its colour's name (else its
+ * hex). Two of one name and material are told apart by their hex (#6152).
+ */
+export function filamentLabels(filaments: readonly Filament[]): Map<string, string> {
+  const name = (filament: Filament) => filament.colour_name?.trim() || filament.colour.toUpperCase()
+  const seen = new Map<string, number>()
+  for (const filament of filaments) {
+    const key = `${name(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}`
+    seen.set(key, (seen.get(key) ?? 0) + 1)
+  }
+  return new Map(
+    filaments.map((filament) => {
+      const key = `${name(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}`
+      const shared = (seen.get(key) ?? 0) > 1 && filament.colour_name
+      return [filament.id, shared ? `${name(filament)} ${filament.colour.toUpperCase()}` : name(filament)]
+    }),
+  )
+}
