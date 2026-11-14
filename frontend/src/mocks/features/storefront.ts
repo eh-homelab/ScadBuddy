@@ -87,8 +87,9 @@ function page(url: URL): StorefrontListingPage {
   const slugs = url.searchParams.getAll('slug')
   const materials = url.searchParams.getAll('material').map((m) => m.toUpperCase())
   const status = get('status')
+  // The backend's bounds (`wire.py` `LISTING_PAGE_MAX`, `LISTING_OFFSET_MAX`).
   const limit = Math.min(200, Math.max(1, Number(get('limit') || 50)))
-  const offset = Math.max(0, Number(get('offset') || 0))
+  const offset = Math.min(1_000_000, Math.max(0, Number(get('offset') || 0)))
   const ordered = sorted()
   const place = new Map(ordered.map((listing, index) => [listing.id, index + 1]))
   const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))
