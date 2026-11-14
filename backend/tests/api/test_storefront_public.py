@@ -360,7 +360,13 @@ def test_a_card_whose_colours_are_all_archived_is_not_available(
     template: dict[str, Any],  # noqa: F811
     pla_red: str,  # noqa: F811
 ) -> None:
-    publish(client, create(client, listing_body(template, pla_red, title="Red tag"))["id"])
+    body = listing_body(
+        template,
+        pla_red,
+        title="Red tag",
+        params={"colour": {"kind": "choice", "choices": ["#FF0000"]}},
+    )
+    publish(client, create(client, body)["id"])
     assert crud.get("/listings").json()["listings"][0]["available"] is True
     assert client.post(f"{BOOK}/filaments/{pla_red}/archive").status_code == 200
     assert crud.get("/listings").json()["listings"][0]["available"] is False
