@@ -365,6 +365,18 @@ class BlobIndex:
         ).fetchone()
         return _stat(row) if row is not None else None
 
+    def delete_if_names(self, key: str, ref: BlobRef) -> BlobStat | None:
+        """Drop ``key``'s row only while it still names ``ref`` (its object and bytes), in
+        one statement: a row stored again since ``ref`` was read stays. The row taken, or
+        None."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"DELETE FROM store_blobs WHERE key = %s AND sha256 = %s AND kind = %s"
+                f" AND backend = %s AND backend_id = %s RETURNING {_COLUMNS}",
+                (key, ref.sha256, ref.kind, ref.backend, ref.backend_id),
+            ).fetchone()
+        return _stat(row) if row is not None else None
+
     def delete_if_stale(
         self, key: str, cutoff: datetime, *, backend: str | None = None
     ) -> BlobStat | None:
