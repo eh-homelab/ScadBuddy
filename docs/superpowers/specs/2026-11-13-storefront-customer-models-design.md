@@ -124,8 +124,9 @@ deadline.
 ### 4.4 After submit
 
 Submit (storefront spec §5.5) signals each staged file's watcher (§6.5): from then on the
-file has no deadline, and its watcher runs the import (§8) and waits until the file is
-imported or a person declines it. The built-in `customer-model-intake` flow (§8) keeps the
+file has no deadline while the order is live, and its watcher runs the import (§8) and
+waits until the file is imported, a person declines it, or the order ends (§6.5: a
+cancelled or closed order keeps the file `ENDED_GRACE`, 30 days, for a reopen). The built-in `customer-model-intake` flow (§8) keeps the
 orchestration. It imports each ready file into the
 native library and deletes its staging object, and it imports each MakerWorld link through
 #6128. Each import makes a `library_file` item on the order (§5.4). The shop slices a quote
@@ -295,13 +296,21 @@ done, or if the file times out." Each upload has one watcher, the workflow `Stag
   is due, cleans it up in the same transaction. The database is the truth: a signal only
   wakes the watcher early, so a lost signal costs time, never a file.
 - **Signals.** `claimed` (the claim's route), `unclaimed` (a line's removal), `submitted`
-  (the submit), and, for later PRs, `checked` (the intake worker), `imported`, `declined`,
-  `closed` and `retry`. Each is sent after its commit and may be lost.
+  (the submit), `closed` (an order's cancel, by the shop or the customer, and its close),
+  `retry` (an order's reopen), and, for later PRs, `checked` (the intake worker), `imported`
+  and `declined`. Each is sent after its commit and may be lost.
 - **Deadlines** (the TTLs below, measured from the database's timestamps): an upload never
   claimed is cleaned up `UNCLAIMED_GRACE` after its URL's expiry; a claimed upload of a cart
   not submitted, `STAGING_TTL` after its claim; a claimed upload whose line is gone, at once.
-  A submitted order's file has **no deadline**: the watcher reads it again every hour and
-  ends only when the file is imported (§8.3) or a person declines it.
+  A live submitted order's file has **no deadline**: the watcher reads it again every hour
+  and ends only when the file is imported (§8.3), a person declines it, or the order ends.
+  A file of an order cancelled or closed is cleaned up `ENDED_GRACE` after `cancelled_at` or
+  `closed_at` (#6164): its source then reads `declined`, "The order ended; the staged file
+  was removed." A reopen within the grace clears those timestamps, so the next step reads
+  the order live again and the file goes back to no deadline. `reopen_order` has no time
+  limit, so a reopen after the grace finds the source declined and the shop asks the
+  customer for the file again. 30 days matches the cart TTL's default
+  (`storefront_draft_ttl_days`).
 - **Clean-up.** In one transaction: a cart's line reads `EXPIRED` (`check_status`
   `refused`), and the row is deleted. After the commit, the staging object and its preview
   are deleted; a missing object is no error. A step that fails is retried with backoff and
@@ -317,7 +326,8 @@ done, or if the file times out." Each upload has one watcher, the workflow `Stag
 | `UNCLAIMED_GRACE` | 1 hour | an upload never claimed, after its URL's expiry |
 | `STAGING_TTL` | 72 hours | a claimed upload of a cart not submitted, after its claim |
 | `ORPHAN_AGE` | 1 day | the backstop's threshold |
-| (submitted) | none | a submitted order's file waits for its import or a decline |
+| `ENDED_GRACE` | 30 days | a file of a submitted order cancelled or closed, after the end (a reopen cancels it) |
+| (submitted) | none | a live submitted order's file waits for its import or a decline |
 
 **The backstop.** The storefront drafts sweep (`housekeeping_sweep_storefront_drafts`, both
 Schedules) runs `staged_files.sweep_staged` after the carts; it owns no file's life. It

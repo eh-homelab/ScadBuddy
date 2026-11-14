@@ -15,7 +15,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.orders.storefront import staged_files
-from scadbuddy.orders.storefront.model_requests import EXPIRED, STAGING_TTL, UNCLAIMED_GRACE
+from scadbuddy.orders.storefront.model_requests import (
+    ENDED,
+    ENDED_GRACE,
+    EXPIRED,
+    STAGING_TTL,
+    UNCLAIMED_GRACE,
+)
 from scadbuddy.orders.storefront.staged_files import WATCH_UNAVAILABLE, sweep_staged
 from scadbuddy.store.s3 import S3ContentBackend, staging_key
 from scadbuddy.storefront.wire import MAX_MODEL_FILE_BYTES, STOREFRONT_PROBLEMS
@@ -512,6 +518,68 @@ def test_a_declined_file_of_a_sent_order_is_cleaned_up(
         conn.execute("UPDATE order_item_sources SET status = 'declined'")
     found = step(s3_api, slot_id, datetime.now(UTC))
     assert (found.phase, found.reason) == ("ended", "declined")
+    assert staged(s3_api, slot_id) is None
+
+
+def test_a_file_of_a_cancelled_order_is_kept_30_days_then_cleaned_up(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    """#6164: the cancel tells the watcher, which keeps the file `ENDED_GRACE` for a
+    reopen; past it the source reads declined with `ENDED`."""
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+    assert s3_api.post(f"/api/v1/orders/{order_id}/cancel").status_code == 200
+    assert (slot_id, "closed") in watcher.signals
+    [order] = rows(s3_api, "SELECT cancelled_at FROM orders WHERE id = %s", order_id)
+    due = order["cancelled_at"] + ENDED_GRACE
+    found = step(s3_api, slot_id, due - timedelta(seconds=1))
+    assert (found.phase, found.due) == ("submitted", due)
+    assert staged(s3_api, slot_id) == len(STL)
+    found = step(s3_api, slot_id, due)
+    assert (found.phase, found.reason) == ("ended", "order_ended")
+    assert staged(s3_api, slot_id) is None
+    assert rows(s3_api, "SELECT id FROM storefront_uploads") == []
+    [source] = rows(s3_api, "SELECT status, status_reason, upload_id FROM order_item_sources")
+    assert source == {"status": "declined", "status_reason": ENDED, "upload_id": None}
+
+
+def test_a_reopen_within_the_grace_keeps_the_file_with_no_deadline(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+    assert s3_api.post(f"/api/v1/orders/{order_id}/cancel").status_code == 200
+    assert step(s3_api, slot_id, datetime.now(UTC)).due is not None
+    assert s3_api.post(f"/api/v1/orders/{order_id}/reopen").status_code == 200
+    assert (slot_id, "retry") in watcher.signals
+    found = step(s3_api, slot_id, datetime.now(UTC) + ENDED_GRACE + timedelta(days=1))
+    assert (found.phase, found.due) == ("submitted", None)
+    assert staged(s3_api, slot_id) == len(STL)
+
+
+def test_a_file_of_a_closed_order_is_kept_30_days_after_the_close(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+    closed_at = datetime.now(UTC) - timedelta(days=2)
+    with _state(s3_api).projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE orders SET status = 'closed', closed_at = %s WHERE id = %s",
+            (closed_at, order_id),
+        )
+    found = step(s3_api, slot_id, datetime.now(UTC))
+    assert (found.phase, found.due) == ("submitted", closed_at + ENDED_GRACE)
+    found = step(s3_api, slot_id, closed_at + ENDED_GRACE)
+    assert (found.phase, found.reason) == ("ended", "order_ended")
     assert staged(s3_api, slot_id) is None
 
 
