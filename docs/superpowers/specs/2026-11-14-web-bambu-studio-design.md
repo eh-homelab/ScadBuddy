@@ -54,7 +54,7 @@ ScadBuddy could set none of them (#2998, #6245, #6246).
 
 - A slicer in the browser. Slicing stays on the server (Bambuddy or the native slicer,
   spec `2026-10-16-own-store-slicer-rust-workers-design.md`).
-- G-code preview beyond what `print/ToolpathScene.tsx` shows today.
+- G-code preview beyond what `components/print/ToolpathScene.tsx` shows today.
 - Mesh modelling (sculpt, boolean, text). Mesh models have their own scene editor
   (`backend/scadbuddy/meshmodel/`, tool `edit_scene`). This epic edits placement,
   grouping and settings of what a render or a file already holds.
@@ -83,7 +83,7 @@ ScadBuddy could set none of them (#2998, #6245, #6246).
 | Objects in a 3MF | One object per declared object (`echo(objects = N)`) or per placed copy of an Arrange layout (#956). A template plate with no declaration is one object (#6245). | `workflows/outputs.py`; spec `2026-10-13-declared-objects-design.md` |
 | Layout | `Layout` → `LayoutPlate` → `Placed(piece_key, x, y, rot, recolour)`. Quarter turns only. | `workflows/models.py`; packer `workflows/arrange.py` |
 | By-object check | Bounding boxes and `extruder_clearance_radius` (49 mm on the H2C). Bambu Studio reads `extruder_clearance_max_radius` (96 mm) and convex hulls. | `bambuddy/clearance.py`; `render/plate_profiles.py` `CLEARANCES` |
-| Viewers | `components/Preview.tsx` (customizer, storefront, library, print history), `components/print/PlateScene.tsx` (print dialog), `print/ToolpathScene.tsx`. All view only. No selection. | three.js with `@react-three/fiber` |
+| Viewers | `components/Preview.tsx` (customizer, storefront, library, print history), `components/print/PlateScene.tsx` (print dialog), `components/print/ToolpathScene.tsx`. All view only. No selection. | three.js with `@react-three/fiber` |
 | Remembered choices | `ModelPrintChoices`: printer, filament plan, nozzles, tier, process, print sequence, part settings. #6219 lists 16 gaps. | `library/settings_store.py:299`; `api/settings.py` `RememberedChoices` |
 | Agent | `arrange`, `get_output_plates`, `get_plate`, `check_plate_fit`, `print_output`, `remember_model_print_choices`, and others. No tool edits a plate. | `agent/src/tools/arrange.ts`, `agent/src/tools/outputs.ts` |
 
@@ -145,7 +145,7 @@ type Capabilities = {
   assemblies?: boolean
   order?: boolean               // reorder objects (print order for by object)
   layers?: boolean              // the cut-at-height slider that PlateScene has today
-  toolpath?: boolean            // the G-code view that ToolpathScene has today
+  toolpath?: boolean            // the G-code view that components/print/ToolpathScene.tsx has today
 }
 ```
 
@@ -198,7 +198,7 @@ for display and keeps an undo stack. Save sends the list.
 
 While a person drags, the viewer shows Bambu Studio's clearance halos and colours a
 conflict red (#3772). The halos come from the same rules module as the server check
-(§5), compiled once and shared: the rules are pure geometry, and the plan ports them to
+(§5): the rules are pure geometry, and the plan ports them to
 TypeScript with one set of test vectors run by both sides (as `workers/rust/vectors`
 does for the slicer). The server check is the one that counts.
 
@@ -340,8 +340,10 @@ PlateDocument
   inline bytes; repo rule #2479).
 - `Placed.x, y, rot` become a full transform. Quarter turns stay what the packer makes.
 - A 3MF that ScadBuddy did not write (a library file, a Bambu Studio project) is read into
-  a document by `render/objects3mf.py`, which already reads objects, parts, transforms and
-  per-object settings.
+  a document by `render/objects3mf.py`. Today it reads objects, parts and their extruders.
+  It drops modifiers and support blockers and enforcers, and it merges the build items
+  that place one object the same way up. Plan Task 3 extends it to keep volume types,
+  instances and setting metadata.
 
 ### 6.2 A template plate is objects, not one object (#6245)
 
@@ -349,9 +351,10 @@ PlateDocument
   `2026-10-13-declared-objects-design.md` §1).
 - Without one, the writer splits each template plate into objects, for every print, not
   only by-object ones: object identity is what the editor, the settings and the agent
-  name. The PR runs the template checks over `models/` to show what changes by connected shells of
-  the plate's union over all colours. Shells closer than `GAP_MM` (5 mm,
-  `workflows/packing.py`) stay one object, so a letter's dot stays with its letter. This
+  name. The split finds the connected shells of each colour's mesh, then joins shells of
+  any colour that touch or are closer than `GAP_MM` (5 mm, `workflows/packing.py`) into
+  one object, so a letter's dot stays with its letter. The PR runs the template checks
+  over `models/` to show what changes. This
   changes the declared-objects spec's "a template with no declaration writes exactly
   what it does today"; that spec rejected splitting to avoid the dot case, which the gap
   rule covers.

@@ -74,9 +74,9 @@
 **Interfaces:**
 - Produces: `Clearances(max_radius: float, radius: float, height_to_rod: float, height_to_lid: float, dist_to_rod: float, nozzle_height: float, printable_height: float, bed_exclude: list[Polygon2], wrapping_exclude: list[Polygon2])`; `clearances_for(printer_model: str) -> Clearances | None`; `RuleObject(id: str, hull: list[tuple[float,float]], height: float)`; `RuleWarning(rule: Literal['hull_clearance','too_tall_rod','too_tall_lid','bed_exclude','wrapping_exclude'], objects: list[str], detail: str, source: str)`; `check_plate(objects: Sequence[RuleObject], *, sequence: Literal['by layer','by object'], clearances: Clearances, skirt_mm: float, wrapping_detection: bool) -> list[RuleWarning]`; `obj_distance(objects, clearances, skirt_mm, by_object: bool) -> float`.
 
-- [ ] **Step 1: Write the failing tests** — `test_h2c_values`: `clearances_for('Bambu Lab H2C')` has `max_radius == 96`, `radius == 49`, `height_to_rod == 47.4`, `height_to_lid == 201`, `dist_to_rod == 50`, `wrapping_exclude == [[(145,310),(251,310),(251,326),(145,326)]]`. `test_hull_clearance_h2c`: two 20 mm squares 95 mm apart, both 60 mm tall, by object → one `hull_clearance` warning; 96 mm apart → none. `test_skirt_adds`: skirt 10 mm → `obj_distance == max(47.9 + 5, 10)`. `test_tall_before_overlapping_y`: object A 70 mm prints first, B prints after in an overlapping Y band (bands grown by 25 mm per side) → `too_tall_rod` on A; swap order → none. `test_last_object_uses_printable_height`. `test_exclusion_by_layer_only_for_wrapping`: an object in the wrapping area → `wrapping_exclude` in both modes (spec assumption 11). `test_menorah_layout`: the owner's 3-plate layout from #6246 → no warnings; all 10 candles on one plate → warnings.
+- [ ] **Step 1: Write the failing tests** — `test_h2c_values`: `clearances_for('Bambu Lab H2C')` has `max_radius == 96`, `radius == 49`, `height_to_rod == 47.4`, `height_to_lid == 201`, `dist_to_rod == 50`, `wrapping_exclude == [[(145,310),(251,310),(251,326),(145,326)]]`. `test_hull_clearance_h2c`: two 20 mm squares 95 mm apart in X, both 30 mm tall (shorter than `height_to_rod` 47.4, so no rod rule applies, and taller than the H2C's `nozzle_height` 4, so `max_radius` applies), by object → one `hull_clearance` warning; 96 mm apart → none. `test_skirt_adds`: skirt 10 mm → `obj_distance == max(47.9 + 5, 10)`. `test_tall_before_overlapping_y`: object A 70 mm prints first, B prints after in an overlapping Y band (bands grown by 25 mm per side) → `too_tall_rod` on A; swap order → none. `test_last_object_uses_printable_height`. `test_wrapping_exclude_warns_in_both_modes`: an object in the wrapping area → `wrapping_exclude` in both modes (spec assumption 11). `test_menorah_layout`: the owner's 3-plate layout from #6246 → no warnings; all 10 candles on one plate → warnings.
 - [ ] **Step 2: Run** `cd backend && uv run pytest tests/render/test_plate_rules.py -v` — expect FAIL.
-- [ ] **Step 3: Implement** with shapely (already a backend dependency via trimesh? if not, add `shapely` to `backend/pyproject.toml`): `buffer(obj_distance, join_style='round')` for the grown hull. Each rule's docstring carries its `Print.cpp` link from spec §5.2. Write each test case also as a vector file (`{input, expected}`).
+- [ ] **Step 3: Implement** with shapely. It is not a backend dependency today, so add `shapely` to `backend/pyproject.toml` and `backend/uv.lock`. Use `buffer(obj_distance, join_style='round')` for the grown hull. Each rule's docstring carries its `Print.cpp` link from spec §5.2. Write each test case also as a vector file (`{input, expected}`).
 - [ ] **Step 4: Run** — expect PASS.
 - [ ] **Step 5: Commit** `feat(render): Bambu Studio's by-object rules in one module (#6274)`.
 
@@ -133,7 +133,7 @@
 
 **Interfaces:** Consumes `plate_rules.check_plate`, `obj_distance`, `clearances_for`.
 
-- [ ] **Step 1: Tests** — `test_menorah_three_plates`: the ORD-2026-2 parts (10 candles 65.5–83.5 mm, flames, plug 27 mm, base 29 mm, cradle 54 mm) on the H2C → at most 5 tall candles a plate, `check_plate` empty on every plate. `test_tall_last`: on each plate the tallest object is last in `DocPlate.objects`. `test_keeps_out_of_exclusion`.
+- [ ] **Step 1: Tests** — `test_menorah_three_plates`: the ORD-2026-2 parts (10 candles 65.5–83.5 mm, flames, plug 27 mm, base 29 mm, cradle 54 mm) on the H2C → at most 5 tall candles a plate, `check_plate` empty on every plate. `test_tall_last`: on each plate the tallest object is the last item in `LayoutPlate.items` (Task 3's `DocPlate.objects` takes this order later). `test_keeps_out_of_exclusion`.
 - [ ] **Steps 2–4:** fail, implement (pack with the grown hull's bounding box as the footprint; assign Y bands to objects taller than `height_to_rod`; open a new plate when no band is free), pass.
 - [ ] **Step 5: Commit** `feat(arrange): lay out for print by object (#6246)`.
 
@@ -166,8 +166,8 @@ As #3770's body says. Additional requirement from this epic: the tower model ans
 - Test: `frontend/src/components/plate/PlateEditor.test.tsx`, `useSelection.test.ts`, `e2e/plate-editor.spec.ts`
 
 **Interfaces:**
-- Consumes: `GET /api/v1/outputs/{id}/plate-document`.
-- Produces: `type Capabilities` (spec §4.1, verbatim); `<PlateEditor outputId={string} capabilities={Capabilities} onSave?={(outputId: string) => void} />`; `useSelection(): {selected: Set<string>, mode: 'object' | 'part', click(id, {shift, alt}), clear()}`; `pendingOps: PlateOp[]` with `undo()`, `redo()`.
+- Consumes: `GET /api/v1/outputs/{id}/plate-document`, `GET /api/v1/library/files/{id}/plate-document`.
+- Produces: `type Capabilities` (spec §4.1, verbatim); `type PlateSource = {output_id: string} | {library_file_id: string}` (the shape of the save route's `source`); `<PlateEditor source={PlateSource} capabilities={Capabilities} onSave?={(outputId: string) => void} />`; `useSelection(): {selected: Set<string>, mode: 'object' | 'part', click(id, {shift, alt}), clear()}`; `pendingOps: PlateOp[]` with `undo()`, `redo()`.
 
 - [ ] **Step 1: Tests** — `renders no control for a capability that is off` (with `{}` → no toolbar buttons, no settings panel); `click selects object, second click selects part`; `shift-click adds`; `list and viewport share selection`; `settings marker shows on an object with settings`.
 - [ ] **Steps 2–4:** fail, implement, pass (`cd frontend && pnpm gen:api && pnpm exec vitest src/components/plate`).
@@ -175,7 +175,7 @@ As #3770's body says. Additional requirement from this epic: the tower model ans
 
 ### Task 10: Transform tools (issue #6278)
 
-**Files:** Create `frontend/src/components/plate/TransformTools.tsx`, `LayOnFace.tsx`; Modify `PlateEditor.tsx` (toolbar, save, undo/redo, keyboard: `M`, `R`, `S`, `F`, `Delete`, `Ctrl+Z`, `Ctrl+Shift+Z`); Modify `frontend/src/components/print/PreviewPane.tsx`, `ArrangedPlates.tsx` (back-office hosts get all capabilities); Test `TransformTools.test.tsx`, `e2e/plate-editor-transform.spec.ts`.
+**Files:** Create `frontend/src/components/plate/TransformTools.tsx`, `LayOnFace.tsx`; Modify `PlateEditor.tsx` (toolbar, save, undo/redo, keyboard: `M`, `R`, `S`, `F`, `Delete`, `Ctrl+Z`, `Ctrl+Shift+Z`); Modify `frontend/src/components/print/PreviewPane.tsx`, `frontend/src/components/ArrangedPlates.tsx` (back-office hosts get all capabilities); Test `TransformTools.test.tsx`, `e2e/plate-editor-transform.spec.ts`.
 
 - [ ] **Step 1: Tests** — `move emits a move op with typed mm`; `rotate snaps to 15 degrees with shift`; `lay on face emits lay_on_face with the clicked normal`; `save posts pendingOps and calls onSave with the new id`; `undo removes the last op`.
 - [ ] **Steps 2–4.** **Step 5: Commit** `feat(ui): move, rotate, scale and lay on face on the plate (#6278)`.
@@ -277,6 +277,7 @@ Queue all writes each file's choices and the bed type; the quote dialog writes t
           │             └─> #6283
           └─> #6277 ─┬─> #6278, #6279, #3772, #6282, #6253
 #3770 ─> #3772
+#6280 ─> #3772
 #2998 ─> #6253, #6281
 #6245, #6246, #6253, #6278, #6283 ─> #6284
 #6218, #6219: no blockers
