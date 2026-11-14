@@ -66,6 +66,8 @@ DEFAULTS: dict[str, object] = {
     "orders_thin_margin_percent": "15",
     "orders_tax_percent": "0",
     "orders_tax_shipping": False,
+    "orders_purchase_fee_flat_minor": 0,
+    "orders_purchase_fee_percent": "0",
     "orders_deposit_policy": [],
     "storefront_shipping_options": [],
     "storefront_payment_instructions": None,
@@ -820,6 +822,42 @@ def test_the_lifecycle_reads_the_money_rules_as_saved(client: TestClient) -> Non
     assert rules.shipping_options == (
         ShippingOption(id="post", label="Post", amount_minor=500, ships=True),
     )
+
+
+def test_the_purchase_fee_is_live_and_read_as_a_rule(client: TestClient) -> None:
+    """#6133 (spec 2026-11-13 §10.3): a flat amount per recorded purchase and a percent of
+    their sum, both env-seeded and live."""
+    saved = client.put(
+        "/api/v1/settings",
+        json={"orders_purchase_fee_flat_minor": 250, "orders_purchase_fee_percent": "12.5"},
+    )
+    assert saved.status_code == 200, saved.text
+    got = client.get("/api/v1/settings").json()
+    assert (got["orders_purchase_fee_flat_minor"], got["orders_purchase_fee_percent"]) == (
+        250,
+        "12.5",
+    )
+    assert got["applies"]["orders_purchase_fee_flat_minor"] == "live"
+    assert got["applies"]["orders_purchase_fee_percent"] == "live"
+    rules = _state(client).components.get(ORDERS).lifecycle.rules()
+    assert (rules.purchase_fee_flat_minor, rules.purchase_fee_percent) == (250, Decimal("12.5"))
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("orders_purchase_fee_percent", "100.01"),
+        ("orders_purchase_fee_percent", "-1"),
+        ("orders_purchase_fee_percent", "1.234"),
+        ("orders_purchase_fee_percent", "lots"),
+        ("orders_purchase_fee_flat_minor", -1),
+    ],
+)
+def test_a_bad_purchase_fee_is_refused(client: TestClient, name: str, value: object) -> None:
+    refused = client.put("/api/v1/settings", json={name: value})
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", name]
+    assert client.put("/api/v1/settings", json={name: "100"}).status_code == 200
 
 
 @pytest.mark.parametrize(

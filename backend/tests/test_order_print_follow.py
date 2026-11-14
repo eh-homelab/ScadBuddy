@@ -33,6 +33,7 @@ from scadbuddy.api.printing import (
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.problems import ApiError
+from scadbuddy.orders import printing as order_printing
 from scadbuddy.orders.lifecycle import ClaimRefusedError, Lifecycle, LifecycleError
 from scadbuddy.orders.models import Actor, Fulfilment
 from scadbuddy.orders.printing import (
@@ -366,8 +367,11 @@ def test_the_look_at_the_bound_takes_all_the_time_left(monkeypatch: pytest.Monke
         given.append(delay)
         return real_timeout(delay)
 
-    # `print_item` reads `asyncio.timeout` from the module when it looks.
-    monkeypatch.setattr(asyncio, "timeout", recorded)
+    # Only `orders/printing.py`'s `asyncio` sees the recorder (#6202): an `asyncio.timeout`
+    # elsewhere on the path (a fake, the attach) does not add to `given`.
+    monkeypatch.setattr(
+        order_printing, "asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": recorded})
+    )
     lifecycle = FakeLifecycle()
     clock = Clock()
     with pytest.raises(ApiError):

@@ -51,7 +51,11 @@ from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
-from scadbuddy.orders.storefront.model_requests import draft_sources
+from scadbuddy.orders.storefront.model_requests import (
+    checked_purchase_links,
+    draft_sources,
+    insert_links,
+)
 from scadbuddy.orders.storefront.renders import checked_choice
 from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
@@ -72,7 +76,12 @@ from scadbuddy.render.job_models import JobNotFoundError
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
-from scadbuddy.storefront.uploads import checked_text, file_too_large, too_many_files
+from scadbuddy.storefront.uploads import (
+    PurchaseLinkAsk,
+    checked_text,
+    file_too_large,
+    too_many_files,
+)
 from scadbuddy.storefront.wire import ITEM_ID, unescape_filename
 
 if TYPE_CHECKING:
@@ -380,7 +389,9 @@ async def add_listing_item(
     add: a model item with revision 1, titled as the listing. A retry of a committed add
     (the same key) answers its order as it is now and does nothing else. Refusals: 404
     ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 422 ``draft_full``, 409 ``draft_changed``."""
+    ``name`` and ``reason``), 422 ``listing_mixed_material``, 422 ``pick_colour_clash``
+    (with ``name``), 409 ``render_pending`` (`checked_choice`, #6152), 422
+    ``draft_full``, 409 ``draft_changed``."""
     orders = _orders(state)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
@@ -526,9 +537,12 @@ async def add_request(
     *,
     text: str,
     files: Sequence[UploadFile],
+    purchase_links: Sequence[PurchaseLinkAsk] = (),
 ) -> DraftView:
     """A design request added to the visitor's draft: a ``request`` item whose notes are
-    ``text``, with each file on it as a ``reference`` attachment. Each file is kept as
+    ``text``, with each file on it as a ``reference`` attachment, and each thing to buy
+    (#6133, spec 2026-11-13 §10.1) as a `pending` purchase link
+    (`model_requests.checked_purchase_links`). Each file is kept as
     ``attachment-<sha256>`` (what the back office reads) and as `request_file_key` (what
     the visitor's presigned GET reads) before the rows; a refused row leaves unheld
     objects for the store's sweeps. A retry of a committed request (the same key)
@@ -536,18 +550,21 @@ async def add_request(
     Refusals: 404 ``requests_disabled`` unless ``storefront_requests_enabled``, after
     the retry's lookup; 422 ``request_text``
     (`checked_text`: not 1 to `MAX_REQUEST_TEXT` characters of plain text); 422
-    ``too_many_files`` past `MAX_REQUEST_FILES`; 413 ``file_too_large``; 415
+    ``too_many_files`` past `MAX_REQUEST_FILES`; 422 ``link_invalid`` and
+    ``too_many_links`` for the things to buy; 413 ``file_too_large``; 415
     ``file_type``; 422 ``draft_full``; 409 ``draft_changed``; 503
     ``storefront_needs_s3``."""
     # Before any file is read or stored.
     text = checked_text(text)
     if len(files) > MAX_REQUEST_FILES:
         raise too_many_files()
+    links = checked_purchase_links(purchase_links)
     checked = [await asyncio.to_thread(_checked_file, upload) for upload in files]
     asked = {
         "visitor": token_sha256(visitor_id),
         "text": text,
         "files": [{"filename": f.filename, "sha256": f.sha256} for f in checked],
+        "purchase_links": [{"url": link.url, "note": link.note} for link in links],
     }
     reply = await asyncio.to_thread(_stored, state, key, REQUEST_ROUTE, asked)
     if reply is not None:
@@ -603,6 +620,7 @@ async def add_request(
                 orders.store.hold_with_attachment(
                     conn, request_file_key(file.sha256), attachment.id
                 )
+            insert_links(conn, draft.id, item.id, links)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, [item]))

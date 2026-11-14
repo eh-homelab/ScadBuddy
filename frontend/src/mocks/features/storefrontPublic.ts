@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw'
 import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
+import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
  * #5282 (spec 2026-11-02 §5.1-§5.4; backend `storefront/routes.py`): the public page's edge,
@@ -36,8 +37,8 @@ export const KEYCHAIN: Listing = {
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
     name: { kind: 'text', label: 'Name', group: '', colour: false, max_length: 20 },
-    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5 },
-    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'] },
+    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5, default: 60 },
+    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'], default: '#1b6ca8' },
   },
   colours: [BLUE, ORANGE],
   media: [],
@@ -74,6 +75,7 @@ export const CHARM: Listing = {
       group: '',
       colour: true,
       choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
     },
     rim_colour: {
       kind: 'choice',
@@ -81,6 +83,7 @@ export const CHARM: Listing = {
       group: '',
       colour: true,
       choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+      default: BLUE.colour,
     },
   },
   colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
@@ -133,7 +136,7 @@ let draft: Draft | null = null
 let renders = new Map<string, { render: StoreRender; polls: number }>()
 let serial = 0
 
-function save(): void {
+export function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
   } catch {
@@ -149,16 +152,16 @@ function load(): void {
   }
 }
 
-function next(): string {
+export function next(): string {
   serial += 1
   return serial.toString(16).padStart(32, '0')
 }
 
-function refused(status: number, slug: string, detail: string) {
+export function refused(status: number, slug: string, detail: string) {
   return problem(status, status === 404 ? 'Not Found' : 'Unprocessable Content', detail, { type: PROBLEMS + slug })
 }
 
-function keyMissing(request: Request) {
+export function keyMissing(request: Request) {
   return request.headers.get('Idempotency-Key')
     ? null
     : refused(428, 'idempotency_key_required', 'Send an Idempotency-Key with this request.')
@@ -262,7 +265,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
     : new HttpResponse(null, { status: 404 })
 }
 
-function ensureDraft(): Draft {
+export function ensureDraft(): Draft {
   draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
 }
@@ -330,7 +333,11 @@ export const handlers = [
       ? HttpResponse.json(ESTIMATE)
       : refused(404, 'render_not_found', 'There is no such render.'),
   ),
-  http.get(`${base}/draft`, () => HttpResponse.json(draft)),
+  http.get(`${base}/draft`, () => {
+    // A cart read moves each model check on (`storefrontModels.ts`).
+    if (draft) advanceChecks(draft)
+    return HttpResponse.json(draft)
+  }),
   http.post(`${base}/draft/items`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -383,6 +390,9 @@ export const handlers = [
     return HttpResponse.json(submitted)
   }),
   http.post(`${base}/order/view`, async ({ request }) => {
+    // The token `models` opens `storefrontModels.ts`'s order.
+    const models = await modelsOrderOf(request)
+    if (models) return HttpResponse.json(models)
     const found = await orderOf(request)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),

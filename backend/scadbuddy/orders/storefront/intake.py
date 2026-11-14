@@ -46,8 +46,10 @@ from scadbuddy.intake_worker.wire import (
 )
 from scadbuddy.orders.storefront.listings import needs_s3, problem
 from scadbuddy.orders.storefront.staged_files import poke, staged_backend
+from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, staging_key
+from scadbuddy.storefront.wire import SOURCE_ID
 from scadbuddy.workflows.commands import execution_gone
 
 if TYPE_CHECKING:
@@ -70,6 +72,44 @@ def preview_key(png: bytes) -> str:
     """The content store's key of a checked file's preview: the SHA-256 of the preview's
     own bytes, as `_store_preview` read them."""
     return f"customer-preview-{hashlib.sha256(png).hexdigest()}"
+
+
+async def read_preview(state: AppState, key: str | None) -> bytes | None:
+    """A checked file's stored preview (`preview_key`) as opaque bytes, at most
+    `MAX_PREVIEW_BYTES`, for a route that serves it with `storefront/wire.py`
+    `PREVIEW_HEADERS` (#6133 PR 4, spec 2026-11-13 §7 "Serving the preview"). This process
+    never decodes it. None when there is no key, no content store, or no stored blob, and
+    for a blob past the cap, which `_store_preview` never stores."""
+    content = state.store.content
+    if key is None or content is None:
+        return None
+    stat = await content.stat(key)
+    if stat is None or stat.ref.size > MAX_PREVIEW_BYTES:
+        return None
+    return await content.read(stat.ref)
+
+
+async def draft_preview(state: AppState, visitor_id: str, source_id: str) -> bytes | None:
+    """The stored preview of ``source_id`` when it is a line of the visitor's own cart (a
+    storefront order not yet submitted); None for any other source, a submitted order's
+    included (its reader reads it on the order page, `order_page.preview`)."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return None
+
+    def key() -> str | None:
+        visitor = VisitorStore(state.projection.pool).find(visitor_id)
+        if visitor is None:
+            return None
+        with state.projection.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT s.preview_key FROM order_item_sources s JOIN orders o ON o.id = s.order_id"
+                " WHERE s.id = %s AND o.storefront_visitor_id = %s AND o.source = 'storefront'"
+                " AND o.submitted_at IS NULL",
+                (source_id, visitor.id),
+            ).fetchone()
+        return None if row is None else row["preview_key"]
+
+    return await read_preview(state, await asyncio.to_thread(key))
 
 
 class Checker(Protocol):

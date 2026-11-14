@@ -158,11 +158,13 @@ export function listingMaterials(listing: Listing): string[] {
   return [...new Set(customerFilaments(listing.colours).map((filament) => filament.material))]
 }
 
-/** The colour an unpicked parameter starts at: the listing's default once it has one (#6144), else its first choice. */
+/**
+ * The colour an unpicked parameter starts at: `default`, what an unpicked render takes
+ * (the listing's default, else the template's, `inputs.py` `effective_default`, #6144).
+ * None when the page may not show it (its filament is gone).
+ */
 export function startColour(param: PublicParam): string | undefined {
-  const start = (param as { default?: unknown }).default
-  if (typeof start === 'string') return start
-  return param.kind === 'choice' ? param.choices.find((c): c is string => typeof c === 'string') : undefined
+  return typeof param.default === 'string' ? param.default : undefined
 }
 
 /**

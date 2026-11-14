@@ -24,23 +24,41 @@ it writes the row and releases once the row is gone (``agent/src/workspace/store
 
 All natural writes. The holder kind is always ``ai_session_file`` and the key a
 workspace blob's, so the agent's credential holds or releases nothing else.
+
+The agent's reads of the backend's tables (#5299 D7), each the one question it asked over
+SQL before, read only:
+
+- area ``events``: ``GET …/events/head``, the event log's last ``seq`` and the database
+  clock, and ``GET …/events``, the logged events after a ``seq``, newest first, for the
+  agent's LISTEN gap replay (``agent/src/events/pgListener.ts``);
+- area ``flows`` (`flows/agent_reads.py`): ``GET …/flow-runs/{id}/starter`` (who started a
+  run, under the row's share lock), ``GET …/flow-decisions`` (whether a call's approval
+  holds), ``GET …/flow-grants/in-force``, ``GET …/flow-runs/{id}/queue``,
+  ``GET …/flow-runs/{id}/steps``, ``GET …/flow-runs/waiting`` (the open runs' parked
+  calls), ``GET …/flow-runs/parent-hop-approvals`` (the calls waiting at a run's starter
+  session) and ``POST …/flow-runs/parent-hop/waiting`` (which of those calls still wait
+  there; a POST for its list of ids).
+
+A request id or a grant id is a query parameter, never a path segment: it is free text.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import Query, Response, status
+from fastapi import Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.api.internal_workspace import WORKSPACE_BLOB_KEY_PATTERN
 from scadbuddy.api.orders import _run, check_path
+from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
+from scadbuddy.flows import agent_reads
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.lifecycle import UsdRate
 from scadbuddy.orders.models import Actor, CostEntry
@@ -176,3 +194,324 @@ async def list_workspace_blob_refs(
     )
     holds = [WorkspaceHold.model_construct(key=key, holder_id=holder) for holder, key in rows]
     return WorkspaceHolds(holds=holds, next=holds[-1] if len(holds) == limit else None)
+
+
+# -- the agent's reads of the backend's tables (#5299 D7) ---------------------------------
+
+#: The most events one gap read returns: the agent asks for its replay limit plus one.
+EVENTS_PAGE_MAX = 5001
+#: Postgres's largest ``bigint``, the event log's ``seq``.
+SEQ_MAX = 2**63 - 1
+#: A run id (a uuid4 today), an execution id, a grant id.
+ID_MAX = 200
+#: A request id (``flow:<run>:<execution>:<call>``).
+REQUEST_ID_MAX = 1024
+#: An input hash (the approvals' HMAC, hex).
+INPUT_HASH_MAX = 256
+#: The most request ids one ``parent-hop/waiting`` asks about.
+STILL_WAITING_MAX = 500
+#: The most runs one page of ``parent-hop-approvals`` lists.
+PARENT_HOP_PAGE_MAX = 200
+
+RunId = Annotated[str, Path(min_length=1, max_length=ID_MAX)]
+
+
+class _Answer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EventLogHead(_Answer):
+    #: The last ``seq`` of the log, 0 when it is empty; a string, as a ``bigint`` is.
+    seq: str
+    #: The database clock when it was read.
+    at: datetime
+
+
+class LoggedEvent(_Answer):
+    seq: str
+    event_id: str
+    payload: dict[str, Any]
+    logged_at: datetime
+
+
+class EventLogGap(_Answer):
+    #: Newest first.
+    events: list[LoggedEvent]
+    #: The database clock when they were read.
+    read_at: datetime
+
+
+def _event_log_head(pool: agent_reads.Pool) -> EventLogHead:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT coalesce(max(seq), 0) AS seq, now() AS at FROM events"
+        ).fetchone()
+    assert row is not None
+    return EventLogHead(seq=str(row["seq"]), at=row["at"])
+
+
+def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGap:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT seq, event_id, payload, logged_at FROM events"
+            " WHERE seq > %s ORDER BY seq DESC LIMIT %s",
+            (after, limit),
+        ).fetchall()
+        clock = conn.execute("SELECT now() AS at").fetchone()
+    assert clock is not None
+    events = [
+        LoggedEvent(
+            seq=str(r["seq"]),
+            event_id=r["event_id"],
+            payload=r["payload"],
+            logged_at=r["logged_at"],
+        )
+        for r in rows
+    ]
+    return EventLogGap(events=events, read_at=clock["at"])
+
+
+@router.get("/events/head", name="crud_agent_event_log_head")
+async def event_log_head(state: StateDep) -> EventLogHead:
+    return await asyncio.to_thread(_event_log_head, state.settings_store.pool)
+
+
+@router.get("/events", name="crud_agent_event_log_gap")
+async def event_log_gap(
+    state: StateDep,
+    after: Annotated[int, Query(ge=0, le=SEQ_MAX)],
+    limit: Annotated[int, Query(ge=1, le=EVENTS_PAGE_MAX)] = 1001,
+) -> EventLogGap:
+    return await asyncio.to_thread(_event_log_gap, state.settings_store.pool, after, limit)
+
+
+class StartedBy(_Answer):
+    """``workflow_runs.started_by`` (`core/authorship.py`), each field only as a string."""
+
+    kind: str | None
+    principal: str | None
+    session: str | None
+
+
+class RunStarter(_Answer):
+    #: Running or waiting, and the execution is not one a Reset replaced.
+    open: bool
+    #: The execution is neither the row's nor one a Reset replaced.
+    unrecorded: bool
+    started_by: StartedBy
+
+
+class RunStarterAnswer(_Answer):
+    #: None for no such run.
+    run: RunStarter | None
+
+
+@router.get("/flow-runs/{run_id}/starter", name="crud_agent_flow_run_starter")
+async def flow_run_starter(
+    run_id: RunId,
+    state: StateDep,
+    execution: Annotated[str, Query(max_length=ID_MAX)],
+) -> RunStarterAnswer:
+    found = await asyncio.to_thread(
+        agent_reads.run_starter, state.settings_store.pool, run_id, execution
+    )
+    return RunStarterAnswer(run=None if found is None else RunStarter.model_validate(found))
+
+
+class DecisionChecks(_Answer):
+    approved: bool
+    approved_unresolved: bool
+    by_person: bool
+    lapsed: bool
+
+
+@router.get("/flow-decisions", name="crud_agent_flow_decision_checks")
+async def flow_decision_checks(
+    state: StateDep,
+    request_id: Annotated[str, Query(min_length=1, max_length=REQUEST_ID_MAX)],
+    input_hash: Annotated[str, Query(min_length=1, max_length=INPUT_HASH_MAX)],
+) -> DecisionChecks:
+    checks = await asyncio.to_thread(
+        agent_reads.decision_checks, state.settings_store.pool, request_id, input_hash
+    )
+    return DecisionChecks.model_validate(checks)
+
+
+class GrantInForce(_Answer):
+    in_force: bool
+
+
+@router.get("/flow-grants/in-force", name="crud_agent_flow_grant_in_force")
+async def flow_grant_in_force(
+    state: StateDep, grant_id: Annotated[str, Query(max_length=ID_MAX)]
+) -> GrantInForce:
+    held = await asyncio.to_thread(agent_reads.grant_in_force, state.settings_store.pool, grant_id)
+    return GrantInForce(in_force=held)
+
+
+class HopOut(_Answer):
+    """One step of a parked call's way up (`workflows/flow_models.py` `HopRecord`)."""
+
+    hop: str | None
+    action: str | None
+    actor: str | None
+    at: str | None
+    reason: str | None
+
+
+class WaitingCall(_Answer):
+    """A run's parked call (`FlowWaiting`), its times as the projection wrote them."""
+
+    call_id: str
+    kind: Literal["approval", "answer"]
+    fn: str
+    prompt: str | None
+    since: str | None
+    hop: Literal["parent", "person"] | None
+    hop_until: str | None
+    reason: str | None
+    proposed: bool
+    hops: list[HopOut]
+
+
+class RunStep(_Answer):
+    """A run's step (`FlowStep`), the fields the agent reads."""
+
+    seq: int
+    fn: str
+    call_id: str
+    status: str
+    session_id: str | None
+
+
+class RequestedGrant(_Answer):
+    id: str
+    created_at: datetime
+
+
+class QueueRun(_Answer):
+    id: str
+    name: str
+    status: str
+    workflow_run_id: str
+    #: The session that started the run, when one did.
+    starter_session: str | None
+    waiting_on: list[WaitingCall]
+    steps: list[RunStep]
+    #: Its grant while it is requested.
+    requested_grant: RequestedGrant | None
+
+
+class QueueRunAnswer(_Answer):
+    #: None for no such run.
+    run: QueueRun | None
+
+
+@router.get("/flow-runs/{run_id}/queue", name="crud_agent_flow_run_queue")
+async def flow_run_queue(run_id: RunId, state: StateDep) -> QueueRunAnswer:
+    found = await asyncio.to_thread(agent_reads.run_queue, state.settings_store.pool, run_id)
+    return QueueRunAnswer(run=None if found is None else QueueRun.model_validate(found))
+
+
+class RunSteps(_Answer):
+    #: Empty for no such run.
+    steps: list[RunStep]
+
+
+@router.get("/flow-runs/{run_id}/steps", name="crud_agent_flow_run_steps")
+async def flow_run_steps(run_id: RunId, state: StateDep) -> RunSteps:
+    steps = await asyncio.to_thread(agent_reads.run_steps, state.settings_store.pool, run_id)
+    return RunSteps.model_validate({"steps": steps})
+
+
+class WaitingRun(_Answer):
+    id: str
+    name: str
+    status: str
+    workflow_run_id: str
+    starter_session: str | None
+    waiting_on: list[WaitingCall]
+    steps: list[RunStep]
+    updated_at: datetime
+
+
+class WaitingRuns(_Answer):
+    #: The most recently moved first, `agent_reads.WAITING_RUNS_MAX` at most.
+    runs: list[WaitingRun]
+
+
+@router.get("/flow-runs/waiting", name="crud_agent_flow_runs_waiting")
+async def flow_runs_waiting(state: StateDep) -> WaitingRuns:
+    runs = await asyncio.to_thread(agent_reads.waiting_runs, state.settings_store.pool)
+    return WaitingRuns.model_validate({"runs": runs})
+
+
+class ParentHopRun(_Answer):
+    id: str
+    workflow_run_id: str
+    #: ``started_by``'s session and principal, each only as a string.
+    session: str | None
+    principal: str | None
+    #: Its parked approvals at hop ``parent`` whose hop is live.
+    calls: list[WaitingCall]
+    steps: list[RunStep]
+
+
+class ParentHopCursor(_Answer):
+    after_updated_at: datetime
+    after_id: str
+
+
+class ParentHopRuns(_Answer):
+    runs: list[ParentHopRun]
+    #: Where the next page starts, for a full page; None on the last.
+    next: ParentHopCursor | None
+
+
+@router.get("/flow-runs/parent-hop-approvals", name="crud_agent_flow_parent_hop_approvals")
+async def flow_parent_hop_approvals(
+    state: StateDep,
+    after_updated_at: Annotated[datetime | None, Query()] = None,
+    after_id: Annotated[str | None, Query(max_length=ID_MAX)] = None,
+    limit: Annotated[int, Query(ge=1, le=PARENT_HOP_PAGE_MAX)] = PARENT_HOP_PAGE_MAX,
+) -> ParentHopRuns:
+    if (after_updated_at is None) != (after_id is None):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "after_updated_at and after_id come together"
+        )
+    after = None if after_updated_at is None or after_id is None else (after_updated_at, after_id)
+    rows = await asyncio.to_thread(
+        agent_reads.parent_hop_approvals, state.settings_store.pool, after, limit
+    )
+    runs = [
+        ParentHopRun.model_validate({k: v for k, v in row.items() if k != "updated_at"})
+        for row in rows
+    ]
+    last = rows[-1] if len(rows) == limit else None
+    cursor = (
+        None
+        if last is None
+        else ParentHopCursor(after_updated_at=last["updated_at"], after_id=last["id"])
+    )
+    return ParentHopRuns(runs=runs, next=cursor)
+
+
+class StillWaitingAsk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_ids: list[Annotated[str, Field(max_length=REQUEST_ID_MAX)]] = Field(
+        max_length=STILL_WAITING_MAX
+    )
+
+
+class StillWaiting(_Answer):
+    #: The ids asked about that still wait at hop ``parent``, in the order asked.
+    waiting: list[str]
+
+
+@router.post("/flow-runs/parent-hop/waiting", name="crud_agent_flow_parent_hop_waiting")
+async def flow_parent_hop_waiting(body: StillWaitingAsk, state: StateDep) -> StillWaiting:
+    waiting = await asyncio.to_thread(
+        agent_reads.still_at_parent_hop, state.settings_store.pool, body.request_ids
+    )
+    return StillWaiting(waiting=waiting)

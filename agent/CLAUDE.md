@@ -6,10 +6,13 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
-`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
-holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
+`ai_*` tables, and run SQL on two backend tables in the gate's transaction (`flow_grants`,
+`flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
+the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
+`AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
+decisions and grants) go through CRUD routes (#5299 D7, below), over SQL only while the API
+does not list their areas yet. The workspace files' `blob_refs` holds go through CRUD routes
+(#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -33,7 +36,18 @@ is tried again at the next call and logged once as "waiting for the backend". Wi
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
 holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
-"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
+"Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
+D7): area `events` (the LISTEN gap replay's head and gap, `src/events/eventLogReads.ts`, used
+by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a grant in force,
+a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
+wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
+`flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
+`PgApprovalRecords`). `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from
+the start with back-off (1 s doubling to 30 s) until both are listed; until then each read
+stays on SQL (`SqlFlowRunReads`, the listener's own connection), the rolling deploy's
+fallback for an API pod older than the routes. A route's answer counts only with
+`X-ScadBuddy-Crud: 1`; any other failure takes the read's existing error path (a lookup
+failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -309,7 +323,8 @@ opens every one and seals it again byte for byte).
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
-    in `data`; on any other backend a write that cannot be sealed and stored is refused
+    in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
+    names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
     `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).

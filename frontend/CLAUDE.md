@@ -99,6 +99,21 @@ same way, `vite.config.ts`).
   them. The session is
   the edge's HttpOnly cookie; the page never sees it. Mocks
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
+  A customer's own models (#6133 PR 4, spec 2026-11-13 §4, §10.5): `components/ModelForm.tsx`
+  at `/print-my-model` (linked from the listings' "Have something else in mind?"). It asks
+  the edge for presigned slots, PUTs each file straight to the bucket with XHR
+  (`api/client.ts` `putFile`, for the progress bar), tries a failed PUT again on the same
+  URL until it expires, then adds the request (Turnstile `model`). `components/PurchaseLinks.tsx`
+  is the "things to buy" list it shares with `RequestForm` (the multipart part
+  `purchase_links`). `components/ModelSources.tsx`: `CartSources` (the draft page reads the
+  cart again while a file is `checking`, `poll.ts` timing) and `OrderSources` (the order
+  page reads each preview by a POST of the reader, `orderPreview`, into a `blob:` URL, so no
+  URL holds the token). A customer's link is always text, never an anchor. Mocks
+  `src/mocks/features/storefrontModels.ts` (the bucket on the page's own origin,
+  `/mock-bucket/staging`, because `vite preview` sends `page-csp.txt`, which names no
+  bucket; the order `/o#models`). One route has one feature module
+  (`mocks/features.test.ts`), so `storefrontPublic.ts`'s `GET /draft` and order view call
+  its `advanceChecks` and `modelsOrderOf`. e2e `e2e/storefront-models.spec.ts`.
 
 - "Sell on storefront" (#6131, design 2026-11-13): Generate's menu (`/storefront?sell=job:<id>`)
   and a History row (`?sell=output:<id>`) open the listing editor with the listing filled in,

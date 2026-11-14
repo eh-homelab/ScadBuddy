@@ -1,7 +1,9 @@
 import { render, screen, within } from '@testing-library/react'
+import { useState } from 'react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { CHARM, KEYCHAIN, TAG } from '../../mocks/features/storefrontPublic'
+import type { ParamValue } from '../api/client'
 import { ListingView } from './ListingView'
 
 describe('ListingView', () => {
@@ -15,9 +17,9 @@ describe('ListingView', () => {
     expect(onChange).toHaveBeenLastCalledWith('size', 5)
     // #6152: a colour is a picker of filaments; a pick sets the value and names the filament.
     await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
-    await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue PLA' }))
-    expect(onChange).toHaveBeenLastCalledWith('base_colour', '#1B6CA8')
-    expect(onPick).toHaveBeenLastCalledWith('base_colour', 'f-blue')
+    await userEvent.click(screen.getByRole('radio', { name: 'Signal orange PLA' }))
+    expect(onChange).toHaveBeenLastCalledWith('base_colour', '#E8532F')
+    expect(onPick).toHaveBeenLastCalledWith('base_colour', 'f-orange')
   })
 
   it('shows one Material control for a one-material listing, and its colours only (#6152)', async () => {
@@ -80,5 +82,44 @@ describe('ListingView', () => {
     render(<ListingView listing={hostile} values={{}} onChange={() => undefined} />)
     expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
     expect(document.querySelector('img[src="x"], b')).toBeNull()
+  })
+
+  it('shows the shop’s default as picked until the visitor picks (#6144)', async () => {
+    render(<ListingView listing={KEYCHAIN} values={{}} onChange={vi.fn()} />)
+    // #6152: the colour row names the shop's colour; its grid shows it picked.
+    expect(screen.getByRole('button', { name: /Base colour/ })).toHaveAccessibleName('Base colour Ocean blue')
+    await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
+    expect(screen.getByRole('radio', { name: 'Ocean blue PLA' })).toHaveAttribute('data-state', 'on')
+    expect(screen.getByRole('radio', { name: 'Signal orange PLA' })).toHaveAttribute('data-state', 'off')
+    expect(screen.getByLabelText('Length (mm)')).toHaveAttribute('placeholder', '60')
+  })
+
+  it('sends no change when the visitor taps the shop’s default, so it never says “Tap it again” (#6144)', async () => {
+    const onChange = vi.fn()
+    function Stateful() {
+      const [values, setValues] = useState<Record<string, ParamValue>>({})
+      return (
+        <ListingView
+          listing={KEYCHAIN}
+          values={values}
+          onChange={(name, value) => {
+            onChange(name, value)
+            setValues(({ [name]: _old, ...rest }) => (value === undefined ? rest : { ...rest, [name]: value }))
+          }}
+        />
+      )
+    }
+    render(<Stateful />)
+    const row = () => screen.getByRole('button', { name: /Base colour/ })
+    const hint = () => document.getElementById(row().closest('[aria-describedby]')!.getAttribute('aria-describedby')!)
+    expect(hint()).toHaveTextContent("The shop's choice, unless you pick one.")
+    await userEvent.click(row())
+    await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue PLA' }))
+    expect(onChange.mock.calls.every(([, value]) => value === undefined)).toBe(true)
+    expect(row()).toHaveAccessibleName('Base colour Ocean blue')
+    await userEvent.click(row())
+    expect(screen.getByRole('radio', { name: 'Ocean blue PLA' })).toHaveAttribute('data-state', 'on')
+    expect(hint()).toHaveTextContent("The shop's choice, unless you pick one.")
+    expect(screen.queryByText(/Tap it again/)).toBeNull()
   })
 })

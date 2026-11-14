@@ -141,7 +141,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     the public site with what a visitor's render needs (the schema, the source
     snapshot, the media). 409 ``storefront_needs_s3`` unless the store is S3; 422 names
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
-    ``listing_fixed_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
+    ``listing_media_unknown``,
     ``listing_reference``, ``listing_pipeline_unsupported``); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""

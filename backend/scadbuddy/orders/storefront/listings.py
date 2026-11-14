@@ -50,7 +50,13 @@ from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, 
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
-from scadbuddy.orders.storefront.inputs import customer_filaments
+from scadbuddy.orders.storefront.inputs import (
+    InputReason,
+    customer_filaments,
+    effective_default,
+    same_value,
+    value_reason,
+)
 from scadbuddy.orders.storefront.wire import (
     SUPPORT_PARAM,
     ChoiceBound,
@@ -644,6 +650,38 @@ def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> Non
         )
 
 
+#: Why a default is outside its bounds, as the shop reads it (`value_reason`, #6144).
+_WHY: dict[InputReason, str] = {
+    "unknown": "the template has no such parameter",
+    "locked": "the parameter is locked",
+    "range": "it is outside the minimum and maximum",
+    "step": "it is not on the step",
+    "choice": "it is not one of the choices",
+    "length": "it is longer than the maximum length",
+    "colour": "no listing filament has that colour",
+}
+
+
+def _check_default(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
+    """The value an unpicked render of ``parameter`` takes (`effective_default`) as one
+    the listing allows, or 422: ``listing_colour_unknown`` for a colour no listing
+    filament has, else ``listing_default_invalid`` (#6144). A render would refuse it."""
+    name = parameter.name
+    value = effective_default(parameter, bound)
+    if value is None:
+        return
+    if parameter.type == "color":
+        _check_colour(name, value, colours)
+    reason = value_reason(parameter, bound, value, {c.casefold() for c in colours})
+    if reason is not None:
+        whose = "the listing's" if bound.default is not None else "the template's"
+        raise _unprocessable(
+            "listing_default_invalid",
+            f"{name!r} starts at {whose} default {value!r}, outside its bounds: {_WHY[reason]}",
+            name,
+        )
+
+
 def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
     """``bound`` as a subset of what the schema lets ``parameter`` take, or 422."""
     name = parameter.name
@@ -710,11 +748,11 @@ def checked_fixed(
     never in ``schema`` (`render/schema.py` `build_schema` leaves it out), so it is
     neither checked nor fixed here: a render takes it from the source.
 
-    Support stays the shop's (#6152): a parameter whose name or shown label sets support
-    (`SUPPORT_PARAM`) is never offered (422 ``listing_support_offered``), a customer's
-    colour choice is never a support filament's (``supports``, by id), and a support
-    colour the shop locked, or left at its default, is not checked against the listing's
-    colours."""
+    Support stays the shop's (#6152): a parameter whose name, caption, group or shown
+    label sets support (`SUPPORT_PARAM`, `_sets_support`) is never offered (422
+    ``listing_support_offered``), a customer's colour choice is never a support
+    filament's (``supports``, by id), and a support colour the shop locked, or left at
+    its default, is not checked against the listing's colours."""
     for filament_id in body.colours:
         if filament_id not in colours:
             raise _unprocessable(
@@ -738,6 +776,7 @@ def checked_fixed(
     pickable = [colours[f] for f in body.colours if f not in supports]
     for name, bound in body.params.items():
         _check_bound(by_name[name], bound, pickable)
+        _check_default(by_name[name], bound, pickable)
     for name, value in body.fixed.items():
         if name in body.params:
             raise _unprocessable(
@@ -858,10 +897,10 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
-    ``listing_colour_unknown``, ``listing_media_unknown``, ``listing_reference`` or
-    ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
-    back; 409 ``listing_changed`` when it
-    was edited while it was being published; 409 ``listing_publishing`` while another
+    ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
+    the price book does not back; 409 ``listing_changed`` when it was edited while it was
+    being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
@@ -941,7 +980,11 @@ def _public_param(
     name: str, bound: ParamBound, by_name: Mapping[str, Parameter], colours: Collection[str]
 ) -> PublicParam:
     """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
-    listing filaments the price book still has, casefolded)."""
+    listing filaments the price book still has and a customer may pick, never a support
+    material, `customer_filaments`, #6152; casefolded), and its ``default`` only
+    when it is one of them. ``default`` is what a render takes while the customer picks
+    none (`effective_default`); a choice's outside its choices, or a number's outside its
+    range or off its step, is not shown (#6144)."""
     parameter = by_name.get(name)
     shown = {
         "label": shown_label(name, bound.label, parameter.caption if parameter else None),
@@ -949,13 +992,30 @@ def _public_param(
         "colour": parameter is not None and parameter.type == "color",
     }
     fields = {**bound.model_dump(), **shown}
-    if isinstance(bound, TextBound) and parameter is not None:
-        initial = parameter.initial
-        fields["placeholder"] = initial if isinstance(initial, str) and initial.strip() else None
+    # What an unpicked render takes (#6144): the page preselects it.
+    start = effective_default(parameter, bound) if parameter is not None else bound.default
+    fields["default"] = start
+    if isinstance(bound, TextBound):
+        fields["placeholder"] = start if isinstance(start, str) and start.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
         fields["choices"] = [
             c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
         ]
+        if not (isinstance(start, str) and start.casefold() in colours):
+            fields["default"] = None
+    elif isinstance(bound, ChoiceBound) and not any(
+        same_value(choice, start) for choice in bound.choices if start is not None
+    ):
+        # Publish refuses such a default; a listing saved before #6144 may still hold one.
+        fields["default"] = None
+    elif (
+        isinstance(bound, NumberBound)
+        and parameter is not None
+        and start is not None
+        and value_reason(parameter, bound, start, colours) is not None
+    ):
+        # The same for a number outside its range or off its step (#6144).
+        fields["default"] = None
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)
     if isinstance(bound, ChoiceBound):
@@ -1047,7 +1107,8 @@ async def public_listing(
 ) -> PublicListing:
     """The published ``listing`` as the public site shows it: each bound with its
     schema label and group, the listing's filaments the price book still has
-    (``filaments``, by id), and each media file as a presigned GET of
+    (``filaments``, by id) and a customer may pick (never a support material,
+    `customer_filaments`, #6152), and each media file as a presigned GET of
     `PUBLIC_MEDIA_TTL`. A media file the index lost is left out, and logged."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}

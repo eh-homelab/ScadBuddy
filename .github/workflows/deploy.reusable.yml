@@ -117,6 +117,11 @@ env:
   # The storefront's Deployment (#5284, `python -m scadbuddy.storefront`): same
   # image, same pin. Optional until that file lands in clusters.
   MANIFEST_STOREFRONT: applications/scadbuddy/scadbuddy-storefront.yaml
+  # The intake worker's Deployment (#6133, `python -m scadbuddy.intake_worker`):
+  # same image, same pin. Its sandbox's Deployment has no image line of its own
+  # (clusters copies the worker's with a kustomize replacement). Optional until
+  # that file lands in clusters (clusters#3573).
+  MANIFEST_INTAKE: applications/scadbuddy/scadbuddy-intake.yaml
   # The slicer worker (#3821, #3822), same run, same tags, its own Deployment.
   # Optional until that file lands in clusters (clusters#2549), and the only
   # image whose absence for a build is not an error: see the pin step.
@@ -802,6 +807,13 @@ jobs:
             manifests+=("$MANIFEST_STOREFRONT")
           else
             echo "::notice::${MANIFEST_STOREFRONT} is not in clusters yet; not pinning it"
+          fi
+          # Conditional until clusters adds the intake worker's file (#6133).
+          if [ -f "$MANIFEST_INTAKE" ]; then
+            pin "$MANIFEST_INTAKE" scadbuddy-intake
+            manifests+=("$MANIFEST_INTAKE")
+          else
+            echo "::notice::${MANIFEST_INTAKE} is not in clusters yet; not pinning it"
           fi
 
           # Nothing left behind (#5037): every ScadBuddy image any scanned file

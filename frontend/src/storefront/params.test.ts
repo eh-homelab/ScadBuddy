@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { oneFilamentPerColour, settleMaterial, startMaterial, filamentFinish, filamentLabels, keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
+import { oneFilamentPerColour, settleMaterial, startColour, startMaterial,filamentFinish, filamentLabels, keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -131,15 +131,20 @@ describe('filament names and finishes (#6152)', () => {
 })
 
 describe('one material (#6152)', () => {
+  it('starts a colour at what an unpicked render takes, never at its first choice (#6144)', () => {
+    const body = CHARM.params.body_colour!
+    expect(startColour({ ...body, default: '#E8532F' })).toBe('#E8532F')
+    // No default the page may show (its filament is gone): no start colour.
+    expect(startColour({ ...body, default: null })).toBeUndefined()
+  })
+
   it('starts at the material that has every start colour', () => {
     expect(startMaterial(CHARM)).toBe('PLA')
-    const tealFirst = {
+    const tealStart = {
       ...CHARM,
-      params: Object.fromEntries(
-        Object.entries(CHARM.params).map(([name, param]) => [name, param.kind === 'choice' ? { ...param, choices: ['#1C8C8C', ...param.choices] } : param]),
-      ),
+      params: Object.fromEntries(Object.entries(CHARM.params).map(([name, param]) => [name, { ...param, default: '#1C8C8C' }])),
     }
-    expect(startMaterial(tealFirst)).toBe('PETG')
+    expect(startMaterial(tealStart)).toBe('PETG')
   })
 
   it('sets every colour, set or not, to a filament of the material', () => {

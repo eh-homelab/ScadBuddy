@@ -179,6 +179,16 @@ describe('StorefrontPage (#5282, #6157)', () => {
     expect(screen.getByTestId('storefront-range')).toHaveTextContent('1–3 of 3')
   })
 
+  it('is refused a page out of bounds by the mock, as by the API (422)', async () => {
+    await expect(api.storefrontListings(new URLSearchParams({ offset: '1000001' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '201' }))).rejects.toMatchObject({ status: 422 })
+    // Pydantic refuses these as integers; it takes spaces and a sign.
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '1e2' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ offset: '0x10' }))).rejects.toMatchObject({ status: 422 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: ' +5 ' }))).resolves.toMatchObject({ limit: 5 })
+    await expect(api.storefrontListings(new URLSearchParams({ limit: '200', offset: '1000000' }))).resolves.toMatchObject({ items: [] })
+  })
+
   it('puts the cursor in the search on "/"', async () => {
     await seed('Owl cup')
     const { user } = renderStorefront()

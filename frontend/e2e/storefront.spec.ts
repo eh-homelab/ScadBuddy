@@ -65,7 +65,7 @@ test.describe('the public storefront', () => {
   })
 
   test('fits every page in a phone width', async ({ page }) => {
-    for (const path of ['/store/', '/store/l/l1', '/store/l/l2', '/store/request', '/store/draft', '/store/o#tok']) {
+    for (const path of ['/store/', '/store/l/l1', '/store/l/l2', '/store/request', '/store/draft', '/store/o#tok', '/store/print-my-model', '/store/o#models']) {
       await page.goto(path)
       await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
       const width = Number(await page.evaluate('document.documentElement.scrollWidth'))

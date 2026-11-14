@@ -183,15 +183,15 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.getByTestId('listing-design')).toBeInTheDocument()
   })
 
-  it('keeps an offered colour’s own label when it is saved (#6137)', () => {
+  it('keeps an offered colour’s own label and default when it is saved (#6137, #6144)', () => {
     const draft: ListingDraft = {
       ...emptyDraft('name-keychain', COMMIT),
       title: 'Tag',
       colours: [RED.id],
-      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters' } },
+      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters', default: '#FF0000' } },
     }
     expect(listingInput(draft, keychainSchema, [RED]).params).toEqual({
-      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters' },
+      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters', default: '#FF0000' },
     })
   })
 
@@ -218,6 +218,55 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(shown.body_color!.label).toBe('Letter colour')
     expect(shown.size!.label).toBe('How big')
     expect(shown.line).toMatchObject({ label: 'Name', placeholder: 'Your name' })
+  })
+
+  it('previews the default an unpicked render takes, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        { ...keychainSchema.parameters!.find((p) => p.name === 'body_color')!, initial: '#ff0000' },
+        { name: 'shape', type: 'select', initial: 'round', caption: 'Shape', group: 'Plate', options: [{ name: 'round', value: 'round' }, { name: 'square', value: 'square' }] } as Param,
+        { name: 'size', type: 'slider', initial: 40, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param,
+        { name: 'line', type: 'string', initial: 'Your name', caption: 'Name', group: 'Text', max_length: 20 } as Param,
+      ],
+    }
+    const draft: ListingDraft = {
+      ...emptyDraft('name-keychain', COMMIT),
+      title: 'Tag',
+      colours: [RED.id],
+      params: {
+        body_color: { kind: 'choice', choices: [] },
+        shape: { kind: 'choice', choices: ['round', 'square'] },
+        size: { kind: 'number', min: 20, max: 80, step: 1 },
+        line: { kind: 'text', max_length: 20, default: 'Ada' },
+      },
+    }
+    const shown = previewListing(draft, schema, [RED], [], () => '').params
+    expect(shown.body_color!.default).toBe('#ff0000')
+    expect(shown.shape!.default).toBe('round')
+    expect(shown.size!.default).toBe(40)
+    expect(shown.line).toMatchObject({ default: 'Ada', placeholder: 'Ada' })
+    const elsewhere = previewListing({ ...draft, colours: [] }, schema, [RED], [], () => '').params
+    expect(elsewhere.body_color!.default).toBeNull()
+    // A choice default outside its choices (a listing saved before #6144) shows none.
+    const stale = previewListing({ ...draft, params: { ...draft.params, shape: { kind: 'choice', choices: ['square'] } } }, schema, [RED], [], () => '').params
+    expect(stale.shape!.default).toBeNull()
+  })
+
+  it('previews no number default outside its range or off its step, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [{ name: 'size', type: 'slider', initial: 50, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param],
+    }
+    const draft = (size: ListingDraft['params'][string]): ListingDraft => ({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', params: { size } })
+    const shown = (size: ListingDraft['params'][string]) => previewListing(draft(size), schema, [], [], () => '').params.size!.default
+    // A listing saved before #6144: the template's 50 on a 60 to 80 field.
+    expect(shown({ kind: 'number', min: 60, max: 80, step: 1 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 85 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30.5 })).toBeNull()
+    // With no step of its own, the schema's applies, as the backend checks it.
+    expect(shown({ kind: 'number', min: 20, max: 80, default: 30.5 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30 })).toBe(30)
   })
 
   it('locks a numeric select at one of its options, as a number', async () => {

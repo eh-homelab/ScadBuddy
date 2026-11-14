@@ -66,8 +66,8 @@ export function offeredFilaments(colourValues: readonly unknown[], filaments: re
  * (at most the schema's `max_length`, capped at 200) and every colour are the customer's
  * (the owner: "why can't I specify colors"), the rest, support settings always (`isSupport`), is locked at its value. A colour is
  * locked only by the caller, or when the price book has no filament to offer
- * (`offeredFilaments`). A customer who picks no colour gets the template's default
- * (`orders/storefront/inputs.py` `listing_values`), which must be a listing filament's:
+ * (`offeredFilaments`). A customer who picks no colour gets the listing's default, else the
+ * template's (`orders/storefront/inputs.py` `listing_values`, #6144), which must be a listing filament's:
  * `colourProblems` names one that is not.
  */
 export function defaultsFor(schema: Schema, filaments: readonly Filament[], values: Readonly<Record<string, Value>> = {}): ListingDefaults {
@@ -102,7 +102,11 @@ export function defaultsFor(schema: Schema, filaments: readonly Filament[], valu
   return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
 }
 
-/** A colour publish would refuse: a locked colour, or an offered one's default, that no listing filament has. */
+/**
+ * A colour publish would refuse: a locked colour, or an offered one's default, that no listing
+ * filament has. An offered colour's default is the listing's `default`, else the template's, as
+ * publish checks it (`effective_default`, #6144).
+ */
 export interface ColourProblem {
   name: string
   label: string
@@ -113,7 +117,8 @@ export function colourProblems(listing: ListingDefaults, schema: Schema, filamen
   const listed = filaments.filter((filament) => listing.colours.includes(filament.id))
   return shownParams(schema).flatMap((param) => {
     if (param.type !== 'color') return []
-    const value = listing.params[param.name] ? param.initial : (listing.fixed[param.name] ?? param.initial)
+    const offered = listing.params[param.name]
+    const value = offered ? (offered.default ?? param.initial) : (listing.fixed[param.name] ?? param.initial)
     if (typeof value !== 'string' || filamentOf(value, listed)) return []
     return [{ name: param.name, label: param.caption || param.name, colour: value }]
   })

@@ -905,8 +905,15 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
   the media type, sha256, size and `source`, and the bytes: a sealed blob of the
   backend's store (`blob_key`, `key_sealed`, #4789, `20261027T0114Z_session_files_blobs.sql`)
-  or, where the backend keeps no blobs, `data`. `SessionFiles` in
+  or, where the backend keeps no blobs, a row of `ai_session_file_bytes` it names
+  (`bytes_sha256`), or `data` for a row an older agent wrote. `SessionFiles` in
   [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
+- `ai_session_file_bytes`: a workspace file's bytes where the backend keeps no blobs
+  (`store_backend` local; #4212, `20261114T1609Z_session_file_bytes.sql`), one row per
+  sha256 (a CHECK makes the key the hash of the bytes), named by every `ai_session_files`
+  row with those bytes, a fork's included, through a foreign key. A row no file names is
+  deleted after a write or delete, on the sweep, and when its session is forgotten.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
@@ -915,11 +922,18 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
 
-The agent also reads the backend's flow tables, which the backend migrates. Its
-database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call
-reads its run `FOR SHARE` (`PgFlowRuns.startedBy`, `agent/src/temporal/flowRuns.ts`), and
-Postgres requires `UPDATE` for that lock. A role narrowed to `SELECT` fails every flow
-tool call, as a lookup error the activity retries until it gives up.
+The agent also reads the backend's flow tables, which the backend migrates. It asks the
+backend over its CRUD routes (`/api/v1/internal/crud/agent/`, area `flows`,
+`agent/src/flows/backendReads.ts`, #5299) once `GET …/crud/agent/areas` lists the area,
+and reads them over SQL only until then, while an API pod older than the routes answers.
+Over SQL its database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every
+flow tool call reads its run `FOR SHARE` (`PgFlowRuns.startedBy`,
+`agent/src/temporal/flowRuns.ts`), and Postgres requires `UPDATE` for that lock. A role
+narrowed to `SELECT` fails every flow tool call, as a lookup error the activity retries
+until it gives up. Through the route the backend takes that lock itself. The gate's grant
+check (`agent/src/gate/store.ts` `grantInput`) still reads `flow_grants` and
+`flow_grant_uses` over SQL, under the grant row's share lock, so the role keeps `UPDATE`
+on `flow_grants`.
 
 ## 8. Per-query limits
 
@@ -1675,9 +1689,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   wrapped under the session's data key (`ai_payload_keys`), or under the KEK for a
   principal's file (re-wrapped at a rotation). A fork's row names the parent's blob with
   the key wrapped again for the child: no bytes are copied. At start the agent moves rows
-  still in `data` to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+  still in Postgres to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
 - Only on `store_backend` local (no content store; the routes answer 404) do the bytes
-  stay in `data`, in plaintext, as before. On any other backend a write is refused
+  stay in Postgres, in plaintext: one row of `ai_session_file_bytes` per sha256, which
+  every file with those bytes names (`bytes_sha256`). A fork's row names the parent's, so
+  here too no bytes are copied (#4212), save a row an older agent kept inline whose bytes do not match its sha256, which is copied inline; a row no file names any more is deleted after a
+  write or delete, on the sweep, and when its session is forgotten. On any other backend a write is refused
   (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
   when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs
   (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes answer 503 saying which), when the
@@ -1697,7 +1714,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
 - Rows of both kinds read back only between blob backends (s3 and bambuddy, through
   `/store/migrate`). After a switch back to `store_backend` local the backend's URL route
   answers 404, so every file already in the blob store cannot be read (`unavailable`)
-  until the backend is on a blob store again; new writes go to `data`. `workspace_files`
+  until the backend is on a blob store again; new writes go to `ai_session_file_bytes`. `workspace_files`
   then carries `unreadable_files`, the count of such rows (also when writes are refused).
   Do not switch a deployment that holds workspace blobs back to local.
 - The holder: each row's blob is held `(ai_session_file, <workspace>/<path>)` in the

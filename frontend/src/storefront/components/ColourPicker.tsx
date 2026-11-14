@@ -110,7 +110,9 @@ export function ColourPicker({ label, filaments, value, fallback, onChange }: Co
             aria-label={label}
             loop={false}
             onKeyDownCapture={move}
-            value={picked?.id ?? ''}
+            // The shop's choice shows as picked until the customer picks (#6144); tapping
+            // it empties the group, which keeps the shop's choice.
+            value={shown?.id ?? ''}
             onValueChange={(id) => {
               onChange(id === '' ? undefined : offered.find((filament) => filament.id === id))
               setOpen(false)

@@ -1216,6 +1216,54 @@ def test_add_to_order_fills_the_slots_from_the_picks(
     assert stored.colours
 
 
+def test_add_to_order_fills_an_unpicked_slot_from_the_first_filament_of_its_colour(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """A colour left at the shop's choice still names a filament on the order line: the
+    first listing filament of the slot's colour, so the shop need not pick it (#6152)."""
+    listing, cheap, _ = two_reds
+    body = render_body(listing, {"width": 40, "colour": "#FF0000"})
+    rendered = crud.post("/renders", json=body, key=uuid.uuid4().hex)
+    assert rendered.status_code == 202, rendered.text
+    job = wait_done(crud, TOKEN_A, rendered.json()["id"])
+    assert job["status"] == "done", job
+    added = crud.post("/draft/items", json=body, key=uuid.uuid4().hex)
+    assert added.status_code == 200, added.text
+    orders: OrdersComponent = _state(crud.api).components.get(ORDERS)
+    [stored] = orders.store.items(added.json()["id"])
+    assert stored.colours
+    assert [(c.slot, c.filament_id) for c in stored.colours] == [
+        (slot, cheap) for slot, colour in enumerate(job["colors"]) if colour.upper() == "#FF0000"
+    ]
+
+
+def test_add_to_order_refuses_a_slot_of_another_material_on_a_one_material_listing(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    dense_red: str,
+) -> None:
+    """The picks are PLA, but the add names a PETG slot filament: the order would mix
+    materials, so the add is 422 ``listing_mixed_material`` (#6152)."""
+    petg_red = _filament(client, "#FF0000", "30", "PETG")
+    body = listing_body(
+        template,
+        dense_red,
+        params={"colour": {"kind": "choice", "choices": ["#FF0000"]}},
+        colours=[dense_red, petg_red],
+        one_material=True,
+    )
+    listing = publish(client, create(client, body)["id"])
+    picked = {**render_body(listing, {"colour": "#FF0000"}), "picks": {"colour": dense_red}}
+    rendered = crud.post("/renders", json=picked, key=uuid.uuid4().hex)
+    assert rendered.status_code == 202, rendered.text
+    assert wait_done(crud, TOKEN_A, rendered.json()["id"])["status"] == "done"
+    mixed = {**picked, "colours": {"0": petg_red}}
+    added = crud.post("/draft/items", json=mixed, key=uuid.uuid4().hex)
+    assert added.status_code == 422, added.text
+    assert added.json()["type"] == STOREFRONT_PROBLEMS + "listing_mixed_material"
+
+
 def test_add_to_order_with_picks_waits_for_the_render(
     crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
 ) -> None:

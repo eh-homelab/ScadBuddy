@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { defaultsFor, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
+import { colourProblems, defaultsFor, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -205,5 +205,16 @@ describe('storefront tools (#6131)', () => {
     const result = firstText(await tool('storefront_listing_publish').execute({ listing_id: LISTING }, ctx()))
     expect(called).toBe(true)
     expect(result).toEqual({ listing_id: LISTING, title: 'Navy owl', published: true, published_at: '2026-11-13T11:00:00Z' })
+  })
+})
+
+describe('colourProblems (#6144)', () => {
+  it('checks an offered colour’s listing default, not the template’s', () => {
+    // The owl's body starts at white in the template; no white filament is on this listing,
+    // but the listing starts the body at navy, which is.
+    const listing = { params: { body: { kind: 'choice' as const, choices: [], default: '#1F2A44' }, eyes: { kind: 'choice' as const, choices: [] } }, fixed: {}, colours: ['f-navy', 'f-black'] }
+    expect(colourProblems(listing, owl.schema, owl.filaments)).toEqual([])
+    const unlisted = { ...listing, params: { ...listing.params, body: { kind: 'choice' as const, choices: [], default: '#FF0000' } } }
+    expect(colourProblems(unlisted, owl.schema, owl.filaments)).toEqual([{ name: 'body', label: 'Body', colour: '#FF0000' }])
   })
 })

@@ -121,6 +121,19 @@ file expired; upload it again" **(call)**: an abandoned cart must not keep up to
 the bucket for the 30-day cart TTL. A new claim or other activity does not move that
 deadline.
 
+As built (PR 4): the form is the storefront's `/print-my-model`
+(`frontend/src/storefront/components/ModelForm.tsx`). It asks `POST /api/store/v1/uploads`
+for the slots, PUTs each file to its slot with a progress bar of its own, tries a failed
+PUT again on the same URL until the URL expires, then sends `POST
+/api/store/v1/draft/models` (Turnstile action `model`). Its colour list is the price book's
+filaments with no price, from a new edge route, `GET /api/store/v1/models/colours`. The
+cart (`components/ModelSources.tsx` `CartSources`) reads itself again while a file is
+`checking` (1 s, doubling to 5 s, for at most 10 minutes). A refused or expired file
+shows "A file cannot be printed. Remove “Your models”, then add the files again without
+it." The customer removes the whole item: there is no route that removes one source.
+`submit` refuses such a cart with 409 `model_file_refused`, whose `sources` names the
+refused files (`orders/storefront/submit.py` `_no_refused_file`).
+
 ### 4.4 After submit
 
 Submit (storefront spec §5.5) signals each staged file's watcher (§6.5): from then on the
@@ -507,7 +520,9 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   check's mount namespace, as it covers the spool and `/proc` (`confine.py --cover`,
   `sandbox.covered_dirs`; the start's probe covers it too, so a refusal stops the start).
   The file is not unlinked, because a Secret volume is read-only. Test:
-  `test_a_confined_child_cannot_read_the_rpc_token`.
+  `test_a_confined_child_cannot_read_the_rpc_token`. The launcher also covers the
+  container's `/dev/shm` (a tmpfs of mode 1777) the same way, so a parse can neither fill
+  pod memory there nor leave a file for a later check (`test_a_confined_child_cannot_write_a_covered_folder`).
 - The request deadline. A request's head and its whole body must arrive within
   `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
   is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the
@@ -639,6 +654,20 @@ are. A presigned `GET` can fix the first two (`ResponseContentType`,
 response headers ([GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)).
 So the back office and the edge stream it through a route of their own that sets all
 three, never a presigned URL.
+
+As built (PR 4): the headers are `storefront/wire.py` `PREVIEW_HEADERS`, with
+`Cache-Control: private, no-cache` (a shared cache must not keep a customer's picture, and
+the browser asks again on each use: the URL stays the same when "Check again" stores a new
+preview).
+The CRUD service reads the bytes (`intake.read_preview`: at most `MAX_PREVIEW_BYTES`) and
+the edge streams them (`routes.py` `_relayed_preview`). The cart's line is `GET
+/api/store/v1/draft/sources/{id}/preview` (the visitor's cookie, only for a cart not yet
+submitted, `intake.draft_preview`). The order page's is `POST
+/api/store/v1/order/sources/{id}/preview` with the reader in the body (`order_page.preview`),
+so no URL carries the order link's token; the page makes a `blob:` URL of the answer. Any
+failure, a source id that is not one included, is a 404 with no body, and the edge checks
+the id's shape before it calls the CRUD service. The back office's route is `GET
+/api/v1/orders/{id}/sources/{source}/preview` (`api/order_sources.py`), with the same headers.
 
 ### 7.1 The zip-bomb limits, measured
 
@@ -849,6 +878,27 @@ A `deposit` request is not gated (the owner's decision): submit opens it before 
 price a purchase. The customer's view sets `can_accept` false while the gate is on and shows
 "Purchase pending: the shop is pricing <n> thing(s) to buy for you."
 
+**As built (PR 3, #6133).** `record_purchase(order_id, source_id, body, by)` also takes
+the order id, for its lock. Record, update and decline work only while the order is
+`draft` or `quoted` (`purchase_locked` after, so record too); a second record of a
+recorded link with the same amount and cost kind, and a second decline, write nothing; a
+second record that differs is 409 `purchase_recorded` (a change is the update); a record of a `not_needed` link is
+409 `purchase_not_pending`, an update of a link not recorded 409
+`purchase_not_recorded`. A cost entry with a `purchase:` source cannot be added by hand
+either (`purchase_cost_linked`). The routes are `GET /orders/{id}/purchases`, `POST
+…/purchases/{source}/record`, `PATCH …/purchases/{source}` and `POST
+…/purchases/{source}/decline`, with no `Idempotency-Key`: the cost entry's `purchase:`
+source and the link's state make a repeat safe. The agent also gets `order_purchases`
+(read), which lists the links' ids that the three write tools take. A design request
+sends its things to buy as the multipart part `purchase_links` (a JSON list of `{url,
+note}`). The fee settings are env-seeded and live, as `orders_tax_percent` is. The
+`purchase_pending` problem names the pending links in `sources` and their items in
+`items`. The gate counts only links of items not cancelled: a cancelled item's link
+stops nothing until the item is reopened. A change to a fee setting reprices an order's
+`handling` row only at that order's next record, update or decline. Sources:
+`backend/scadbuddy/orders/lifecycle.py`, `api/order_purchases.py`,
+`storefront/uploads.py`; `backend/tests/orders/test_purchases.py`.
+
 ### 10.5 What the customer sees
 
 `CustomerOrderView` and `ORDER_VIEW_FIELDS` gain:
@@ -862,6 +912,12 @@ price a purchase. The customer's view sets `can_accept` false while the gate is 
 
 No cost entry, margin, staff name or import reason reaches the customer. A source declined
 with `ENDED` shows its reason and an "Upload again" link to the storefront's model form.
+
+As built (PR 4): `order_page.py` `CUSTOMER_REASONS` holds only `ENDED`, and
+`test_order_page.py` pins the new fields. A recorded purchase's `amount_minor` is the
+`purchase` charge's amount, never the cost entry's. The page says "Purchase pending: the
+shop is pricing <n> thing(s) to buy for you." while a purchase link is `pending`, and lists
+the charges by label and amount.
 
 ## 11. The back office
 
@@ -878,6 +934,23 @@ Agent tools: `order_get` shows the sources; `import_staged_model`,
 `order_item_source_resolve`, `order_item_source_manual`, `order_item_source_decline` (write);
 `order_purchase_record`, `order_purchase_update`, `order_purchase_decline` (write). No tool
 fetches a link.
+
+As built (PR 4): the routes are `api/order_sources.py` under
+`/api/v1/orders/{id}/sources/{source}`: `GET …/preview`, `GET …/download` (a presigned
+`GET` of the frozen copy, 5 minutes, `attachment` with a safe file name; 409
+`source_not_staged` once it is gone), `POST …/check` (a `failed` check back to `checking`,
+then `intake.start_checks`; a check still `checking` is not refused but started again, a
+running one joined, so a stalled check can be pushed), `POST …/decline` (`{reason}`, default "Declined by the
+shop."; the watcher is told `declined`) and `POST …/retry-import` (the watcher is told
+`retry`). They take no `Idempotency-Key`: a repeat finds the source in its new state and
+writes nothing. `GET /orders/{id}` adds `sources` (`OrderItemSource`) and `model_requests`
+(the colours asked for). A source is `import_stuck` while it is not imported an hour after
+the order was sent (`models.py` `IMPORT_STUCK`, the reason shown). `GET /orders` takes
+`own_model`, `purchase_pending` and `import_stuck`. "Open link" opens a link only after the
+page checks its scheme again (`https:` or `http:`), with `target="_blank"`, `rel="noopener
+noreferrer"` and `referrerpolicy="no-referrer"`. The agent's tools in this PR are
+`order_item_source_decline`, `order_item_source_check_again` and
+`order_item_source_retry_import` (write); the import tools wait for phase 5.
 
 ## 12. eh-homelab/clusters
 

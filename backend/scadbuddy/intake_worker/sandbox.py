@@ -155,11 +155,20 @@ def check_sandbox_environment(environ: Mapping[str, str]) -> None:
         raise IntakeRefusal(reasons)
 
 
+#: The container's shared-memory tmpfs, writable by every user (mode 1777).
+SHARED_MEMORY: Final = "/dev/shm"
+
+
 def covered_dirs(token_file: str) -> tuple[str, ...]:
-    """The directories the launcher covers with an empty tmpfs for each check besides the
-    spool: the RPC token's own, so the parser cannot read the token by its path. The token
-    sits on a read-only Secret volume, so it cannot be unlinked instead."""
-    return (os.path.dirname(os.path.abspath(token_file)),)
+    """The directories the launcher covers with an empty tmpfs (mode 0) for each check
+    besides the spool and ``/proc``: the RPC token's own, so the parser cannot read the
+    token by its path (it sits on a read-only Secret volume, so it cannot be unlinked
+    instead), and `SHARED_MEMORY` when it exists, so a parse can neither fill pod memory
+    there nor leave a file for a later check."""
+    covers = [os.path.dirname(os.path.abspath(token_file))]
+    if os.path.isdir(SHARED_MEMORY):
+        covers.append(SHARED_MEMORY)
+    return tuple(covers)
 
 
 def probe_isolation(spool: Path, covers: tuple[str, ...] = ()) -> str | None:
@@ -631,15 +640,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     forbid_dumping()
     spool = Path(os.environ.get("SCADBUDDY_INTAKE_WORK_DIR", "/tmp"))
     covers = covered_dirs(token_file)
-    # A tmpfs hides a directory only from above: a cover that holds the spool, or lies in
-    # it, would leave the token reachable by ``..`` from the box.
+    # A tmpfs hides a directory only from above. A cover that holds the spool would hide
+    # the spool from the check; one that lies in it would leave the covered directory (the
+    # RPC token's, or /dev/shm) reachable by ``..`` from the box.
     real_spool = os.path.realpath(spool)
     for cover in covers:
         real_cover = os.path.realpath(cover)
         if os.path.commonpath([real_spool, real_cover]) in (real_spool, real_cover):
             logger.error(
-                "the intake sandbox refuses to start: the RPC token's directory %s and the"
-                " spool %s must not hold one another",
+                "the intake sandbox refuses to start: a covered directory %s and the spool"
+                " %s must not hold one another",
                 cover,
                 spool,
             )

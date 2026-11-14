@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import os
 import time
 from collections.abc import Callable, Iterator
@@ -42,6 +43,8 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.storefront import uploads
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    MAX_LINK_CHARS,
+    MAX_PURCHASE_LINKS,
     SESSION_HEADER,
     STOREFRONT_PROBLEMS,
     VISITOR_HEADER,
@@ -727,6 +730,115 @@ def test_a_request_may_come_with_no_files(asks: CrudCaller) -> None:
     r = ask(asks, key="r5")
     assert r.status_code == 200, r.text
     assert r.json()["items"][0]["attachments"] == []
+
+
+def _with_links(text: str, links: str) -> bytes:
+    return (
+        b'--b\r\nContent-Disposition: form-data; name="text"\r\n\r\n'
+        + text.encode()
+        + b'\r\n--b\r\nContent-Disposition: form-data; name="purchase_links"\r\n\r\n'
+        + links.encode()
+        + b"\r\n--b--\r\n"
+    )
+
+
+def ask_with_links(crud: CrudCaller, links: str, *, key: str) -> Any:
+    headers = crud._headers(TOKEN_A, key)
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    return crud.api.post(
+        CRUD + "/draft/requests", content=_with_links("A hook", links), headers=headers
+    )
+
+
+def test_a_design_request_takes_things_to_buy(asks: CrudCaller) -> None:
+    """#6133 (spec 2026-11-13 §10.1): each purchase link is a `pending` source of the
+    request item, a `manual` link kept as text, with the customer's note."""
+    links = json.dumps(
+        [
+            {"url": "https://Parts.Example.com/magnets?x=1", "note": "  6x3 magnets  "},
+            {"url": "https://makerworld.com/en/models/123"},
+        ]
+    )
+    r = ask_with_links(asks, links, key="r30")
+    assert r.status_code == 200, r.text
+    [item] = r.json()["items"]
+    assert [
+        (s["kind"], s["purpose"], s["url"], s["note"], s["status"]) for s in item["sources"]
+    ] == [
+        ("link", "purchase", "https://parts.example.com/magnets?x=1", "6x3 magnets", "pending"),
+        ("link", "purchase", "https://makerworld.com/en/models/123", "", "pending"),
+    ]
+    assert item["own_model"] is False
+
+
+def test_a_design_request_takes_at_most_five_things_to_buy(asks: CrudCaller) -> None:
+    links = json.dumps([{"url": f"https://parts.example.com/{n}"} for n in range(6)])
+    r = ask_with_links(asks, links, key="r31")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_links"
+    assert asks.get("/draft").json() is None
+
+
+@pytest.mark.parametrize(
+    ("links", "problem"),
+    [
+        (json.dumps([{"url": "ftp://parts.example.com/x"}]), "link_invalid"),
+        (json.dumps([{"url": "https://user:pw@parts.example.com/x"}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/x", "note": "n" * 501}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/" + "x" * 2048}]), "link_invalid"),
+        (json.dumps([{"url": "https://parts.example.com/x", "price": 1}]), "link_invalid"),
+        ('[{"url": "https://parts.example.com/\\ud83d"}]', "link_invalid"),
+        ('[{"url": "https://parts.example.com/x", "note": "\\udc00"}]', "link_invalid"),
+        ("not json", "draft_body_invalid"),
+        (json.dumps({"url": "https://parts.example.com/x"}), "draft_body_invalid"),
+    ],
+)
+def test_a_bad_thing_to_buy_is_refused(asks: CrudCaller, links: str, problem: str) -> None:
+    r = ask_with_links(asks, links, key=f"r32-{sha256(links.encode()).hexdigest()[:8]}")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{problem}"
+    assert asks.get("/draft").json() is None
+
+
+def test_the_edges_multipart_carries_the_things_to_buy(asks: CrudCaller) -> None:
+    from scadbuddy.storefront.uploads import PurchaseLinkAsk
+
+    links = [PurchaseLinkAsk(url="https://parts.example.com/x", note="hooks")]
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [], links)])
+
+    headers = asks._headers(TOKEN_A, "r33")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    [source] = r.json()["items"][0]["sources"]
+    assert (source["url"], source["note"]) == ("https://parts.example.com/x", "hooks")
+
+
+def test_five_longest_links_of_astral_characters_reach_the_crud_side(asks: CrudCaller) -> None:
+    """Review of #6200: the edge's part is UTF-8, so what the edge took fits the cap here
+    too (a ``json.dumps`` with ``ensure_ascii`` made each such character 12 bytes)."""
+    from scadbuddy.storefront.uploads import PurchaseLinkAsk
+
+    host = "https://parts.example.com/"
+    links = [
+        PurchaseLinkAsk(
+            url=host + "\U0001f600" * (MAX_LINK_CHARS - len(host)), note="\U0001f9f2" * 500
+        )
+        for _ in range(MAX_PURCHASE_LINKS)
+    ]
+
+    async def body() -> bytes:
+        return b"".join([chunk async for chunk in edge_multipart("b", "A hook", [], links)])
+
+    headers = asks._headers(TOKEN_A, "r34")
+    headers["Content-Type"] = "multipart/form-data; boundary=b"
+    r = asks.api.post(CRUD + "/draft/requests", content=asyncio.run(body()), headers=headers)
+    assert r.status_code == 200, r.text
+    sources = r.json()["items"][0]["sources"]
+    assert len(sources) == MAX_PURCHASE_LINKS
+    assert all(s["note"] == "\U0001f9f2" * 500 for s in sources)
 
 
 def test_requests_are_off_by_default(requests_off: CrudCaller) -> None:

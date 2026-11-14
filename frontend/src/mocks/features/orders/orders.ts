@@ -32,6 +32,7 @@ import { orderRow } from './costs'
 import { productOf } from './report'
 import { fillFromRule, returnParts, useParts } from './parts'
 import { archiveCopies, pastPrint } from './pastPrints'
+import { compareCharges } from '../../../components/orders/chargeOrder'
 import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges, retax, typedCharges } from './money'
 
 /**
@@ -41,7 +42,7 @@ import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'own_model', 'purchase_pending', 'import_stuck', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 /** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
 export const SCAN_PAGE_SIZE = 100
@@ -57,7 +58,8 @@ const FULFILLABLE = new Set(['approved', 'failed'])
 /** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
 const PRINTING = new Set(['queued', 'printing', 'printed'])
 
-const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax'])
+// #6133: `purchase` and `handling` pass the check and are dropped from a replace (`typedCharges`).
+const CHARGE_KINDS = new Set(['shipping', 'discount', 'fee', 'tax', 'purchase', 'handling'])
 // #5281: a charge sent back as read carries its `id`, `auto` and `shipping_option_id`.
 const CHARGE_KEYS = new Set(['kind', 'label', 'amount_minor', 'id', 'auto', 'shipping_option_id'])
 
@@ -82,7 +84,7 @@ function chargeProblem(c: unknown): string | null {
   const row = c as Record<string, unknown>
   const extra = Object.keys(row).find((k) => !CHARGE_KEYS.has(k))
   if (extra) return `${extra}: Extra inputs are not permitted`
-  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee' or 'tax'"
+  if (typeof row.kind !== 'string' || !CHARGE_KINDS.has(row.kind)) return "kind: Input should be 'shipping', 'discount', 'fee', 'tax', 'purchase' or 'handling'"
   const points = typeof row.label === 'string' ? [...row.label].length : 0
   if (points < 1 || points > 200) return 'label: String should have 1 to 200 characters'
   if (laxInt(row.amount_minor) === null) return 'amount_minor: Input should be a valid integer'
@@ -251,7 +253,7 @@ export function rederive(order: Order) {
 function detail(order: Order): OrderDetail {
   const items = itemsOf(order.id).map((i) => ({ ...i, quotes: quotesOf(i.id), fulfilments: attemptsOf(i.id).map((f) => ({ ...f, stale: staleAttempt(f) })), revisions: revisionsOf(i.id) }))
   // `store.charges`: the typed rows by position, then the auto tax row (#5281).
-  const charges = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position)
+  const charges = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges)
   const payments = state.payments.filter((p) => p.order_id === order.id)
   // `orders/totals.py` `order_totals`: an accepted quote's total, else the newest quote's unit
   // price times the quantity now; an item with no quote is in no sum.
@@ -284,6 +286,9 @@ function detail(order: Order): OrderDetail {
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
+    // #6133: a storefront customer's files and links, and the colours each request asked for.
+    sources: state.sources.filter((s) => s.order_id === order.id).sort((a, b) => (a.item_id === b.item_id ? a.position - b.position : a.item_id < b.item_id ? -1 : 1)),
+    model_requests: state.modelRequests.filter((m) => state.items.some((i) => i.id === m.item_id && i.order_id === order.id)),
     totals: {
       subtotal_minor: subtotal,
       pending_minor: pending,
@@ -937,12 +942,20 @@ export const handlers = [
     const source = sp.get('source')
     if (source !== null && source !== 'back_office' && source !== 'storefront') return fieldProblem(request, 'source', "Input should be 'back_office' or 'storefront'")
     const unsubmitted = sp.get('unsubmitted') === 'true'
+    // #6133: `OrderStore.orders`' own-model, purchase-pending and import-stuck filters.
+    const ownModel = sp.get('own_model') === 'true'
+    const purchasePending = sp.get('purchase_pending') === 'true'
+    const importStuck = sp.get('import_stuck') === 'true'
+    const sourcesOf = (orderId: string) => state.sources.filter((s) => s.order_id === orderId)
     const product = sp.get('product')
     if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
       .filter((o) => (o.source === 'storefront' && o.submitted_at == null) === unsubmitted)
       .filter((o) => !source || o.source === source)
+      .filter((o) => !ownModel || state.modelRequests.some((m) => state.items.some((i) => i.id === m.item_id && i.order_id === o.id)))
+      .filter((o) => !purchasePending || sourcesOf(o.id).some((s) => s.purpose === 'purchase' && s.status === 'pending'))
+      .filter((o) => !importStuck || sourcesOf(o.id).some((s) => s.import_stuck))
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
@@ -1093,7 +1106,7 @@ export const handlers = [
       const before = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => a.position - b.position).map(line)
       replaceCharges(order.id, typedCharges(order.id, parsed))
       retax(order.id)
-      const after = state.charges.filter((c) => c.order_id === order.id).sort((a, b) => Number(a.auto) - Number(b.auto) || a.position - b.position).map(line)
+      const after = state.charges.filter((c) => c.order_id === order.id).sort(compareCharges).map(line)
       event(order, 'charges.replaced_after_acceptance', { order_status: order.status, before, after })
       order.updated_at = now()
       return HttpResponse.json(order)

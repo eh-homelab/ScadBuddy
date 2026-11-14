@@ -335,13 +335,14 @@ async def checked_choice(
 ) -> tuple[Listing, ResolvedReference]:
     """The published listing ``body`` names and the reference of ``body``'s values and
     colours on it. With ``render_colours``, each slot ``body.colours`` lacks takes the
-    picked filament of the slot's colour in that render (#6152, `slots_from_picks`).
-    Refusals: 404 ``listing_not_found``, 409 ``listing_changed`` (the listing moved since
-    the page read it), 422 ``input_outside_listing`` (with ``name`` and ``reason``; a pick
-    is ``picks.<name>``), 422 ``listing_mixed_material`` (a ``one_material`` listing's
-    colours of more than one material), 422 ``pick_colour_clash`` (two picks of one colour
-    that name two filaments, with ``name``), 409 ``render_pending`` (with
-    ``render_colours``, picks but no done render of the visitor's to take the slots from)."""
+    picked filament of the slot's colour in that render, else the first customer filament
+    of that colour (#6152, `slots_from_picks`). Refusals: 404 ``listing_not_found``, 409
+    ``listing_changed`` (the listing moved since the page read it), 422
+    ``input_outside_listing`` (with ``name`` and ``reason``; a pick is ``picks.<name>``),
+    422 ``listing_mixed_material`` (a ``one_material`` listing's colours of more than one
+    material), 422 ``pick_colour_clash`` (two picks of one colour that name two
+    filaments, with ``name``), 409 ``render_pending`` (with ``render_colours``, picks but
+    no done render of the visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(
@@ -355,9 +356,9 @@ async def checked_choice(
         picked = checked_picks(listing, values, body.picks, filaments)
         check_one_material(listing, values, picked, filaments)
         resolved = listing_reference(listing, values, body.colours, filaments=filaments)
-        if render_colours is not None and picked:
+        if render_colours is not None:
             colours = await render_colours(resolved.reference.render_key)
-            if not colours:
+            if not colours and picked:
                 # The slots are known only from a done render; without them the order
                 # line would lose what the visitor picked (#6152).
                 raise problem(
@@ -365,8 +366,12 @@ async def checked_choice(
                     "render_pending",
                     "Your preview is still being made. Add it once it shows.",
                 )
-            chosen = slots_from_picks(body.colours, picked, colours)
-            resolved = listing_reference(listing, values, chosen, filaments=filaments)
+            if colours:
+                # A colour left at the shop's choice takes the first customer filament of
+                # its colour, so the shop need not pick its slot by hand (#6152).
+                offered = customer_filaments(listing, filaments)
+                chosen = slots_from_picks(body.colours, picked, colours, offered)
+                resolved = listing_reference(listing, values, chosen, filaments=filaments)
         # The final slot map counts too: a slot may name a filament no pick does.
         check_one_material(
             listing,

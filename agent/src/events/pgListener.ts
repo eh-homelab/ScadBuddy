@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import postgres, { type Sql } from 'postgres'
 import { type BusEvent, decodeEvent, type EventListener, type EventSource, Followers, PG_CHANNEL } from './bus.js'
+import type { EventLogReads, LoggedRow } from './eventLogReads.js'
 
 // LISTEN on `scadbuddy_events` (spec §7), on a connection of the agent's own.
 //
@@ -21,7 +22,9 @@ import { type BusEvent, decodeEvent, type EventListener, type EventSource, Follo
 // replays the rows after that place before carrying on, skipping ids it has
 // already delivered. If the gap is larger than `replayLimit`, or the log
 // cannot be read (pruned, not migrated yet, a different schema), followers are
-// told to resync instead: re-read what they follow.
+// told to resync instead: re-read what they follow. The log is read through the
+// backend's CRUD routes (eventLogReads.ts, #5299 D7) once the API lists area
+// `events`, and over SQL on this connection before; both read the database's clock.
 //
 // The place is advanced lazily: every `checkIntervalMs` the listener reads
 // max(seq) and adopts the value it read on the PREVIOUS check. An event that
@@ -65,9 +68,12 @@ export type PgListenerOptions = {
   /** Event ids remembered for de-duplication (default 5000). */
   seenMax?: number
   log?: (message: string) => void
+  /**
+   * The backend's CRUD reads of the log (eventLogReads.ts, #5299 D7) once the API lists area
+   * `events`, else undefined: until then the log is read over SQL on this connection.
+   */
+  eventLog?: () => EventLogReads | undefined
 }
-
-type Row = { seq: string; event_id: string; payload: unknown; logged_at: Date; read_at: Date }
 
 export class PgEventListener implements EventSource {
   readonly #sql: Sql
@@ -83,6 +89,7 @@ export class PgEventListener implements EventSource {
   readonly #replayLimit: number
   readonly #seenMax: number
   readonly #log: (message: string) => void
+  readonly #eventLog: () => EventLogReads | undefined
   #timer: NodeJS.Timeout | undefined
   #closed = false
   #listening = false
@@ -108,6 +115,7 @@ export class PgEventListener implements EventSource {
     this.#replayLimit = options.replayLimit ?? 1000
     this.#seenMax = options.seenMax ?? 5000
     this.#log = options.log ?? ((m) => console.error(m))
+    this.#eventLog = options.eventLog ?? (() => undefined)
     const connectionOptions = {
       max: 1,
       // Keep the one connection for as long as it lives: LISTEN is per session.
@@ -250,12 +258,25 @@ export class PgEventListener implements EventSource {
   /** max(seq) of the log and the database clock, or undefined when the log cannot be read. */
   async #maxSeq(): Promise<{ seq: bigint; at: Date } | undefined> {
     try {
+      const crud = this.#eventLog()
+      if (crud) return await crud.head()
       const [row] = await this.#sql<{ seq: string; at: Date }[]>`
         SELECT coalesce(max(seq), 0)::text AS seq, now() AS at FROM events`
       return { seq: BigInt(row?.seq ?? '0'), at: row?.at ?? new Date() }
     } catch {
       return undefined
     }
+  }
+
+  /** The log's rows after `from`, newest first, one more than the replay limit at most. */
+  async #gap(from: bigint): Promise<LoggedRow[]> {
+    const crud = this.#eventLog()
+    if (crud) return await crud.gap(from, this.#replayLimit + 1)
+    // ORDER BY names events.seq: a bare `seq` is the text output column, which sorts "9" above "10" (#893).
+    return await this.#sql<LoggedRow[]>`
+      SELECT seq::text AS seq, event_id, payload, logged_at, now() AS read_at FROM events
+      WHERE seq > ${from.toString()}::bigint
+      ORDER BY events.seq DESC LIMIT ${this.#replayLimit + 1}`
   }
 
   async #replayGap(): Promise<void> {
@@ -265,13 +286,9 @@ export class PgEventListener implements EventSource {
       this.#resync('the event log could not be read before the drop')
       return
     }
-    let rows: Row[]
+    let rows: LoggedRow[]
     try {
-      // ORDER BY names events.seq: a bare `seq` is the text output column, which sorts "9" above "10" (#893).
-      rows = await this.#sql<Row[]>`
-        SELECT seq::text AS seq, event_id, payload, logged_at, now() AS read_at FROM events
-        WHERE seq > ${from.toString()}::bigint
-        ORDER BY events.seq DESC LIMIT ${this.#replayLimit + 1}`
+      rows = await this.#gap(from)
     } catch (err) {
       this.#adopt(undefined)
       this.#resync(`the event log could not be read (${(err as Error).message})`)

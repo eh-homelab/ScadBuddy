@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
 import { AttachToOrderItem } from '../components/orders/AttachToOrderItem'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
@@ -198,7 +199,7 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
               </Button>
             )}
             {print.links.bambuddy_url && (
-              <Button variant="outline" onClick={() => openExternal(print.links.bambuddy_url as string)}>
+              <Button variant="outline" onClick={() => openExternal(bambuddyLink(print.links.bambuddy_url as string))}>
                 <ExternalLinkIcon aria-hidden="true" />
                 Open in Bambuddy
               </Button>
