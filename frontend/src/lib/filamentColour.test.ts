@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { spoolChip, spoolColour } from './filamentColour'
+import { spoolChip, spoolColour, spoolValue } from './filamentColour'
 
 describe('spoolChip (#3358)', () => {
   it('reads a colour, keeping whether it is translucent', () => {
@@ -21,5 +21,15 @@ describe('spoolChip (#3358)', () => {
     expect(spoolColour({ rgba: 'F5547CFF' })).toEqual({ hex: '#F5547C', translucent: false })
     expect(spoolColour({ rgba: '00000000' })).toBeNull()
     expect(spoolColour({ rgba: null })).toBeNull()
+  })
+})
+
+describe('spoolValue (owner, 2026-11-14)', () => {
+  it("keeps a translucent spool's alpha, so the part draws see-through", () => {
+    expect(spoolValue({ rgba: 'ffffff80' })).toBe('#FFFFFF80')
+    expect(spoolValue({ rgba: ' #F5547C80 ' })).toBe('#F5547C80')
+    expect(spoolValue({ rgba: 'F5547CFF' })).toBe('#F5547C')
+    expect(spoolValue({ rgba: 'F5547C' })).toBe('#F5547C')
+    expect(spoolValue({ rgba: '00000000' })).toBeNull()
   })
 })

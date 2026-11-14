@@ -30,6 +30,7 @@ from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
 from scadbuddy.render import split as split_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
+from scadbuddy.render.colours import MIN_PART_ALPHA
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.jobs import (
@@ -49,12 +50,14 @@ from scadbuddy.render.jobs import (
     Prepared,
     extruder_order,
     finish_piece_stage,
+    part_alphas,
     plate_thumbnails,
     prepare_source,
     render_main,
     render_solids_stage,
     solid_parts,
     unreadable_colour_warnings,
+    with_alphas,
 )
 from scadbuddy.render.objects3mf import ReadObject, read_objects
 from scadbuddy.render.read_budget import ReadBudget
@@ -235,6 +238,44 @@ def test_extruder_order_matches_the_rendered_values() -> None:
         (2, "#AABBCC"),
         (1, "#FF0000"),
     ]
+
+
+def test_a_colour_values_alpha_goes_to_its_parts() -> None:
+    """Owner, 2026-11-14: `#RRGGBBAA` keeps its alpha for the part, first parameter of a
+    colour wins, an opaque value or a CSS name keeps none, and a clear one is floored."""
+    schema = _colour_schema(
+        ("a", "#000000"), ("b", "#111111"), ("c", "#222222"), ("d", "red"), ("e", "#333333")
+    )
+    params: dict[str, ParamValue] = {
+        "a": "#1f6feb80",
+        "b": "#1F6FEBFF",
+        "c": "#abc8",
+        "e": "#FFFFFF00",
+    }
+    alphas = part_alphas(schema, params)
+    assert alphas == {"#1F6FEB": 0x80, "#AABBCC": 0x88, "#FFFFFF": MIN_PART_ALPHA}
+
+    parts = with_alphas([_part(1, "#1F6FEB"), _part(2, "#FF0000")], alphas)
+    assert [part.alpha for part in parts] == [0x80, 255]
+
+
+def test_a_layout_keeps_a_translucent_parts_alpha(tmp_path: Path) -> None:
+    mesh = trimesh.creation.box((1, 1, 1))
+    write_openscad_3mf(tmp_path / RAW_RENDER_NAME, [("Color 1", "#FFFFFF00", mesh)])
+    clear = ColourPart(1, "Color 1", "#FFFFFF", mesh, alpha=0x80)
+    layout = PlateLayout(
+        [single_plate([clear])],
+        ["#FFFFFF"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    layout.save(tmp_path / LAYOUT_NAME)
+
+    entry = json.loads((tmp_path / LAYOUT_NAME).read_text())["plates"][0]["parts"][0]
+    assert entry["alpha"] == 0x80
+    loaded = PlateLayout.load(tmp_path / LAYOUT_NAME)
+    assert [part.alpha for part in loaded.plates[0].parts] == [0x80]
 
 
 def test_a_malformed_colour_matches_no_part() -> None:

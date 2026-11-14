@@ -540,3 +540,88 @@ def test_a_colour_only_the_painting_uses_gets_a_breakdown_tile() -> None:
         [ColourPart(1, "Color 1", BLUE, box, Paint(codes, (PINK,)))]
     )
     assert breakdown.colours == [BLUE, PINK]
+
+
+# ── translucent parts (owner, 2026-11-14) ─────────────────────────────────────
+
+
+def _red_inside_clear(alpha: int) -> list[ColourPart]:
+    """A small red cube inside a large white box of ``alpha``: clear PETG around a core."""
+    return [
+        ColourPart(1, "core", "#FF0000", trimesh.creation.box(extents=(10, 10, 10))),
+        ColourPart(2, "shell", "#FFFFFF", trimesh.creation.box(extents=(40, 40, 30)), alpha=alpha),
+    ]
+
+
+def test_a_translucent_part_blends_over_the_part_behind_it() -> None:
+    parts = _red_inside_clear(128)
+    image = thumbnail._rasterise(
+        parts,
+        (0.0, 0.0, -1.0),
+        200,
+        shaded=False,
+        colours=[(255, 0, 0), (255, 255, 255)],
+        alphas=[part.alpha for part in parts],
+    )
+    a = 128 / 255
+    centre = image[100, 100]
+    # The shell's top face over the core, once: white at a over red.
+    assert centre[3] == 255
+    assert centre[0] == 255
+    assert abs(int(centre[1]) - round(255 * a)) <= 1
+    assert abs(int(centre[2]) - round(255 * a)) <= 1
+    # Over nothing, the shell is white and only as opaque as its alpha.
+    edge = image[100, 30]
+    assert tuple(edge[:3]) == (255, 255, 255)
+    assert abs(int(edge[3]) - round(255 * a)) <= 1
+
+
+def test_two_translucent_layers_blend_back_to_front() -> None:
+    """A blue pane over a green pane over nothing: blue over green, by their alphas."""
+    parts = [
+        ColourPart(1, "far", "#00FF00", trimesh.creation.box(extents=(20, 20, 1)), alpha=128),
+        ColourPart(
+            2,
+            "near",
+            "#0000FF",
+            trimesh.creation.box(extents=(20, 20, 1), transform=_translate(0, 0, 5)),
+            alpha=64,
+        ),
+    ]
+    image = thumbnail._rasterise(
+        parts,
+        (0.0, 0.0, -1.0),
+        100,
+        shaded=False,
+        colours=[(0, 255, 0), (0, 0, 255)],
+        alphas=[part.alpha for part in parts],
+    )
+    far, near = 128 / 255, 64 / 255
+    covered = 1 - (1 - far) * (1 - near)
+    pixel = image[50, 50]
+    assert abs(int(pixel[3]) - round(covered * 255)) <= 1
+    assert abs(int(pixel[1]) - round(255 * far * (1 - near) / covered)) <= 1
+    assert abs(int(pixel[2]) - round(255 * near / covered)) <= 1
+
+
+def test_the_covers_show_the_core_through_a_translucent_shell() -> None:
+    clear = read_png(render_plate_thumbnails(_red_inside_clear(128)).top)
+    solid = read_png(render_plate_thumbnails(_red_inside_clear(255)).top)
+    middle = PLATE_PNG_SIZE // 2
+    # Opaque, the shell hides the core; translucent, the core's red shows through it.
+    assert solid[middle, middle, 1] > 200
+    assert clear[middle, middle, 0] > 200
+    assert clear[middle, middle, 1] < solid[middle, middle, 1] - 60
+
+
+def test_the_pick_image_stays_opaque_under_a_translucent_part() -> None:
+    pick = read_png(render_plate_thumbnails(_red_inside_clear(128)).pick)
+    covered = pick[..., 3] > 0
+    assert covered.any()
+    assert (pick[covered, 3] == 255).all()
+
+
+def test_a_view_draws_a_translucent_part_see_through() -> None:
+    clear = read_png(render_view(_red_inside_clear(128), "top", 128))
+    solid = read_png(render_view(_red_inside_clear(255), "top", 128))
+    assert clear[64, 64, 1] < solid[64, 64, 1] - 60

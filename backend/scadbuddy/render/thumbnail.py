@@ -115,6 +115,7 @@ def _rasterise(
     shaded: bool,
     colours: Sequence[tuple[int, int, int]],
     look: _Look | None = None,
+    alphas: Sequence[int] | None = None,
 ) -> np.ndarray:
     """A size x size x 4 uint8 RGBA image of `parts`, transparent behind them.
 
@@ -122,6 +123,8 @@ def _rasterise(
     colour is which part", and perspective on a plate-sized object adds
     foreshortening without adding information. `look` frames it on another point
     than the bounding box's centre, closer in, or with another up for a vertical view.
+    `alphas` is each part's alpha byte: a part below 255 is blended over what is behind
+    it. Left out, every part is opaque.
     """
     right, up, ahead = _basis(forward) if look is None else _basis(forward, look.vertical_up)
 
@@ -146,7 +149,14 @@ def _rasterise(
     light = _unit(np.asarray(LIGHT_DIRECTION) @ np.array([right, up, -ahead]))
 
     canvas = _Canvas(size)
-    for part, rgb in zip(parts, colours, strict=True):
+    # Owner, 2026-11-14 — a translucent part (`ColourPart.alpha`) is drawn after every
+    # opaque one and blended over it (`_Canvas.blend`), as the browser's viewer draws it.
+    drawn = [
+        (part, rgb, 255 if alphas is None else alphas[index])
+        for index, (part, rgb) in enumerate(zip(parts, colours, strict=True))
+    ]
+    drawn.sort(key=lambda entry: entry[2] < 255)
+    for part, rgb, alpha in drawn:
         base = np.asarray(rgb, dtype=np.float64) / 255
         vertices = np.asarray(part.mesh.vertices, dtype=np.float64)
         faces = np.asarray(part.mesh.faces)
@@ -155,8 +165,15 @@ def _rasterise(
         # were the sum of every piece on the plate.
         for start in range(0, len(faces), CHUNK_TRIANGLES):
             corners = vertices[faces[start : start + CHUNK_TRIANGLES]]
+            normals = _normals(corners) if shaded or alpha < 255 else None
+            if alpha < 255:
+                # Only its faces toward the camera, as the viewer's single-sided
+                # material draws it: one layer of the part over what is behind it.
+                assert normals is not None
+                corners, normals = corners[normals @ ahead < 0], normals[normals @ ahead < 0]
             if shaded:
-                lit = AMBIENT + (1 - AMBIENT) * np.clip(_normals(corners) @ light, 0.0, 1.0)
+                assert normals is not None
+                lit = AMBIENT + (1 - AMBIENT) * np.clip(normals @ light, 0.0, 1.0)
             else:
                 lit = np.ones(len(corners))
             moved = corners - centre
@@ -168,7 +185,10 @@ def _rasterise(
                 ),
                 axis=-1,
             )
-            canvas.draw(screen, base * lit[:, None])
+            if alpha < 255:
+                canvas.blend(screen, base * lit[:, None], alpha / 255)
+            else:
+                canvas.draw(screen, base * lit[:, None])
     return canvas.image()
 
 
@@ -210,6 +230,8 @@ class _Canvas:
         self.size = size
         self.depth = np.full(size * size, np.inf)
         self.colour = np.zeros((size * size, 3), dtype=np.uint8)
+        #: Translucent fragments in front of the opaque ones: pixel, depth, colour, alpha.
+        self.layers: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
     def draw(self, triangles: np.ndarray, colours: np.ndarray) -> None:
         for pixels, depth, owner in _fragments(triangles, self.size):
@@ -225,11 +247,59 @@ class _Canvas:
             self.depth[pixels] = depth[nearer]
             self.colour[pixels] = np.rint(np.clip(colours[owner], 0, 1) * 255).astype(np.uint8)
 
+    def blend(self, triangles: np.ndarray, colours: np.ndarray, alpha: float) -> None:
+        """Keeps every fragment of a translucent part that is in front of the opaque
+        ones, all of which are drawn first; :meth:`image` blends them. Its memory is the
+        translucent parts' fragments, not one per pixel."""
+        for pixels, depth, owner in _fragments(triangles, self.size):
+            front = depth < self.depth[pixels]
+            self.layers.append(
+                (
+                    pixels[front],
+                    depth[front],
+                    np.clip(colours[owner[front]], 0, 1).astype(np.float32),
+                    np.full(int(front.sum()), alpha, dtype=np.float32),
+                )
+            )
+
     def image(self) -> np.ndarray:
         image = np.zeros((self.size * self.size, 4), dtype=np.uint8)
         image[:, :3] = self.colour
         image[np.isfinite(self.depth), 3] = 255
+        if self.layers:
+            self._composite(image)
         return image.reshape(self.size, self.size, 4)
+
+    def _composite(self, image: np.ndarray) -> None:
+        """The translucent fragments over the opaque image, back to front in each pixel
+        ("over"): a fragment's colour counts by its alpha and by what lets through every
+        fragment in front of it, the product of their (1 - alpha)."""
+        pixels = np.concatenate([layer[0] for layer in self.layers])
+        if len(pixels) == 0:
+            return
+        depth = np.concatenate([layer[1] for layer in self.layers])
+        colour = np.concatenate([layer[2] for layer in self.layers]).astype(np.float64)
+        alpha = np.concatenate([layer[3] for layer in self.layers]).astype(np.float64)
+        # By pixel, then nearest first.
+        order = np.lexsort((depth, pixels))
+        pixels, colour, alpha = pixels[order], colour[order], alpha[order]
+        starts = np.flatnonzero(np.r_[True, pixels[1:] != pixels[:-1]])
+        # What the fragments in front of each one let through: a cumulative product
+        # within its pixel, as sums of logs (each alpha is below 1).
+        logs = np.log1p(-alpha)
+        running = np.cumsum(logs)
+        before = np.repeat(running[starts] - logs[starts], np.diff(np.r_[starts, len(pixels)]))
+        in_front = np.exp(running - logs - before)
+        lit = np.add.reduceat(colour * (alpha * in_front)[:, None], starts, axis=0)
+        through = np.exp(np.add.reduceat(logs, starts))
+        targets = pixels[starts]
+        behind = image[targets, 3].astype(np.float64) / 255
+        premultiplied = (
+            lit + (image[targets, :3].astype(np.float64) / 255) * (behind * through)[:, None]
+        )
+        covered = 1 - (1 - behind) * through
+        image[targets, :3] = np.rint(np.clip(premultiplied / covered[:, None], 0, 1) * 255)
+        image[targets, 3] = np.rint(covered * 255)
 
 
 def _fragments(
@@ -362,13 +432,16 @@ def render_plate_thumbnails(parts: Sequence[ColourPart]) -> PlateThumbnails:
     if not parts:
         raise ValueError("a plate thumbnail needs at least one colour part")
     # Drawn in the colours they print, painting included (#3956); the pick map stays one
-    # colour per part, as it names the parts.
+    # colour per part, as it names the parts, and opaque: it is a lookup, not a picture.
     drawn = painted_pieces(parts)
     colours = _part_colours(drawn)
+    alphas = [part.alpha for part in drawn]
     supersampled = PLATE_PNG_SIZE * SUPERSAMPLE
     looking = tuple(-axis for axis in VIEW_POSITION)
-    lit = _rasterise(drawn, looking, supersampled, shaded=True, colours=colours)
-    top = _rasterise(drawn, (0.0, 0.0, -1.0), supersampled, shaded=True, colours=colours)
+    lit = _rasterise(drawn, looking, supersampled, shaded=True, colours=colours, alphas=alphas)
+    top = _rasterise(
+        drawn, (0.0, 0.0, -1.0), supersampled, shaded=True, colours=colours, alphas=alphas
+    )
     pick = _rasterise(
         parts, (0.0, 0.0, -1.0), PLATE_PNG_SIZE, shaded=False, colours=_pick_colours(len(parts))
     )
@@ -517,7 +590,13 @@ def render_view(
     if not MIN_VIEW_SIZE <= size <= MAX_VIEW_SIZE:
         raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_VIEW_SIZE}")
     image = _rasterise(
-        parts, forward, size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts), look=look
+        parts,
+        forward,
+        size * SUPERSAMPLE,
+        shaded=True,
+        colours=_part_colours(parts),
+        look=look,
+        alphas=[part.alpha for part in parts],
     )
     return encode_png(_downsample(image, size))
 

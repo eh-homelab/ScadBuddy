@@ -46,6 +46,40 @@ describe('a colour from a filament (#1026)', () => {
     expect(screen.queryByRole('listbox', { name: 'Filaments for Plate' })).toBeNull()
   })
 
+  it("takes a translucent spool's alpha, and an opaque spool's colour drops it (owner, 2026-11-14)", async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () =>
+        HttpResponse.json({
+          spools: [
+            { ...SPOOL_INVENTORY[0], id: 60, color_name: 'Clear Tint', rgba: 'FFFFFF80', remaining_g: 900 },
+            { ...SPOOL_INVENTORY[0], id: 61, color_name: 'White', rgba: 'FFFFFFFF', remaining_g: 800 },
+          ],
+          slots: [],
+        }),
+      ),
+    )
+    const first = setup('#1B6CA8')
+    await first.user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    expect(await screen.findByRole('option', { name: /Clear Tint/ })).toHaveTextContent('translucent')
+    await first.user.click(screen.getByRole('option', { name: /Clear Tint/ }))
+    expect(first.onChange).toHaveBeenCalledWith('#FFFFFF80')
+  })
+
+  it('sends the opaque colour over the same colour with an alpha', async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () =>
+        HttpResponse.json({
+          spools: [{ ...SPOOL_INVENTORY[0], id: 61, color_name: 'White', rgba: 'FFFFFFFF', remaining_g: 800 }],
+          slots: [],
+        }),
+      ),
+    )
+    const { onChange, user } = setup('#FFFFFF80')
+    await user.click(screen.getByRole('button', { name: 'Choose Plate' }))
+    await user.click(await screen.findByRole('option', { name: /White/ }))
+    expect(onChange).toHaveBeenCalledWith('#FFFFFF')
+  })
+
   it('marks the spool whose colour the parameter already has', async () => {
     const { user } = setup('#3F8E43')
     await user.click(screen.getByRole('button', { name: 'Choose Plate' }))

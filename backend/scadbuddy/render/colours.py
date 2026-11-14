@@ -171,3 +171,32 @@ def colour_hex(value: object) -> str | None:
     if len(digits) in (3, 4):
         digits = "".join(digit * 2 for digit in digits)
     return "#" + digits[:6]
+
+
+#: The least alpha a part keeps: a clear part (`#FFFFFF00`) still shows in the preview
+#: and on the covers, at 0.2.
+MIN_PART_ALPHA = 51
+
+
+def colour_alpha(value: object) -> int | None:
+    """The alpha byte of a hex colour value that has one (`#RGBA`, `#RRGGBBAA`) below
+    FF, floored at :data:`MIN_PART_ALPHA`; ``None`` for an opaque value or no colour.
+    OpenSCAD gets only the colour (:func:`without_alpha`); the part keeps this (owner,
+    2026-11-14: a translucent filament draws see-through)."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not _HEX_RE.fullmatch(value) or len(value) not in (5, 9):
+        return None
+    alpha = int(value[-1] * 2 if len(value) == 5 else value[-2:], 16)
+    return None if alpha == 255 else max(alpha, MIN_PART_ALPHA)
+
+
+def without_alpha(value: str) -> str:
+    """A colour value as OpenSCAD is given it: a hex value's alpha left off (`#RGBA` is
+    `#RGB`, `#RRGGBBAA` is `#RRGGBB`), so a part's colour, and the per-colour solids
+    that split by it, never depend on the alpha. Any other value is unchanged."""
+    stripped = value.strip()
+    if _HEX_RE.fullmatch(stripped) and len(stripped) in (5, 9):
+        return stripped[: 4 if len(stripped) == 5 else 7]
+    return value

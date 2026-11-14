@@ -3,7 +3,8 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import { designColorOf } from '../../lib/glbColor'
+import { designColorOf, designOpacityOf } from '../../lib/glbColor'
+import { seeThrough } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
@@ -116,13 +117,17 @@ function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>)
       const mesh = node as THREE.Mesh
       if (!mesh.isMesh) return
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      const opacity = designOpacityOf(mesh)
       const owned = materials.map((material) => {
         const own = material.clone() as THREE.MeshStandardMaterial
         own.userData.designColor = designColorOf(mesh, own)
         own.side = THREE.DoubleSide
+        // A translucent filament's part draws see-through, as in the Customize preview.
+        if (opacity < 1) seeThrough(own, opacity)
         return own
       })
       mesh.material = Array.isArray(mesh.material) ? owned : owned[0]!
+      if (opacity < 1) mesh.renderOrder = 1
     })
     // Y-up: x wide, y tall, z deep. The framing reads (wide, deep, tall).
     const extent = box.getSize(new THREE.Vector3())
