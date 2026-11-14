@@ -286,6 +286,23 @@ class ListingStore:
             _drop_holds(conn, listing_id)
         return _listing(row)
 
+    def set_media(
+        self, listing_id: str, media_ids: Sequence[str], *, expected_updated_at: datetime
+    ) -> Listing:
+        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a
+        published listing stays published with what it last published until it is
+        published again. 409 ``listing_changed`` when it changed after
+        ``expected_updated_at`` was read, 404 when it is gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE storefront_listings SET media_ids = %s, updated_at = clock_timestamp()"
+                f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
+                (list(media_ids), listing_id, expected_updated_at),
+            ).fetchone()
+            if row is None:
+                raise self._refusal(conn, listing_id)
+        return _listing(row)
+
     @staticmethod
     def _refusal(conn: Connection[DictRow], listing_id: str) -> ApiError:
         found = conn.execute(
@@ -382,8 +399,8 @@ class ListingStore:
                 args,
             ).fetchone()
             rows = conn.execute(
-                "SELECT id, slug, commit, title, place, published, media_ids[1] AS media_id,"
-                " published_at, updated_at FROM ("
+                "SELECT id, slug, commit, title, place, published, media_ids,"
+                " media_ids[1] AS media_id, published_at, updated_at FROM ("
                 "  SELECT *, row_number() OVER (ORDER BY position, id) AS place"
                 "  FROM storefront_listings"
                 f") ranked {filtered} ORDER BY {order} LIMIT %s OFFSET %s",
@@ -844,7 +861,11 @@ async def _copy_media(
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
         copied.append(
             ListingMedia(
-                blob_key=key, kind=view.kind, media_type=view.content_type, caption=view.caption
+                blob_key=key,
+                kind=view.kind,
+                media_type=view.content_type,
+                caption=view.caption,
+                media_id=media_id,
             )
         )
     return copied
@@ -896,6 +917,74 @@ async def _publish(
     except BaseException:
         await asyncio.to_thread(store.release_unheld, listing.id)
         raise
+
+
+def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
+    """422 ``listing_media_duplicate`` for an id named twice, ``listing_media_unknown``
+    for one the template does not have (or whose file is missing), and
+    ``listing_media_not_image`` for a video: the storefront shows images only (#6131)."""
+    seen: set[str] = set()
+    for media_id in media_ids:
+        if media_id in seen:
+            raise _unprocessable("listing_media_duplicate", f"media {media_id!r} is named twice")
+        seen.add(media_id)
+        try:
+            view, _path = core.catalogue.media_item(slug, media_id)
+        except (MediaNotFoundError, ModelNotFoundError):
+            raise _unprocessable(
+                "listing_media_unknown", f"the template has no media {media_id!r}", name=media_id
+            ) from None
+        if view.kind != "image":
+            raise _unprocessable(
+                "listing_media_not_image",
+                f"media {media_id!r} is a {view.kind}, not an image",
+                name=media_id,
+            )
+
+
+async def change_media(
+    core: Core,
+    store: ListingStore,
+    listing_id: str,
+    media_ids: Sequence[str],
+    *,
+    expected_updated_at: datetime,
+) -> Listing:
+    """The listing's pictures set to ``media_ids`` (#6213), each an image of its
+    template, in the order to show them. A draft stays a draft. A published listing is
+    published again at once, so it stays on the public site and shows the new pictures;
+    when that publish is refused, the pictures are kept and the public site shows what
+    was last published (the listing's ``media``, each with its ``media_id``) until the
+    next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
+    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
+    were written says so with the extension ``pictures_saved: true`` (any failure of the
+    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
+    client never has to guess whether its change landed."""
+    listing = await asyncio.to_thread(store.get, listing_id)
+    if listing is None:
+        raise listing_not_found(listing_id)
+    # The cheap check first: a stale read is refused before any media is read.
+    if listing.updated_at != expected_updated_at:
+        raise _changed(listing_id)
+    await asyncio.to_thread(_check_pictures, core, listing.slug, media_ids)
+    changed = await asyncio.to_thread(
+        store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
+    )
+    if not changed.published:
+        return changed
+    try:
+        return await publish(core, store, listing_id)
+    except ApiError as refused:
+        refused.extensions["pictures_saved"] = True
+        raise
+    except Exception as error:
+        raise problem(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "listing_republish_failed",
+            "the pictures were saved, but publishing the listing again failed;"
+            " the store shows the last published pictures",
+            pictures_saved=True,
+        ) from error
 
 
 async def unpublish(store: ListingStore, listing_id: str) -> Listing:
