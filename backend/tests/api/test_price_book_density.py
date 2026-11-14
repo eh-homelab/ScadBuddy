@@ -253,6 +253,33 @@ def test_a_filament_added_by_hand_takes_its_spools_density(client: TestClient) -
     assert empty["density_g_cm3"] is None
 
 
+@respx.mock
+def test_the_import_goes_on_with_no_density_when_a_density_read_fails(
+    client: TestClient,
+) -> None:
+    """The density reads are an extra: one Bambuddy refuses leaves the density empty,
+    never fails the import of the spools' costs."""
+    configure(client)
+    routes = bambuddy(
+        [
+            spool(1, brand="Bambu Lab", cost_per_kg=20, slicer_filament="7"),
+            spool(2, brand="Bambu Lab", rgba="0000FFFF", cost_per_kg=20),
+        ]
+    )
+    routes["local"].mock(return_value=httpx.Response(403))
+    routes["assignments"].mock(return_value=httpx.Response(503))
+    routes["catalogue"].mock(return_value=httpx.Response(503))
+    response = client.post(IMPORT)
+    assert response.status_code == 200, response.text
+    assert [(row["action"], row["density_g_cm3"]) for row in response.json()["rows"]] == [
+        ("created", None),
+        ("created", None),
+    ]
+    filled = client.post(FILL)
+    assert filled.status_code == 200, filled.text
+    assert [row["density_g_cm3"] for row in filled.json()["rows"]] == [None, None]
+
+
 def test_the_estimate_says_which_density_it_used(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

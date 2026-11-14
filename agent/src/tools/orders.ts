@@ -2644,6 +2644,22 @@ export const orderTools: Tool[] = [
       json(await ok(backend.POST('/api/v1/orders/price-book/import-spools'), 'import filaments from spools')),
   }),
   defineTool({
+    name: 'price_book_fill_densities',
+    label: 'Fill empty filament densities',
+    description:
+      'Give every price-book filament with no density the one its Bambuddy spools link to: the preset id ' +
+      "(the spool's slicer preset, then its K-profile's, then its AMS tray's) gives Bambuddy's local preset or " +
+      "the Bambu Studio vendor preset's `filament_density`, then Bambuddy's filament catalogue. Never " +
+      "overwrites a density that is set. Each row is filled with its `profile` (the source) or has no " +
+      "`density_g_cm3` (no source: enter it with price_book_set). Only when Bambuddy is linked; else `not_linked`.",
+    input: z.object({}),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/price-book/fill-densities'],
+    title: () => 'Fill filament densities',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/orders/price-book/fill-densities'), 'fill filament densities')),
+  }),
+  defineTool({
     name: 'order_estimate',
     label: "Estimate an output's filament cost",
     description:

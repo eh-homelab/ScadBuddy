@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections import defaultdict
+from collections.abc import Awaitable
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -52,6 +54,8 @@ from scadbuddy.orders.integrations import (
 )
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
+
+logger = logging.getLogger(__name__)
 
 
 def _colour(rgba: str | None) -> str | None:
@@ -142,8 +146,11 @@ def _catalogue_density(
     catalogue: list[CatalogFilament], spool: Spool, colour: str | None
 ) -> str | None:
     """The one density of the catalogue's entries of the spool's material, brand and
-    colour (#6136); ``None`` for none, or entries that disagree."""
-    if colour is None:
+    colour (#6136); ``None`` for none, entries that disagree, or a spool with no brand
+    or colour. Bambuddy stores ``color_hex`` as ``#RRGGBB`` (``models/filament.py``,
+    validated by ``schemas/filament.py``'s ``^#[0-9A-Fa-f]{6}$`` at v1.3.2b1-daily.20261113:
+    https://github.com/maziggy/bambuddy/blob/v1.3.2b1-daily.20261113/backend/app/schemas/filament.py)."""
+    if colour is None or not (spool.brand or "").strip():
         return None
     densities = {
         text
@@ -164,6 +171,16 @@ def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
         if preset.preset_type == "filament"
         and (density := density_text(preset.filament_density)) is not None
     }
+
+
+async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
+    """One of the density chain's reads (#6136); ``None`` when Bambuddy refuses it, so
+    the spools are still imported, with no density from it."""
+    try:
+        return await read
+    except ApiError as error:
+        logger.warning("no densities from Bambuddy's %s: %s", what, error.detail)
+        return None
 
 
 async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int, str]:
@@ -259,17 +276,20 @@ class BambuddyIntegrations:
         archived ones left out) by filament, with what gives each a density (#6136):
         the local presets (``GET /local-presets/``) only when a spool names one by its
         numeric id, the AMS trays (``GET /inventory/assignments`` and each such
-        printer's ``GET /printers/{id}/status``) only for a group whose spools name no
-        preset, and the filament catalogue (``GET /filament-catalog/``)."""
+        printer's ``GET /printers/{id}/status``) only for the spools that name no
+        preset (a group uses a tray's id only after its own preset ids), and the
+        filament catalogue (``GET /filament-catalog/``). A density read Bambuddy
+        refuses gives no density, logged; only the spools' read fails the call."""
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             spools = [s for s in await client.spools() if s.archived_at is None]
             local: dict[str, LocalDensity] = {}
             if any((s.slicer_filament or "").strip().isdigit() for s in spools):
-                local = _local_densities((await client.local_presets()).filament)
-            trays = await _tray_presets(client, spools)
-            catalogue = await client.filament_catalog()
-            return spool_groups(spools, local=local, trays=trays, catalogue=catalogue)
+                presets = await _density_read(client.local_presets(), "local presets")
+                local = _local_densities(presets.filament) if presets is not None else {}
+            trays = await _density_read(_tray_presets(client, spools), "AMS trays") or {}
+            catalogue = await _density_read(client.filament_catalog(), "filament catalogue")
+            return spool_groups(spools, local=local, trays=trays, catalogue=catalogue or [])
 
     async def spool_inventory(self) -> list[ShelfSpool]:
         """``GET /inventory/spools`` (archived ones included, so a named one is known)

@@ -136,6 +136,7 @@ def test_a_group_carries_what_gives_its_density() -> None:
             _spool(8, rgba="FFFFFFFF", slicer_filament=" "),
             _spool(5, material="PETG", brand="Insignia", rgba="00AE42FF"),
             _spool(9, material="PETG", brand="Insignia", rgba="000000FF"),
+            _spool(11, material="PETG", brand=None, rgba="333333FF"),
         ],
         local={"7": LocalDensity(name="My PLA", density_g_cm3="1.25")},
         trays={5: "GFG99"},
@@ -148,6 +149,9 @@ def test_a_group_carries_what_gives_its_density() -> None:
             ),
             CatalogFilament(
                 id=3, name="z", type="PETG", brand="Insignia", color_hex="#000000", density=1.3
+            ),
+            CatalogFilament(
+                id=4, name="w", type="PETG", brand=None, color_hex="#333333", density=1.27
             ),
         ],
     )
@@ -163,6 +167,8 @@ def test_a_group_carries_what_gives_its_density() -> None:
     assert (green.tray_info_idx, green.catalogue_density) == ("GFG99", "1.27")
     # Two catalogue entries of one colour that disagree give none.
     assert by_ids[(9,)].catalogue_density is None
+    # A spool with no brand matches no catalogue entry: no brand is not a brand.
+    assert by_ids[(11,)].catalogue_density is None
 
 
 def test_spools_of_one_record_are_one_group() -> None:

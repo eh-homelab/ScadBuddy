@@ -888,9 +888,10 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
-    #: Where ``density_g_cm3`` came from when the spool import or "Fill densities" read
-    #: it from Bambuddy's link to the slicer preset (#6136, `orders/density.py`): the
-    #: preset and the id that named it. ``None`` for a density a person set, or none.
+    #: Where ``density_g_cm3`` came from when the spool import, "Fill densities" or a
+    #: manual add with no density read it from Bambuddy's link to the slicer preset
+    #: (#6136, `orders/density.py`): the preset and the id that named it. ``None`` for
+    #: a density a person set, or none.
     density_profile: str | None = None
     archived_at: datetime | None
     created_at: datetime

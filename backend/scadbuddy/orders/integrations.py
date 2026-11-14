@@ -56,7 +56,8 @@ class SpoolGroup(BaseModel):
     #: The ``setting_id`` of each K-profile of the group's spools, newest spool first.
     k_profile_settings: list[str] = Field(default_factory=list)
     #: The ``tray_info_idx`` of the AMS tray a spool of the group is loaded in, read
-    #: only for a group with neither of the above.
+    #: only for the spools that name neither of the above; the group uses it only
+    #: after its own preset ids.
     tray_info_idx: str | None = None
     #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density.
     local_preset: LocalDensity | None = None
