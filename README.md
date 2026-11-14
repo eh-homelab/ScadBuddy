@@ -830,7 +830,9 @@ sbsvc_…`): the agent sidecar, the print worker (`--queue bambuddy`) and the fl
 worker (`--queue projects`). Nothing is configured for them: the API issues each
 caller's credential at its start and rotates it on the prune Schedule with an overlap,
 and each caller reads its current one from a view of its own and unseals it with the
-KEK, so **each caller needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. Settings → System →
+KEK, so **each caller that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**.
+The print and projects workers read no view: each exchanges a proof (below), and the
+print worker needs no KEK at all (#5298 Task 33). Settings → System →
 Service credentials lists, rotates and revokes them.
 
 **The service-token exchange (#5494).** A caller can prove who it is instead, and get a
@@ -839,7 +841,8 @@ Service credentials lists, rotates and revokes them.
 It presents its proof at `POST /api/v1/auth/service-token` (RFC 8693 form fields
 `grant_type`, `subject_token`, `subject_token_type`) and renews the credential at half-life
 and at once after a 401. Each caller picks its proof with one variable; setting both is a
-start error, and setting neither reads the view as above:
+start error, and setting neither reads the view as above, except on the workers that hold
+no database (render, print and projects), which refuse to start:
 
 | Proof | On the caller | On the API |
 |---|---|---|
@@ -869,9 +872,9 @@ hash, with no budget; a `client_id` sent beside any proof must name the caller i
 The counter
 `scadbuddy_service_token_exchanges_total{caller, proof, result}` counts them. An exchange
 the API answers `404` (an older API pod during a roll) falls back to the view while the
-caller still has a database URL, except on the print worker: with a proof it takes the
-exchange only (`exchange_source`), since the CRUD areas it waits for come only from an API
-that serves the exchange (#5298). The API's own in-process `projects` worker gets its
+caller still has a database URL, except on the workers that hold no database (render,
+print and projects): they take the exchange only (`exchange_source`), since the CRUD areas
+they wait for come only from an API that serves the exchange (#5298). The API's own in-process `projects` worker gets its
 credential minted in memory. `GET /api/v1/auth/service-credentials` returns each
 credential's `proof`, `pod_name` and `pod_uid` (the Settings page does not show them, or the
 `render` caller, yet), and the API also revokes every credential of a pod
@@ -900,7 +903,7 @@ store or another caller's credential:
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
 | render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
-| print worker | `scadbuddy_print`: its list grants no table; the role keeps the 34 tables and the sequence it held until #5298 Task 35 revokes them. The worker holds no pool. With a proof it exchanges that proof only (`exchange_source`, no view fallback), whether or not `SCADBUDDY_DATABASE_URL` is set; only with no proof and the URL set does it read its sealed credential from its view (`token_source`, until #5298 Task 34); with neither it refuses to start | `scadbuddy-print.yaml` |
+| print worker | `scadbuddy_print`: its list grants no table; the role keeps the 34 tables and the sequence it held until #5298 Task 35 revokes them. The worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33) | `scadbuddy-print.yaml` |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
@@ -1241,11 +1244,12 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_BAMBUDDY`,
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, `SCADBUDDY_API_INTERNAL_URL`, and
   `SCADBUDDY_SERVICE_TOKEN_FILE` (or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`), the proof it
-  exchanges for its service credential. It holds no Postgres pool (#5298). With a proof
-  it exchanges that proof only (`exchange_source`, no view fallback), whether or not
-  `SCADBUDDY_DATABASE_URL` is set, so it starts with the URL unset. Only with no proof and
-  the URL set does it read its sealed credential from its view (`token_source`, until
-  #5298 Task 34), one short connection per read; with neither it refuses to start. It reads the
+  exchanges for its service credential. The proof is required: without one the worker
+  refuses to start (`exchange_source`, no view fallback). It holds no Postgres pool and
+  needs no database secret (#5298): nothing on it reads `SCADBUDDY_DATABASE_URL`, and when
+  it is set the worker logs that it ignores it. It needs no KEK
+  (`SCADBUDDY_SECRET_KEY_FILE`, `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`) either, and reads
+  neither file (#5298 Task 33): the API opens every sealed value it needs. It reads the
   settings, the Bambuddy key included, from the API's CRUD route
   `GET /api/v1/internal/crud/print/settings` on every use (#5298), as the API resolves
   them, so its own Bambuddy URL and key variables are not read. That answer is
@@ -1267,8 +1271,12 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   so do the printer registry and the printers' LAN reports (`…/printers`, `…/reports`):
   a printer's access code is opened on the API and answered to the print worker's
   credential alone (`…/printers/{id}/access-code`, `no-store`, logged without the code),
-  so the worker's KEK opens no access code; it still unseals a virtual printer's request
-  and, with no exchange proof, its sealed service credential. The rack hotends' usage
+  and the worker holds no KEK. The API also opens a virtual printer's sealed access code
+  for the worker's run (`…/access-codes/virtual-printer`, the same `no-store` and log
+  rule; the seal's key is derived from the KEK for that use alone, so the route opens no
+  other secret), and says whether it can open access codes at all (`…/access-codes`): an
+  API with no KEK sends an `auto` printer's run through Bambuddy and refuses a `native`
+  printer's with a 503 (#5298 Task 33). The rack hotends' usage
   goes through them too (`…/rack`; a LAN start's picks, a queue item's picks, a settled print's rows and a LAN
   start's settles take an `Idempotency-Key`), so the worker holds no rack pool. Through
   them too go the spools a native run's overlay reads and the native provider re-caches, ScadBuddy's
@@ -1300,7 +1308,8 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   503 `store_unavailable`, which the worker retries. The worker signs nothing. It does
   not `LISTEN`. It waits until the API lists every area in `worker.py` `PRINT_CRUD_AREAS` (`settings`, `runs`, `operations`,
   `events`, `printer-ensure`, `reprints`, `uploads`, `previews`, `copy-leases`, `links`,
-  `lan-imports`, `printers`, `rack`, `spools` and `transfer-urls`) before it serves. Its
+  `lan-imports`, `printers`, `rack`, `spools`, `transfer-urls` and `access-codes`) before
+  it serves. Its
   build id is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
   render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
@@ -2216,8 +2225,9 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
    render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API,
    which seals the printer's access code and opens it for the print worker (#5298) and
-   signs a LAN print's blob reads (#5298 Task 32), and on the print worker, which takes
-   Bambuddy's path for an `auto` printer without it. Both count as native
+   signs a LAN print's blob reads (#5298 Task 32). The print worker holds no KEK; while
+   the API has none, it takes Bambuddy's path for an `auto` printer and refuses a
+   `native` one (#5298 Task 33). Both count as native
    (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
    copy among them, live in Bambuddy's library: those reads are the store's calls, outside
    the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of

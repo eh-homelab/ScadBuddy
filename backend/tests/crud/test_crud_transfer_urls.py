@@ -182,7 +182,7 @@ async def _read(blobs: RemoteBlobs, key: str) -> bytes:
 def test_the_area_is_served_and_awaited() -> None:
     assert "transfer-urls" in PRINT_CRUD_AREAS
     # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-1] == "transfer-urls"
+    assert CRUD_AREAS["print"][-2:] == ["transfer-urls", "access-codes"]
 
 
 async def test_an_unknown_key_is_refused(tmp_path: Path) -> None:

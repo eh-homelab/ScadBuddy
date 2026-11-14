@@ -1184,9 +1184,9 @@ async def check_print(
 
     ``printers`` and ``reports`` are the registry, read as the run reads it (#4442 I2):
     a ``printer`` it refuses is an error here in the run's words, and on the LAN path
-    the status judged is the LAN report's. A print worker without the key is the run's
-    503, raised as it is. Like the run, a check makes the registry row of a Bambuddy
-    printer that has none (`PrinterStore.ensure_bambuddy`): that row is the printer's
+    the status judged is the LAN report's. An API that cannot open access codes (no
+    KEK) is the run's 503, raised as it is. Like the run, a check makes the registry row
+    of a Bambuddy printer that has none (`PrinterStore.ensure_bambuddy`): that row is the printer's
     identity, made once and idempotently, as the printers strip makes it on a read
     (`printers_now`), so a check that writes it changes nothing a run would not.
 
@@ -2698,9 +2698,9 @@ def _not_on_bambuddy(row: PrinterRow) -> str:
     return f"{row.name} is not linked to Bambuddy. Link it in Settings > Printers."
 
 
-#: A native run on a print worker with no key (Review Focus 4): the API opens the access
-#: code for it (#5298 Task 29), but the worker signs the sliced blob's reads with its key.
-LAN_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the print worker"
+#: A native run when the API cannot open the printer's access code (Review Focus 4): it
+#: has no KEK. The print worker holds none; the API opens the code for it (#5298 Task 33).
+LAN_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the API"
 
 
 async def _registry_path(
@@ -2714,11 +2714,13 @@ async def _registry_path(
     report, which must be as fresh as `printers_now` needs it to call the printer
     online (#4442 I3): an older one is no report.
 
-    A print worker without the key takes Bambuddy's path: an ``auto`` row it reaches
-    through Bambuddy too takes that path (#4442 review), and only a row set to ``native``
-    is the key's 503. The key itself no longer serves the LAN path on the print worker
-    (the API opens the access code, #5298 Task 29, and mints the sliced blob's read URL,
-    Task 32); this check stays until #5298 Task 33 decides the worker's KEK.
+    When the store cannot open access codes (`PrinterStore.opens_access_codes`: the API
+    has no KEK; on the print worker, which holds none, the API is asked, #5298 Task 33)
+    the run takes Bambuddy's path: an ``auto`` row it reaches through Bambuddy too takes
+    that path (#4442 review), and only a row set to ``native`` is the 503
+    `LAN_NEEDS_KEK`. An API out of reach while the worker asks is raised as the report's
+    read beside it is (`CrudUnavailableError`, which the run's retry tries again), never
+    read as "no key": a blip must not move a run to Bambuddy's path or refuse it.
     ``say_fallback`` logs that fallback: on for a run, off for the dialog's checks, which
     would repeat it on every re-check."""
     if printers is None or row is None:
@@ -2728,12 +2730,12 @@ async def _registry_path(
     path = run_path(row, None if report is None else report[1], now=now)
     if path == "bambuddy":
         return path, None
-    if printers.kek is None:
+    if not await asyncio.to_thread(printers.opens_access_codes):
         if row.preferred_path == "auto" and row.bambuddy_printer_id is not None:
-            # Said, so a worker that lost its key is not silently on Bambuddy's path.
+            # Said, so an API that lost its key does not silently put runs on Bambuddy's path.
             if say_fallback:
                 logger.info(
-                    "printer %s takes Bambuddy's path: the print worker has no key for the LAN",
+                    "printer %s takes Bambuddy's path: the API has no key for the LAN",
                     row.id,
                 )
             return "bambuddy", None

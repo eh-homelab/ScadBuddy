@@ -150,7 +150,7 @@ from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
-from scadbuddy.core.secrets import Kek, SealError
+from scadbuddy.core.secrets import SealError
 from scadbuddy.crud.client import (
     CrudClient,
     CrudRefusedError,
@@ -896,18 +896,13 @@ API_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the API"
 class RemotePrinterStore(PrinterStore):
     """Blocking: called through ``asyncio.to_thread``, as the SQL store is. No pool:
     every method the worker calls is a route under ``…/print/printers`` (areas
-    ``printer-ensure`` and ``printers``). A row is made or merged on the API, which
-    announces a merge. ``kek`` is the worker's own: the API opens the access code (plan
-    D8) and mints a LAN print's read URL (#5298 Task 32), but the worker still needs its
-    KEK for a virtual printer's sealed request (`bambuddy/virtual_printers.py`), and
-    `bambuddy/print_run.py` `_registry_path` still reads it."""
+    ``printer-ensure``, ``printers`` and ``access-codes``). A row is made or merged on
+    the API, which announces a merge. The worker holds no KEK (#5298 Task 33): the API
+    opens a printer's access code (plan D8) and a virtual printer's sealed one, says
+    whether it can open them at all, and mints a LAN print's read URL (Task 32)."""
 
-    def __init__(
-        self, client: CrudSyncClient, kek: Kek | None, *, previous_kek: Kek | None = None
-    ) -> None:
+    def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
-        self.kek = kek
-        self.previous_kek = previous_kek
         #: The API announces a merge; the worker announces nothing of the registry's.
         self.events = None
 
@@ -953,6 +948,37 @@ class RemotePrinterStore(PrinterStore):
             if error.status == 404 and reason == NO_SUCH_PRINTER:
                 raise PrinterNotFoundError(printer_id) from None
             if reason == NOT_CONFIGURED:
+                raise KekMissingError(API_NEEDS_KEK) from None
+            if _refused_as(error, ACCESS_CODE_UNREADABLE):
+                raise SealError("the access code was sealed under another key") from None
+            raise
+        return str(response.json()["code"])
+
+    def opens_access_codes(self) -> bool:
+        """Whether the API can open an access code (it holds the KEK), asked on each call:
+        an API pod may roll with or without its key. A short read, bounded as the watch's
+        calls are (`WATCH_CALL_TIMEOUT`, `WATCH_CALL_BUDGET`): an API out of reach is the
+        client's `CrudUnavailableError`, which the run's retry tries again."""
+        response = self._client.request(
+            "GET", f"{BASE}/access-codes", timeout=WATCH_CALL_TIMEOUT, budget=WATCH_CALL_BUDGET
+        )
+        return bool(response.json()["opens"])
+
+    def open_virtual_access_code(self, sealed: str, context: str) -> str:
+        """A virtual printer's sealed access code, opened on the API. Raises
+        `KekMissingError` when the API has no KEK and `SealError` when ``sealed`` does not
+        open for ``context``; no exception here carries the code."""
+        body = {"sealed": sealed, "context": context}
+        try:
+            response = self._client.request(
+                "POST",
+                f"{BASE}/access-codes/virtual-printer",
+                json=body,
+                timeout=WATCH_CALL_TIMEOUT,
+                budget=WATCH_CALL_BUDGET,
+            )
+        except CrudRefusedError as error:
+            if error.problem.get("reason") == NOT_CONFIGURED:
                 raise KekMissingError(API_NEEDS_KEK) from None
             if _refused_as(error, ACCESS_CODE_UNREADABLE):
                 raise SealError("the access code was sealed under another key") from None

@@ -764,10 +764,9 @@ class Settings(BaseSettings):
 
 class NoDatabaseSettings(Settings):
     """The settings of a worker that holds no SQL pool (#5298): the projects, render and
-    print workers. Each starts with ``SCADBUDDY_DATABASE_URL`` unset. The projects and
-    render workers ignore it when set. The print worker reads it only when it has no
-    proof to exchange, to read its sealed credential from its view (`worker.py`
-    `build_print_deps`, until #5298 Task 34); with a proof it ignores it."""
+    print workers. Each starts with ``SCADBUDDY_DATABASE_URL`` unset and ignores it, with a
+    warning, when set: each exchanges a proof for its credential and has no view to read
+    (`worker.py` `exchange_source`, #5298 Task 33 for the print worker)."""
 
     @field_validator("database_url")
     @classmethod

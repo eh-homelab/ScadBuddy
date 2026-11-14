@@ -452,6 +452,7 @@ def print_crud_app(
     links: PrintLinkStore | None = None,
     catalogue: Any = None,
     rack: RackUsageStore | None = None,
+    bootstrap: BootstrapVerifier | None = None,
 ) -> FastAPI:
     """The print routes, reading the settings through the API's ``store``, the runs
     through ``runs`` and ``outcomes``, publishing on ``events``, writing operations
@@ -463,10 +464,16 @@ def print_crud_app(
     print records go to the watcher's store on ``store``'s pool, matched against
     ``catalogue`` (none when not given), and the rack hotends' usage goes through
     ``rack`` (no rack route answers without one), and the spools, native spools, kept
-    presets and native slices through the API's own stores on ``store``'s pool."""
+    presets and native slices through the API's own stores on ``store``'s pool; the
+    exchange too, of the proofs ``bootstrap`` takes, when given (#5298 Task 33)."""
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts: dict[Any, Any] = {
-        AUTH: SimpleNamespace(would_refuse=_Noted()),
+        AUTH: SimpleNamespace(
+            would_refuse=_Noted(),
+            verifiers={} if bootstrap is None else {"bootstrap": bootstrap},
+            credentials=credentials,
+            core=SimpleNamespace(metrics=Metrics()),
+        ),
         OPERATIONS: SimpleNamespace(store=operations, kinds=kinds or {}),
         AUTO_IMPORTS: AutoImportStore(store.pool),
         # The registry is the API's own on ``store``'s pool when not given (#5298 Task 29).
@@ -499,6 +506,8 @@ def print_crud_app(
     )
     app.include_router(crud_print.router, prefix="/api/v1")
     app.include_router(crud_areas.router, prefix="/api/v1")
+    if bootstrap is not None:
+        app.include_router(service_token.router, prefix="/api/v1")
     install_problem_handlers(app)
     app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
     return app
@@ -577,6 +586,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "rack",
         "spools",
         "transfer-urls",
+        "access-codes",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

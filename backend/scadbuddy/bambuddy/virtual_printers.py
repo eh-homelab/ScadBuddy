@@ -15,12 +15,14 @@ The writes are operation kinds on the ``bambuddy`` queue. The access code an unt
 VP may be given is sealed by the route before the request is recorded
 (`seal_access_code`, a random IV, bound to the VP's id or, for a create, to the request's
 Idempotency-Key), so it is never in an operation's row or a Temporal payload in the
-clear, and opened by the run. The sealed value is left out of the operation key
-(`OperationKind.unkeyed`); in its place the key covers `access_code_mac`, a MAC of the
-code under its own KEK-derived key and bound to the Idempotency-Key, so a re-send with
-the same key and code finds its record while equal codes in different requests never
-look equal. A targeted VP inherits its target's code (Bambuddy overwrites any other,
-lines 236-240), so a code with a target is refused."""
+clear. The run opens it through its printer store: the API's own store opens it under the
+KEK, and on the print worker, which holds no KEK, the API opens it over its CRUD route
+(`PrinterStore.open_virtual_access_code`, area ``access-codes``, #5298 Task 33). The sealed
+value is left out of the operation key (`OperationKind.unkeyed`); in its place the key
+covers `access_code_mac`, a MAC of the code under its own KEK-derived key and bound to
+the Idempotency-Key, so a re-send with the same key and code finds its record while
+equal codes in different requests never look equal. A targeted VP inherits its target's
+code (Bambuddy overwrites any other, lines 236-240), so a code with a target is refused."""
 
 from __future__ import annotations
 
@@ -44,7 +46,7 @@ from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 from scadbuddy.printers.bambuddy_sync import StoreRegistry, sync_virtual_printers
 from scadbuddy.printers.models import VirtualPrinterMode
-from scadbuddy.printers.store import PrinterStore
+from scadbuddy.printers.store import KekMissingError, PrinterStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,9 @@ SEALED_FIELD = "access_code"
 MAC_FIELD = "access_code_mac"
 #: The Idempotency-Key a create's seal is bound to (already the operation row's own).
 KEY_FIELD = "seal_key"
+
+#: Why a sealed code cannot be opened: the API, which opens it, has no KEK.
+CODE_NEEDS_KEK = "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the API"
 
 CODE_WITH_TARGET = (
     "a virtual printer with a target uses its target's access code; send no access code"
@@ -236,13 +241,12 @@ def virtual_printer_kinds(
     async def write_check(request: dict[str, Any]) -> dict[str, Any]:
         fields: dict[str, Any] = request.get("fields", {})
         checked: dict[str, Any] = {}
-        # First of all: a worker that cannot open the code fails without reading anything.
-        if request.get(SEALED_FIELD) and (printers is None or printers.kek is None):
-            raise ApiError(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the"
-                " print worker",
-            )
+        # First of all: a code nobody can open fails without reading anything. The store
+        # opens it: on the print worker, the API does (#5298 Task 33).
+        if request.get(SEALED_FIELD) and (
+            printers is None or not await asyncio.to_thread(printers.opens_access_codes)
+        ):
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, CODE_NEEDS_KEK)
         if "target" in fields:
             checked["target_printer_id"] = await target_id(fields)
             if checked["target_printer_id"] is not None and request.get(SEALED_FIELD):
@@ -272,21 +276,22 @@ def virtual_printer_kinds(
     def body_of(
         request: dict[str, Any], checked: dict[str, Any], vp_id: int | None
     ) -> dict[str, Any]:
+        """Blocking: on the print worker the code is opened by a call to the API."""
         fields = {k: v for k, v in request.get("fields", {}).items() if k != "target"}
         if "target_printer_id" in checked:
             fields["target_printer_id"] = checked["target_printer_id"]
         sealed = request.get(SEALED_FIELD)
         if sealed:
-            assert printers is not None and printers.kek is not None
+            assert printers is not None
             # The run derives the context, never reads it from the request: an update's
             # seal opens only for this VP (its AAD), a create's only for its own key.
             # A sealed code always comes with its key (`access_code_request`): a request
             # without one fails here rather than binding to an empty key.
             context = seal_context(vp_id=vp_id, idempotency_key=str(request[KEY_FIELD]))
             try:
-                fields["access_code"] = open_access_code(
-                    printers.kek, sealed, context, previous=printers.previous_kek
-                )
+                fields["access_code"] = printers.open_virtual_access_code(sealed, context)
+            except KekMissingError:
+                raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, CODE_NEEDS_KEK) from None
             except SealError:
                 raise ApiError(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -295,7 +300,7 @@ def virtual_printer_kinds(
         return fields
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        body = body_of(request, checked, None)
+        body = await asyncio.to_thread(body_of, request, checked, None)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             created = await client.create_virtual_printer(body)
             await follow(client)
@@ -303,7 +308,7 @@ def virtual_printer_kinds(
 
     async def update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         vp_id = int(request["vp_id"])
-        body = body_of(request, checked, vp_id)
+        body = await asyncio.to_thread(body_of, request, checked, vp_id)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             updated = await client.update_virtual_printer(vp_id, body)
             await follow(client)

@@ -36,7 +36,9 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: (#5298 Task 30). Its ``spools`` area is ``…/print/spools``, ``…/print/native-spools``,
 #: ``…/print/held-presets`` and ``…/print/native-slices`` (#5298 Task 31). Its
 #: ``transfer-urls`` area is ``…/print/transfer-urls``, a LAN print's read URL of a
-#: native slice's file (#5298 Task 32).
+#: native slice's file (#5298 Task 32). Its ``access-codes`` area is
+#: ``…/print/access-codes`` and ``…/access-codes/virtual-printer``: whether the API opens
+#: access codes, and a virtual printer's sealed code opened (#5298 Task 33).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "projects": ["flows", "operations", "payload-keys"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
@@ -56,6 +58,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
         "rack",
         "spools",
         "transfer-urls",
+        "access-codes",
     ],
     "storefront": [
         "listings",
