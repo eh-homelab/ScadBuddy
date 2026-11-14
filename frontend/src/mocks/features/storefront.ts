@@ -80,7 +80,6 @@ const UNPUBLISHED: Pick<StorefrontListing, 'published' | 'snapshot' | 'media' | 
 
 const EMPTY_SCHEMA: CustomizerSchema = { title: null, source_sha256: '', groups: [], parameters: [] }
 
-/** The backend's `ListingStore.page` (#6157): search, filters, sort, a page and the total. */
 /** The backend's bounds on a page (`wire.py` `ListingQuery`: `LISTING_PAGE_MAX`, `LISTING_OFFSET_MAX`). */
 const PAGE_BOUNDS = { limit: [1, 200], offset: [0, 1_000_000] } as const
 
@@ -89,7 +88,9 @@ function outOfBounds(url: URL): Response | null {
   const detail = Object.entries(PAGE_BOUNDS).flatMap(([name, [min, max]]) => {
     const raw = url.searchParams.get(name)
     if (raw === null) return []
-    const value = Number(raw)
+    // As Pydantic reads an int from a query (measured with its `TypeAdapter(int)`): decimal
+    // digits with an optional sign and surrounding spaces; `1e2` and `0x10` are refused.
+    const value = /^\s*[+-]?\d+\s*$/.test(raw) ? Number(raw) : NaN
     if (!Number.isInteger(value)) return [{ type: 'int_parsing', loc: ['query', name], msg: 'Input should be a valid integer' }]
     if (value < min) return [{ type: 'greater_than_equal', loc: ['query', name], msg: `Input should be greater than or equal to ${min}` }]
     if (value > max) return [{ type: 'less_than_equal', loc: ['query', name], msg: `Input should be less than or equal to ${max}` }]
@@ -98,6 +99,7 @@ function outOfBounds(url: URL): Response | null {
   return detail.length > 0 ? HttpResponse.json({ detail }, { status: 422 }) : null
 }
 
+/** The backend's `ListingStore.page` (#6157): search, filters, sort, a page and the total. */
 function page(url: URL): StorefrontListingPage {
   const get = (key: string) => url.searchParams.get(key) ?? ''
   const q = get('q').trim().toLowerCase()
