@@ -940,6 +940,29 @@ def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
     assert cleared.json()["storefront_slice_profile"] is None
 
 
+@respx.mock
+def test_profile_is_checked_against_the_connection_sent_beside_it(client: TestClient) -> None:
+    """#6255 review: one PUT that sets the Bambuddy URL and the profile checks the spools
+    at the new URL, not the stored one."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://old.test"})
+    respx.get("https://old.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get("https://new.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "bambuddy_url": "https://new.test",
+            "storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
+
+
 def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
     refused = client.put(
         "/api/v1/settings",

@@ -120,7 +120,12 @@ function SliceProfileEditor() {
             setError('Choose the printer to slice for.')
             return
           }
-          const named = Object.entries(chosen).filter(([, spool]) => spool !== '')
+          // Only the materials the editor lists, and only spools this printer offers: a
+          // spool the form does not show is never sent (#6255 review).
+          const offeredIds = new Set(offered.map((spool) => String(spool.spool_id)))
+          const named = materials
+            .map((m) => [m.material.toLowerCase(), chosen[m.material.toLowerCase()] ?? ''] as const)
+            .filter(([, spool]) => offeredIds.has(spool))
           save({ printer, spools: Object.fromEntries(named.map(([material, spool]) => [material, Number(spool)])) })
         }}
       >
@@ -130,6 +135,8 @@ function SliceProfileEditor() {
             value={printer ?? ''}
             onValueChange={(value) => {
               setSaved(false)
+              // Another printer offers other spools: the old choices do not carry over.
+              if (value !== printer) setSpools({})
               setPrinter(value)
             }}
           >

@@ -461,7 +461,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'storefront-pricing',
     label: 'Slices at once',
     kind: 'count',
-    help: 'How many storefront slices run at the same time, 1 to 4. The others wait.',
+    help: 'How many storefront slices run at the same time, 1 to 4. The others wait. It takes effect once the storefront prices designs from a slice.',
   },
   {
     name: 'log_level',

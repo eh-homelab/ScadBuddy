@@ -229,7 +229,8 @@ class Settings(BaseSettings):
     storefront_renders_per_day: int = Field(default=30, ge=1, le=10000)
     storefront_render_concurrency: int = Field(default=2, ge=1, le=50)
     # SCADBUDDY_STOREFRONT_SLICES_CONCURRENT: the storefront's slices that run at once,
-    # shop-wide (#6153); the rest wait.
+    # shop-wide (#6153); the rest wait. Nothing reads it until the storefront prices a
+    # design from a slice (#6153 PR A).
     storefront_slices_concurrent: int = Field(default=1, ge=1, le=4)
     storefront_draft_ttl_days: int = Field(default=30, ge=1, le=365)
     storefront_requests_enabled: bool = False

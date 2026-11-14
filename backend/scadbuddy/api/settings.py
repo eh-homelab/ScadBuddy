@@ -572,7 +572,11 @@ async def put_settings(
     _print_watch_by_a_person(patch)
     patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.storefront_slice_profile is not None:
-        await check_profile(patch.storefront_slice_profile, store.load(), registry, spools)
+        # Checked against the connection this same PUT sets, not the stored one (#6255).
+        stored = store.load()
+        given = patch.model_fields_set & type(stored).model_fields.keys()
+        pending = stored.model_copy(update={name: getattr(patch, name) for name in given})
+        await check_profile(patch.storefront_slice_profile, pending, registry, spools)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     if patch.git_remote_token and store.kek is None:

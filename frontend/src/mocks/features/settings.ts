@@ -2,6 +2,7 @@ import { HttpResponse, delay, http } from 'msw'
 import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
 import { state as orders } from './orders/state'
+import { printersState } from './printers'
 import { SPOOL_INVENTORY } from './spoolInventory'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
@@ -325,6 +326,8 @@ export const handlers = [
     const materials = new Map<string, string>()
     for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
     const printer = new URL(request.url).searchParams.get('printer')
+    // As the route: 422 for a printer the registry does not hold.
+    if (printer && !printersState().some((row) => row.id === printer)) return problem(422, 'Unprocessable Content', `no printer ${printer}`)
     const spools: ProfileSpool[] = printer
       ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
           spool_id: spool.id,
