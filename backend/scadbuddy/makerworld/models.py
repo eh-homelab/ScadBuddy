@@ -73,6 +73,11 @@ class MakerWorldResolveRequest(BaseModel):
     )
 
 
+#: The Bambuddy files of a model whose bytes a resolve looks up in the native library: a
+#: model imported once per profile has a few.
+MAX_MATCHED = 20
+
+
 class MakerWorldResolved(BaseModel):
     model_id: int = Field(description="The MakerWorld design id, for the import")
     profile_id: int | None = Field(
@@ -90,8 +95,10 @@ class MakerWorldResolved(BaseModel):
     )
     already_imported_library_ids: list[int] = Field(
         description="On `library_backend` native: ScadBuddy's own library files holding the"
-        " same bytes as those Bambuddy files, the ids the order and print tools take. On"
-        " `bambuddy` the same as `already_imported_bambuddy_ids`."
+        " same bytes as those Bambuddy files, the ids the order and print tools take. Only"
+        f" the first {MAX_MATCHED} Bambuddy files are looked up, so the list can be shorter"
+        " than `already_imported_bambuddy_ids`. On `bambuddy` the same as"
+        " `already_imported_bambuddy_ids`."
     )
     library: Literal["native", "bambuddy"] = Field(
         description="Which library `already_imported_library_ids` names"

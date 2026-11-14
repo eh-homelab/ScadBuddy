@@ -86,13 +86,20 @@ async def import_model(
 
 
 def _copy_failed(bambuddy_id: int, reason: str | None) -> ApiError:
-    detail = (
+    failed = (
         f"Bambuddy imported the model as its library file {bambuddy_id}, but copying it"
-        f" into ScadBuddy's library failed: {reason or 'no reason given'}. Importing again"
-        " downloads nothing twice"
+        f" into ScadBuddy's library failed: {reason or 'no reason given'}"
     )
     if reason is not None and reason.startswith(STORE_FULL):
-        return ApiError(status.HTTP_507_INSUFFICIENT_STORAGE, detail)
+        return ApiError(
+            status.HTTP_507_INSUFFICIENT_STORAGE,
+            f"{failed}. Make room in the blob store, then import again: that downloads"
+            " nothing twice",
+        )
+    detail = (
+        f"{failed}. Importing again fails the same way while that file is unchanged in"
+        " Bambuddy's library, so do not try again: check that file in Bambuddy first"
+    )
     # Not `UNAVAILABLE_PROBLEM`: a copy that ended "failed" (the file gone from Bambuddy,
     # bytes that do not match its hash) fails the same way again, so the run does not
     # try it again (`operations._try_again`). A transient Bambuddy failure raises its

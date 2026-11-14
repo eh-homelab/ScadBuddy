@@ -26,6 +26,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.makerworld.models import (
+    MAX_MATCHED,
     MakerWorldImported,
     MakerWorldImportRequest,
     MakerWorldResolved,
@@ -39,9 +40,6 @@ from scadbuddy.print_library.native import NativeLibrary
 
 router = APIRouter(prefix="/makerworld", tags=["makerworld"])
 
-#: The Bambuddy files of a model whose bytes a resolve looks up in the native library: a
-#: model imported once per profile has a few.
-MAX_MATCHED = 20
 #: How many of those Bambuddy files a resolve reads at once.
 READS_AT_ONCE = 4
 

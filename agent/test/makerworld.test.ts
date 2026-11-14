@@ -120,6 +120,27 @@ it('a slow import answers the running operation to follow with get_operation', a
   expect(answer.operation_id).toBe(operation.id)
 })
 
+it('an import that ends inside the follow window answers the operation result', async () => {
+  const running = { id: 'b'.repeat(32), kind: 'makerworld_import', subject: 'makerworld:123:77', status: 'running' }
+  const reads: string[] = []
+  let key: string | null = null
+  server.use(
+    http.post(`${BACKEND}/api/v1/makerworld/import`, ({ request }) => {
+      key = request.headers.get('Idempotency-Key')
+      return HttpResponse.json(running, { status: 202 })
+    }),
+    http.get(`${BACKEND}/api/v1/operations/${running.id}`, () => {
+      reads.push(running.id)
+      // The first read still runs; the second has the import's result.
+      return HttpResponse.json(reads.length < 2 ? running : { ...running, status: 'succeeded', result: IMPORTED })
+    }),
+  )
+  const answer = await tool('import_makerworld_model').execute({ model_id: 123, profile_id: 77 }, { ...ctx(), commandFollowMs: 5_000 })
+  expect(body(answer)).toEqual(IMPORTED)
+  expect(reads).toHaveLength(2)
+  expect(key).toMatch(/^[0-9a-f]{32}$/)
+})
+
 it('import_makerworld_model reports the backend refusal', async () => {
   server.use(
     http.post(`${BACKEND}/api/v1/makerworld/import`, () =>
