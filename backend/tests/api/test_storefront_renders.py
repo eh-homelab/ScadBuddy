@@ -848,14 +848,65 @@ def test_an_analysis_that_never_starts_is_withdrawn(
     pool = one_worker(monkeypatch, busy_for=1.5)
     try:
         r = crud.get(f"/renders/{job['id']}/estimate")
-        assert r.status_code == 422, r.text
-        assert r.json()["detail"] == "The price is not ready yet. Try again in a moment."
+        assert r.status_code == 429, r.text
+        assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
         assert counted.calls == 0 and parts_record(crud, job["id"]) is None
     finally:
         pool.shutdown(wait=True)
     monkeypatch.setattr(renders_module, "_executor", shared)
     assert crud.get(f"/renders/{job['id']}/estimate").status_code == 200
     assert counted.calls == 1
+
+
+def test_a_slow_analysis_answers_pending_at_once_and_runs_on(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6120: no estimate request waits on the analysis past `READY_WAIT`; the analysis
+    runs on, once, and a later request reads its price."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 68})
+    monkeypatch.setattr(renders_module, "READY_WAIT", 0.2)
+    counted = Counted(delay=1.0)
+    monkeypatch.setattr(renders_module, "part_volumes", counted)
+    started = time.monotonic()
+    r = crud.get(f"/renders/{job['id']}/estimate")
+    assert time.monotonic() - started < 0.9
+    assert r.status_code == 429, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
+    assert r.headers["Retry-After"] == str(renders_module.PENDING_RETRY)
+    deadline = time.monotonic() + 10
+    while (r := crud.get(f"/renders/{job['id']}/estimate")).status_code == 429:
+        assert time.monotonic() < deadline, r.text
+        time.sleep(0.1)
+    assert r.status_code == 200, r.text
+    assert counted.calls == 1
+
+
+def test_a_done_render_names_its_preview_once_its_files_are_here(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6120: a done render's status names no preview while its files are fetched, so the
+    page never asks for a preview the API would hold open; a later poll names it."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 69})
+    monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
+    real = renders_module.materialize_result
+    fetches = 0
+
+    async def slow(blobs: Any, result: Any) -> None:
+        nonlocal fetches
+        fetches += 1
+        await asyncio.sleep(0.6)
+        await real(blobs, result)
+
+    monkeypatch.setattr(renders_module, "materialize_result", slow)
+    first = crud.get(f"/renders/{job['id']}")
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "done" and first.json()["preview_url"] is None
+    deadline = time.monotonic() + 10
+    while (r := crud.get(f"/renders/{job['id']}")).json()["preview_url"] is None:
+        assert time.monotonic() < deadline, r.text
+        time.sleep(0.1)
+    assert r.json()["preview_url"].endswith(f"/renders/{job['id']}/preview.glb")
+    assert fetches == 1
 
 
 def test_a_full_analysis_queue_is_not_ready(
@@ -866,8 +917,9 @@ def test_a_full_analysis_queue_is_not_ready(
     monkeypatch.setattr(renders_module, "part_volumes", counted)
     monkeypatch.setattr(renders_module, "ANALYSIS_QUEUE", 0)
     r = crud.get(f"/renders/{job['id']}/estimate")
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"] == "The price is not ready yet. Try again in a moment."
+    assert r.status_code == 429, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "estimate_pending"
+    assert r.headers["Retry-After"] == str(renders_module.PENDING_RETRY)
     assert counted.calls == 0 and parts_record(crud, job["id"]) is None
 
 
