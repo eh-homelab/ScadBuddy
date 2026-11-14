@@ -124,7 +124,8 @@ same way, `vite.config.ts`).
   listings into the mock's `sessionStorage`.
   Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` orders,
   removes and adds a listing's images, uploads one into the template's media, and marks
-  each one Live from the listing's published `media` (`media_id`). A template's Media
+  each one Live from the listing's published `media` (`media_id`; a listing published
+  before that was kept says to publish again, never matched by place). A template's Media
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.

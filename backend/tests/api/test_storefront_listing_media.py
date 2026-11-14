@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.orders.storefront.listings import HOLDER
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
-from tests.api.test_media import PNG
+from tests.api.test_media import MP4, PNG
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     BOOK,
     LISTINGS,
@@ -103,6 +103,20 @@ def test_pictures_the_template_does_not_back_are_refused(
     assert answer.status_code == 422, answer.text
     assert answer.json()["type"] == STOREFRONT_PROBLEMS + problem
     assert client.get(f"{LISTINGS}/{listing['id']}").json()["media_ids"] == listing["media_ids"]
+
+
+def test_a_video_is_refused_the_storefront_shows_images_only(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    files = {"file": ("clip.mp4", MP4, "application/octet-stream")}
+    added = client.post(f"/api/v1/models/{template['slug']}/media", files=files, headers=press())
+    assert added.status_code == 200, added.text
+    video = added.json()["media"][-1]
+    assert video["kind"] == "video"
+    listing = create(client, listing_body(template, pla_red))
+    answer = _set(client, listing, [video["id"]])
+    assert answer.status_code == 422, answer.text
+    assert answer.json()["type"] == STOREFRONT_PROBLEMS + "listing_media_not_image"
 
 
 def test_a_stale_read_and_a_missing_listing_are_refused(

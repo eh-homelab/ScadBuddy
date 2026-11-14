@@ -11,6 +11,22 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 /** The most listings one template's dialog reads: the list route's page cap. */
 const MAX_LISTINGS = 200
+/** How many listings the dialog reads at once. */
+const READS_AT_ONCE = 4
+
+/** Each id read with `read`, at most `READS_AT_ONCE` at a time, in the order given. */
+async function readAll(ids: readonly string[], read: (id: string) => Promise<StorefrontListing>): Promise<StorefrontListing[]> {
+  const out: StorefrontListing[] = new Array<StorefrontListing>(ids.length)
+  let next = 0
+  async function worker() {
+    while (next < ids.length) {
+      const index = next++
+      out[index] = await read(ids[index]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, ids.length) }, () => worker()))
+  return out
+}
 
 function message(caught: unknown): string {
   return caught instanceof ApiError || caught instanceof Error ? caught.message : String(caught)
@@ -38,7 +54,10 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
     setResults({})
     try {
       const page = await api.storefrontListings(new URLSearchParams({ slug, limit: String(MAX_LISTINGS) }))
-      const read = await Promise.all(page.items.map((row) => api.storefrontListing(row.id)))
+      const read = await readAll(
+        page.items.map((row) => row.id),
+        (id) => api.storefrontListing(id),
+      )
       setListings(read)
       setWanted(Object.fromEntries(read.map((listing) => [listing.id, listing.media_ids.includes(item.id)])))
     } catch (caught) {
@@ -60,6 +79,16 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
         said[listing.id] = show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.'
       } catch (caught) {
         said[listing.id] = `Not saved: ${message(caught)}`
+        // Changed elsewhere since it was read: read it again, so Save tries over its newest state.
+        if (caught instanceof ApiError && caught.status === 409) {
+          try {
+            const fresh = await api.storefrontListing(listing.id)
+            setListings((all) => (all ?? []).map((one) => (one.id === fresh.id ? fresh : one)))
+            said[listing.id] = 'Changed elsewhere since it was read; read again. Save to try again.'
+          } catch {
+            // Left as it was read; reopening the dialog reads it again.
+          }
+        }
       }
     }
     setResults(said)

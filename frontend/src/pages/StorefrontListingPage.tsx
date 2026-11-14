@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
 import type { StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
+import type { LivePictures } from '../components/storefront/ListingPictures'
 import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { sellListing, type SellListing } from '../components/storefront/sellSource'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
@@ -38,8 +39,8 @@ interface Open {
   filled: boolean
   /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
   notes: string[]
-  /** #6213 — the pictures the public site shows now (`liveMedia`), or null while not published. */
-  live: string[] | null
+  /** #6213 — the pictures the public site shows now (`liveMedia`). */
+  live: LivePictures
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -57,16 +58,15 @@ function fresh(sold?: SellListing): Open {
 }
 
 /**
- * #6213 — the media ids a published listing shows, in order. A listing published before
- * publish kept each picture's `media_id` reads it from `media_ids` by place: publish copied
- * them in that order, and an edit since would have unpublished it.
+ * #6213 — the media ids a published listing shows, in order; null while it is not
+ * published. A listing published before publish kept each picture's `media_id` is
+ * `unknown`: its `media_ids` may have changed since (`PUT …/media` keeps it published when
+ * a republish is refused), so its pictures are never matched by place.
  */
-function liveMedia(listing: StorefrontListing): string[] | null {
+function liveMedia(listing: StorefrontListing): LivePictures {
   if (!listing.published) return null
-  return listing.media.flatMap((item, index) => {
-    const id = item.media_id ?? listing.media_ids[index]
-    return id ? [id] : []
-  })
+  const ids = listing.media.map((item) => item.media_id)
+  return ids.every((id) => typeof id === 'string') ? (ids as string[]) : 'unknown'
 }
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { colourProblems, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
-import { ListingPictures } from './ListingPictures'
+import { ListingPictures, type LivePictures } from './ListingPictures'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -29,8 +29,8 @@ export interface ListingEditorProps {
   schema: CustomizerSchema | undefined
   filaments: readonly Filament[]
   media: readonly MediaView[]
-  /** #6213 — the pictures the public site shows now, or null while the listing is not published. */
-  live?: readonly string[] | null
+  /** #6213 — the pictures the public site shows now (`LivePictures`). */
+  live?: LivePictures
   /** #6213 — the template as a picture uploaded in the editor left it. */
   onMediaUploaded?: (model: ModelSummary) => void
 }

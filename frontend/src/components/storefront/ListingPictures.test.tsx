@@ -5,11 +5,11 @@ import { api } from '../../api/client'
 import type { MediaView, ModelSummary } from '../../api/types'
 import { GALLERY_SLUG, MEDIA_PNG_BASE64 } from '../../mocks/fixtures'
 import { renderPage } from '../../test/utils'
-import { ListingPictures } from './ListingPictures'
+import { ListingPictures, type LivePictures } from './ListingPictures'
 
 const PNG = Uint8Array.from(atob(MEDIA_PNG_BASE64), (c) => c.charCodeAt(0))
 
-function Harness({ media, start, live, seen, uploaded }: { media: MediaView[]; start: string[]; live: string[] | null; seen: string[][]; uploaded?: (model: ModelSummary) => void }) {
+function Harness({ media, start, live, seen, uploaded }: { media: MediaView[]; start: string[]; live: LivePictures; seen: string[][]; uploaded?: (model: ModelSummary) => void }) {
   const [chosen, setChosen] = useState(start)
   const [items, setItems] = useState(media)
   return (
@@ -66,6 +66,14 @@ describe('ListingPictures (#6213)', () => {
     const [first, second] = screen.getAllByTestId('listing-picture')
     expect(within(first!).getByText('Live')).toBeInTheDocument()
     expect(within(second!).getByText('Not live yet')).toBeInTheDocument()
+  })
+
+  it('marks nothing when the published pictures cannot be told apart, and says to publish again', async () => {
+    const media = (await api.getModel(GALLERY_SLUG)).media ?? []
+    renderPage(<Harness media={media} start={['a1b2c3d4e5f6']} live="unknown" seen={[]} />)
+    expect(screen.getByText('Publish again to see which pictures are live.')).toBeInTheDocument()
+    expect(screen.queryByText('Live')).not.toBeInTheDocument()
+    expect(screen.queryByText('Not live yet')).not.toBeInTheDocument()
   })
 
   it('uploads a picture into the design’s media and shows it last', async () => {

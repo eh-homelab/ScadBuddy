@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import type { CustomizerSchema, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
-import { problem } from '../handlers'
+import { mockModels, problem } from '../handlers'
 import * as orders from './orders/state'
 
 /**
@@ -226,6 +226,13 @@ export const handlers = [
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
     if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
     if (new Set(media_ids).size !== media_ids.length) return refused(422, 'listing_media_duplicate', 'a picture is named twice')
+    // As `_check_pictures`: each id one of the template's images.
+    const media = mockModels().find((m) => m.slug === found.slug)?.media ?? []
+    for (const mediaId of media_ids) {
+      const item = media.find((m) => m.id === mediaId && !m.missing)
+      if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`)
+      if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`)
+    }
     const at = stamp()
     const next: StorefrontListing = { ...found, media_ids, updated_at: at }
     const changed: StorefrontListing = found.published ? { ...next, media: publishedMedia(next), published_at: at } : next

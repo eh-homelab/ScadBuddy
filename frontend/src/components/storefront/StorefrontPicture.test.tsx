@@ -65,6 +65,32 @@ describe('StorefrontPicture (#6213)', () => {
     await waitFor(async () => expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['a1b2c3d4e5f6']))
   })
 
+  it('reads a listing changed elsewhere again, so a second Save goes through', async () => {
+    const item = await image()
+    const listing = await api.createStorefrontListing(body('Coaster'))
+    const { user, dialog } = await open(item)
+    await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
+    // Edited elsewhere after the dialog read it.
+    await api.setStorefrontListingMedia(listing.id, ['a1b2c3d4e5f6'], listing.updated_at)
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByText(/Changed elsewhere since it was read/)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    expect(await within(dialog).findByText('Added to the draft.')).toBeInTheDocument()
+    expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['a1b2c3d4e5f6', item.id])
+  })
+
+  it('shows the refusal of a picture that is no image', async () => {
+    const video = ((await api.getModel(GALLERY_SLUG)).media ?? []).find((m) => m.kind === 'video')
+    if (!video) throw new Error('no fixture video')
+    await api.createStorefrontListing(body('Coaster'))
+    const { user, dialog } = await open(video)
+    await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByText(/Not saved: .*not an image/)).toBeInTheDocument()
+  })
+
   it('says when no listing sells the design', async () => {
     const { dialog } = await open(await image())
     expect(await within(dialog).findByText(/No listing sells this design yet/)).toBeInTheDocument()

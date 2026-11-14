@@ -10,14 +10,20 @@ import { sellMedia } from './listingDraft'
 /** The image types a listing's upload takes: the storefront shows images only (#6131). */
 const PICTURE_ACCEPT = 'image/png,image/jpeg,image/webp'
 
+/**
+ * #6213 — what the public site shows: the media ids, in order; null while the listing is
+ * not published; `unknown` for a listing published before publish kept each picture's
+ * media id (publish it again to tell).
+ */
+export type LivePictures = readonly string[] | null | 'unknown'
+
 export interface ListingPicturesProps {
   slug: string
   /** The template's media; only its images can be shown. */
   media: readonly MediaView[]
   /** The listing's pictures (`media_ids`), in the order the customer sees them. */
   chosen: readonly string[]
-  /** The ids the public site shows now, or null while the listing is not published. */
-  live: readonly string[] | null
+  live: LivePictures
   onChange: (ids: string[]) => void
   /** The template as an upload left it, with the new image last. */
   onUploaded: (model: ModelSummary) => void
@@ -77,6 +83,7 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
   return (
     <div className="flex flex-col gap-2" role="group" aria-label="Pictures">
       <span className="text-sm font-medium">Pictures</span>
+      {live === 'unknown' && <p className="text-xs text-muted-foreground">Publish again to see which pictures are live.</p>}
       {shown.length === 0 ? (
         <p className="text-xs text-muted-foreground">No pictures: the customer sees none.</p>
       ) : (
@@ -84,12 +91,12 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
           {shown.map((id, index) => {
             const item = byId.get(id)
             const name = item?.caption || item?.file || id
-            const isLive = live?.includes(id) ?? false
+            const isLive = Array.isArray(live) && live.includes(id)
             return (
               <li key={id} data-testid="listing-picture" className="flex flex-wrap items-center gap-2 rounded-md border p-1.5 text-sm">
                 <img src={api.mediaUrl(slug, { id })} alt={name} className="h-10 w-14 shrink-0 rounded object-cover" />
                 <span className="min-w-0 flex-1 truncate">{name}</span>
-                {live !== null && (isLive ? <Badge>Live</Badge> : <Badge variant="outline">Not live yet</Badge>)}
+                {Array.isArray(live) && (isLive ? <Badge>Live</Badge> : <Badge variant="outline">Not live yet</Badge>)}
                 <Button size="sm" variant="ghost" aria-label={`Move ${name} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
                   <ArrowUpIcon />
                 </Button>
