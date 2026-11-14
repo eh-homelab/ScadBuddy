@@ -232,6 +232,11 @@ import type {
   Order,
   OrderCreate,
   OrderDetail,
+  OrderItemSource,
+  PurchaseRecordInput,
+  PurchaseSource,
+  PurchaseUpdateInput,
+  SourceDownload,
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
@@ -275,6 +280,7 @@ import type {
   PriceBook,
   StorefrontListing,
   StorefrontListingInput,
+  StorefrontListingPage,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -285,6 +291,7 @@ import type {
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
+  DensityFill,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -2519,6 +2526,29 @@ export const api = {
     request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
   removeCostEntry: (orderId: string, id: string) =>
     request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #6133 — the address of a customer file's preview: untrusted bytes the backend serves
+   * as `image/png` with `nosniff`, for an `<img>` only. */
+  sourcePreviewUrl: (orderId: string, sourceId: string) => `${API_BASE}/orders/${seg(orderId)}/sources/${seg(sourceId)}/preview`,
+  /** #6133 — a presigned GET of a customer's staged file, as an attachment. */
+  sourceDownload: (orderId: string, sourceId: string) =>
+    request<SourceDownload>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/download`),
+  /** #6133 — "Check again" for a file whose check failed. */
+  checkSourceAgain: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/check`, { method: 'POST' }),
+  /** #6133 — the shop does not print this file or link; the reason is the shop's. */
+  declineSource: (orderId: string, sourceId: string, reason: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #6133 — "Retry import" for a file whose import is stuck. */
+  retrySourceImport: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/retry-import`, { method: 'POST' }),
+  /** #6133 — what the shop paid for a thing to buy: a cost entry and a charge together. */
+  recordPurchase: (orderId: string, sourceId: string, body: PurchaseRecordInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/record`, { method: 'POST', body: JSON.stringify(body) }),
+  updatePurchase: (orderId: string, sourceId: string, body: PurchaseUpdateInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** #6133 — a thing to buy the shop does not buy; the customer reads `shop_note`. */
+  declinePurchase: (orderId: string, sourceId: string, shopNote: string) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ shop_note: shopNote }) }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -2797,7 +2827,14 @@ export const api = {
   /** The printer is priced at the price book's machine rate again. */
   deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
   // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
-  storefrontListings: () => request<StorefrontListing[]>('/storefront/listings'),
+  /** #6157 — one page of the listings: searched, filtered and sorted on the server. */
+  storefrontListings: (query: URLSearchParams = new URLSearchParams()) =>
+    request<StorefrontListingPage>(`/storefront/listings${query.size ? `?${query}` : ''}`),
+  /** #6157 — one listing whole, for its editor. */
+  storefrontListing: (id: string) => request<StorefrontListing>(`/storefront/listings/${seg(id)}`),
+  /** #6157 — the listing put at `place` (from 1) in the public site's order. */
+  moveStorefrontListing: (id: string, place: number) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/move`, { method: 'POST', body: JSON.stringify({ place }) }),
   createStorefrontListing: (body: StorefrontListingInput) =>
     request<StorefrontListing>('/storefront/listings', { method: 'POST', body: JSON.stringify(body) }),
   /** Replaces the listing whole and unpublishes it; `updatedAt` is the `updated_at` the editor read. */
@@ -2805,6 +2842,15 @@ export const api = {
     request<StorefrontListing>(`/storefront/listings/${seg(id)}`, {
       method: 'PUT',
       body: JSON.stringify({ listing: body, updated_at: updatedAt }),
+    }),
+  /**
+   * #6213 — the listing's pictures (ids of its template's images, in order), nothing else
+   * changed. A draft stays a draft; a published listing is published again and stays live.
+   */
+  setStorefrontListingMedia: (id: string, mediaIds: string[], updatedAt: string) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/media`, {
+      method: 'PUT',
+      body: JSON.stringify({ media_ids: mediaIds, updated_at: updatedAt }),
     }),
   publishStorefrontListing: (id: string) =>
     request<StorefrontListing>(`/storefront/listings/${seg(id)}/publish`, { method: 'POST' }),
@@ -2817,6 +2863,7 @@ export const api = {
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
   importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),
+  fillDensities: () => request<DensityFill>('/orders/price-book/fill-densities', { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),

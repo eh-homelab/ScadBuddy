@@ -6,6 +6,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import type { BusEvent } from '../src/events/bus.js'
+import { CrudEventLogReads, type EventLogReads } from '../src/events/eventLogReads.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { BACKEND, connectWatching, testApp } from './helpers/mcp.js'
@@ -80,7 +81,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await drop()
     })
 
-    async function listen(options: { replayLimit?: number } = {}) {
+    async function listen(options: { replayLimit?: number; eventLog?: () => EventLogReads | undefined } = {}) {
       const logs: string[] = []
       const listener = new PgEventListener(url, {
         searchPath: schema,
@@ -208,6 +209,56 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await until(() => resyncs() === 1, 'the resync')
       expect(listener.replayed).toBe(0)
       expect(heard.filter((h) => h.kind === 'print.progress' && h.output_id === 'o')).toHaveLength(0)
+    })
+
+    /**
+     * The backend's CRUD routes of area `events` (backend api/crud_agent.py), on this test's
+     * database: the same queries, answered as the routes answer them.
+     */
+    function eventRoutes(seen: string[]): typeof fetch {
+      return async (input) => {
+        const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+        seen.push(url.pathname)
+        const crud = { 'x-scadbuddy-crud': '1', 'content-type': 'application/json' }
+        if (url.pathname.endsWith('/crud/agent/events/head')) {
+          const [row] = await db.sql<{ seq: string; at: Date }[]>`SELECT coalesce(max(seq), 0)::text AS seq, now() AS at FROM events`
+          return new Response(JSON.stringify(row), { headers: crud })
+        }
+        if (url.pathname.endsWith('/crud/agent/events')) {
+          const rows = await db.sql<{ seq: string; event_id: string; payload: unknown; logged_at: Date }[]>`
+            SELECT seq::text AS seq, event_id, payload, logged_at FROM events
+            WHERE seq > ${url.searchParams.get('after')}::bigint ORDER BY events.seq DESC LIMIT ${Number(url.searchParams.get('limit'))}`
+          const [clock] = await db.sql<{ at: Date }[]>`SELECT now() AS at`
+          return new Response(JSON.stringify({ events: rows, read_at: clock!.at }), { headers: crud })
+        }
+        return new Response('not found', { status: 404 })
+      }
+    }
+
+    it("once the API lists area events, replays the gap through the backend's routes", async () => {
+      const seen: string[] = []
+      const routes = new CrudEventLogReads('http://api:8080', { fetch: eventRoutes(seen) })
+      const { listener, heard } = await listen({ eventLog: () => routes })
+      const missed = [event({ kind: 'job.running', job_id: 'j3', slug: 'k' }), event({ kind: 'job.done', job_id: 'j3', slug: 'k' })]
+      for (const e of missed) await publish(db, e, { notify: false })
+      await listener.dropConnectionForTest()
+      await until(() => missed.every((m) => heard.some((h) => h.id === m.id)), 'the replayed events')
+      const ids = heard.map((h) => h.id)
+      expect(ids.indexOf(missed[0]!.id)).toBeLessThan(ids.indexOf(missed[1]!.id))
+      expect(listener.longTransactions).toBe(0)
+      expect(seen).toContain('/api/v1/internal/crud/agent/events/head')
+      expect(seen).toContain('/api/v1/internal/crud/agent/events')
+    })
+
+    it('resyncs after a drop when the routes cannot be read, as for an unreadable log', async () => {
+      const refused = new CrudEventLogReads('http://api:8080', { fetch: async () => new Response('', { status: 503, headers: { 'x-scadbuddy-crud': '1' } }) })
+      const { listener, heard, resyncs, logs } = await listen({ eventLog: () => refused })
+      const e = event({ kind: 'model.created', slug: 'y' })
+      await publish(db, e)
+      await until(() => heard.some((h) => h.id === e.id), 'the live event')
+      await listener.dropConnectionForTest()
+      await until(() => resyncs() === 1, 'the resync')
+      expect(logs.some((l) => l.includes('could not be read before the drop'))).toBe(true)
     })
 
     it('without a readable log, still hears live events and resyncs after a drop', async () => {

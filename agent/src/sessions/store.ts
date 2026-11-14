@@ -3,6 +3,9 @@ import type { Sql, TransactionSql } from 'postgres'
 import { isUuid } from '../harness/uuid.js'
 import { openBytes, sealBytes } from '../secrets.js'
 import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/payloadCodec.js'
+import { copyForkBlobs } from './blobs.js'
+import { copyForkEvents } from './eventLog.js'
+import { blobNames } from './forkPoint.js'
 
 // The Agent SDK `SessionStore` adapter on Postgres (#300, spec §6 "Storage"):
 // the SDK mirrors every transcript line here, so any replica can resume a
@@ -68,7 +71,9 @@ import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/
 // parent's own cut, for a fork of a fork), cut there and opened under each owner's
 // key, then the child's own rows. Nothing is copied at the fork. Forgetting a parent
 // copies each child's range into the child first (`copyForkRanges`, forget.ts): those
-// rows are `inherited`, read before the child's own, and the link is cleared. The
+// rows are `inherited`, read before the child's own, and the link is cleared. Its events
+// and the images they name are copied in then too (eventLog.ts `copyForkEvents`, blobs.ts
+// `copyForkBlobs`), since the child reads those through the same link. The
 // parent's entries are passed on as they are, with the parent's `sessionId`: Claude
 // Code restores a session-scoped entry (a `cost-state`) only of the session it
 // resumes (warm.ts `restoredCostUsd`, measured in test/warmResumeCost.sdk.test.ts), so
@@ -274,12 +279,17 @@ export class PostgresSessionStore implements SessionStore {
 
 type KeyOf = (sessionId: string, create: boolean) => Promise<Buffer>
 
-/** Whether `sessionId` has a main transcript to resume: rows of its own, or the parent a fork reads through. */
+/**
+ * Whether `sessionId` has a main transcript to resume: rows of its own, or entries a fork takes
+ * through its link. A cut above 0 was taken from a transcript that had that many entries, which
+ * stay reachable (through the chain, or copied in when an ancestor is forgotten); a fork with a
+ * cut of 0 (of a closed DurableSession, #4212) takes none.
+ */
 export async function transcriptExists(sql: Sql, sessionId: string): Promise<boolean> {
   const [row] = isUuid(sessionId)
     ? await sql<{ found: boolean }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '')
-          OR EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND fork_parent_id IS NOT NULL) AS found`
+          OR EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND fork_parent_id IS NOT NULL AND fork_cut > 0) AS found`
     : await sql<{ found: boolean }[]>`
         SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS found`
   return row?.found === true
@@ -316,31 +326,51 @@ function firstRows(segments: Segment[], n: number): Segment[] {
   return out
 }
 
+/** A row of `chainRows`: a session on the chain (its link) and one of its main-transcript rows, if any. */
+export type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
+
+/**
+ * The fork chain of `sessionId` with the main-transcript rows `segmentsOf` builds its load
+ * from, in one statement; empty for an id that is no uuid.
+ */
+export async function chainRows(sql: Sql | TransactionSql, sessionId: string): Promise<ChainRow[]> {
+  // From the session up to the first ancestor that is no fork. Links are only ever made to an
+  // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
+  // links come with no row (`id` NULL) when it has no entries of its own. An ancestor's rows
+  // are read only up to `bound`, the least cut below it (LEAST skips the session's own NULL):
+  // a load takes no more than that of the ancestor's transcript, and its rows come first in
+  // it, so none past its fork point is read (#4212): the index `ai_session_entries_load`, in that
+  // order, lets the limit stop the scan. `LIMIT NULL` is no limit.
+  return isUuid(sessionId)
+    ? sql<ChainRow[]>`
+        WITH RECURSIVE chain (id, parent, cut, depth, bound) AS (
+          SELECT id, fork_parent_id, fork_cut, 0, NULL::bigint FROM ai_sessions WHERE id = ${sessionId}::uuid
+          UNION ALL
+          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1, LEAST(c.bound, c.cut)
+          FROM ai_sessions s JOIN chain c ON s.id = c.parent
+        )
+        SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
+        FROM chain c LEFT JOIN LATERAL (
+          SELECT id, uuid, entry, sealed, inherited FROM ai_session_entries
+          WHERE session_id = c.id::text AND subpath = ''
+          ORDER BY inherited DESC, id
+          LIMIT c.bound
+        ) e ON true
+        ORDER BY c.depth, e.inherited DESC, e.id`
+    : []
+}
+
 /**
  * The rows of `sessionId`'s main transcript, in the order it loads: its inherited rows (a
  * forgotten parent's range, copied in), then its parent's transcript through the cut, then
- * its own; for a fork of a fork, the parent's is built the same way from its own parent. One
- * statement however long the chain, its links and every row of the sessions on it, so it is one
- * snapshot even in a READ COMMITTED transaction (forgetSubject's): a copy committed meanwhile is
- * read either as the link or as the rows, never both (#5062). Only the rows a load takes are
- * opened (`openSegments`).
+ * its own; for a fork of a fork, the parent's is built the same way from its own parent. Read
+ * by `chainRows`, one statement however long the chain: its links and, for each session on
+ * it, the rows up to its bound. So it is one snapshot even in a READ COMMITTED transaction
+ * (forgetSubject's): a copy committed meanwhile is read either as the link or as the rows,
+ * never both (#5062). Only the rows a load takes are opened (`openSegments`).
  */
 async function segmentsOf(sql: Sql | TransactionSql, sessionId: string): Promise<Segment[]> {
-  type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
-  // From the session up to the first ancestor that is no fork. Links are only ever made to an
-  // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
-  // links come with no row (`id` NULL) when it has no entries of its own.
-  const joined = isUuid(sessionId)
-    ? await sql<ChainRow[]>`
-        WITH RECURSIVE chain (id, parent, cut, depth) AS (
-          SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
-          UNION ALL
-          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
-        )
-        SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
-        FROM chain c LEFT JOIN ai_session_entries e ON e.session_id = c.id::text AND e.subpath = ''
-        ORDER BY c.depth, e.inherited DESC, e.id`
-    : []
+  const joined = await chainRows(sql, sessionId)
   const chain: { id: string; cut: number | null }[] = []
   for (const row of joined) if (chain.at(-1)?.id !== row.owner) chain.push({ id: row.owner, cut: row.cut })
   let rows = joined.filter((row) => row.id !== null)
@@ -400,27 +430,30 @@ export class ForksNeedKeys extends Error {
   }
 }
 
-/** Whether a fork reads its transcript through `parentId`. */
+/** Whether a fork reads entries of its transcript through `parentId` (a cut of 0 reads only its log). */
 export async function hasForks(sql: Sql, parentId: string): Promise<boolean> {
-  const rows = await sql`SELECT 1 FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid LIMIT 1`
+  const rows = await sql`SELECT 1 FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid AND fork_cut > 0 LIMIT 1`
   return rows.length > 0
 }
 
 /**
  * Before `parentId`'s key goes (forgetSubject, in its transaction, under the parent's lock): each
  * fork that reads through it takes the range it references as rows of its own, `inherited` and
- * sealed under its own key, and its link is cleared, so it needs neither the parent's rows nor
- * its key again. A fork being forgotten itself gets no rows, only its link cleared. `keys` opens
+ * sealed under its own key, with its events and the images they name (#4212), and its link is
+ * cleared, so it needs neither the parent's rows nor its key again. A fork being forgotten itself
+ * gets no rows, only its link cleared. `keys` opens
  * the parent's transcript (its own ancestors' too) and seals the copies; without them a parent
- * with forks is not forgotten. How many forks there were.
+ * with forks that take entries of it is not forgotten (forks with a cut of 0 need none). How many
+ * forks there were.
  */
 export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | undefined, parentId: string): Promise<number> {
   const children = await tx<{ id: string; cut: number }[]>`
     SELECT id::text AS id, fork_cut AS cut FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid ORDER BY id FOR UPDATE`
   if (children.length === 0) return 0
-  if (!keys) throw new ForksNeedKeys(parentId)
-  const keyOf: KeyOf = (sessionId, create) => keys.keyFor(`session-${sessionId}`, create)
-  const transcript = await openSegments(keyOf, await segmentsOf(tx, parentId))
+  const takesEntries = children.some((child) => child.cut > 0)
+  if (takesEntries && !keys) throw new ForksNeedKeys(parentId)
+  const keyOf: KeyOf = (sessionId, create) => keys!.keyFor(`session-${sessionId}`, create)
+  const transcript = takesEntries ? await openSegments(keyOf, await segmentsOf(tx, parentId)) : []
   for (const child of children) {
     const range = transcript.slice(0, child.cut)
     const subject = `session-${child.id}`
@@ -468,7 +501,9 @@ export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | und
           }
         }
       }
-      await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${child.id}::uuid`
+      // Its events and the images they name (#4212), read through the link before it goes.
+      if (!forgotten) await copyForkBlobs(tx, child.id, blobNames(await copyForkEvents(tx, child.id)))
+      await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL, fork_event_cut = NULL WHERE id = ${child.id}::uuid`
     } finally {
       dek?.fill(0)
     }

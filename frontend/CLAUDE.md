@@ -99,6 +99,52 @@ same way, `vite.config.ts`).
   them. The session is
   the edge's HttpOnly cookie; the page never sees it. Mocks
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
+  A customer's own models (#6133 PR 4, spec 2026-11-13 §4, §10.5): `components/ModelForm.tsx`
+  at `/print-my-model` (linked from the listings' "Have something else in mind?"). It asks
+  the edge for presigned slots, PUTs each file straight to the bucket with XHR
+  (`api/client.ts` `putFile`, for the progress bar), tries a failed PUT again on the same
+  URL until it expires, then adds the request (Turnstile `model`). `components/PurchaseLinks.tsx`
+  is the "things to buy" list it shares with `RequestForm` (the multipart part
+  `purchase_links`). `components/ModelSources.tsx`: `CartSources` (the draft page reads the
+  cart again while a file is `checking`, `poll.ts` timing) and `OrderSources` (the order
+  page reads each preview by a POST of the reader, `orderPreview`, into a `blob:` URL, so no
+  URL holds the token). A customer's link is always text, never an anchor. Mocks
+  `src/mocks/features/storefrontModels.ts` (the bucket on the page's own origin,
+  `/mock-bucket/staging`, because `vite preview` sends `page-csp.txt`, which names no
+  bucket; the order `/o#models`). One route has one feature module
+  (`mocks/features.test.ts`), so `storefrontPublic.ts`'s `GET /draft` and order view call
+  its `advanceChecks` and `modelsOrderOf`. e2e `e2e/storefront-models.spec.ts`.
+
+- "Sell on storefront" (#6131, design 2026-11-13): Generate's menu (`/storefront?sell=job:<id>`)
+  and a History row (`?sell=output:<id>`) open the listing editor with the listing filled in,
+  unsaved (`components/storefront/sellSource.ts`; the list redirects the address to
+  `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
+  every colour offered, from the priced filaments of the design's material, the rest locked;
+  a support setting is never offered, `isSupport`), pinned by
+  `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
+  colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
+
+- The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
+  server searches, filters, sorts and pages (`GET /storefront/listings` answers 50 rows, the
+  matches' `total` and the shop's `places`, the last place a move can name; a page past the
+  last moves to the last); `components/storefront/listingsQuery.ts` keeps that state in the URL. Bulk
+  Publish, Unpublish and Delete run one listing at a time. "Move to top" and "Move to
+  position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
+  `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
+  links pass its query in the history state, which "Back to listings" returns to. While it
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks. The old
+  `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
+  `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
+  listings into the mock's `sessionStorage`.
+  Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` lists every
+  id of the draft's `media_ids` (a video, a missing file or an unknown id says so), orders,
+  removes and adds a listing's images, uploads one into the template's media, and marks
+  each one Live from the listing's published `media` (`media_id`; a listing published
+  before that was kept says to publish again, never matched by place). A template's Media
+  dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
+  which sets the image on each listing of that template through `PUT
+  /storefront/listings/{id}/media`; a published listing is published again at once.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

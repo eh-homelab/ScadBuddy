@@ -19,6 +19,7 @@ from typing import Any
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
 from scadbuddy.core.tracing import failure_class, span
+from scadbuddy.render.colours import without_alpha
 from scadbuddy.render.confinement import escaping_includes, sandboxed
 from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector, parse_diagnostics
 from scadbuddy.render.schema import (
@@ -359,7 +360,12 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
     for parameter in schema.parameters:
         if parameter.name not in params:
             continue
-        formatted = format_scad_value(parameter, params[parameter.name])
+        value = params[parameter.name]
+        if parameter.type == "color" and isinstance(value, str):
+            # A translucent colour's alpha stays with the part (`jobs.part_alphas`),
+            # never in OpenSCAD's colour, which the per-colour solids split by.
+            value = without_alpha(value)
+        formatted = format_scad_value(parameter, value)
         defines += ["-D", f"{parameter.name}={formatted}"]
     return defines
 

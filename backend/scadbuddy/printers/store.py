@@ -117,8 +117,8 @@ ANY_HOST = object()
 
 
 class KekMissingError(Exception):
-    def __init__(self) -> None:
-        super().__init__("LAN printing needs SCADBUDDY_SECRET_KEY_FILE")
+    def __init__(self, message: str = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE") -> None:
+        super().__init__(message)
 
 
 class NoAccessCodeError(LookupError):
@@ -381,13 +381,19 @@ class PrinterStore:
         events: EventBus | None = None,
         previous_kek: Kek | None = None,
     ) -> None:
-        self.pool = pool
+        self._pool = pool
         self.kek = kek
         #: The KEK before a rotation (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`), tried after
         #: ``kek`` where a value sealed before the rotation may still be opened (#4888).
         self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
+
+    @property
+    def pool(self) -> Pool:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`)."""
+        return self._pool
 
     # ── reads ─────────────────────────────────────────────────────────────────────
 
@@ -576,16 +582,21 @@ class PrinterStore:
         Writes only the rows that change, and returns their ids. Each of this and
         `mark_bambuddy_active` writes ``bambuddy_active`` on its own kind of row only
         (#4921), so neither can overwrite the other's whatever links a row holds."""
-        ids = sorted(set(listed))
         with self.pool.connection() as conn:
-            changed = conn.execute(
-                "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
-                " updated_at = now() WHERE kind = 'bambuddy_virtual'"
-                " AND bambuddy_vp_id IS NOT NULL"
-                " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
-                " RETURNING id",
-                (ids, ids),
-            ).fetchall()
+            return self.mark_virtual_listed_in(conn, listed)
+
+    @staticmethod
+    def mark_virtual_listed_in(conn: Connection[DictRow], listed: Iterable[int]) -> tuple[str, ...]:
+        """`mark_virtual_listed` on ``conn``, in the caller's transaction."""
+        ids = sorted(set(listed))
+        changed = conn.execute(
+            "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
+            " updated_at = now() WHERE kind = 'bambuddy_virtual'"
+            " AND bambuddy_vp_id IS NOT NULL"
+            " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
+            " RETURNING id",
+            (ids, ids),
+        ).fetchall()
         return tuple(str(row["id"]) for row in changed)
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
@@ -689,6 +700,23 @@ class PrinterStore:
             kek_id=data["access_code_kek_id"],
         )
         return open_secret(self.kek, envelope, access_code_aad(str(data["id"]), data["serial"]))
+
+    def opens_access_codes(self) -> bool:
+        """Whether this store can open an access code: it holds the KEK. The LAN path
+        needs it (`bambuddy/print_run.py` `_registry_path`)."""
+        return self.kek is not None
+
+    def open_virtual_access_code(self, sealed: str, context: str) -> str:
+        """A virtual printer's sealed access code (`bambuddy/virtual_printers.py`
+        `access_code_request`), opened under the KEK or, during a rotation, the previous
+        one. Raises `KekMissingError` with no KEK and `SealError` when ``sealed`` does not
+        open for ``context``."""
+        # Imported here: `virtual_printers` imports this module.
+        from scadbuddy.bambuddy.virtual_printers import open_access_code
+
+        if self.kek is None:
+            raise KekMissingError()
+        return open_access_code(self.kek, sealed, context, previous=self.previous_kek)
 
     def ensure_bambuddy(
         self,
@@ -935,62 +963,89 @@ class PrinterStore:
         new row) or ``conflict`` (another row holds the serial and keeps it: a new row
         under `synthetic_vp_serial`, never an overwrite)."""
         with self.pool.connection() as conn, conn.transaction():
-            conn.execute(_LOCK)
-            fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
-            args: tuple[Any, ...] = (
-                mode,
-                None if forwards_to is None else uuid.UUID(forwards_to),
-                Jsonb(view.model_dump(mode="json")),
+            return self.upsert_virtual_in(
+                conn,
+                vp_id,
+                serial=serial,
+                name=name,
+                model=model,
+                mode=mode,
+                forwards_to=forwards_to,
+                view=view,
+                may_adopt=may_adopt,
             )
-            row = self._one(conn, "bambuddy_vp_id", vp_id)
-            if row is not None:
-                renamed = row.bambuddy_view is None or row.name != row.bambuddy_view.name
-                new_name = row.name if renamed else name
-                new_model = model or row.model
-                if (
-                    _same_view(row.bambuddy_view, view)
-                    and row.vp_mode == mode
-                    and row.forwards_to == forwards_to
-                    and row.name == new_name
-                    and row.model == new_model
-                ):
-                    return row, "already_linked", False
-                return (
-                    self._update(
-                        conn,
-                        row.id,
-                        f"{fields}, name = %s, model = %s",
-                        (*args, new_name, new_model),
-                    ),
-                    "already_linked",
-                    True,
-                )
-            holder = None if serial is None else self._one(conn, "serial", serial)
-            if holder is not None and adopts_for_virtual(holder, may_adopt=may_adopt):
-                return (
-                    self._update(
-                        conn,
-                        holder.id,
-                        f"{fields}, kind = 'bambuddy_virtual', bambuddy_vp_id = %s,"
-                        " model = COALESCE(model, %s)",
-                        (*args, vp_id, model),
-                    ),
-                    "linked",
-                    True,
-                )
-            if serial is None or holder is not None:
-                serial = synthetic_vp_serial(vp_id)
-                if self._one(conn, "serial", serial) is not None:
-                    raise SerialTakenError(serial)
-            data = conn.execute(
-                "INSERT INTO printers (id, serial, name, model, preferred_path, kind,"
-                " bambuddy_vp_id, vp_mode, forwards_to, bambuddy_view)"
-                " VALUES (%s, %s, %s, %s, 'bambuddy', 'bambuddy_virtual', %s, %s, %s, %s)"
-                f" RETURNING {_COLUMNS}",
-                (str(uuid.uuid4()), serial, name, model, vp_id, *args),
-            ).fetchone()
-            assert data is not None
-            return _row(data), "created" if holder is None else "conflict", True
+
+    def upsert_virtual_in(
+        self,
+        conn: Connection[DictRow],
+        vp_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        mode: str,
+        forwards_to: str | None,
+        view: BambuddyView,
+        may_adopt: bool = True,
+    ) -> tuple[PrinterRow, VirtualOutcome, bool]:
+        """`upsert_virtual` on ``conn``, in the caller's transaction, under the registry's
+        lock, which it takes."""
+        conn.execute(_LOCK)
+        fields = "vp_mode = %s, forwards_to = %s, bambuddy_view = %s"
+        args: tuple[Any, ...] = (
+            mode,
+            None if forwards_to is None else uuid.UUID(forwards_to),
+            Jsonb(view.model_dump(mode="json")),
+        )
+        row = self._one(conn, "bambuddy_vp_id", vp_id)
+        if row is not None:
+            renamed = row.bambuddy_view is None or row.name != row.bambuddy_view.name
+            new_name = row.name if renamed else name
+            new_model = model or row.model
+            if (
+                _same_view(row.bambuddy_view, view)
+                and row.vp_mode == mode
+                and row.forwards_to == forwards_to
+                and row.name == new_name
+                and row.model == new_model
+            ):
+                return row, "already_linked", False
+            return (
+                self._update(
+                    conn,
+                    row.id,
+                    f"{fields}, name = %s, model = %s",
+                    (*args, new_name, new_model),
+                ),
+                "already_linked",
+                True,
+            )
+        holder = None if serial is None else self._one(conn, "serial", serial)
+        if holder is not None and adopts_for_virtual(holder, may_adopt=may_adopt):
+            return (
+                self._update(
+                    conn,
+                    holder.id,
+                    f"{fields}, kind = 'bambuddy_virtual', bambuddy_vp_id = %s,"
+                    " model = COALESCE(model, %s)",
+                    (*args, vp_id, model),
+                ),
+                "linked",
+                True,
+            )
+        if serial is None or holder is not None:
+            serial = synthetic_vp_serial(vp_id)
+            if self._one(conn, "serial", serial) is not None:
+                raise SerialTakenError(serial)
+        data = conn.execute(
+            "INSERT INTO printers (id, serial, name, model, preferred_path, kind,"
+            " bambuddy_vp_id, vp_mode, forwards_to, bambuddy_view)"
+            " VALUES (%s, %s, %s, %s, 'bambuddy', 'bambuddy_virtual', %s, %s, %s, %s)"
+            f" RETURNING {_COLUMNS}",
+            (str(uuid.uuid4()), serial, name, model, vp_id, *args),
+        ).fetchone()
+        assert data is not None
+        return _row(data), "created" if holder is None else "conflict", True
 
     def delete(self, printer_id: str) -> None:
         key = printer_uuid(printer_id)

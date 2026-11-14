@@ -414,6 +414,15 @@ export type CustomerPatch = Partial<Schemas['CustomerPatch']>
 export type Order = Schemas['Order']
 export type OrderStatus = Order['status']
 export type OrderDetail = Schemas['OrderDetail']
+/** #6133 — a storefront customer's file or link on a request item, as the back office reads it. */
+export type OrderItemSource = Schemas['OrderItemSource']
+/** #6133 — the colours an own-model request asked for. */
+export type ModelRequestColours = Schemas['ModelRequestColours']
+/** #6133 — a thing to buy for the customer (`GET /orders/{id}/purchases`). */
+export type PurchaseSource = Schemas['PurchaseSource']
+export type PurchaseRecordInput = Defaulted<Schemas['PurchaseRecordInput'], 'cost_kind' | 'note'>
+export type PurchaseUpdateInput = Partial<Schemas['PurchaseUpdateInput']>
+export type SourceDownload = Schemas['SourceDownload']
 export type OrderItem = Schemas['OrderItem']
 export type OrderItemStatus = OrderItem['status']
 /** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */
@@ -523,6 +532,9 @@ export type MachineRateInputs = {
 export type StorefrontListing = Required<Schemas['Listing']>
 export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
+/** #6157 — one row of the back office's list, and a page of them. */
+export type StorefrontListingRow = Schemas['ListingRow']
+export type StorefrontListingPage = Schemas['ListingPage']
 /** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
 export type NativeSpool = Schemas['NativeSpool']
 export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
@@ -532,6 +544,8 @@ export type PricingPolicy = Schemas['PricingPolicy']
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
 export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
+export type DensityFill = Schemas['DensityFill']
+export type DensityFillRow = Schemas['DensityFillRow']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first

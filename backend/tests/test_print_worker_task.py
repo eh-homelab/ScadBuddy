@@ -122,7 +122,11 @@ def _state() -> SimpleNamespace:
         print_runs=SimpleNamespace(store=None),
         print_progress=None,
         print_follower=None,
-        metrics=SimpleNamespace(print_follows_running=None, rack_watch_settle_failed=None),
+        metrics=SimpleNamespace(
+            print_follows_running=None,
+            rack_watch_settle_failed=None,
+            printer_watch_write_failed=None,
+        ),
         print_links=None,
         events=None,
         components=SimpleNamespace(

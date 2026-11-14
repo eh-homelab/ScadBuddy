@@ -51,37 +51,27 @@ export function transcriptCut(entries: readonly SessionStoreEntry[], messageId: 
   return reply.filter(hasText).at(-1)?.uuid
 }
 
-/** The conversation events a fork copies; lifecycle events (status, owner, result) are the parent's own. */
-const CONVERSATION = new Set<ServerEvent['type']>([
-  'user.turn',
-  'assistant.text.delta',
-  'assistant.text.done',
-  'tool.call',
-  'tool.result',
-])
-
 /**
- * The parent's conversation events, for the child: all of them, or with `upTo` those
- * through that reply's `assistant.text.done`. Undefined when `upTo` names no finished
+ * Where a fork cuts the parent's log (eventLog.ts `inheritThrough`): the seq of that reply's
+ * `assistant.text.done` with `upTo`, else the log's last. Undefined when `upTo` names no finished
  * reply in the log.
  */
-export async function forkHistory(events: Pick<EventLog, 'read'>, id: string, upTo?: string): Promise<ServerEvent[] | undefined> {
-  const history: ServerEvent[] = []
+export async function forkEventCut(events: Pick<EventLog, 'read' | 'lastSeq'>, id: string, upTo?: string): Promise<number | undefined> {
+  if (upTo === undefined) return events.lastSeq(id)
   for (let after = 0; ; ) {
     const page = await events.read(id, after)
-    if (page.length === 0) return upTo === undefined ? history : undefined
+    if (page.length === 0) return undefined
     after = page.at(-1)?.seq ?? after
-    for (const { event: e } of page) {
-      if (!CONVERSATION.has(e.type)) continue
-      history.push(e)
-      if (upTo !== undefined && e.type === 'assistant.text.done' && e.messageId === upTo) return history
+    for (const { seq, event: e } of page) {
+      if (e.type === 'assistant.text.done' && e.messageId === upTo) return seq
     }
   }
 }
 
 /**
  * The blobs (blobs.ts) the events name: a tool result's images, and the images a user sent
- * with a turn and their previews (#2479). What a fork copies into the child (#2150), and nothing else.
+ * with a turn and their previews (#2479). What forgetting a parent copies into each fork, from
+ * the events it copies (store.ts `copyForkRanges`, #2150, #4212), and nothing else.
  */
 export function blobNames(events: readonly ServerEvent[]): string[] {
   const names = new Set<string>()

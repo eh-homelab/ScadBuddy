@@ -142,6 +142,17 @@
   padding: 18px 0;
   border-bottom: 1px solid var(--sf-line);
 }
+.sf-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.sf-header nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
 .sf-mark {
   display: inline-flex;
   align-items: center;
@@ -299,6 +310,15 @@
 }
 
 /* The listings. */
+.sf-search {
+  max-width: 28rem;
+  margin: 0 0 20px;
+}
+.sf-more {
+  display: flex;
+  justify-content: center;
+  margin: 24px 0 0;
+}
 .sf-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
@@ -620,4 +640,153 @@ fieldset.sf-field {
   vertical-align: -0.15em;
   border: 1px solid var(--sf-line);
   border-radius: 50%;
+}
+
+/*
+ * A customer's own models (#6133): the form's uploads, and the files and links in the cart
+ * and on the order. The one bold part is the upload bar: its fill is drawn in cobalt layer
+ * lines, so a file goes up the way a print does. The rest stays quiet.
+ */
+.sf-uploads,
+.sf-sources,
+.sf-colours {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.sf-upload {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--sf-line);
+  border-radius: 10px;
+  background: var(--sf-panel);
+}
+.sf-upload-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.sf-upload-name,
+.sf-source-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.sf-progress {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--sf-line) 55%, var(--sf-plate));
+}
+.sf-progress-fill {
+  display: block;
+  height: 100%;
+  background: repeating-linear-gradient(
+    to right,
+    var(--sf-cobalt) 0 5px,
+    color-mix(in srgb, var(--sf-cobalt) 78%, var(--sf-panel)) 5px 6px
+  );
+  transition: width 0.2s linear;
+}
+@media (forced-colors: active) {
+  .sf-progress {
+    border: 1px solid CanvasText;
+  }
+  .sf-progress-fill {
+    background: Highlight;
+  }
+}
+.sf-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.sf-inline .sf-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.sf-input-short {
+  max-width: 8rem;
+}
+.sf-colours {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+  gap: 2px 12px;
+}
+.sf-buy-list {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+.sf-buy-row {
+  display: grid;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 3px solid var(--sf-line);
+}
+.sf-source {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid var(--sf-line);
+}
+.sf-source:first-child {
+  border-top: 0;
+}
+.sf-source-preview {
+  flex: none;
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--sb-bg);
+}
+.sf-source-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.sf-source-body .sf-hint,
+.sf-source-body .sf-notes {
+  margin: 0;
+}
+/* A customer's link, shown as text: it never looks like a link it is not. */
+.sf-source-link {
+  color: var(--sf-ink-soft);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+.sf-state {
+  justify-self: start;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+.sf-state-ok {
+  background: color-mix(in srgb, var(--sf-cobalt) 12%, var(--sf-panel));
+  color: var(--sf-cobalt);
+}
+.sf-state-wait {
+  background: color-mix(in srgb, var(--sf-signal) 45%, var(--sf-panel));
+  color: var(--sf-ink);
+}
+.sf-buy-shown {
+  margin-top: 12px;
+}
+.sf-charge {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sf-charge span:last-child {
+  flex: none;
+  font-variant-numeric: tabular-nums;
 }

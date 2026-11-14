@@ -28,8 +28,8 @@ CLAUDE.md, "Database access (#5295)"). The watch runs in the print worker (or th
 in-process): the nudge is a Temporal start, with no database client, grant or CRUD route
 of its own. It reads the settings over the CRUD route (`crud/print.py`
 `RemoteSettingsStore`) and the printer row through the watch's own ``PrinterStore.get``,
-the read each watch attempt already makes (on the print worker's SQL until #5298 Task
-29 moves it to a route). ``Housekeeping.run``
+the read each watch attempt already makes (on the print worker, `crud/print.py`
+`RemotePrinterStore.get` over the CRUD route, #5298 Task 29). ``Housekeeping.run``
 already takes the sweeps to run, so its commands are unchanged and no patch is needed.
 
 Debounce:
@@ -50,9 +50,10 @@ nudge run per job would only shorten that rare wait, and would need a workflow c
 its timer; the Schedule is the retry.
 
 The settings read is bounded by `SETTINGS_TIMEOUT` (#6034), and the printer row read by
-`PRINTER_TIMEOUT` (#6037: one deadline for the pool wait and a statement timeout local
-to that read, on the store's own pool; no new pool or client). Both bound a slow or
-locked read only: a dead server or a dropped TCP link still blocks the read's thread,
+`PRINTER_TIMEOUT` (#6037: on the API, one deadline for the pool wait and a statement
+timeout local to that read, on the store's own pool; on the print worker, the CRUD
+route's request, retries included; no new pool or client). Both bound a slow or locked
+read only: a dead server or a dropped TCP link still blocks the read's thread,
 and the watch's cancel then frees the nudge but not that thread. The watch runs each nudge
 as a task of its own, off its report loop, and cancels it past
 `printers.watch.NUDGE_TIMEOUT` or when its attempt ends. A nudge that fails is logged
@@ -154,7 +155,8 @@ class SettingsLoader(Protocol):
 
 
 class PrinterLoader(Protocol):
-    """`PrinterStore.get`: ``timeout`` bounds the pool wait and the statement."""
+    """`PrinterStore.get`: ``timeout`` bounds the pool wait and the statement, or (the
+    worker's `RemotePrinterStore.get`) the route's request."""
 
     def __call__(self, printer_id: str, timeout: float | None = None) -> PrinterRow | None: ...
 

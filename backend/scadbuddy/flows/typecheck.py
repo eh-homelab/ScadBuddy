@@ -21,6 +21,14 @@ log = logging.getLogger(__name__)
 
 MAX_SCRIPT_BYTES = 65_536
 _LINE = re.compile(r"-->\s*main\.py:(\d+):\d+")
+#: How many times a check runs when the checker's worker dies (#6123).
+CHECK_ATTEMPTS = 3
+
+
+class CheckerUnavailableError(Exception):
+    """The checker's worker died on every attempt: nothing is known about the script, so
+    a route answers 503 and a trigger's fire is tried again, never "does not type-check"
+    (#6123)."""
 
 
 class ScriptProblem(BaseModel):
@@ -37,21 +45,36 @@ async def check_script(
 ) -> list[ScriptProblem]:
     """Every problem with `script` and, when the flow declares inputs, with its inputs
     schema (#2483), against which `inputs()` is typed; empty when it may run. ``stored``
-    for a registered version starting: see :func:`schema_problems`."""
+    for a registered version starting: see :func:`schema_problems`. Raises
+    :class:`CheckerUnavailableError` when the checker never answered."""
     if inputs_schema is not None and (found := schema_problems(inputs_schema, stored=stored)):
         return [ScriptProblem(message=message, file=INPUTS_FILE) for message in found]
     if len(script.encode()) > MAX_SCRIPT_BYTES:
         return [ScriptProblem(message="script is over 64 KiB")]
-    try:
-        report = await agent.code_mode_type_check(
-            run_flow_tool(inputs_schema=inputs_schema), script
-        )
-    except pydantic_monty.MontyCrashedError:
-        log.warning("the flow type checker crashed")
-        return [ScriptProblem(message="the checker failed: try again")]
+    report = await _type_check(run_flow_tool(inputs_schema=inputs_schema), script)
     if report is not None:
         return _problems(report)
     return _literal_ranges(script)
+
+
+async def _type_check(tool: Any, script: str) -> str | None:
+    """The checker's report, tried again when its worker dies (#6123). The harness checks
+    in a Monty worker whose watchdog kills it about 1.05 s into the check (its 0.05 s run
+    limit plus Monty's 1 s grace); a new worker's first check can take that long on a
+    pod short of CPU. A killed worker says nothing about the script, and the pool starts
+    another."""
+    for attempt in range(1, CHECK_ATTEMPTS + 1):
+        try:
+            report: str | None = await agent.code_mode_type_check(tool, script)
+            return report
+        except pydantic_monty.MontyCrashedError as err:
+            log.warning(
+                "the flow type checker crashed (attempt %d of %d): %s",
+                attempt,
+                CHECK_ATTEMPTS,
+                err,
+            )
+    raise CheckerUnavailableError
 
 
 def _problems(report: str) -> list[ScriptProblem]:

@@ -133,6 +133,68 @@ def test_the_crud_side_lists_only_published_listings(
     assert unknown.json() == {**refused.json(), "instance": unknown.json()["instance"]}
 
 
+def test_the_public_list_is_cards_a_page_at_a_time(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    """#6154: a card per listing, in the shop's order, ``limit`` at a time; the cursor
+    reads the next page and the last page has none."""
+    made = [
+        publish(client, create(client, listing_body(template, pla_red, title=f"Box {n}"))["id"])
+        for n in range(3)
+    ]
+    first = crud.get("/listings?limit=2")
+    assert first.status_code == 200, first.text
+    page = first.json()
+    assert [c["id"] for c in page["listings"]] == [m["id"] for m in made[:2]]
+    card = page["listings"][0]
+    assert set(card) == {"id", "title", "description", "image", "available"}
+    assert card["available"] is True
+    assert card["image"]["kind"] == "image" and "Signature" in card["image"]["url"]
+    assert page["next_cursor"]
+    second = crud.get(f"/listings?limit=2&cursor={page['next_cursor']}").json()
+    assert [c["id"] for c in second["listings"]] == [made[2]["id"]]
+    assert second["next_cursor"] is None
+
+
+def test_the_public_list_searches_titles_and_takes_wildcards_literally(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    titles = ["Name Keychain", "Luggage tag", "100% Plant pot"]
+    for title in titles:
+        publish(client, create(client, listing_body(template, pla_red, title=title))["id"])
+    found = crud.get("/listings?q=KEY").json()["listings"]
+    assert [c["title"] for c in found] == ["Name Keychain"]
+    assert [c["title"] for c in crud.get("/listings?q=0%25").json()["listings"]] == [
+        "100% Plant pot"
+    ]
+    assert crud.get("/listings?q=_").json()["listings"] == []
+    # Postgres text holds no NUL: refused, never a 500.
+    assert crud.get("/listings?q=a%00b").status_code == 422
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "5b323134373438333634382c202230303030303030302d303030302d303030302d303030302d303030303030303030303030225d",
+        "x",
+        "5b312c20325d",
+        "5b2261222c202262225d",
+        "5b747275652c20223030225d",
+        "5b312c20226e6f742d616e2d6964225d",
+    ],
+)
+def test_a_cursor_the_shop_never_gave_is_422(crud: CrudCaller, cursor: str) -> None:
+    r = crud.get(f"/listings?cursor={cursor}")
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_cursor_invalid"
+
+
 def test_a_public_listing_shows_what_a_visitor_may_choose(
     crud: CrudCaller,
     published: dict[str, Any],
@@ -152,6 +214,7 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "label": "width",
             "group": "Main",
             "colour": False,
+            "default": 50,
         },
         "colour": {
             "kind": "choice",
@@ -159,6 +222,7 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "label": "colour",
             "group": "Main",
             "colour": True,
+            "default": "#FF0000",
         },
     }
     assert listing["colours"] == [
@@ -240,9 +304,7 @@ def test_the_reference_matches_the_back_offices(
     published: dict[str, Any],
     pla_red: str,  # noqa: F811
 ) -> None:
-    listing = Listing.model_validate(
-        next(item for item in client.get(LISTINGS).json() if item["id"] == published["id"])
-    )
+    listing = Listing.model_validate(client.get(f"{LISTINGS}/{published['id']}").json())
     book = client.get(BOOK).json()
     filaments = {f["id"]: Filament.model_validate(f) for f in book["filaments"]}
     values = listing_values(listing, {"width": 40}, filaments)
@@ -290,3 +352,21 @@ def test_a_listing_id_that_is_not_one_is_404(crud: CrudCaller, listing_id: str) 
     r = crud.get(f"/listings/{listing_id}")
     assert r.status_code == 404, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_not_found"
+
+
+def test_a_card_whose_colours_are_all_archived_is_not_available(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    body = listing_body(
+        template,
+        pla_red,
+        title="Red tag",
+        params={"colour": {"kind": "choice", "choices": ["#FF0000"]}},
+    )
+    publish(client, create(client, body)["id"])
+    assert crud.get("/listings").json()["listings"][0]["available"] is True
+    assert client.post(f"{BOOK}/filaments/{pla_red}/archive").status_code == 200
+    assert crud.get("/listings").json()["listings"][0]["available"] is False

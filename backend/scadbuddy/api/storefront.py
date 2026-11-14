@@ -14,17 +14,32 @@ runtime (``api/components.py``).
 import asyncio
 import dataclasses
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.authorship import by_a_person
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.storefront.listings import publish, unpublish
+from scadbuddy.orders.storefront.listings import (
+    change_media,
+    listing_not_found,
+    publish,
+    unpublish,
+)
 from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
-from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingOrder, ListingUpdate
+from scadbuddy.orders.storefront.wire import (
+    Listing,
+    ListingInput,
+    ListingMediaUpdate,
+    ListingMove,
+    ListingOrder,
+    ListingPage,
+    ListingQuery,
+    ListingUpdate,
+)
 from scadbuddy.payments.credentials import KekMissingError
 
 router = APIRouter(prefix="/storefront", tags=["storefront"])
@@ -63,10 +78,14 @@ def _by_a_person() -> None:
         )
 
 
-@router.get("/listings", response_model=list[Listing], summary="The storefront's listings")
-async def list_listings(orders: OrdersDep) -> list[Listing]:
-    """Every listing, published or not, in the order the public site shows them."""
-    return await asyncio.to_thread(orders.listings.all)
+@router.get("/listings", response_model=ListingPage, summary="The storefront's listings")
+async def list_listings(orders: OrdersDep, query: Annotated[ListingQuery, Query()]) -> ListingPage:
+    """A page of the listings, published or not (#6157): those whose title or slug
+    holds ``q``, of ``status``, of any ``slug`` and with a colour of any ``material``,
+    sorted by ``sort`` (``position`` is the order the public site shows them), and how
+    many match in all. A row holds only what the list shows; ``GET
+    …/listings/{listing_id}`` reads one listing whole."""
+    return await asyncio.to_thread(orders.listings.page, query)
 
 
 @router.post(
@@ -89,12 +108,52 @@ async def order_listings(body: ListingOrder, orders: OrdersDep) -> list[Listing]
     return await asyncio.to_thread(orders.listings.reorder, body.ids)
 
 
+@router.get("/listings/{listing_id}", response_model=Listing, summary="A storefront listing")
+async def get_listing(listing_id: str, orders: OrdersDep) -> Listing:
+    """One listing whole, for its editor (#6157); 404 ``listing_not_found``."""
+    found = await asyncio.to_thread(orders.listings.get, listing_id)
+    if found is None:
+        raise listing_not_found(listing_id)
+    return found
+
+
+@router.post(
+    "/listings/{listing_id}/move", response_model=Listing, summary="Move a storefront listing"
+)
+async def move_listing(listing_id: str, body: ListingMove, orders: OrdersDep) -> Listing:
+    """The listing put at ``place`` (from 1; a place past the end puts it last) in the
+    order the public site shows them, the others keeping their order around it (#6157).
+    Unlike ``PUT …/listings/order`` it names one listing, so it suits a long list. 404
+    ``listing_not_found``."""
+    return await asyncio.to_thread(orders.listings.move, listing_id, body.place)
+
+
 @router.put("/listings/{listing_id}", response_model=Listing, summary="Edit a storefront listing")
 async def update_listing(listing_id: str, body: ListingUpdate, orders: OrdersDep) -> Listing:
     """The listing replaced whole, and unpublished: a change is not live until the shop
     publishes it again. 409 ``listing_changed`` unless ``updated_at`` is the listing's."""
     return await asyncio.to_thread(
         orders.listings.update, listing_id, body.listing, expected_updated_at=body.updated_at
+    )
+
+
+@router.put(
+    "/listings/{listing_id}/media",
+    response_model=Listing,
+    summary="Set a storefront listing's pictures",
+)
+async def set_listing_media(
+    listing_id: str, body: ListingMediaUpdate, orders: OrdersDep, state: StateDep
+) -> Listing:
+    """The listing's pictures (#6213): ``media_ids``, images of its template in the order
+    to show them, and nothing else changed. A draft stays a draft; a published listing
+    is published again at once and stays live. 409 ``listing_changed`` unless
+    ``updated_at`` is the listing's; 422 ``listing_media_unknown``,
+    ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a
+    republish refused answers as ``POST …/publish`` does, with ``pictures_saved: true``:
+    the pictures are kept and the public site shows what was last published."""
+    return await change_media(
+        state, orders.listings, listing_id, body.media_ids, expected_updated_at=body.updated_at
     )
 
 
@@ -108,7 +167,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     the public site with what a visitor's render needs (the schema, the source
     snapshot, the media). 409 ``storefront_needs_s3`` unless the store is S3; 422 names
     the fault (``listing_param_unknown``, ``listing_bounds_outside_schema``,
-    ``listing_fixed_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_fixed_invalid``, ``listing_default_invalid``, ``listing_colour_unknown``,
+    ``listing_media_unknown``,
     ``listing_reference``, ``listing_pipeline_unsupported``); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""

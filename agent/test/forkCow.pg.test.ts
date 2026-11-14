@@ -7,7 +7,7 @@ import type { HarnessPaths } from '../src/harness/options.js'
 import { ensureStateDirs, sessionWorkDir } from '../src/harness/stateDirs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { PostgresSessionStore } from '../src/sessions/store.js'
+import { chainRows, PostgresSessionStore } from '../src/sessions/store.js'
 import { DIRECTORY_NOTE_MARK, directoryNote } from '../src/sessions/directoryNote.js'
 import { SealError } from '../src/secrets.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -188,6 +188,20 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`forks are cop
     expect(sent).toContain('turn:left')
     expect(sent).toContain('turn:right')
   }, 120_000)
+
+  it("a fork's load reads none of its parent's rows past the cut (#4212)", async () => {
+    const m = await replica()
+    const root = await started(m, 'box')
+    const fork = await m.fork(root, browser)
+    const cut = (await link(fork.id))!.cut!
+    await turn(m, root, 'taller')
+    await turn(m, root, 'wider')
+    const [main] = await db.sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ai_session_entries WHERE session_id = ${root} AND subpath = ''`
+    expect(main!.n).toBeGreaterThan(cut)
+    const read = await chainRows(db.sql, fork.id)
+    expect(read.filter((row) => row.owner === root && row.id !== null)).toHaveLength(cut)
+  }, 180_000)
 
   it('a fork of a fork reads both cuts', async () => {
     const m = await replica()

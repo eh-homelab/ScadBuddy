@@ -3,8 +3,8 @@ MQTT reports into `PrinterReportStore`, for as long as the connection lasts.
 
 Each merged report is written at most every `write_every` seconds, except one that
 changes what a card shows (``gcode_state``, ``mc_percent``, ``layer_num`` or a tray),
-which is written at once and announced (``printer.report``). While the connection is
-up (the printer took the login and the subscription, and paho's keepalive,
+which is written at once and, once written, announced (``printer.report``). While the
+connection is up (the printer took the login and the subscription, and paho's keepalive,
 `lan.KEEPALIVE`, has not given up on it) and quiet, the row's ``seen_at`` is touched
 every `HEARD_EVERY`, stamped with what the link proves (`LINK_PROOF`); a connect
 still pending is no evidence, so it touches nothing (#4186 review I3). The P1 series
@@ -14,7 +14,16 @@ against ``pushall`` more than every 5 minutes). A dropped connection raises, the
 attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
 ``/printers/now`` shows the printer offline (`status.STALE_AFTER`). A worker shutting
 down ends the attempt at once, as `FollowActivities` does, so a stop never waits out
-its graceful timeout per printer.
+its graceful timeout per printer. A report the store could not write, or a touch it could
+not make, is logged and counted (`WATCH_WRITE_FAILED`) and the watch goes on; the report
+is written at the next quiet tick or report, and announced only once written. A report
+whose answer was lost (it may have landed) is sent again under its Idempotency-Key before
+any newer one, so the API answers the print end that write showed, at most
+`OWED_RESENDS` times: it stays owed under that key whatever a resend answers, until one
+lands, except a refusal (a 4xx other than 429), which gives it up. The API writes no
+report older than the row's. On the print worker
+each write is a CRUD call bounded well inside the heartbeat timeout (`crud/print.py`
+`WATCH_CALL_BUDGET`).
 
 A write that shows the print the printer was running has ended (`reports.advance_print`)
 settles that start's rack picks up to the report's time (#5138, #5142): the run's own
@@ -38,16 +47,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import traceback
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from functools import partial
+from typing import Any, Literal, cast
 
 from prometheus_client import Counter
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.events import EventBus, PrinterEvent, emit
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.printers.lan import KEEPALIVE, LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import JobStart, PrinterReportStore
@@ -59,6 +72,29 @@ logger = logging.getLogger(__name__)
 
 #: How often a quiet connection touches ``seen_at`` and heartbeats.
 HEARD_EVERY = 10.0
+#: Logged, with the write (``put`` or ``touch``) and the error's type, when the watch
+#: could not write a report or touch its row; counted on `Metrics.printer_watch_write_failed`.
+WATCH_WRITE_FAILED = "a printer watch could not write its report"
+
+#: How a report's write ended (`WatchActivities._write`): written; sent and an answer
+#: lost (on any try of the call), so it may have landed and is sent again under its key;
+#: not written, so it is written again at the next quiet tick; or refused (a 4xx other
+#: than 429), so it is dropped: sending it again would be refused again and hold back the
+#: touch.
+WriteOutcome = Literal["written", "owed", "unwritten", "refused"]
+WRITTEN: WriteOutcome = "written"
+OWED: WriteOutcome = "owed"
+UNWRITTEN: WriteOutcome = "unwritten"
+REFUSED: WriteOutcome = "refused"
+#: How many times an owed report is sent again under its key before it is given up (every
+#: resend counts, whatever it answered, except one that lands): its
+#: print end is then left to ``lan_wait``, the run's follow or the pick's age, and the
+#: report itself, or a newer one, is written under a new key. Bounded, so an API whose
+#: answers keep being lost never freezes the card or stops the touch.
+OWED_RESENDS = 3
+#: Logged, and counted on `Metrics.printer_watch_write_failed`, when an owed report is
+#: given up (``given_up`` true): after `OWED_RESENDS`, or when a resend is refused.
+WATCH_OWED_GIVEN_UP = "a printer watch gave up a report whose answer was lost"
 #: How far back an open connection proves the printer was there: paho closes a link
 #: with no inbound traffic within two keepalives, so a touch stamps ``now`` less this
 #: (never before the connect), and the card goes offline `STALE_AFTER` after the last
@@ -83,6 +119,15 @@ Nudge = Callable[[str, JobStart], Awaitable[object]]
 NUDGE_TIMEOUT = 10.0
 
 
+def raised_at(error: BaseException) -> str | None:
+    """The file and line of the frame that raised ``error`` (its traceback's last), never
+    its message, which can quote what it was given."""
+    frames = traceback.extract_tb(error.__traceback__)
+    if not frames:
+        return None
+    return f"{frames[-1].filename}:{frames[-1].lineno}"
+
+
 def shown(report: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(report.get(name) for name in SHOWN)
 
@@ -100,6 +145,7 @@ class WatchActivities:
         rack: LanUsage | None = None,
         settle_failed: Counter | None = None,
         nudge: Nudge | None = None,
+        write_failed: Counter | None = None,
     ) -> None:
         self.printers = printers
         self.reports = reports
@@ -113,6 +159,8 @@ class WatchActivities:
         self.settle_failed = settle_failed
         #: Each job start, to the print watcher's LAN nudge (#4699 phase 3).
         self.nudge = nudge
+        #: The count of reports not written and touches not made (`WATCH_WRITE_FAILED`).
+        self.write_failed = write_failed
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
     async def printer_watch(self, input: PrinterWatchInput) -> str:
@@ -126,11 +174,10 @@ class WatchActivities:
             return "unlinked"
         try:
             code = await asyncio.to_thread(self.printers.open_access_code, printer_id)
-        except KekMissingError:
+        except KekMissingError as error:
+            # Where the code is opened: the API's (#5298 Task 29), or this process's.
             logger.warning(
-                "a LAN printer cannot be watched: the print worker has no"
-                " SCADBUDDY_SECRET_KEY_FILE",
-                extra={"printer_id": printer_id},
+                "a LAN printer cannot be watched: %s", error, extra={"printer_id": printer_id}
             )
             return "no-key"
         except NoAccessCodeError:
@@ -173,40 +220,84 @@ class WatchActivities:
 
         reader = asyncio.create_task(read())
         marker = asyncio.create_task(mark())
+        #: What the last report read showed, which decides when to write at once.
         last_shown: tuple[Any, ...] | None = None
+        #: What the last report written showed, announced once its write lands.
+        announced: tuple[Any, ...] | None = None
         last_write = float("-inf")
+        #: The newest report not written yet: held back by `write_every`, or one whose
+        #: write never ran. A newer report replaces it.
         pending: LanReport | None = None
         #: The nudges still running, each bounded by `NUDGE_TIMEOUT`; cancelled when the
         #: attempt ends, so none outlives its activity.
         nudges: set[asyncio.Task[None]] = set()
+        #: A report sent whose answer was lost (it may have landed), with its
+        #: Idempotency-Key and how many times it was sent again. It is sent again under
+        #: that key before any newer report, so the API answers the print end and start
+        #: that write showed; a newer one waits in ``pending``. A resend that does not
+        #: land (a 5xx, a lost answer, one never run, a 429) says nothing of the first
+        #: send, so the report stays owed under its key. One write per turn of the loop,
+        #: so each fits between heartbeats. After `OWED_RESENDS`, or on a resend refused
+        #: with a 4xx other than 429, it is given up.
+        owed: tuple[LanReport, str, int] | None = None
+
+        async def flush(report: LanReport | None) -> None:
+            """One write: the owed report first, else ``report`` (or the pending one)."""
+            nonlocal pending, owed, last_write, announced
+            last_write = self.clock()
+            if owed is not None:
+                sent, key, resends = owed
+                outcome = await self._write(printer_id, sent, key, nudges)
+                owed = None
+                if outcome == WRITTEN:
+                    announced = self._announce(printer_id, sent, announced)
+                elif outcome == REFUSED:
+                    # Sent again it would be refused again: dropped, not re-sent.
+                    self._gave_up(printer_id)
+                elif resends + 1 < OWED_RESENDS:
+                    owed = (sent, key, resends + 1)
+                else:
+                    self._gave_up(printer_id)
+                if report is not None:
+                    pending = report
+                elif owed is None and outcome in (UNWRITTEN, OWED) and pending is None:
+                    pending = sent
+                return
+            target = report if report is not None else pending
+            if target is None:
+                return
+            key = uuid.uuid4().hex
+            outcome = await self._write(printer_id, target, key, nudges)
+            pending = target if outcome == UNWRITTEN else None
+            if outcome == OWED:
+                owed = (target, key, 0)
+            elif outcome == WRITTEN:
+                announced = self._announce(printer_id, target, announced)
+
         try:
             while True:
                 activity.heartbeat()
                 try:
                     item = await asyncio.wait_for(queue.get(), HEARD_EVERY)
                 except TimeoutError:
-                    if pending is not None:
-                        await self._write(printer_id, pending, nudges)
-                        pending, last_write = None, self.clock()
+                    if owed is not None or pending is not None:
+                        await flush(None)
                     elif connected_at is not None:
                         proven = max(
                             connected_at, datetime.now(UTC) - timedelta(seconds=LINK_PROOF)
                         )
-                        await asyncio.to_thread(self.reports.touch, printer_id, proven)
+                        await self._touch(printer_id, proven)
                     continue
                 if item is None:
                     return
                 if isinstance(item, BaseException):
                     raise item
                 changed = shown(item.print) != last_shown
+                last_shown = shown(item.print)
                 if changed or self.clock() - last_write >= self.write_every:
-                    await self._write(printer_id, item, nudges)
-                    pending, last_write = None, self.clock()
+                    await flush(item)
                 else:
                     pending = item
-                if changed:
-                    last_shown = shown(item.print)
-                    emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
         finally:
             reader.cancel()
             marker.cancel()
@@ -228,12 +319,95 @@ class WatchActivities:
                 exc_info=True,
             )
 
-    async def _write(
-        self, printer_id: str, report: LanReport, nudges: set[asyncio.Task[None]]
-    ) -> None:
-        advance = await asyncio.to_thread(
-            self.reports.advance, printer_id, report.print, report.received_at
+    def _announce(
+        self, printer_id: str, written: LanReport, announced: tuple[Any, ...] | None
+    ) -> tuple[Any, ...]:
+        """``printer.report`` once a written report shows a card something new: never for
+        a report not written, which a card would read back as the old one."""
+        now = shown(written.print)
+        if now != announced:
+            emit(self.events, PrinterEvent(kind="printer.report", printer_id=printer_id))
+        return now
+
+    def _gave_up(self, printer_id: str) -> None:
+        if self.write_failed is not None:
+            self.write_failed.inc()
+        logger.warning(
+            WATCH_OWED_GIVEN_UP,
+            extra={"printer_id": printer_id, "write": "put", "given_up": True},
         )
+
+    def _failed(self, what: str, printer_id: str, error: Exception) -> None:
+        """Counted, and logged with what can be searched for, never the report nor an
+        error's text, traceback or message (spec §7: a database error's DETAIL can quote
+        the report, hotend serials in it): a refusal's status and problem type, a CRUD
+        outage's failure word, else the file and line that raised it."""
+        if self.write_failed is not None:
+            self.write_failed.inc()
+        extra: dict[str, Any] = {
+            "printer_id": printer_id,
+            "write": what,
+            "error": type(error).__name__,
+        }
+        if isinstance(error, CrudRefusedError):
+            extra |= {
+                "status": error.status,
+                "problem_type": error.problem.get("type"),
+                "reason": error.problem.get("reason"),
+            }
+        elif isinstance(error, CrudUnavailableError):
+            extra["failure"] = error.failure
+        else:
+            extra["raised_at"] = raised_at(error)
+        logger.warning(WATCH_WRITE_FAILED, extra=extra)
+
+    async def _touch(self, printer_id: str, proven: datetime) -> None:
+        """The row's ``seen_at``; a failure is logged and counted, and the row ages."""
+        try:
+            await asyncio.to_thread(self.reports.touch, printer_id, proven)
+        except Exception as error:
+            self._failed("touch", printer_id, error)
+
+    async def _write(
+        self,
+        printer_id: str,
+        report: LanReport,
+        key: str,
+        nudges: set[asyncio.Task[None]],
+    ) -> WriteOutcome:
+        """``report`` written under the Idempotency-Key ``key``: `WRITTEN`, `OWED` when
+        its answer was lost and it may have landed (send it again under ``key``), or
+        `UNWRITTEN` when no try may have run it (never sent, or the API answered 429 or a
+        5xx to every try that was sent), or `REFUSED` when
+        the API refused it with any other 4xx (dropped). A failed write is logged and
+        counted, and the watch goes on: a stalled API never fails the attempt, which
+        would redial the printer. On the print worker each call is bounded
+        (`crud/print.py` `WATCH_CALL_BUDGET`). A job start it shows goes to the nudge, in
+        ``nudges``; an owed report sent again answers the start it showed the first time."""
+        try:
+            advance = await asyncio.to_thread(
+                partial(
+                    self.reports.advance,
+                    printer_id,
+                    report.print,
+                    report.received_at,
+                    idempotency_key=key,
+                )
+            )
+        except Exception as error:
+            self._failed("put", printer_id, error)
+            # Only a lost answer may have landed, on any try of the call: a try sent whose
+            # answer was lost may have committed even when a later try got a 5xx or never
+            # connected. A call whose every try got a 5xx (the write raised, its ledger
+            # recorded nothing) or never ran is not written. A refusal (`CrudRefusedError`)
+            # ends the call at once, even after a lost try: that retry carried the same key
+            # and body, so the ledger would have replayed a write the lost try committed.
+            landed = isinstance(error, CrudUnavailableError) and error.maybe_sent
+            if landed:
+                return OWED
+            if isinstance(error, CrudRefusedError) and error.status != 429:
+                return REFUSED
+            return UNWRITTEN
         if advance.started is not None and self.nudge is not None:
             # A task of its own (#6034), held in ``nudges`` until it ends: the loop's next
             # heartbeat and report, and the settle below, never wait for it.
@@ -250,10 +424,11 @@ class WatchActivities:
         if ended is not None:
             # The print's rack picks, up to the report that ended it: the run's follow
             # may read it late, or no longer read it at all (a newer run of the subject).
-            # Awaited inline on purpose: one insert per print end, so the next report
-            # waits at most that long. Move it to a tracked background task (kept in a
-            # set, awaited or cancelled on shutdown) only if it shows on the watch's
-            # latency (#5261).
+            # Awaited inline, once per print end. On the print worker it is a CRUD call
+            # bounded by `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, so with the put
+            # the next report waits at most about 8 s, inside the heartbeat timeout. Move
+            # it to a tracked background task (kept in a set, awaited or cancelled on
+            # shutdown) only if it shows on the watch's latency (#5261).
             await settle_lan_end(
                 self.rack,
                 printer_id,
@@ -262,3 +437,4 @@ class WatchActivities:
                 timed=ended.timed,
                 failed=self.settle_failed,
             )
+        return WRITTEN

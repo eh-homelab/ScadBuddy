@@ -64,7 +64,10 @@ ItemStatus = Literal[
 ContactKind = Literal[
     "phone", "email", "instagram", "facebook", "tiktok", "etsy", "website", "other"
 ]
-ChargeKind = Literal["shipping", "discount", "fee", "tax"]
+#: ``purchase`` and ``handling`` (#6133, spec 2026-11-13 §5.5) are the lifecycle's own: a
+#: thing the shop bought for the customer, and the shop's fee for buying. A body that
+#: sends either kind has it ignored (``Lifecycle._typed``).
+ChargeKind = Literal["shipping", "discount", "fee", "tax", "purchase", "handling"]
 #: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
 #: (#4777) is priced from what a past print used, with no re-slice.
 QuoteSource = Literal["slice", "manual", "archive"]
@@ -262,6 +265,8 @@ class Charge(ChargeInput):
     #: The tax ScadBuddy computes from ``orders_tax_percent`` (#5281): no body writes it,
     #: and a save of the charges keeps it.
     auto: bool = False
+    #: The purchase link a ``purchase`` charge is for (#6133); None on every other kind.
+    purchase_link_id: str | None = None
 
 
 class Payment(BaseModel):
@@ -399,6 +404,12 @@ class OrderFilter(BaseModel):
     source: OrderSource | None = None
     #: False leaves out the unsubmitted storefront drafts; True lists only those.
     unsubmitted: bool = False
+    #: Only orders with a customer's own-model request (#6133, spec 2026-11-13 §11).
+    own_model: bool = False
+    #: Only orders with a thing to buy the shop has not priced (`purchase_pending`).
+    purchase_pending: bool = False
+    #: Only orders with a source whose import is stuck (`IMPORT_STUCK`).
+    import_stuck: bool = False
 
 
 # -- line items (§3.3) ------------------------------------------------------------------
@@ -750,6 +761,145 @@ class CostEntry(CostEntryInput):
     created_at: datetime
 
 
+# -- purchases (#6133, spec 2026-11-13 §10) ---------------------------------------------
+
+#: What a recorded purchase cost the shop: parts (``material``) or a paid model file
+#: (``other``).
+PurchaseCostKind = Literal["material", "other"]
+#: A purchase link's state: not priced yet, recorded with its cost and charge, or not
+#: needed.
+PurchaseStatus = Literal["pending", "recorded", "not_needed"]
+#: The longest shop note on a purchase, which the customer reads.
+MAX_SHOP_NOTE = 500
+#: A cost entry's ``source`` that a recorded purchase wrote: ``purchase:<source id>``.
+PURCHASE_SOURCE_PREFIX = "purchase:"
+
+
+class PurchaseRecordInput(BaseModel):
+    """What the shop paid for one purchase link, in the order's currency. The same amount
+    becomes the customer's ``purchase`` charge. ``note`` is the cost entry's (the shop's
+    own); the customer never reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind = "material"
+    note: str = Field(default="", max_length=1000)
+
+
+class PurchaseUpdateInput(BaseModel):
+    """A recorded purchase changed: each field given replaces its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money | None = Field(default=None, ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class PurchaseDeclineInput(BaseModel):
+    """A purchase link the shop does not buy, with a note the customer reads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_note: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class PurchaseSource(BaseModel):
+    """A purchase link of a request item, as the back office reads it. ``url`` is text
+    only: nothing fetches it (spec §9.3). ``amount_minor`` and ``cost_kind`` are a recorded
+    purchase's, else None."""
+
+    id: str
+    order_id: str
+    item_id: str
+    url: str
+    note: str
+    status: PurchaseStatus
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    cost_entry_id: str | None = None
+    charge_id: str | None = None
+    shop_note: str = ""
+
+
+#: A file's check by the intake worker (spec 2026-11-13 §7).
+SourceCheckStatus = Literal["checking", "ready", "refused", "failed"]
+#: A print source's state; a purchase link's is `PurchaseStatus`.
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+SourceLinkType = Literal["makerworld", "printables", "thingiverse", "manual"]
+#: The status reason of a staged file's source whose import has not finished an hour after
+#: the submit (spec 2026-11-13 §8.1). The watcher's import child sets it (#6133 PR 5); the
+#: back office shows "Import stuck" and "Retry import", which sends the watcher ``retry``.
+#: It is the shop's: the customer's order page never shows it.
+IMPORT_STUCK = "The import has not finished an hour after the order was sent."
+
+
+class OrderItemSource(BaseModel):
+    """A file or a link of a storefront customer's request item, as the back office reads
+    it (#6133, spec 2026-11-13 §5.3, §11). ``url`` is text only: nothing fetches it.
+    ``staged`` is true while a file's frozen copy waits in the staging area (a download
+    is a presigned GET of it then). ``has_preview`` says the check stored a preview,
+    which ``GET …/sources/{id}/preview`` serves. ``import_stuck`` is true while
+    ``status_reason`` is the watcher's stuck reason (``model_requests.IMPORT_STUCK``).
+    ``amount_minor`` and ``cost_kind`` are a recorded purchase's."""
+
+    id: str
+    order_id: str
+    item_id: str
+    position: int
+    kind: Literal["file", "link"]
+    purpose: Literal["print", "purchase"]
+    filename: str | None = None
+    size: int | None = None
+    media_type: str | None = None
+    url: str | None = None
+    link_type: SourceLinkType | None = None
+    canonical: str | None = None
+    note: str = ""
+    check_status: SourceCheckStatus | None = None
+    check_reason: str | None = None
+    facts: dict[str, Any] | None = None
+    sha256: str | None = None
+    has_preview: bool = False
+    staged: bool = False
+    status: SourceStatus
+    status_reason: str | None = None
+    import_stuck: bool = False
+    library_file_id: int | None = None
+    result_item_id: str | None = None
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    shop_note: str = ""
+
+
+class ModelRequestColours(BaseModel):
+    """The colours a customer asked for on an own-model request item: the shop's choice,
+    or price book filaments by id."""
+
+    item_id: str
+    shop_choice: bool = False
+    filaments: list[str] = Field(default_factory=list)
+
+
+class SourceDeclineInput(BaseModel):
+    """A print file or link the shop does not take, with its reason (the shop's own)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class SourceDownload(BaseModel):
+    """A presigned GET of a staged file's frozen copy, as an attachment, until
+    ``expires_at``. The query carries the signature: never log it."""
+
+    url: str
+    expires_at: datetime
+
+
 # -- attachments (§6.2, #4251) ----------------------------------------------------------
 
 #: What a file is, from its bytes (``orders/attachments.py`` ``sniff``): an ``image`` or
@@ -888,6 +1038,11 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
+    #: Where ``density_g_cm3`` came from when the spool import, "Fill densities" or a
+    #: manual add with no density read it from Bambuddy's link to the slicer preset
+    #: (#6136, `orders/density.py`): the preset and the id that named it. ``None`` for
+    #: a density a person set, or none.
+    density_profile: str | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -952,6 +1107,36 @@ class SpoolImportRow(BaseModel):
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
     spool_ids: list[int]
+    #: The record's density after the import (#6136): its own, or the one the import
+    #: read through Bambuddy when it had none.
+    density_g_cm3: str | None = None
+    #: The record's ``density_profile`` after the import: where this import read
+    #: ``density_g_cm3`` from, or where a density it kept was read from before;
+    #: ``None`` for a density a person set, or none.
+    density_profile: str | None = None
+
+
+class DensityFillRow(BaseModel):
+    """One record of the book that had no density, and what filled it (#6136)."""
+
+    filament_id: str
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    colour: str
+    #: The density written; ``None`` when no source gives one, so the record still has
+    #: none and an estimate of it is refused.
+    density_g_cm3: str | None = None
+    #: Where it was read from.
+    density_profile: str | None = None
+
+
+class DensityFill(BaseModel):
+    """`POST /orders/price-book/fill-densities`: one row per record that had no
+    density, in the book's order."""
+
+    rows: list[DensityFillRow]
 
 
 class SpoolImport(BaseModel):

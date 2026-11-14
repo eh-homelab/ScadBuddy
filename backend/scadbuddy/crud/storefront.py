@@ -24,9 +24,11 @@ checks it.
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final
+from urllib.parse import urlencode
 
 import anyio
 import httpx
@@ -35,8 +37,10 @@ from starlette.datastructures import UploadFile
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
+from scadbuddy.storefront.uploads import PurchaseLinkAsk
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    PURCHASE_LINKS_FIELD,
     SESSION_HEADER,
     TURNSTILE_VERIFY_SECONDS,
     VISITOR_HEADER,
@@ -48,8 +52,19 @@ from scadbuddy.storefront.wire import (
 #: ``/pay#<token>`` page (#5283 phase 4).
 #: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
 #: customer's order page (#5283).
+#: ``models`` is a customer's own models (#6133): upload slots, the request, the CSP origin.
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
-    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts", "order"}
+    {
+        "listings",
+        "renders",
+        "drafts",
+        "requests",
+        "pay",
+        "turnstile",
+        "accounts",
+        "order",
+        "models",
+    }
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
@@ -61,11 +76,28 @@ UPLOAD_TIMEOUT: Final = httpx.Timeout(connect=5.0, read=300.0, write=300.0, pool
 _CHUNK: Final = 1 << 20
 
 
-async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> AsyncIterator[bytes]:
-    """The request as multipart, each file read from its start in a thread."""
+async def _multipart(
+    boundary: str,
+    text: str,
+    files: Sequence[UploadFile],
+    purchase_links: Sequence[PurchaseLinkAsk] = (),
+) -> AsyncIterator[bytes]:
+    """The request as multipart, each file read from its start in a thread. The things to
+    buy (#6133), when there are any, go as the JSON the edge read them as."""
     dash = f"--{boundary}\r\n".encode()
     yield dash + b'Content-Disposition: form-data; name="text"\r\n\r\n'
     yield text.encode() + b"\r\n"
+    if purchase_links:
+        # UTF-8, not ASCII escapes: `ensure_ascii` writes a character outside the BMP as a
+        # surrogate pair, 12 bytes, past `MAX_PURCHASE_LINKS_BYTES` (review of #6200).
+        links = json.dumps(
+            [link.model_dump() for link in purchase_links],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        disposition = f'Content-Disposition: form-data; name="{PURCHASE_LINKS_FIELD}"\r\n\r\n'
+        yield dash + disposition.encode()
+        yield links.encode() + b"\r\n"
     for upload in files:
         name = escape_filename(upload.filename or "file")
         yield (
@@ -180,9 +212,13 @@ class StorefrontCrud:
             "GET", "/account/orders", visitor_id=visitor_id, client=client, session=session
         )
 
-    async def listings(self, *, visitor_id: str, client: str) -> Any:
-        """``GET …/storefront/listings``: the published listings."""
-        return await self._call("GET", "/listings", visitor_id=visitor_id, client=client)
+    async def listings(
+        self, query: Mapping[str, str | int], *, visitor_id: str, client: str
+    ) -> Any:
+        """``GET …/storefront/listings``: one page of the published listings, with
+        ``query``'s ``cursor``, ``limit`` and ``q``, URL-encoded here."""
+        path = f"/listings?{urlencode(query)}" if query else "/listings"
+        return await self._call("GET", path, visitor_id=visitor_id, client=client)
 
     async def listing(self, listing_id: str, *, visitor_id: str, client: str) -> Any:
         """``GET …/storefront/listings/{id}``: one published listing. ``listing_id`` must
@@ -219,6 +255,31 @@ class StorefrontCrud:
         return await self._call(
             "POST", "/draft/items", visitor_id=visitor_id, client=client, content=body, key=key
         )
+
+    async def upload_slots(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/uploads`` (#6133): the visitor's JSON body as it came,
+        unread. The answer carries presigned URLs: the edge relays it and logs none."""
+        return await self._call(
+            "POST", "/uploads", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def add_models(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/draft/models`` (#6133): the visitor's JSON body as it came,
+        unread, and the request's ``Idempotency-Key``."""
+        return await self._call(
+            "POST", "/draft/models", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def upload_origin(self) -> str | None:
+        """``GET …/storefront/uploads/config``: the origin of the store's presigned PUTs,
+        which the page's CSP names (`storefront/static.py`). One quick try, as the site
+        key's read."""
+        response = await self._crud.request(
+            "GET", f"{BASE}/uploads/config", budget=SITE_KEY_BUDGET, timeout=SITE_KEY_BUDGET
+        )
+        answer = response.json()
+        origin = answer.get("origin") if isinstance(answer, dict) else None
+        return origin if isinstance(origin, str) else None
 
     async def remove_item(self, item_id: str, *, key: str, visitor_id: str, client: str) -> Any:
         """``DELETE …/storefront/draft/items/{id}``. ``item_id`` must be an item id
@@ -260,9 +321,11 @@ class StorefrontCrud:
         key: str,
         visitor_id: str,
         client: str,
+        purchase_links: Sequence[PurchaseLinkAsk] = (),
     ) -> Any:
-        """``POST …/storefront/draft/requests``: ``text`` and each spooled file, as
-        multipart made as it is sent, each file read a chunk at a time in a thread. Its
+        """``POST …/storefront/draft/requests``: ``text``, the things to buy (#6133) and
+        each spooled file, as multipart made as it is sent, each file read a chunk at a
+        time in a thread. Its
         body cannot be sent twice, so it is sent once (`UPLOAD_TIMEOUT`), never retried:
         a failure raises `CrudUnavailableError` at once."""
         boundary = secrets.token_hex(16)
@@ -274,7 +337,7 @@ class StorefrontCrud:
             timeout=UPLOAD_TIMEOUT,
             upload=Upload(
                 f"multipart/form-data; boundary={boundary}",
-                _multipart(boundary, text, files),
+                _multipart(boundary, text, files, purchase_links),
             ),
         )
         return response.json()
@@ -335,6 +398,34 @@ class StorefrontCrud:
         answer = response.json()
         verdict = answer.get("verdict") if isinstance(answer, dict) else None
         return verdict if isinstance(verdict, str) else "unavailable"
+
+    async def model_colours(self, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/models/colours`` (#6133): the filaments the form offers."""
+        return await self._call("GET", "/models/colours", visitor_id=visitor_id, client=client)
+
+    async def draft_source_preview(
+        self, source_id: str, *, visitor_id: str, client: str
+    ) -> CrudStream:
+        """``GET …/storefront/draft/sources/{id}/preview`` (#6133), its body unread. The
+        caller checked ``source_id``; a bare 404 raises `CrudRefusedError`."""
+        return await self._crud.stream(
+            "GET",
+            f"{BASE}/draft/sources/{source_id}/preview",
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+        )
+
+    async def order_source_preview(
+        self, source_id: str, body: bytes, *, session: str | None = None
+    ) -> CrudStream:
+        """``POST …/storefront/order/sources/{id}/preview`` (#6133), its body unread: the
+        page's body goes on unread, as `order`'s does, since it holds the order link's
+        token. A reader that reads nothing raises `CrudRefusedError` 404 with no problem."""
+        return await self._crud.stream(
+            "POST",
+            f"{BASE}/order/sources/{source_id}/preview",
+            content=body,
+            headers=None if session is None else {SESSION_HEADER: session},
+        )
 
     async def render_preview(
         self, job_id: str, *, plate: int | None, visitor_id: str, client: str

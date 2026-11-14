@@ -202,7 +202,7 @@ class _Down:
 
     async def aclose(self) -> None: ...
 
-    async def listings(self, **_kwargs: Any) -> Any:
+    async def listings(self, *_args: Any, **_kwargs: Any) -> Any:
         raise CrudUnavailableError("the API did not answer", "unreached")
 
 
@@ -862,6 +862,99 @@ def test_a_request_is_streamed_on_with_a_key(
     assert len(sent.headers["idempotency-key"]) == 64
     assert b'name="text"' in sent.content and b"A hook" in sent.content
     assert b'filename="a.png"' in sent.content and PNG in sent.content
+
+
+def test_a_request_forwards_its_things_to_buy(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """#6133: the edge checks the purchase links' shape and sends on what it read."""
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    links = '[{"url": "https://parts.example.com/x", "note": "hooks"}]'
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    sent = route.calls.last.request.content
+    assert b'name="purchase_links"' in sent
+    assert b'"url":"https://parts.example.com/x"' in sent and b'"note":"hooks"' in sent
+
+
+def test_the_edge_forwards_five_longest_astral_links_within_the_cap(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """Review of #6200: the forwarded part is UTF-8, so it stays under the CRUD side's cap."""
+    from scadbuddy.storefront.wire import (
+        MAX_LINK_CHARS,
+        MAX_LINK_NOTE,
+        MAX_PURCHASE_LINKS,
+        MAX_PURCHASE_LINKS_BYTES,
+    )
+
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    host = "https://parts.example.com/"
+    url = host + "\U0001f600" * (MAX_LINK_CHARS - len(host))
+    link = {"url": url, "note": "\U0001f9f2" * MAX_LINK_NOTE}
+    links = json.dumps([link] * MAX_PURCHASE_LINKS, ensure_ascii=False)
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    sent = route.calls.last.request.content
+    start = sent.index(b'name="purchase_links"\r\n\r\n') + len(b'name="purchase_links"\r\n\r\n')
+    part = sent[start : sent.index(b"\r\n--", start)]
+    assert len(part) <= MAX_PURCHASE_LINKS_BYTES
+    assert json.loads(part)[0]["note"] == link["note"]
+
+
+def test_the_edge_refuses_six_things_to_buy_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    links = "[" + ",".join('{"url": "https://parts.example.com/x"}' for _ in range(6)) + "]"
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_links"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '{"url": "https://parts.example.com/\\ud83d"}',
+        '{"url": "https://parts.example.com/x", "note": "\\udc00"}',
+    ],
+)
+def test_the_edge_refuses_a_lone_surrogate_in_a_thing_to_buy(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    entry: str,
+) -> None:
+    """Review of #6200: text UTF-8 cannot carry is 422 ``link_invalid`` with its index,
+    never a 5xx from the forwarded part's encode."""
+    links = '[{"url": "https://parts.example.com/ok"}, ' + entry + "]"
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}link_invalid"
+    assert r.json()["index"] == 1
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
 
 
 def test_the_edge_refuses_an_oversized_file_before_the_crud_call(
@@ -1683,3 +1776,287 @@ def test_a_pay_checkout_refusal_with_a_problem_is_the_edge_s_502_not_an_empty_40
     # The edge answers its own 502 problem, never an empty 404 and never the CRUD text.
     assert r.status_code == 502
     assert r.json()["detail"] == "The shop could not answer this request."
+
+
+# -- a customer's own models (#6133) -----------------------------------------------------
+
+UPLOADS = "/api/v1/internal/crud/storefront/uploads"
+MODELS = "/api/v1/internal/crud/storefront/draft/models"
+SLOTS_BODY = {"files": [{"filename": "cube.stl", "size": 5, "media_type": "model/stl"}]}
+SLOTS = {
+    "uploads": [
+        {
+            "id": "a" * 32,
+            "filename": "cube.stl",
+            "url": "https://s3/x",
+            "headers": {"Content-Type": "model/stl"},
+            "expires_at": "2026-11-13T00:00:00Z",
+        }
+    ]
+}
+
+
+def test_upload_slots_take_the_bot_check_then_are_forwarded_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+    route = crud_mock.post(UPLOADS).respond(200, json=SLOTS, headers=CRUD)
+
+    async def check(_request: Request, action: str) -> None:
+        assert route.call_count == 0
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+    assert r.status_code == 200 and r.json() == SLOTS
+    assert checks == ["model"]
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == SLOTS_BODY
+    assert len(sent.headers["idempotency-key"]) == 64
+
+
+def test_upload_slots_share_the_design_requests_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(UPLOADS).respond(200, json=SLOTS, headers=CRUD)
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    codes = [
+        edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed()).status_code
+        for _ in range(3)
+    ]
+    codes += [_ask(edge).status_code for _ in range(4)]
+    assert codes == [200] * 6 + [429]
+
+
+def test_a_failed_bot_check_spends_no_upload_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check(_request: Request, _action: str) -> None:
+        raise bot_check_failed()
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(UPLOADS)
+    for _ in range(REQUEST_UPLOADS + 1):
+        r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+        assert r.status_code == 403
+    assert route.call_count == 0
+
+
+def test_upload_slots_are_refused_while_requests_are_off(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    route = crud_mock.post(UPLOADS)
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert route.call_count == 0
+
+
+def test_upload_slots_need_a_browser_key(edge: TestClient) -> None:
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 428
+
+
+def test_a_model_request_is_forwarded_as_sent_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    body = {"uploads": ["a" * 32], "links": [{"url": "https://makerworld.com/en/models/1"}]}
+    r = edge.post("/api/store/v1/draft/models", json=body, headers=_keyed())
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == body
+    assert len(sent.headers["idempotency-key"]) == 64
+
+
+LINKS_ONLY = {"links": [{"url": "https://makerworld.com/en/models/1"}]}
+
+
+def test_a_model_request_naming_uploads_takes_no_second_bot_check(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+
+    async def check(_request: Request, action: str) -> None:
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    body = {"uploads": ["a" * 32], **LINKS_ONLY}
+    assert edge.post("/api/store/v1/draft/models", json=body, headers=_keyed()).status_code == 200
+    assert checks == []
+
+
+def test_a_links_only_model_request_takes_the_bot_check(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+    route = crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+
+    async def check(_request: Request, action: str) -> None:
+        assert route.call_count == 0
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    r = edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed())
+    assert r.status_code == 200 and checks == ["model"]
+
+
+def test_a_links_only_model_request_failing_the_bot_check_is_not_forwarded(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check(_request: Request, _action: str) -> None:
+        raise bot_check_failed()
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(MODELS)
+    for _ in range(REQUEST_UPLOADS + 1):
+        r = edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed())
+        assert r.status_code == 403  # a failed check spends no allowance
+    assert route.call_count == 0
+
+
+def test_links_only_model_requests_spend_the_design_requests_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    codes = [
+        edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed()).status_code
+        for _ in range(REQUEST_UPLOADS + 1)
+    ]
+    assert codes == [200] * REQUEST_UPLOADS + [429]
+
+
+def test_a_model_request_is_refused_while_requests_are_off(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    route = crud_mock.post(MODELS)
+    for body in (LINKS_ONLY, {"uploads": ["a" * 32]}):
+        r = edge.post("/api/store/v1/draft/models", json=body, headers=_keyed())
+        assert r.status_code == 404
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert route.call_count == 0
+
+
+def test_a_model_request_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    problem = {
+        "type": f"{STOREFRONT_PROBLEMS}upload_missing",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "detail": "A file did not arrive. Upload it again.",
+        "index": 0,
+    }
+    crud_mock.post(MODELS).respond(
+        422, json=problem, headers={**CRUD, "Content-Type": "application/problem+json"}
+    )
+    r = edge.post("/api/store/v1/draft/models", json={"uploads": ["a" * 32]}, headers=_keyed())
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_missing"
+
+
+# -- a customer file's preview (#6133 PR 4, spec 2026-11-13 §7 "Serving the preview") ------
+
+SOURCE = "0b6f0f1e-5d0c-4d43-9d33-6c1f9d0f6a12"
+PREVIEW_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+DRAFT_SOURCES = "/api/v1/internal/crud/storefront/draft/sources"
+SHOWN_PREVIEW = {
+    "content-type": "image/png",
+    "content-disposition": "inline",
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-cache",
+}
+
+
+def _preview_headers(r: Any) -> dict[str, str | None]:
+    return {k: r.headers.get(k) for k in SHOWN_PREVIEW}
+
+
+def test_a_carts_preview_is_relayed_with_fixed_headers(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    # Whatever the CRUD side says the type is, the edge sends a PNG shown inline, unsniffed.
+    route = crud_mock.get(f"{DRAFT_SOURCES}/{SOURCE}/preview").respond(
+        200, content=PREVIEW_PNG, headers={**CRUD, "Content-Type": "text/html"}
+    )
+    r = edge.get(f"/api/store/v1/draft/sources/{SOURCE}/preview")
+    assert r.status_code == 200
+    assert r.content == PREVIEW_PNG
+    assert _preview_headers(r) == SHOWN_PREVIEW
+    assert route.calls.last.request.headers[VISITOR_HEADER]
+
+
+def test_an_order_sources_preview_takes_the_readers_body(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(f"{ORDER}/sources/{SOURCE}/preview").respond(
+        200, content=PREVIEW_PNG, headers={**CRUD, "Content-Type": "image/png"}
+    )
+    r = edge.post(
+        f"/api/store/v1/order/sources/{SOURCE}/preview",
+        json={"token": LINK},
+        headers={"Origin": PUBLIC_URL},
+    )
+    assert r.status_code == 200
+    assert r.content == PREVIEW_PNG
+    assert _preview_headers(r) == SHOWN_PREVIEW
+    sent = route.calls.last.request
+    assert LINK not in str(sent.url)
+    assert sent.content == b'{"token":"' + LINK.encode() + b'"}'
+
+
+def test_the_forms_colours_carry_no_price(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    red = {"id": "f1", "colour": "#ff0000", "colour_name": "Red", "material": "PLA"}
+    crud_mock.get("/api/v1/internal/crud/storefront/models/colours").respond(
+        200, json={"filaments": [{**red, "cost_per_kg": "20.00"}]}, headers=CRUD
+    )
+    r = edge.get("/api/store/v1/models/colours")
+    assert r.status_code == 200
+    assert r.json() == {"filaments": [red]}
+
+
+def test_a_refused_preview_is_a_bare_404(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.get(f"{DRAFT_SOURCES}/{SOURCE}/preview").respond(404, headers=CRUD)
+    crud_mock.post(f"{ORDER}/sources/{SOURCE}/preview").respond(404, headers=CRUD)
+    before = len(crud_mock.calls)
+    for r in (
+        edge.get(f"/api/store/v1/draft/sources/{SOURCE}/preview"),
+        edge.post(
+            f"/api/store/v1/order/sources/{SOURCE}/preview",
+            json={"token": "x"},
+            headers={"Origin": PUBLIC_URL},
+        ),
+    ):
+        assert (r.status_code, r.content) == (404, b"")
+    assert len(crud_mock.calls) == before + 2
+    # An id that is not one never reaches the CRUD side.
+    r = edge.get("/api/store/v1/draft/sources/not-an-id/preview")
+    assert (r.status_code, r.content) == (404, b"")
+    assert len(crud_mock.calls) == before + 2

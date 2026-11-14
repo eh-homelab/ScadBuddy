@@ -11,7 +11,7 @@ import { mockOrderMessage } from '../mocks/features/orders/messages'
 import { mockCustomerLink, mockOrderMail } from '../mocks/features/orders/customerLink'
 import { setMockMailServerError } from '../mocks/features/storefrontMail'
 import { choose } from '../test/select'
-import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, item, seedCart, state } from '../mocks/features/orders/state'
+import { CUSTOMER_BOB, ITEM_APPROVED, ITEM_DRAFT, ITEM_MODELS, ORDER_ACCEPTED, ORDER_CLOSED, ORDER_DRAFT, ORDER_MODELS, item, seedCart, state } from '../mocks/features/orders/state'
 import { renderPage } from '../test/utils'
 import { OrderPage } from './OrderPage'
 import { readSpec } from '../test/spec'
@@ -65,6 +65,20 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByRole('heading', { name: 'Summary' })).toBeInTheDocument()
     expect(within(totals).getByText('Shipping · Post')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
+  })
+
+  it("shows the purchases still pending in the header, and the customer's models on the request item (#6133)", async () => {
+    render(ORDER_MODELS, `?item=${ITEM_MODELS}`)
+    // The open item drawer hides the page behind it from the accessibility tree.
+    expect(await screen.findByRole('region', { name: "Customer's models" })).toBeInTheDocument()
+    expect(screen.getByText('ORD-2026-4')).toBeInTheDocument()
+    expect(screen.getByText('Purchase pending (1)')).toBeInTheDocument()
+  })
+
+  it('shows no purchase badge on an order with nothing to buy (#6133)', async () => {
+    render(ORDER_ACCEPTED)
+    expect(await screen.findByRole('heading', { name: 'ORD-2026-2' })).toBeInTheDocument()
+    expect(screen.queryByText(/Purchase pending/)).toBeNull()
   })
 
   it('shows a swept cart as not found once its deleted frame arrives (#5282)', async () => {

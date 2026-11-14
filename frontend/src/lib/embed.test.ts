@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DownloadBlockedError, DownloadWindowClosedError, downloadBlob, isEmbedded, openExternal } from './embed'
+import { DownloadBlockedError, DownloadWindowClosedError, downloadBlob, downloadUrl, isEmbedded, openExternal } from './embed'
 
 describe('isEmbedded', () => {
   it('is false at the top level', () => {
@@ -118,6 +118,49 @@ describe('downloadBlob', () => {
     vi.spyOn(window, 'open').mockReturnValue({ document, close } as unknown as Window)
     await expect(downloadBlob(() => Promise.reject(new Error('HTTP 500')), 'a.3mf', true)).rejects.toThrow('HTTP 500')
     expect(close).toHaveBeenCalled()
+  })
+})
+
+describe('downloadUrl (#6133)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('opens the window before the URL is known, then sends it there with no opener', async () => {
+    const popup = { closed: false, opener: window, location: { href: '' }, close: vi.fn() }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    let release: (url: string) => void = () => {}
+    const saving = downloadUrl(() => new Promise<string>((resolve) => (release = resolve)))
+    expect(open).toHaveBeenCalledWith('', '_blank')
+    expect(popup.location.href).toBe('')
+    release('https://bucket.example/staging/x.frozen?sig=1')
+    await saving
+    expect(popup.location.href).toBe('https://bucket.example/staging/x.frozen?sig=1')
+    expect(popup.opener).toBeNull()
+    expect(popup.close).not.toHaveBeenCalled()
+  })
+
+  it('refuses, without loading, when the window is blocked', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    const load = vi.fn(async () => 'https://bucket.example/x')
+    await expect(downloadUrl(load)).rejects.toBeInstanceOf(DownloadBlockedError)
+    expect(load).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the window is closed before the URL arrived', async () => {
+    const popup = { closed: false, opener: window, location: { href: '' }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    let release: (url: string) => void = () => {}
+    const saving = downloadUrl(() => new Promise<string>((resolve) => (release = resolve)))
+    popup.closed = true
+    release('https://bucket.example/x')
+    await expect(saving).rejects.toBeInstanceOf(DownloadWindowClosedError)
+    expect(popup.location.href).toBe('')
+  })
+
+  it('closes the window when the URL cannot be had', async () => {
+    const popup = { closed: false, opener: window, location: { href: '' }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    await expect(downloadUrl(() => Promise.reject(new Error('HTTP 409')))).rejects.toThrow('HTTP 409')
+    expect(popup.close).toHaveBeenCalled()
   })
 })
 

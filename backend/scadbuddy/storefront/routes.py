@@ -28,11 +28,12 @@ cookie's session on. The POSTs are checked by `CrossSiteGate`, as every write is
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Final
 
 import anyio
@@ -60,10 +61,15 @@ from scadbuddy.storefront.wire import (
     ITEM_ID,
     JOB_ID,
     LISTING_ID,
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     ORDER_VIEW_FIELDS,
     PAY_CHECKOUT_FIELDS,
+    PREVIEW_HEADERS,
     QUOTE_ID,
     REVISION_ID,
+    SOURCE_ID,
     STOREFRONT_PROBLEMS,
 )
 
@@ -117,8 +123,22 @@ async def turnstile(request: Request, crud: Crud) -> Any:
 
 
 @visitor_router.get("/listings")
-async def listings(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    return await crud.listings(visitor_id=visitor_id, client=client)
+async def listings(
+    crud: Crud,
+    visitor_id: Visitor,
+    client: Client,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=LISTINGS_MAX_PAGE)] = None,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
+) -> Any:
+    """One page of the published listings (#6154): the edge checks the query's bounds
+    and sends on only these three."""
+    query = {"cursor": cursor, "limit": limit, "q": q}
+    return await crud.listings(
+        {k: v for k, v in query.items() if v is not None}, visitor_id=visitor_id, client=client
+    )
 
 
 @visitor_router.get("/listings/{listing_id}")
@@ -188,6 +208,107 @@ async def add_item(request: Request, crud: Crud, visitor_id: Visitor, client: Cl
     key = _request_key(request, visitor_id)
     body = await _body(request, "draft_body_invalid")
     return await crud.add_item(body, key=key, visitor_id=visitor_id, client=client)
+
+
+def _requests_off() -> ApiError:
+    return ApiError(
+        404,
+        "This shop does not take design requests.",
+        type_=f"{STOREFRONT_PROBLEMS}requests_disabled",
+    )
+
+
+@visitor_router.post("/uploads")
+async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """Upload slots for "Print my own model" (#6133, spec 2026-11-13 §6.2): a presigned
+    PUT per file, straight to the store, so no file byte passes the edge. Refused before
+    the CRUD call: 404 ``requests_disabled`` while "Ask for a design" is off, 428
+    ``idempotency_key_required``, 429 ``request_limited`` (`UploadAllowance`, the design
+    requests' own, so the two forms do not add up), then the bot check (action ``model``;
+    neither refusal spends the allowance). A passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
+    key = _request_key(request, visitor_id)
+    allowance: UploadAllowance = state.upload_allowance
+    held = allowance.start(client)
+    if isinstance(held, int):
+        raise ApiError(
+            429,
+            "You have sent a lot of files, or some are still sending. Try again later.",
+            type_=REQUEST_LIMITED,
+            headers={"Retry-After": str(held)},
+            retry_after=held,
+        )
+    try:
+        await require_turnstile(request, "model")
+        allowance.spend(held)
+        body = await _body(request, "draft_body_invalid")
+    finally:
+        allowance.finish(held)
+    return await crud.upload_slots(body, key=key, visitor_id=visitor_id, client=client)
+
+
+#: The fields of a filament the form shows (`orders/storefront/wire.py` `PublicFilament`):
+#: the edge sends on these only, so no price reaches a visitor.
+FILAMENT_FIELDS: Final = frozenset({"id", "colour", "colour_name", "material"})
+
+
+@visitor_router.get("/models/colours")
+async def model_colours(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1)."""
+    answer = await crud.model_colours(visitor_id=visitor_id, client=client)
+    filaments = answer.get("filaments", []) if isinstance(answer, dict) else []
+    return {
+        "filaments": [
+            {k: v for k, v in f.items() if k in FILAMENT_FIELDS}
+            for f in filaments
+            if isinstance(f, dict)
+        ]
+    }
+
+
+@visitor_router.post("/draft/models")
+async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
+    """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the
+    browser filled and the links, as the visitor sent them. 404 ``requests_disabled`` while
+    "Ask for a design" is off, as ``POST /uploads``. A request that names an upload had its
+    bot check and allowance at that upload's slots (the CRUD side claims each slot once).
+    One that names none (links only) takes them here, as ``POST /uploads`` does: 429
+    ``request_limited``, then the bot check (action ``model``); a passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
+    key = _request_key(request, visitor_id)
+    body = await _body(request, "draft_body_invalid")
+    if not _names_uploads(body):
+        allowance: UploadAllowance = state.upload_allowance
+        held = allowance.start(client)
+        if isinstance(held, int):
+            raise ApiError(
+                429,
+                "You have sent a lot of requests, or one is still sending. Try again later.",
+                type_=REQUEST_LIMITED,
+                headers={"Retry-After": str(held)},
+                retry_after=held,
+            )
+        try:
+            await require_turnstile(request, "model")
+            allowance.spend(held)
+        finally:
+            allowance.finish(held)
+    return await crud.add_models(body, key=key, visitor_id=visitor_id, client=client)
+
+
+def _names_uploads(body: bytes) -> bool:
+    """Whether the body is a JSON object with a non-empty ``uploads`` list. Anything else
+    takes the gates; the CRUD side judges the body's shape."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    uploads = parsed.get("uploads") if isinstance(parsed, dict) else None
+    return isinstance(uploads, list) and len(uploads) > 0
 
 
 @visitor_router.delete("/draft/items/{item_id}")
@@ -352,7 +473,12 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
     try:
         upload.release()
         return await crud.add_request(
-            upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
+            upload.text,
+            upload.files,
+            key=key,
+            visitor_id=visitor_id,
+            client=client,
+            purchase_links=upload.purchase_links,
         )
     except CrudUnavailableError as error:
         if error.problem.get("type") == UPLOADS_BUSY:
@@ -382,8 +508,10 @@ class _Relayed(StreamingResponse):
     failed or cancelled (a browser that went away), never left to the garbage
     collector."""
 
-    def __init__(self, stream: CrudStream, *, headers: dict[str, str]) -> None:
-        super().__init__(stream.aiter_bytes(), media_type=GLB_MEDIA_TYPE, headers=headers)
+    def __init__(
+        self, stream: CrudStream, *, headers: dict[str, str], media_type: str = GLB_MEDIA_TYPE
+    ) -> None:
+        super().__init__(stream.aiter_bytes(), media_type=media_type, headers=headers)
         self._stream = stream
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -411,6 +539,50 @@ async def render_preview(
     ):
         headers["Content-Length"] = stream.response.headers["content-length"]
     return _Relayed(stream, headers=headers)
+
+
+async def _relayed_preview(opening: Awaitable[CrudStream]) -> Response:
+    """A checked file's preview relayed as a stream (#6133, spec 2026-11-13 §7 "Serving the
+    preview") with `PREVIEW_HEADERS`, whatever the CRUD side's answer says: the bytes are
+    the untrusted check's, never decoded here. Any refusal is a 404 with no body, so a
+    reader learns no reason."""
+    try:
+        stream = await opening
+    except CrudRefusedError:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    headers = {k: v for k, v in PREVIEW_HEADERS.items() if k != "Content-Type"}
+    if "content-length" in stream.response.headers and (
+        "content-encoding" not in stream.response.headers
+    ):
+        headers["Content-Length"] = stream.response.headers["content-length"]
+    return _Relayed(stream, headers=headers, media_type=PREVIEW_HEADERS["Content-Type"])
+
+
+@visitor_router.get("/draft/sources/{source_id}/preview", response_class=Response)
+async def draft_source_preview(
+    source_id: str, crud: Crud, visitor_id: Visitor, client: Client
+) -> Response:
+    """The preview of a line of the visitor's own cart (#6133): the visitor's cookie reads
+    it, so the page shows it as an ``<img>``. Any other source is a bare 404."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    return await _relayed_preview(
+        crud.draft_source_preview(source_id, visitor_id=visitor_id, client=client)
+    )
+
+
+@visitor_router.post("/order/sources/{source_id}/preview", response_class=Response)
+async def order_source_preview(source_id: str, request: Request, crud: Crud) -> Response:
+    """The preview of a source of the customer's order (#6133, spec 2026-11-13 §10.5). The
+    page POSTs its reader's body (the order link's token, or a signed-in reader's
+    ``order_id``), as it does for the view, so no URL holds the token; the store session
+    goes on. Any reader that reads nothing, or another order's source, is a bare 404."""
+    if SOURCE_ID.fullmatch(source_id) is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    body = await _body(request, "order_body_invalid")
+    return await _relayed_preview(
+        crud.order_source_preview(source_id, body, session=session_of(request))
+    )
 
 
 def _shown(node: Any, path: str = "") -> Any:

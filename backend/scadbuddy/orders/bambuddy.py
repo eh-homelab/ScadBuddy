@@ -13,17 +13,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections import defaultdict
+from collections.abc import Awaitable
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from pydantic import ValidationError
+
+from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
+    CatalogFilament,
     LibraryFile,
+    LocalPreset,
     PrinterMaintenanceOverview,
     SliceJob,
     Spool,
@@ -32,14 +38,17 @@ from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_previe
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
+from scadbuddy.bambuddy.trays import tray_at
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
+from scadbuddy.orders.density import density_text
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     ArchiveSlot,
     CopiedMedia,
+    LocalDensity,
     MaintenanceTask,
     MediaTooLargeError,
     ShelfSpool,
@@ -47,6 +56,8 @@ from scadbuddy.orders.integrations import (
 )
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
+
+logger = logging.getLogger(__name__)
 
 
 def _colour(rgba: str | None) -> str | None:
@@ -71,14 +82,27 @@ def _identity(spool: Spool) -> tuple[str, str, str, str]:
     )
 
 
-def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
+def spool_groups(
+    spools: list[Spool],
+    *,
+    local: dict[str, LocalDensity] | None = None,
+    trays: dict[int, str] | None = None,
+    catalogue: list[CatalogFilament] | None = None,
+) -> list[SpoolGroup]:
     """Every unarchived spool by the record identity it would price (material, subtype,
     brand and ``#RRGGBB``, upper-cased), in that order. That is ``bambuddy/farm.py``
     ``_filament_key``'s grouping with the colour as a record holds it: the alpha byte and
     a 6- or 8-digit spelling are dropped, so two spools that would land on one record are
     one group, priced once (#5159 review). A spool with no ``rgba`` keeps its colour's
     name as its key, never matched to an rgba one (#2918). A group's names are its most
-    recent spool's (the highest id)."""
+    recent spool's (the highest id).
+
+    Each group also carries what gives its record a density (#6136,
+    `orders/density.py`): its spools' preset ids (``slicer_filament``, newest first, and
+    their K-profiles' ``setting_id``), the ``tray_info_idx`` in ``trays`` (by spool id)
+    of a spool of it, the local preset in ``local`` (by id) that ``slicer_filament``
+    names, and the one ``density`` of the ``catalogue`` entries of its material, brand
+    and colour whose ``name`` holds each word of its subtype."""
     groups: dict[tuple[str, str, str, str], list[Spool]] = defaultdict(list)
     for spool in spools:
         if spool.archived_at is None:
@@ -87,17 +111,123 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
     for key in sorted(groups):
         rows = sorted(groups[key], key=lambda s: s.id)
         latest = rows[-1]
+        newest_first = list(reversed(rows))
+        slicer_filament = next(
+            (f for s in newest_first if (f := (s.slicer_filament or "").strip())), None
+        )
+        settings = list(
+            dict.fromkeys(
+                setting
+                for s in newest_first
+                for k in s.k_profiles
+                if (setting := (k.setting_id or "").strip())
+            )
+        )
+        colour = _colour(latest.rgba)
         out.append(
             SpoolGroup(
                 material=latest.material.strip(),
                 subtype=(latest.subtype or "").strip() or None,
                 brand=(latest.brand or "").strip() or None,
                 colour_name=(latest.color_name or "").strip() or None,
-                colour=_colour(latest.rgba),
+                colour=colour,
                 spools=[(s.id, s.cost_per_kg) for s in rows],
+                slicer_filament=slicer_filament,
+                k_profile_settings=settings,
+                tray_info_idx=next(
+                    (t for s in newest_first if (t := (trays or {}).get(s.id))), None
+                ),
+                local_preset=(local or {}).get(slicer_filament or ""),
+                catalogue_density=_catalogue_density(catalogue or [], latest, colour),
             )
         )
     return out
+
+
+def _catalogue_density(
+    catalogue: list[CatalogFilament], spool: Spool, colour: str | None
+) -> str | None:
+    """The one density of the catalogue's entries of the spool's material, brand and
+    colour (#6136); ``None`` for none, entries that disagree, or a spool with no brand
+    or colour. A spool with a subtype takes only an entry whose ``name`` holds each word
+    of it, so a PLA Basic spool never takes a PLA Matte entry of its colour (#6148
+    review). Bambuddy stores ``color_hex`` as ``#RRGGBB`` (``models/filament.py``,
+    validated by ``schemas/filament.py``'s ``^#[0-9A-Fa-f]{6}$`` at v1.3.2b1-daily.20261113:
+    https://github.com/maziggy/bambuddy/blob/v1.3.2b1-daily.20261113/backend/app/schemas/filament.py)."""
+    if colour is None or not (spool.brand or "").strip():
+        return None
+    subtype = set((spool.subtype or "").upper().split())
+    densities = {
+        text
+        for entry in catalogue
+        if entry.type.strip().upper() == spool.material.strip().upper()
+        and (entry.brand or "").strip().upper() == (spool.brand or "").strip().upper()
+        and (entry.color_hex or "").upper() == colour
+        and subtype <= set(entry.name.upper().split())
+        and (text := density_text(entry.density)) is not None
+    }
+    return densities.pop() if len(densities) == 1 else None
+
+
+def _local_densities(presets: list[LocalPreset]) -> dict[str, LocalDensity]:
+    """Each local filament preset with a density, by its id as a spool names it."""
+    return {
+        str(preset.id): LocalDensity(name=preset.name, density_g_cm3=density)
+        for preset in presets
+        if preset.preset_type == "filament"
+        and (density := density_text(preset.filament_density)) is not None
+    }
+
+
+async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
+    """One of the density chain's reads (#6136); ``None`` when Bambuddy refuses it, so
+    the spools are still imported, with no density from it."""
+    try:
+        return await read
+    except ApiError as error:
+        logger.warning("no densities from Bambuddy's %s: %s", what, error.detail)
+        return None
+    except ValidationError as error:
+        logger.warning(
+            "no densities from Bambuddy's %s: an answer of another shape: %s", what, error
+        )
+        return None
+
+
+async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int, str]:
+    """The ``tray_info_idx`` of each loaded spool that names no preset, by spool id:
+    one read of the assignments, then the status reads of the printers that hold one,
+    at once, so the slowest printer bounds them, not their sum. A printer whose read
+    Bambuddy refuses gives no tray, logged; the other printers' trays are kept, and no
+    read is left running when this returns."""
+    unnamed = {
+        s.id
+        for s in spools
+        if not (s.slicer_filament or "").strip()
+        and not any((k.setting_id or "").strip() for k in s.k_profiles)
+    }
+    if not unnamed:
+        return {}
+    loaded = [a for a in await client.spool_assignments() if a.spool_id in unnamed]
+    printer_ids = sorted({a.printer_id for a in loaded})
+    statuses = await asyncio.gather(
+        *(client.printer_status(p) for p in printer_ids), return_exceptions=True
+    )
+    found: dict[int, str] = {}
+    for printer_id, status in zip(printer_ids, statuses, strict=True):
+        if isinstance(status, ApiError | ValidationError):
+            logger.warning("no AMS trays from Bambuddy's printer %s: %s", printer_id, status)
+            continue
+        if isinstance(status, BaseException):
+            raise status
+        for assignment in loaded:
+            if assignment.printer_id != printer_id:
+                continue
+            tray = tray_at(status, assignment.ams_id, assignment.tray_id)
+            idx = (tray.tray_info_idx or "").strip() if tray is not None else ""
+            if idx:
+                found[assignment.spool_id] = idx
+    return found
 
 
 def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
@@ -165,11 +295,50 @@ class BambuddyIntegrations:
 
     async def spool_groups(self) -> list[SpoolGroup]:
         """The inventory's spools (``inventory_view``'s, ``GET /inventory/spools``,
-        archived ones left out) by filament. Only the spools: the loaded slots that
-        ``inventory_view`` adds say nothing about a price."""
+        archived ones left out) by filament, with what gives each a density (#6136):
+        the local presets (``GET /local-presets/``) only when a spool names one by its
+        numeric id, the AMS trays (``GET /inventory/assignments`` and each such
+        printer's ``GET /printers/{id}/status``) only for the spools that name no
+        preset (a group uses a tray's id only after its own preset ids), and the
+        filament catalogue (``GET /filament-catalog/``). The three density reads run at
+        once after the spools' read, so the slowest bounds them, not their sum (#6148
+        review). A density read Bambuddy refuses gives no density, logged; only the
+        spools' read fails the call."""
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
-            return spool_groups(await client.spools())
+            spools = [s for s in await client.spools() if s.archived_at is None]
+            failed: BaseException | None = None
+            try:
+                async with asyncio.TaskGroup() as reads:
+                    presets = (
+                        reads.create_task(_density_read(client.local_presets(), "local presets"))
+                        if any((s.slicer_filament or "").strip().isdigit() for s in spools)
+                        else None
+                    )
+                    trays = reads.create_task(
+                        _density_read(_tray_presets(client, spools), "AMS trays")
+                    )
+                    catalogue = reads.create_task(
+                        _density_read(client.filament_catalog(), "filament catalogue")
+                    )
+            except ExceptionGroup as group:
+                # The first read's own error, not the group: the log and the trace show
+                # what failed, as before the reads ran at once (#6186 review). It is
+                # raised after this block, so its own cause stays; any other read that
+                # failed is logged here (#6188 review).
+                failed, *others = group.exceptions
+                for other in others:
+                    logger.warning("another density read failed too", exc_info=other)
+            if failed is not None:
+                raise failed
+            local_read = None if presets is None else presets.result()
+            local = _local_densities(local_read.filament) if local_read is not None else {}
+            return spool_groups(
+                spools,
+                local=local,
+                trays=trays.result() or {},
+                catalogue=catalogue.result() or [],
+            )
 
     async def spool_inventory(self) -> list[ShelfSpool]:
         """``GET /inventory/spools`` (archived ones included, so a named one is known)

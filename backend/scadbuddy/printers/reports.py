@@ -21,7 +21,7 @@ gives one start, also across a reconnect's ``pushall`` and a new attempt of the 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from psycopg import Connection
@@ -43,6 +43,21 @@ class PrintEnd:
 
     subtask_name: str
     timed: bool
+
+
+#: How far ahead of the database's clock a stored ``seen_at`` may be and still guard the
+#: row (`stale`). Report times come from the clock of the host that runs the watch, which
+#: may move between hosts; a row stamped by a host whose clock ran ahead must not freeze
+#: every later report until real time catches up.
+FUTURE_TOLERANCE = timedelta(seconds=30)
+
+
+def stale(stored: datetime | None, seen_at: datetime, now: datetime) -> bool:
+    """Whether a report seen at ``seen_at`` is older than the row's ``stored``: then it
+    is not written (`PrinterReportStore.advance_in`). A ``stored`` time more than
+    `FUTURE_TOLERANCE` past ``now`` (the database's clock) guards nothing: it came from a
+    clock that ran ahead, and the next report repairs the row, as before the guard."""
+    return stored is not None and seen_at < stored and stored <= now + FUTURE_TOLERANCE
 
 
 def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None, PrintEnd | None]:
@@ -99,34 +114,75 @@ class Advance:
 
 class PrinterReportStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
-        self.pool = pool
+        self._pool = pool
 
-    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The pool, for a CRUD route that writes in one transaction with its ledger row
+        (`api/crud_print.py`)."""
+        return self._pool
+
+    def put(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> PrintEnd | None:
         """Write the report; the print it shows ended (`advance_print`), if any."""
-        return self.advance(printer_id, report, seen_at).ended
+        return self.advance(printer_id, report, seen_at, idempotency_key=idempotency_key).ended
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
         """Write the report; the print it ended and the print it started. A printer gone
         from the registry (deleted while it was watched) or no longer LAN-linked (an
         attempt still running after the unlink) writes nothing, and ends and starts
-        nothing."""
-        key = printer_uuid(printer_id)
-        if key is None:
+        nothing. ``idempotency_key`` is the print worker's (`crud/print.py`
+        `RemoteReports.advance`), which may lose an answer; here an answer is never lost,
+        so it is unused."""
+        if printer_uuid(printer_id) is None:
             return Advance()
         with self.pool.connection() as conn, conn.transaction():
-            old = conn.execute(
-                "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
-                (printer_id,),
-            ).fetchone()
-            before = None if old is None else old["running_subtask"]
-            running, ended = advance_print(before, report)
-            written = conn.execute(
-                "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
-                " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
-                " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
-                " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
-                (Jsonb(report), seen_at, running, printer_id),
-            ).rowcount
+            return self.advance_in(conn, printer_id, report, seen_at)
+
+    @staticmethod
+    def advance_in(
+        conn: Connection[DictRow], printer_id: str, report: dict[str, Any], seen_at: datetime
+    ) -> Advance:
+        """`advance` on ``conn``, in the caller's transaction. A report older than the row's
+        ``seen_at`` writes nothing, touches nothing, and ends and starts nothing (`stale`):
+        a write that lands after a newer one (a print worker's request still running on
+        the API after the worker gave its answer up) never moves the row, or the print it
+        shows running, back. One as old as the row's writes as before, so a resend is the
+        same write. A skipped write answers no end and no start, as a written one that
+        ended and started nothing does, so the watch counts it written and announces
+        `printer.report` once more: the card refetches the row unchanged, which costs one
+        read."""
+        if printer_uuid(printer_id) is None:
+            return Advance()
+        old = conn.execute(
+            "SELECT running_subtask, seen_at, now() AS now FROM printer_reports"
+            " WHERE printer_id = %s FOR UPDATE",
+            (printer_id,),
+        ).fetchone()
+        if old is not None and stale(old["seen_at"], seen_at, old["now"]):
+            return Advance()
+        before = None if old is None else old["running_subtask"]
+        running, ended = advance_print(before, report)
+        written = conn.execute(
+            "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
+            " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
+            " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
+            " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
+            (Jsonb(report), seen_at, running, printer_id),
+        ).rowcount
         if not written:
             return Advance()
         return Advance(ended=ended, started=started_print(before, running))

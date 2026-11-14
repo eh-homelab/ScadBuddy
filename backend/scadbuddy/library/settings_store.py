@@ -872,6 +872,9 @@ class SettingsPatch(BaseModel):
     #: Auto tax (#5281): the percent, and whether shipping is in its base.
     orders_tax_percent: str | None = None
     orders_tax_shipping: bool | None = None
+    #: The handling fee for bought items (#6133): flat per purchase, and a percent.
+    orders_purchase_fee_flat_minor: int | None = None
+    orders_purchase_fee_percent: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).
@@ -1003,13 +1006,10 @@ class SettingsStore:
         """The key the secret settings are sealed with; ``None`` when they are kept plain."""
         return self._kek
 
-    def open(self, *, migrate_schema: bool = True) -> None:
-        """Connect and bring the schema up to date. Fails the start when it cannot.
-        ``migrate_schema=False`` only connects: a worker on a role of its own never
-        migrates (`render/worker_role.py` `open_for_caller`)."""
+    def open(self) -> None:
+        """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
-        if migrate_schema:
-            self.migrate_and_seal()
+        self.migrate_and_seal()
 
     def migrate_and_seal(self) -> None:
         """Apply this build's migrations and seal any plaintext secret setting."""

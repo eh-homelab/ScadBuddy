@@ -53,6 +53,7 @@ from scadbuddy.storefront.settings import STOREFRONT_PREFIX, StorefrontSettings
 from scadbuddy.storefront.sign_out import SignOutRetries
 from scadbuddy.storefront.static import StorefrontStatic
 from scadbuddy.storefront.turnstile import FailedChecks, SiteKey
+from scadbuddy.storefront.upload_origin import UploadOrigin
 from scadbuddy.storefront.visitors import VisitorCookie
 from scadbuddy.storefront.wire import public_problem
 
@@ -127,6 +128,8 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
     # The bot check's site key (#5283), for the page's config and its CSP.
     app.state.turnstile_site_key = SiteKey()
     app.state.turnstile_failures = FailedChecks()
+    # The store's origin for the page's direct uploads (#6133), for its CSP.
+    app.state.upload_origin = UploadOrigin()
     # Sign-outs the CRUD side did not answer, tried again (`sign_out.py`).
     app.state.sign_out_retries = SignOutRetries(lambda **call: client.account_sign_out(**call))
     install_problem_handlers(app)
@@ -165,7 +168,15 @@ def create_app(settings: StorefrontSettings, *, crud: StorefrontCrud | None = No
             site_key = app.state.turnstile_site_key
             return await site_key.get(client) is not None or not site_key.ever_read
 
-        app.mount("/", StorefrontStatic(frontend, turnstile=turnstile_on), name="storefront-page")
+        async def upload_origin() -> str | None:
+            origin: UploadOrigin = app.state.upload_origin
+            return await origin.get(client)
+
+        app.mount(
+            "/",
+            StorefrontStatic(frontend, turnstile=turnstile_on, upload_origin=upload_origin),
+            name="storefront-page",
+        )
     else:
         logger.info("no storefront page bundle found; serving the API only")
     key = settings.storefront_cookie_key_file.read_bytes()

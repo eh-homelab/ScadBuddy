@@ -327,7 +327,7 @@ async def test_a_backend_id_with_slashes_is_one_path_part(
 
 
 def test_outside_an_activity_each_write_takes_a_key_of_its_own() -> None:
-    keys = WriteKeys()
+    keys = WriteKeys("blob-index")
     assert len({keys.next() for _ in range(3)}) == 3
 
 
@@ -337,14 +337,27 @@ def test_inside_an_activity_the_keys_are_its_ordinals(monkeypatch: pytest.Monkey
     info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7", attempt=1)
     monkeypatch.setattr(activity, "in_activity", lambda: True)
     monkeypatch.setattr(activity, "info", lambda: info)
-    keys = WriteKeys()
+    keys = WriteKeys("blob-index")
     first = [keys.next() for _ in range(2)]
     info.attempt = 2
     second = [keys.next() for _ in range(2)]
-    assert first == second == [activity_key(0), activity_key(1)]
+    assert first == second == [activity_key(0, "blob-index"), activity_key(1, "blob-index")]
     # Another run of the workflow (a render key's next run) is not a retry.
     info.workflow_run_id = "run-2"
     assert keys.next() != first[0]
+
+
+def test_two_stores_in_one_attempt_never_share_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each store counts its own writes: at the same ordinal, in the same attempt, the
+    namespace keeps their keys apart, so one store's request is never answered with
+    another's reply."""
+    info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7", attempt=1)
+    monkeypatch.setattr(activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activity, "info", lambda: info)
+    index, previews = WriteKeys("blob-index"), WriteKeys("previews")
+    assert index.next() != previews.next()
+    assert index.next() != previews.next()
+    assert WriteKeys("previews").next() == activity_key(0, "previews")
 
 
 async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
@@ -367,15 +380,19 @@ async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
 # -- keys only the API writes (#5298 Task 18) ---------------------------------------
 
 
-@pytest.mark.parametrize("key", ["asset-" + "a" * 64, "font-dejavu", "src-demo-abc"])
+@pytest.mark.parametrize(
+    "key", ["asset-" + "a" * 64, "font-dejavu", "src-demo-abc", "slice-" + "c" * 64]
+)
 async def test_the_worker_cannot_store_a_key_only_the_api_writes(
     index: RemoteBlobIndex, pool: Pool, key: str
 ) -> None:
     """An upload's copy is what an adopt writes the upload's row from: a render
     credential that could store one could forge the row. Fonts and snapshots are the
-    API's too. Nor may it delete one: a delete whose object release then failed would
-    leave the object untracked, the row's restore being a write too. A touch is allowed;
-    a font's or snapshot's forget goes to the API's ``forget-copy``."""
+    API's too, and so are a slicer's inputs and outputs (#5298 Task 32: a marked
+    ``slice-`` key gets the print worker a read URL). Nor may it delete one: a delete
+    whose object release then failed would leave the object untracked, the row's restore
+    being a write too. A touch is allowed; a font's or snapshot's forget goes to the
+    API's ``forget-copy``."""
     sql = BlobIndex(pool)
     sql.put(key, _ref("b"), slug=None, meta={"name": "real"})
     for write in (
@@ -392,8 +409,9 @@ async def test_the_worker_cannot_store_a_key_only_the_api_writes(
     held = sql.get(key)
     assert held is not None and held.meta == {"name": "real"} and held.ref == _ref("b")
     await asyncio.to_thread(index.touch, key)
-    if key.startswith("asset-"):
-        # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only.
+    if key.startswith(("asset-", "slice-")):
+        # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only; a slice
+        # blob is the API's sweep's.
         with pytest.raises(CrudRefusedError) as refused:
             await asyncio.to_thread(index.delete, key)
         assert refused.value.status == 403

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, mayHaveRun } from '../api/client'
 import type { PrintAgain, PrintDetail } from '../api/types'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 import { openExternal } from '../lib/embed'
 import { Button } from '@/components/ui/button'
 import {
@@ -102,7 +103,7 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
           {result ? (
             <>
               <Button type="button" variant="outline" onClick={close}>Done</Button>
-              <Button type="button" onClick={() => openExternal(result.bambuddy_url)}>
+              <Button type="button" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
                 Open in queue
               </Button>
             </>

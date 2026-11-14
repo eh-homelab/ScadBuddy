@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
 import type { PreviewStarted, PrintRunRequest, SlicePreview } from '../api/types'
 import type { PrintSource } from './printSource'
+import { fakeRealtime } from './realtime.fake'
 import { RESLICE_DEBOUNCE_MS, RESLICE_POLL_MS, usePreviewSlice } from './usePreviewSlice'
 
 /** The native slicer's progress and its `?slicer` reads (plan 2026-10-16 Task 14). */
@@ -29,15 +30,20 @@ async function advance(ms: number) {
 }
 
 describe('usePreviewSlice on the native slicer', () => {
-  beforeEach(() => vi.useFakeTimers())
+  let realtime: ReturnType<typeof fakeRealtime>
+  beforeEach(() => {
+    vi.useFakeTimers()
+    realtime = fakeRealtime({ confirm: false })
+  })
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
-  it('follows the progress of each read while the slice runs', async () => {
+  it('follows the progress of each read while the slice runs, one read per event (#265)', async () => {
     vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
-    vi.spyOn(api, 'getPreviewSlice')
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
       .mockResolvedValueOnce(running(20, 'native'))
       .mockResolvedValueOnce(running(60, 'native'))
       .mockResolvedValueOnce(completed('native'))
@@ -45,11 +51,91 @@ describe('usePreviewSlice on the native slicer', () => {
 
     await advance(RESLICE_DEBOUNCE_MS)
     expect(result.current.progress).toBe(20)
-    await advance(RESLICE_POLL_MS)
+    expect(realtime.following()).toEqual(['preview-slice:native:5'])
+    // The socket is up: no event, no read, however long the slice takes.
+    await advance(RESLICE_POLL_MS * 5)
+    expect(read).toHaveBeenCalledTimes(1)
+
+    await realtime.signal('preview-slice:native:5', 'preview_slice.progress')
     expect(result.current.progress).toBe(60)
-    await advance(RESLICE_POLL_MS)
+    await realtime.signal('preview-slice:native:5', 'preview_slice.settled')
     expect(result.current.slicing).toBe(false)
     expect(result.current.progress).toBeNull()
+    expect(read).toHaveBeenCalledTimes(3)
+    expect(realtime.following()).toEqual([])
+  })
+
+  it('reads on a timer only while the realtime socket is unavailable (#265)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce(running(null, 'bambuddy'))
+      .mockResolvedValueOnce(running(null, 'bambuddy'))
+      .mockResolvedValueOnce(completed('bambuddy'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    await advance(RESLICE_POLL_MS * 3)
+    expect(read).toHaveBeenCalledTimes(1)
+
+    realtime.setStatus('unavailable')
+    await advance(RESLICE_POLL_MS)
+    expect(read).toHaveBeenCalledTimes(2)
+    await advance(RESLICE_POLL_MS)
+    expect(read).toHaveBeenCalledTimes(3)
+    expect(result.current.slicing).toBe(false)
+    expect(result.current.result?.status).toBe('completed')
+    await advance(RESLICE_POLL_MS * 3)
+    expect(read).toHaveBeenCalledTimes(3)
+  })
+
+  it('reads on its timer while the backend says it does not follow the slice, and still sees the end (#265 review)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce({ ...running(20, 'native'), followed: false })
+      .mockResolvedValueOnce({ ...running(70, 'native'), followed: false })
+      .mockResolvedValueOnce(completed('native'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(result.current.progress).toBe(20)
+
+    // The socket is up, but no event will come for this slice.
+    await advance(RESLICE_POLL_MS)
+    expect(result.current.progress).toBe(70)
+    await advance(RESLICE_POLL_MS)
+    expect(result.current.slicing).toBe(false)
+    expect(result.current.result?.status).toBe('completed')
+    await advance(RESLICE_POLL_MS * 3)
+    expect(read).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops the timer once a read says the slice is followed again (#265 review)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('native'))
+    const read = vi
+      .spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce({ ...running(20, 'native'), followed: false })
+      .mockResolvedValue({ ...running(30, 'native'), followed: true })
+    renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    await advance(RESLICE_POLL_MS)
+    expect(read).toHaveBeenCalledTimes(2)
+    await advance(RESLICE_POLL_MS * 4)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads again once the subscription is confirmed, so a change before it is seen (#265)', async () => {
+    vi.spyOn(api, 'previewSlice').mockResolvedValue(started('bambuddy'))
+    vi.spyOn(api, 'getPreviewSlice')
+      .mockResolvedValueOnce(running(null, 'bambuddy'))
+      .mockResolvedValueOnce(completed('bambuddy'))
+    const { result } = renderHook(() => usePreviewSlice(source, request))
+    await advance(RESLICE_DEBOUNCE_MS)
+    expect(result.current.slicing).toBe(true)
+
+    await realtime.confirm('preview-slice:bambuddy:5')
+
+    expect(result.current.slicing).toBe(false)
+    expect(result.current.result?.status).toBe('completed')
   })
 
   it('reads a native start, and its toolpath, with slicer=native', async () => {
@@ -114,7 +200,11 @@ describe('the preview reads', () => {
 })
 
 describe('usePreviewSlice: Reslice (#4433)', () => {
-  beforeEach(() => vi.useFakeTimers())
+  let realtime: ReturnType<typeof fakeRealtime>
+  beforeEach(() => {
+    vi.useFakeTimers()
+    realtime = fakeRealtime({ confirm: false })
+  })
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -143,7 +233,7 @@ describe('usePreviewSlice: Reslice (#4433)', () => {
     expect(result.current.stale).toBe(true)
     expect(result.current.result?.print_time_seconds).toBe(60)
 
-    await advance(RESLICE_POLL_MS)
+    await realtime.signal('preview-slice:bambuddy:5', 'preview_slice.settled')
 
     expect(result.current.reslicing).toBe(false)
     expect(result.current.stale).toBe(false)

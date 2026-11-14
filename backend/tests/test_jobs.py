@@ -26,10 +26,11 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import GLYPH_CHECK_TIMEOUT
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.meshmodel.scene import SCENE_NAME
-from scadbuddy.render import jobs
+from scadbuddy.render import jobs, submit
 from scadbuddy.render import solids as solids_module
 from scadbuddy.render import split as split_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
+from scadbuddy.render.colours import MIN_PART_ALPHA
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.jobs import (
@@ -49,12 +50,14 @@ from scadbuddy.render.jobs import (
     Prepared,
     extruder_order,
     finish_piece_stage,
+    part_alphas,
     plate_thumbnails,
     prepare_source,
     render_main,
     render_solids_stage,
     solid_parts,
     unreadable_colour_warnings,
+    with_alphas,
 )
 from scadbuddy.render.objects3mf import ReadObject, read_objects
 from scadbuddy.render.read_budget import ReadBudget
@@ -62,6 +65,7 @@ from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender, solid_file, solid_mesh
 from scadbuddy.render.split import ColourPart, Paint, split_by_material
+from scadbuddy.render.submit import RenderService
 from tests.conftest import PgPool, write_openscad_3mf
 from tests.meshmodel.test_paint import (
     GREEN,
@@ -235,6 +239,44 @@ def test_extruder_order_matches_the_rendered_values() -> None:
         (2, "#AABBCC"),
         (1, "#FF0000"),
     ]
+
+
+def test_a_colour_values_alpha_goes_to_its_parts() -> None:
+    """Owner, 2026-11-14: `#RRGGBBAA` keeps its alpha for the part, first parameter of a
+    colour wins, an opaque value or a CSS name keeps none, and a clear one is floored."""
+    schema = _colour_schema(
+        ("a", "#000000"), ("b", "#111111"), ("c", "#222222"), ("d", "red"), ("e", "#333333")
+    )
+    params: dict[str, ParamValue] = {
+        "a": "#1f6feb80",
+        "b": "#1F6FEBFF",
+        "c": "#abc8",
+        "e": "#FFFFFF00",
+    }
+    alphas = part_alphas(schema, params)
+    assert alphas == {"#1F6FEB": 0x80, "#AABBCC": 0x88, "#FFFFFF": MIN_PART_ALPHA}
+
+    parts = with_alphas([_part(1, "#1F6FEB"), _part(2, "#FF0000")], alphas)
+    assert [part.alpha for part in parts] == [0x80, 255]
+
+
+def test_a_layout_keeps_a_translucent_parts_alpha(tmp_path: Path) -> None:
+    mesh = trimesh.creation.box((1, 1, 1))
+    write_openscad_3mf(tmp_path / RAW_RENDER_NAME, [("Color 1", "#FFFFFF00", mesh)])
+    clear = ColourPart(1, "Color 1", "#FFFFFF", mesh, alpha=0x80)
+    layout = PlateLayout(
+        [single_plate([clear])],
+        ["#FFFFFF"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    layout.save(tmp_path / LAYOUT_NAME)
+
+    entry = json.loads((tmp_path / LAYOUT_NAME).read_text())["plates"][0]["parts"][0]
+    assert entry["alpha"] == 0x80
+    loaded = PlateLayout.load(tmp_path / LAYOUT_NAME)
+    assert [part.alpha for part in loaded.plates[0].parts] == [0x80]
 
 
 def test_a_malformed_colour_matches_no_part() -> None:
@@ -1882,3 +1924,24 @@ async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
     # Both were reached, so an empty `on_loop` is not a guard that never ran.
     assert {"split", "write_glb"} <= set(ran)
     assert on_loop == []
+
+
+@pytest.mark.parametrize(("job_ttl", "pruned"), [(0.0, []), (600.0, [600.0])])
+async def test_the_prune_keeps_revision_exports_for_the_sweep_grace_at_any_job_ttl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job_ttl: float, pruned: list[float]
+) -> None:
+    """#6236: at ``job_ttl`` 0 the prune asks the store to remove no job. It still prunes
+    the revision exports, after ``sweep_grace`` (the default day), not after 0."""
+    jobs: list[float] = []
+    exports: list[float] = []
+    monkeypatch.setattr(submit, "prune_revision_exports", lambda paths, ttl: exports.append(ttl))
+    service = object.__new__(RenderService)
+    service.store = mock.Mock(prune=jobs.append)
+    service.config = Config(data_dir=tmp_path, job_ttl=job_ttl)
+    service.paths = DataPaths(tmp_path)
+    service.settle = mock.AsyncMock()  # type: ignore[method-assign]
+    await service.prune()
+    assert jobs == pruned
+    assert exports == [service.config.sweep_grace]
+    assert exports != [0.0]
+    service.settle.assert_awaited_once()

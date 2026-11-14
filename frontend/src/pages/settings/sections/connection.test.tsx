@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../../../api/client'
 import type { Settings } from '../../../api/types'
+import { resetBambuddyLinks, setBambuddyLinks } from '../../../lib/bambuddyLinks'
 import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { enter, region, renderSettingsSection } from '../testing'
@@ -192,6 +193,25 @@ describe('Connection', () => {
     expect(within(status).getByRole('link', { name: 'Turn it on in Bambuddy' })).toHaveAttribute(
       'href',
       'https://bambuddy.internal.nullreference.io/settings',
+    )
+  })
+
+  it('links to the Bambuddy beside the page, as every Bambuddy link does (#6212)', async () => {
+    setBambuddyLinks({
+      bambuddy_url: 'http://bambuddy.svc',
+      bambuddy_web_urls: 'https://bambuddy.internal.nullreference.io,https://bambuddy.sso.nullreference.io',
+    })
+    vi.stubGlobal('location', { ...window.location, hostname: 'scadbuddy.sso.nullreference.io' })
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+      resetBambuddyLinks()
+    })
+    renderSettingsSection(<Connection />)
+    const status = await screen.findByTestId('bambuddy-status')
+    await waitFor(() => expect(status).toHaveTextContent('Finish photo in Bambuddy: off'))
+    expect(within(status).getByRole('link', { name: 'Turn it on in Bambuddy' })).toHaveAttribute(
+      'href',
+      'https://bambuddy.sso.nullreference.io/settings',
     )
   })
 

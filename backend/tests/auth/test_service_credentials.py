@@ -50,12 +50,12 @@ def test_rotation_issues_one_per_caller_and_again_only_when_due(
     store: ServiceCredentialStore,
 ) -> None:
     now = datetime.now(UTC)
-    assert len(store.rotate_due(KEK, now=now)) == 2
+    assert len(store.rotate_due(KEK, now=now)) == 1
     assert store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE - timedelta(hours=1)) == []
-    assert len(store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE + timedelta(hours=1))) == 2
+    assert len(store.rotate_due(KEK, now=now + LIFETIME - ROTATE_BEFORE + timedelta(hours=1))) == 1
     # A new KEK: the callers could not open the old ones, so new ones at once.
-    assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 2
-    assert {c.caller for c in store.list()} == {"agent", "print"}
+    assert len(store.rotate_due(Kek("k2", os.urandom(32)), now=now)) == 1
+    assert {c.caller for c in store.list()} == {"agent"}
 
 
 def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
@@ -66,19 +66,19 @@ def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
     of the roll, and a reader refused with the old one reads the new one."""
     now = datetime.now(UTC)
     with monkeypatch.context() as patched:
-        patched.setitem(SCOPES, "print", frozenset({"api"}))
+        patched.setitem(SCOPES, "agent", frozenset({"api"}))
         store.rotate_due(KEK, now=now)
     clock = [0.0]
-    reader = TokenReader("print", pg_conninfo, KEK, clock=lambda: clock[0])
+    reader = TokenReader("agent", pg_conninfo, KEK, clock=lambda: clock[0])
     old = reader.token()
     assert old is not None
-    assert store.resolve(old) == Service("print", frozenset({"api"}))
+    assert store.resolve(old) == Service("agent", frozenset({"api"}))
 
     # Minted at the same instant, so it expires with the old one: the later-created wins.
     (minted,) = store.rotate_due(KEK, now=now)
-    assert [c.caller for c in store.list() if c.id == minted] == ["print"]
+    assert [c.caller for c in store.list() if c.id == minted] == ["agent"]
     assert store.rotate_due(KEK, now=now) == []
-    assert store.resolve(old) == Service("print", frozenset({"api"}))
+    assert store.resolve(old) == Service("agent", frozenset({"api"}))
 
     reader.invalidate(old)
     clock[0] = REREAD_MIN_SECONDS - 0.1
@@ -86,23 +86,23 @@ def test_new_scopes_mint_at_once_and_an_invalidated_reader_takes_them(
     clock[0] = REREAD_MIN_SECONDS
     new = reader.token()
     assert new is not None and new != old
-    assert store.resolve(new) == Service("print", SCOPES["print"])
+    assert store.resolve(new) == Service("agent", SCOPES["agent"])
 
 
 def test_a_caller_reads_its_token_and_the_api_verifies_it(
     store: ServiceCredentialStore, pg_conninfo: str, pg_pool: PgPool
 ) -> None:
     store.rotate_due(KEK)
-    token = _token(pg_conninfo, "print")
+    token = _token(pg_conninfo, "agent")
     assert token.startswith("sbsvc_")
-    assert store.resolve(token) == Service("print", SCOPES["print"])
+    assert store.resolve(token) == Service("agent", SCOPES["agent"])
     # Stored as its hash; the sealed copy opens only under its own row's AAD.
     with pg_pool.connection() as conn:
         rows = conn.execute("SELECT * FROM service_credentials").fetchall()
     assert all(token not in {str(v) for v in row.values()} for row in rows)
     assert aad("x", "print", ["b", "a"]) == "service_credentials|x|print|a,b"
     assert store.resolve(token.replace("sbsvc_", "sbsvc_0", 1)[:-1]) is None
-    assert TokenReader("print", pg_conninfo, None).token() is None
+    assert TokenReader("agent", pg_conninfo, None).token() is None
 
 
 def test_revoked_or_expired_is_refused(store: ServiceCredentialStore, pg_conninfo: str) -> None:
@@ -156,13 +156,13 @@ def test_a_revoke_and_the_rotation_replace_once(store: ServiceCredentialStore) -
 
 def test_last_used_is_recorded(store: ServiceCredentialStore, pg_conninfo: str) -> None:
     store.rotate_due(KEK)
-    store.resolve(_token(pg_conninfo, "print"))
-    (printer,) = [c for c in store.list() if c.caller == "print"]
-    assert printer.last_used_at is not None
+    store.resolve(_token(pg_conninfo, "agent"))
+    (agent,) = [c for c in store.list() if c.caller == "agent"]
+    assert agent.last_used_at is not None
 
 
 def test_each_role_is_granted_its_own_view_only(pg_pool: PgPool, pg_conninfo: str) -> None:
-    role = "scadbuddy_print"
+    role = "scadbuddy_agent"
     with pg_pool.connection() as conn:
         if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
             with contextlib.suppress(psycopg.errors.DuplicateObject):
@@ -173,14 +173,17 @@ def test_each_role_is_granted_its_own_view_only(pg_pool: PgPool, pg_conninfo: st
             " WHERE grantee = %s AND table_schema = current_schema()",
             (role,),
         ).fetchall()
-    assert {row["table_name"] for row in privileges} == {"service_credentials_print"}
+    assert {row["table_name"] for row in privileges} == {
+        "service_credentials_agent",
+        "auth_sessions_agent",
+    }
 
 
 async def test_the_gate_resolves_a_bearer_credential(
     store: ServiceCredentialStore, pg_conninfo: str
 ) -> None:
     store.rotate_due(KEK)
-    token = _token(pg_conninfo, "print")
+    token = _token(pg_conninfo, "agent")
     seen = []
 
     async def app(scope: dict[str, object], receive: object, send: object) -> None:
@@ -190,7 +193,7 @@ async def test_the_gate_resolves_a_bearer_credential(
     for header in (f"Bearer {token}", "Bearer sbsvc_0000000000000000." + "a" * 43):
         scope = {"type": "http", "headers": [(b"authorization", header.encode())]}
         await gate(scope, None, None)  # type: ignore[arg-type]
-    assert seen == [Service("print", SCOPES["print"]), ANONYMOUS]
+    assert seen == [Service("agent", SCOPES["agent"]), ANONYMOUS]
 
 
 def test_a_retired_callers_sealed_credential_is_revoked_and_never_minted(

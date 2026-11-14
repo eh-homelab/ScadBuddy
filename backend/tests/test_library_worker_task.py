@@ -270,7 +270,7 @@ async def test_a_failing_sweep_fails_its_activity(
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),
-        config=SimpleNamespace(job_ttl=60.0),
+        config=SimpleNamespace(sweep_grace=60.0),
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
         events=None,
@@ -418,6 +418,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return [], 0, 0
 
     monkeypatch.setattr(main, "_sweep_storefront", slow_storefront)
+
+    # #6133: the staged files' backstop, a listing of the staging area.
+    async def slow_staged(state: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sweep_staged", slow_staged)
 
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:

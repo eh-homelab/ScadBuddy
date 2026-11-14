@@ -1,7 +1,8 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomerOrder, Draft, Listing, StoreEstimate, StoreRender } from '../../storefront/api/client'
+import type { CustomerOrder, Draft, Listing, ListingCard, StoreEstimate, StoreRender } from '../../storefront/api/client'
 import { keychainGlb } from '../glb'
 import { problem } from '../handlers'
+import { advanceChecks, modelsOrderOf } from './storefrontModels'
 
 /**
  * #5282 (spec 2026-11-02 §5.1-§5.4; backend `storefront/routes.py`): the public page's edge,
@@ -36,8 +37,8 @@ export const KEYCHAIN: Listing = {
   description: 'A keychain with your name raised on it, in two colours.',
   params: {
     name: { kind: 'text', label: 'Name', group: '', colour: false, max_length: 20 },
-    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5 },
-    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'] },
+    size: { kind: 'number', label: 'Length (mm)', group: '', colour: false, min: 40, max: 80, step: 5, default: 60 },
+    base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#1B6CA8', '#E8532F'], default: '#1b6ca8' },
   },
   colours: [BLUE, ORANGE],
   media: [],
@@ -57,6 +58,27 @@ export const TAG: Listing = {
 }
 
 const LISTINGS = [KEYCHAIN, TAG]
+
+/** A listing as the public list shows it (#6154): its first picture, and whether it can be ordered. */
+export function card(listing: Listing): ListingCard {
+  const image = listing.media.find((media) => media.kind === 'image') ?? null
+  const available = !Object.values(listing.params).some((param) => param.kind === 'choice' && param.colour && param.choices.length === 0)
+  return { id: listing.id, title: listing.title, description: listing.description, image, available }
+}
+
+/** One page of `listings`, as the edge pages them: the cursor is the next card's index. */
+export function listingsPage(listings: readonly Listing[], url: URL, requestsEnabled = true) {
+  const q = url.searchParams.get('q')?.trim().toLowerCase() ?? ''
+  const limit = Number(url.searchParams.get('limit') ?? 24)
+  const start = Number(url.searchParams.get('cursor') ?? 0)
+  const matched = listings.filter((listing) => listing.title.toLowerCase().includes(q))
+  const page = matched.slice(start, start + limit)
+  return {
+    listings: page.map(card),
+    next_cursor: start + limit < matched.length ? String(start + limit) : null,
+    requests_enabled: requestsEnabled,
+  }
+}
 
 export const ESTIMATE: StoreEstimate = {
   estimate: true,
@@ -79,7 +101,7 @@ let draft: Draft | null = null
 let renders = new Map<string, { render: StoreRender; polls: number }>()
 let serial = 0
 
-function save(): void {
+export function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft))
   } catch {
@@ -95,16 +117,16 @@ function load(): void {
   }
 }
 
-function next(): string {
+export function next(): string {
   serial += 1
   return serial.toString(16).padStart(32, '0')
 }
 
-function refused(status: number, slug: string, detail: string) {
+export function refused(status: number, slug: string, detail: string) {
   return problem(status, status === 404 ? 'Not Found' : 'Unprocessable Content', detail, { type: PROBLEMS + slug })
 }
 
-function keyMissing(request: Request) {
+export function keyMissing(request: Request) {
   return request.headers.get('Idempotency-Key')
     ? null
     : refused(428, 'idempotency_key_required', 'Send an Idempotency-Key with this request.')
@@ -185,7 +207,7 @@ async function orderOf(request: Request): Promise<CustomerOrder | Response> {
     : new HttpResponse(null, { status: 404 })
 }
 
-function ensureDraft(): Draft {
+export function ensureDraft(): Draft {
   draft ??= { id: 'draft-1', currency: 'USD', minor_exponent: 2, items: [], shipping_options: SHIPPING }
   return draft
 }
@@ -204,7 +226,7 @@ export const handlers = [
         })
       : new HttpResponse(null, { status: 404 })
   }),
-  http.get(`${base}/listings`, () => HttpResponse.json({ listings: LISTINGS, requests_enabled: true })),
+  http.get(`${base}/listings`, ({ request }) => HttpResponse.json(listingsPage(LISTINGS, new URL(request.url)))),
   http.get(`${base}/listings/:id`, ({ params }) => {
     const listing = LISTINGS.find((l) => l.id === params.id)
     return listing ? HttpResponse.json(listing) : refused(404, 'listing_not_found', 'There is no such listing.')
@@ -253,7 +275,11 @@ export const handlers = [
       ? HttpResponse.json(ESTIMATE)
       : refused(404, 'render_not_found', 'There is no such render.'),
   ),
-  http.get(`${base}/draft`, () => HttpResponse.json(draft)),
+  http.get(`${base}/draft`, () => {
+    // A cart read moves each model check on (`storefrontModels.ts`).
+    if (draft) advanceChecks(draft)
+    return HttpResponse.json(draft)
+  }),
   http.post(`${base}/draft/items`, async ({ request }) => {
     const missing = keyMissing(request)
     if (missing) return missing
@@ -270,6 +296,8 @@ export const handlers = [
       labels: Object.fromEntries(Object.keys(body.values ?? {}).map((name) => [name, checked.params[name]?.label ?? name])),
       notes: null,
       attachments: [],
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)
@@ -304,6 +332,9 @@ export const handlers = [
     return HttpResponse.json(submitted)
   }),
   http.post(`${base}/order/view`, async ({ request }) => {
+    // The token `models` opens `storefrontModels.ts`'s order.
+    const models = await modelsOrderOf(request)
+    if (models) return HttpResponse.json(models)
     const found = await orderOf(request)
     return found instanceof Response ? found : HttpResponse.json(found)
   }),
@@ -363,6 +394,8 @@ export const handlers = [
       labels: {},
       notes: text,
       attachments: files.map((file) => ({ filename: file.name, kind: 'image', url: `/mock-files/${encodeURIComponent(file.name)}` })),
+      sources: [],
+      own_model: false,
     })
     save()
     return HttpResponse.json(current)

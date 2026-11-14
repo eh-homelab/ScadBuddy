@@ -6,10 +6,13 @@ These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the 
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
 the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
-`ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
-`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`;
-`backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). The workspace files' `blob_refs`
-holds go through CRUD routes (#5299, below), no longer a trigger. `src/db/grants.ts`
+`ai_*` tables, and run SQL on two backend tables in the gate's transaction (`flow_grants`,
+`flow_grant_uses`: `src/gate/store.ts` `grantInput`, under the grant row's share lock, until
+the gate moves to the CRUD service, #5299 step 10; `backend/scadbuddy/auth/caller_grants.py`
+`AGENT_GRANTS`). The agent's other reads of backend tables (the event log, flow runs, their
+decisions and grants) go through CRUD routes (#5299 D7, below), over SQL only while the API
+does not list their areas yet. The workspace files' `blob_refs` holds go through CRUD routes
+(#5299, below), no longer a trigger. `src/db/grants.ts`
 grants the API's role its `ai_*` reads and writes, and revokes what it once granted the
 projects worker's role `scadbuddy_projects` (#5298; the worker holds no database).
 Claude Code, and any plugin package approved with `allow_refused`, runs in the same pod
@@ -33,7 +36,18 @@ is tried again at the next call and logged once as "waiting for the backend". Wi
 
 The agent's own CRUD routes (`/api/v1/internal/crud/agent/`, class `crud.agent`, #5330): the
 holds of the workspace files' blobs (`workspace-blob-refs`, #5299; see the workspace under
-"Layout"), and the assistant's spend on an order. A session's successful `order_item_revision_add` (or
+"Layout"), the assistant's spend on an order, and its reads of the backend's tables (#5299
+D7): area `events` (the LISTEN gap replay's head and gap, `src/events/eventLogReads.ts`, used
+by `pgListener.ts`) and area `flows` (a run's starter, its decision checks, a grant in force,
+a run's queue and steps, the waiting runs, the parent-hop approvals and which of them still
+wait: `src/flows/backendReads.ts` `CrudFlowRunReads`, used by `temporal/flowRuns.ts`,
+`flows/queue.ts`, `flows/escalations.ts` and `temporal/toolActivities.ts`
+`PgApprovalRecords`). `src/api/crudAreas.ts` `CrudAreas` reads `GET …/crud/agent/areas` from
+the start with back-off (1 s doubling to 30 s) until both are listed; until then each read
+stays on SQL (`SqlFlowRunReads`, the listener's own connection), the rolling deploy's
+fallback for an API pod older than the routes. A route's answer counts only with
+`X-ScadBuddy-Crud: 1`; any other failure takes the read's existing error path (a lookup
+failure the activity retries, a 500, a resync). A session's successful `order_item_revision_add` (or
 `_after_acceptance`) is an `ai_session_order_costs` row (`src/sessions/orderCosts.ts`
 `OrderCosts`, a `TouchedSink` beside `SessionResources`); each turn's end
 (`temporal/session/finishActivity.ts`, a retry too, not awaited: it never holds up the next
@@ -275,8 +289,12 @@ opens every one and seals it again byte for byte).
     the rows) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
     through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
-    plan Step 6.5), so forgetting a parent first copies each fork's range into it under
-    the fork's key (`copyForkRanges`, `inherited` rows), and refuses without the KEK. A gated tool's activity runs only
+    plan Step 6.5), and its event log and images through `fork_event_cut` (#4212:
+    `src/sessions/eventLog.ts` `read`, `blobs.ts` `get`; its own `session.started` is seq 1,
+    its own later events come after the cut), so forgetting a parent first copies each fork's
+    range into it, the transcript under the fork's key (`copyForkRanges`, `inherited` rows),
+    and refuses without the KEK when a fork takes transcript entries (`fork_cut` above 0; a
+    fork of a closed DurableSession takes none). A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
     open sessions were moved to AgentSession on 2026-11-01 (their conversations in
@@ -305,7 +323,8 @@ opens every one and seals it again byte for byte).
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
-    in `data`; on any other backend a write that cannot be sealed and stored is refused
+    in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
+    names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
     `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
@@ -373,6 +392,12 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
+    `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
+    with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the
+    frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
+    a colour the customer can choose is taken out of the title) and
+    `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);
@@ -393,7 +418,10 @@ opens every one and seals it again byte for byte).
     Claude Code expands to HOME after the seam for Glob and Grep, measured on 2.1.310; with
     no working directory the file tools are not offered). `Read` and `Grep` may also reach the
     session's own `tool-results` directory in the Claude Code config dir, where Claude Code
-    saves an oversized tool result (#5542, `projectDirName`). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    saves an oversized tool result (#5542, `projectDirName`), and, in a resumed turn, the same
+    directory under the SDK's resume config dir `<os.tmpdir()>/claude-resume-<randomUUID>`
+    (#6117, read from SDK 0.3.314 `sdk.mjs`; the rest of that dir, its transcript and copied
+    credentials included, stays refused). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
     2026-11-01). Where the deployment sets `SCADBUDDY_SANDBOX_*` (all five or none, `config.ts`
     `sandbox`), every turn gets the session's own `Bash` and `PowerShell` instead

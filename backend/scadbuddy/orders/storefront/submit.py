@@ -41,6 +41,7 @@ from scadbuddy.orders.models import Order
 from scadbuddy.orders.storefront.accounts import Account
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.listings import problem
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import SubmitBody, SubmittedOrder
 from scadbuddy.payments.credentials import KekMissingError
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
 
 #: The ledger's name of the route (`idempotent_write`).
 SUBMIT_ROUTE: Final = "POST /storefront/draft/submit"
+#: A cart that holds a refused file (#6133).
+MODEL_FILE_REFUSED: Final = "model_file_refused"
 
 
 def draft_not_found() -> ApiError:
@@ -81,13 +84,45 @@ def _refusal(error: LifecycleError) -> ApiError:
     )
 
 
+def _no_refused_file(conn: Any, draft_id: str, visitor_id: str) -> None:
+    """409 ``model_file_refused`` while the visitor's cart holds a file its check refused,
+    or one whose staged copy expired (#6133, spec 2026-11-13 §4.3), naming those files'
+    sources. The customer removes it first. A file still being checked does not block.
+    The order's lock is taken first, as the check's verdict takes it, so a verdict that
+    lands meanwhile is seen. Another visitor's cart, or no cart, is left to
+    `Lifecycle.submit_order`, which refuses it."""
+    order = conn.execute(
+        "SELECT id FROM orders WHERE id = %s AND storefront_visitor_id = %s"
+        " AND submitted_at IS NULL FOR UPDATE",
+        (draft_id, visitor_id),
+    ).fetchone()
+    if order is None:
+        return
+    refused = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM order_item_sources WHERE order_id = %s AND kind = 'file'"
+            " AND check_status = 'refused' ORDER BY item_id, position",
+            (draft_id,),
+        ).fetchall()
+    ]
+    if refused:
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            MODEL_FILE_REFUSED,
+            "A model file cannot be printed. Remove it, then send your order.",
+            sources=refused,
+        )
+
+
 async def submit_draft(
     state: AppState, visitor_id: str, key: str, body: SubmitBody, account: Account | None
 ) -> SubmittedOrder:
     """The visitor's cart ``body.draft_id`` submitted (`Lifecycle.submit_order`). A retry
     of a committed submit (the same key) answers its reply and does nothing else.
     Refusals: 404 ``draft_not_found``, 409 ``order_submitted``, 409 ``draft_empty``, 409
-    ``shipping_address_required``, 422 ``shipping_option_id``, 422 ``email_invalid``,
+    ``shipping_address_required``, 409 ``model_file_refused`` (#6133), 422
+    ``shipping_option_id``, 422 ``email_invalid``,
     503 ``submit_unavailable`` (no KEK to seal the link with)."""
     orders: OrdersComponent = state.components.get(ORDERS)
     asked = {
@@ -118,6 +153,7 @@ async def submit_draft(
         changes: list[Order] = []
 
         def submit(conn: Any) -> Replay:
+            _no_refused_file(conn, body.draft_id, visitor.id)
             order, _token = orders.lifecycle.submit_order(
                 body.draft_id, entry, by, cart_of=visitor.id, conn=conn
             )
@@ -152,4 +188,8 @@ async def submit_draft(
             "submit_unavailable",
             "The shop cannot take orders now. Try again later.",
         ) from None
+    # Each staged file of the order now waits for its import, not a deadline (#6133).
+    await poke(
+        state, await asyncio.to_thread(uploads_of, state, order_id=body.draft_id), "submitted"
+    )
     return SubmittedOrder.model_validate(reply.body)

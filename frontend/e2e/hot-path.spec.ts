@@ -119,7 +119,8 @@ test.describe('native hot path (msw)', () => {
     // Nothing to link while the records are stale: no question.
     await expect(dialog.getByTestId('tray-question-0-1')).toHaveCount(0)
 
-    // Three reads two seconds apart (`RESLICE_POLL_MS`) before it lands.
+    // Three reads, each on the event the mock sends two seconds after the one before
+    // (#265), before it lands.
     await expect(dialog.getByTestId('slice-time')).toHaveText('30m', { timeout: 15_000 })
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Sliced and sent to H2C over the LAN')

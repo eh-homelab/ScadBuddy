@@ -793,7 +793,7 @@ async def get_job_preview(
     description=(
         "OpenSCAD's warnings and errors, with the file and line each names, from the "
         "model's most recently settled render (done or failed). A 404 when no render of "
-        "it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`."
+        "it is on record: jobs are kept for `SCADBUDDY_JOB_TTL` (forever when it is 0)."
     ),
 )
 async def get_model_diagnostics(

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -49,22 +50,34 @@ from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, 
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.storefront.inputs import (
+    InputReason,
+    effective_default,
+    same_value,
+    value_reason,
+)
 from scadbuddy.orders.storefront.wire import (
     ChoiceBound,
     Listing,
     ListingInput,
     ListingMedia,
+    ListingPage,
+    ListingQuery,
+    ListingRow,
     ListingSnapshot,
+    ListingSort,
     NumberBound,
     ParamBound,
     PublicChoice,
     PublicFilament,
     PublicListing,
+    PublicListingCard,
     PublicMedia,
     PublicNumber,
     PublicParam,
     PublicText,
     TextBound,
+    shown_label,
 )
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_value
@@ -105,6 +118,13 @@ _COLUMNS = (
     " media_ids, snapshot, media, published_at, created_at, updated_at"
 )
 _NUMBERS = frozenset({"number", "integer", "slider"})
+#: Each sort's columns, the last of each the id, so a page boundary never splits ties.
+_SORTS: Final[Mapping[ListingSort, tuple[str, ...]]] = {
+    "position": ("position", "id"),
+    "title": ("lower(title)", "id"),
+    "slug": ("slug", "position", "id"),
+    "updated": ("updated_at", "id"),
+}
 
 type Pool = ConnectionPool[Connection[DictRow]]
 
@@ -114,7 +134,7 @@ def problem(status_code: int, slug: str, detail: str, **extensions: Any) -> ApiE
     return ApiError(status_code, detail, type_=STOREFRONT_PROBLEMS + slug, **extensions)
 
 
-def _not_found(listing_id: str) -> ApiError:
+def listing_not_found(listing_id: str) -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", f"no listing {listing_id!r}")
 
 
@@ -133,6 +153,11 @@ def _changed(listing_id: str) -> ApiError:
         "listing_changed",
         f"listing {listing_id!r} changed since it was read; load it again",
     )
+
+
+def _like_escaped(text: str) -> str:
+    """``text`` with LIKE's wildcards and its escape character taken literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _listing(row: DictRow) -> Listing:
@@ -261,12 +286,29 @@ class ListingStore:
             _drop_holds(conn, listing_id)
         return _listing(row)
 
+    def set_media(
+        self, listing_id: str, media_ids: Sequence[str], *, expected_updated_at: datetime
+    ) -> Listing:
+        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a
+        published listing stays published with what it last published until it is
+        published again. 409 ``listing_changed`` when it changed after
+        ``expected_updated_at`` was read, 404 when it is gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE storefront_listings SET media_ids = %s, updated_at = clock_timestamp()"
+                f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
+                (list(media_ids), listing_id, expected_updated_at),
+            ).fetchone()
+            if row is None:
+                raise self._refusal(conn, listing_id)
+        return _listing(row)
+
     @staticmethod
     def _refusal(conn: Connection[DictRow], listing_id: str) -> ApiError:
         found = conn.execute(
             "SELECT 1 FROM storefront_listings WHERE id = %s", (listing_id,)
         ).fetchone()
-        return _not_found(listing_id) if found is None else _changed(listing_id)
+        return listing_not_found(listing_id) if found is None else _changed(listing_id)
 
     def get(self, listing_id: str) -> Listing | None:
         with self.pool.connection() as conn:
@@ -275,11 +317,27 @@ class ListingStore:
             ).fetchone()
         return None if row is None else _listing(row)
 
-    def published(self) -> list[Listing]:
-        """The published listings, in the shop's order."""
+    def published(
+        self, *, limit: int, after: tuple[int, str] | None = None, query: str | None = None
+    ) -> list[Listing]:
+        """At most ``limit`` published listings, in the shop's order (position, then id),
+        after the listing at ``after`` (its position and id), whose title has ``query`` in
+        it, any case (#6154). Keyset paging on ``storefront_listings_published_order``, so
+        a later page costs what the first does."""
+        where = ["published"]
+        args: list[Any] = []
+        if after is not None:
+            where.append("(position, id) > (%s, %s)")
+            args.extend(after)
+        if query:
+            where.append("title ILIKE %s ESCAPE '\\'")
+            args.append("%" + _like_escaped(query) + "%")
+        args.append(limit)
         with self.pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM storefront_listings WHERE published ORDER BY position, id"
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE {' AND '.join(where)}"
+                " ORDER BY position, id LIMIT %s",
+                args,
             ).fetchall()
         return [_listing(row) for row in rows]
 
@@ -304,6 +362,86 @@ class ListingStore:
                 f"SELECT {_COLUMNS} FROM storefront_listings ORDER BY position, id"
             ).fetchall()
         return [_listing(row) for row in rows]
+
+    def page(self, query: ListingQuery) -> ListingPage:
+        """One page of the listings that match ``query`` (#6157), how many match, and how
+        many there are in all (``places``). Each row's ``place`` is its place in the shop's
+        whole order, filtered or not."""
+        where: list[str] = []
+        args: list[object] = []
+        if query.q.strip():
+            # ILIKE on the raw pattern: Postgres folds the case of both sides the same way.
+            pattern = f"%{_like_escaped(query.q.strip())}%"
+            where.append("(title ILIKE %s OR slug ILIKE %s)")
+            args += [pattern, pattern]
+        if query.status is not None:
+            where.append("published" if query.status == "published" else "NOT published")
+        if query.slug:
+            where.append("slug = ANY(%s)")
+            args.append(query.slug)
+        if query.material:
+            where.append(
+                "EXISTS (SELECT 1 FROM filaments f WHERE f.id = ANY(colours)"
+                " AND upper(f.material) = ANY(%s))"
+            )
+            args.append([material.upper() for material in query.material])
+        filtered = f"WHERE {' AND '.join(where)}" if where else ""
+        direction = "DESC" if query.dir == "desc" else "ASC"
+        order = ", ".join(f"{column} {direction}" for column in _SORTS[query.sort])
+        matches = " AND ".join(where) or "TRUE"
+        # One snapshot for the counts and the rows, so a write between them cannot make the
+        # total disagree with the page.
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            counts = conn.execute(
+                f"SELECT count(*) FILTER (WHERE {matches}) AS n, count(*) AS places"
+                " FROM storefront_listings",
+                args,
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT id, slug, commit, title, place, published, media_ids,"
+                " media_ids[1] AS media_id, published_at, updated_at FROM ("
+                "  SELECT *, row_number() OVER (ORDER BY position, id) AS place"
+                "  FROM storefront_listings"
+                f") ranked {filtered} ORDER BY {order} LIMIT %s OFFSET %s",
+                [*args, query.limit, query.offset],
+            ).fetchall()
+        assert counts is not None
+        return ListingPage(
+            items=[ListingRow.model_validate(row) for row in rows],
+            total=counts["n"],
+            places=counts["places"],
+            limit=query.limit,
+            offset=query.offset,
+        )
+
+    def move(self, listing_id: str, place: int) -> Listing:
+        """The listing put at ``place`` (from 1; past the end is last) in the shop's
+        order (#6157); the others keep their order around it. 404 when it is gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM storefront_listings ORDER BY position, id FOR UPDATE"
+                ).fetchall()
+            ]
+            if listing_id not in ids:
+                raise listing_not_found(listing_id)
+            ids.remove(listing_id)
+            ids.insert(min(place, len(ids) + 1) - 1, listing_id)
+            conn.execute(
+                "UPDATE storefront_listings SET position = given.position - 1"
+                " FROM unnest(%s::text[]) WITH ORDINALITY AS given(id, position)"
+                " WHERE storefront_listings.id = given.id"
+                " AND storefront_listings.position IS DISTINCT FROM given.position - 1",
+                (ids,),
+            )
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE id = %s", (listing_id,)
+            ).fetchone()
+        assert row is not None
+        return _listing(row)
 
     def reorder(self, ids: Sequence[str]) -> list[Listing]:
         """Every listing, in the order of ``ids``. ``ids`` must name each listing once:
@@ -336,7 +474,7 @@ class ListingStore:
                 (listing_id,),
             ).fetchone()
             if row is None:
-                raise _not_found(listing_id)
+                raise listing_not_found(listing_id)
             if row["published"]:
                 raise problem(
                     status.HTTP_409_CONFLICT,
@@ -387,7 +525,7 @@ class ListingStore:
                 (listing_id,),
             ).fetchone()
             if row is None:
-                raise _not_found(listing_id)
+                raise listing_not_found(listing_id)
             _drop_holds(conn, listing_id)
         return _listing(row)
 
@@ -511,6 +649,38 @@ def _check_colour(name: str, value: ParamValue, colours: Collection[str]) -> Non
         )
 
 
+#: Why a default is outside its bounds, as the shop reads it (`value_reason`, #6144).
+_WHY: dict[InputReason, str] = {
+    "unknown": "the template has no such parameter",
+    "locked": "the parameter is locked",
+    "range": "it is outside the minimum and maximum",
+    "step": "it is not on the step",
+    "choice": "it is not one of the choices",
+    "length": "it is longer than the maximum length",
+    "colour": "no listing filament has that colour",
+}
+
+
+def _check_default(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
+    """The value an unpicked render of ``parameter`` takes (`effective_default`) as one
+    the listing allows, or 422: ``listing_colour_unknown`` for a colour no listing
+    filament has, else ``listing_default_invalid`` (#6144). A render would refuse it."""
+    name = parameter.name
+    value = effective_default(parameter, bound)
+    if value is None:
+        return
+    if parameter.type == "color":
+        _check_colour(name, value, colours)
+    reason = value_reason(parameter, bound, value, {c.casefold() for c in colours})
+    if reason is not None:
+        whose = "the listing's" if bound.default is not None else "the template's"
+        raise _unprocessable(
+            "listing_default_invalid",
+            f"{name!r} starts at {whose} default {value!r}, outside its bounds: {_WHY[reason]}",
+            name,
+        )
+
+
 def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[str]) -> None:
     """``bound`` as a subset of what the schema lets ``parameter`` take, or 422."""
     name = parameter.name
@@ -583,6 +753,7 @@ def checked_fixed(
     offered = [colours[filament_id] for filament_id in body.colours]
     for name, bound in body.params.items():
         _check_bound(by_name[name], bound, offered)
+        _check_default(by_name[name], bound, offered)
     for name, value in body.fixed.items():
         if name in body.params:
             raise _unprocessable(
@@ -690,7 +861,11 @@ async def _copy_media(
         await asyncio.to_thread(refs.add, key, HOLDER, listing.id)
         copied.append(
             ListingMedia(
-                blob_key=key, kind=view.kind, media_type=view.content_type, caption=view.caption
+                blob_key=key,
+                kind=view.kind,
+                media_type=view.content_type,
+                caption=view.caption,
+                media_id=media_id,
             )
         )
     return copied
@@ -700,15 +875,15 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     """The listing checked against its commit and published (see the module's notes).
     409 ``storefront_needs_s3`` unless the store is S3; 422 ``listing_param_unknown``,
     ``listing_bounds_outside_schema``, ``listing_fixed_invalid``,
-    ``listing_colour_unknown``, ``listing_media_unknown``, ``listing_reference`` or
-    ``listing_pipeline_unsupported`` for a listing its commit or the price book does not
-    back; 409 ``listing_changed`` when it
-    was edited while it was being published; 409 ``listing_publishing`` while another
+    ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
+    ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
+    the price book does not back; 409 ``listing_changed`` when it was edited while it was
+    being published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
-        raise _not_found(listing_id)
+        raise listing_not_found(listing_id)
     snapshots = core.store.snapshots
     # The public site serves listing media as presigned GETs, and a visitor's render
     # reads the snapshot from the content store (plan).
@@ -742,6 +917,74 @@ async def _publish(
     except BaseException:
         await asyncio.to_thread(store.release_unheld, listing.id)
         raise
+
+
+def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
+    """422 ``listing_media_duplicate`` for an id named twice, ``listing_media_unknown``
+    for one the template does not have (or whose file is missing), and
+    ``listing_media_not_image`` for a video: the storefront shows images only (#6131)."""
+    seen: set[str] = set()
+    for media_id in media_ids:
+        if media_id in seen:
+            raise _unprocessable("listing_media_duplicate", f"media {media_id!r} is named twice")
+        seen.add(media_id)
+        try:
+            view, _path = core.catalogue.media_item(slug, media_id)
+        except (MediaNotFoundError, ModelNotFoundError):
+            raise _unprocessable(
+                "listing_media_unknown", f"the template has no media {media_id!r}", name=media_id
+            ) from None
+        if view.kind != "image":
+            raise _unprocessable(
+                "listing_media_not_image",
+                f"media {media_id!r} is a {view.kind}, not an image",
+                name=media_id,
+            )
+
+
+async def change_media(
+    core: Core,
+    store: ListingStore,
+    listing_id: str,
+    media_ids: Sequence[str],
+    *,
+    expected_updated_at: datetime,
+) -> Listing:
+    """The listing's pictures set to ``media_ids`` (#6213), each an image of its
+    template, in the order to show them. A draft stays a draft. A published listing is
+    published again at once, so it stays on the public site and shows the new pictures;
+    when that publish is refused, the pictures are kept and the public site shows what
+    was last published (the listing's ``media``, each with its ``media_id``) until the
+    next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
+    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
+    were written says so with the extension ``pictures_saved: true`` (any failure of the
+    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
+    client never has to guess whether its change landed."""
+    listing = await asyncio.to_thread(store.get, listing_id)
+    if listing is None:
+        raise listing_not_found(listing_id)
+    # The cheap check first: a stale read is refused before any media is read.
+    if listing.updated_at != expected_updated_at:
+        raise _changed(listing_id)
+    await asyncio.to_thread(_check_pictures, core, listing.slug, media_ids)
+    changed = await asyncio.to_thread(
+        store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
+    )
+    if not changed.published:
+        return changed
+    try:
+        return await publish(core, store, listing_id)
+    except ApiError as refused:
+        refused.extensions["pictures_saved"] = True
+        raise
+    except Exception as error:
+        raise problem(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "listing_republish_failed",
+            "the pictures were saved, but publishing the listing again failed;"
+            " the store shows the last published pictures",
+            pictures_saved=True,
+        ) from error
 
 
 async def unpublish(store: ListingStore, listing_id: str) -> Listing:
@@ -782,18 +1025,41 @@ def _public_param(
     name: str, bound: ParamBound, by_name: Mapping[str, Parameter], colours: Collection[str]
 ) -> PublicParam:
     """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
-    listing filaments the price book still has, casefolded)."""
+    listing filaments the price book still has, casefolded), and its ``default`` only
+    when it is one of them. ``default`` is what a render takes while the customer picks
+    none (`effective_default`); a choice's outside its choices, or a number's outside its
+    range or off its step, is not shown (#6144)."""
     parameter = by_name.get(name)
     shown = {
-        "label": (parameter.caption if parameter is not None else None) or name,
+        "label": shown_label(name, bound.label, parameter.caption if parameter else None),
         "group": parameter.group if parameter is not None else "",
         "colour": parameter is not None and parameter.type == "color",
     }
     fields = {**bound.model_dump(), **shown}
+    # What an unpicked render takes (#6144): the page preselects it.
+    start = effective_default(parameter, bound) if parameter is not None else bound.default
+    fields["default"] = start
+    if isinstance(bound, TextBound):
+        fields["placeholder"] = start if isinstance(start, str) and start.strip() else None
     if isinstance(bound, ChoiceBound) and shown["colour"]:
         fields["choices"] = [
             c for c in bound.choices if isinstance(c, str) and c.casefold() in colours
         ]
+        if not (isinstance(start, str) and start.casefold() in colours):
+            fields["default"] = None
+    elif isinstance(bound, ChoiceBound) and not any(
+        same_value(choice, start) for choice in bound.choices if start is not None
+    ):
+        # Publish refuses such a default; a listing saved before #6144 may still hold one.
+        fields["default"] = None
+    elif (
+        isinstance(bound, NumberBound)
+        and parameter is not None
+        and start is not None
+        and value_reason(parameter, bound, start, colours) is not None
+    ):
+        # The same for a number outside its range or off its step (#6144).
+        fields["default"] = None
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)
     if isinstance(bound, ChoiceBound):
@@ -817,6 +1083,67 @@ async def _media_url(content: ContentStore, listing_id: str, key: str) -> str | 
     backend = content.backend
     assert isinstance(backend, S3ContentBackend)
     return await backend.presign_get(stat.ref.backend_id, PUBLIC_MEDIA_TTL)
+
+
+def listing_cursor(listing: Listing) -> str:
+    """The public list's cursor after ``listing``: its position and id, as hex of JSON."""
+    return json.dumps([listing.position, listing.id], separators=(",", ":")).encode().hex()
+
+
+def cursor_after(cursor: str) -> tuple[int, str]:
+    """The position and id a `listing_cursor` names; 422 ``listing_cursor_invalid`` for
+    any other text."""
+    try:
+        position, listing_id = json.loads(bytes.fromhex(cursor))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        position = listing_id = None
+    if (
+        not isinstance(position, int)
+        or isinstance(position, bool)
+        # ``position`` is an ``integer`` column: a cursor past it was never given out.
+        or not -(2**31) <= position < 2**31
+        or not isinstance(listing_id, str)
+        or not LISTING_ID.fullmatch(listing_id)
+    ):
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "listing_cursor_invalid",
+            "This page of designs is not one the shop gave out.",
+        )
+    return position, listing_id
+
+
+async def public_card(
+    content: ContentStore, listing: Listing, filaments: Mapping[str, Filament]
+) -> PublicListingCard:
+    """``listing`` as a card of the public list (#6154): its first picture as the one
+    presigned GET, and whether every colour it offers still has a filament."""
+    assert listing.snapshot is not None
+    colours = {filaments[i].colour.casefold() for i in listing.colours if i in filaments}
+    by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    # As the page's `colourGone` (`frontend/src/storefront/params.ts`): a colour with no
+    # filament left cannot be ordered.
+    available = True
+    for name, bound in listing.params.items():
+        shown = _public_param(name, bound, by_name, colours)
+        if isinstance(shown, PublicChoice) and shown.colour and not shown.choices:
+            available = False
+            break
+    image = None
+    for item in listing.media:
+        if item.kind != "image":
+            continue
+        url = await _media_url(content, listing.id, item.blob_key)
+        if url is not None:
+            image = PublicMedia(url=url, kind=item.kind, caption=item.caption)
+            break
+    return PublicListingCard(
+        id=listing.id,
+        title=listing.title,
+        description=listing.description,
+        image=image,
+        available=available,
+    )
 
 
 async def public_listing(

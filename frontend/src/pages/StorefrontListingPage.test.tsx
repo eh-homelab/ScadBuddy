@@ -1,0 +1,565 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { Route, Routes, useLocation, useNavigate } from 'react-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
+import type { MediaView, StorefrontListing } from '../api/types'
+import { resetMockState, setMockMedia } from '../mocks/handlers'
+import { keychainSchema, versionIds } from '../mocks/fixtures'
+import { FILAMENT_PETG, FILAMENT_PLA } from '../mocks/features/orders/state'
+import { server } from '../mocks/server'
+import { renderPage } from '../test/utils'
+import { StorefrontListingPage } from './StorefrontListingPage'
+import { StorefrontPage } from './StorefrontPage'
+
+const KEYCHAIN = 'name-keychain'
+const COMMIT = 'c3d4e5f6a7b8'.repeat(4).slice(0, 40)
+
+async function seed(title: string) {
+  return api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title })
+}
+
+/** Every listing, read whole, in the shop's order. */
+async function stored(): Promise<StorefrontListing[]> {
+  const page = await api.storefrontListings(new URLSearchParams({ limit: '200' }))
+  return Promise.all(page.items.map((row) => api.storefrontListing(row.id)))
+}
+
+/** Requests of `method` to `path` wait until the returned function is called, then fall through. */
+function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  server.use(
+    http[method](path, async () => {
+      await gate
+      return undefined
+    }),
+  )
+  return release
+}
+
+/** A button that moves the router to `to` in the same tree, as an in-app link does. */
+function GoTo({ to }: { to: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate(to)}>
+      Go
+    </button>
+  )
+}
+
+/** The router's path, shown for a test to read. */
+function Where() {
+  return <span data-testid="where">{useLocation().pathname}</span>
+}
+
+/** Each request the page sends, as `METHOD path`. */
+function recordRequests(): string[] {
+  const seen: string[] = []
+  server.events.on('request:start', ({ request }) => {
+    seen.push(`${request.method} ${new URL(request.url).pathname}`)
+  })
+  return seen
+}
+
+/** The list and the editor at their app routes, starting at `route`. */
+function renderStorefront(route = '/storefront/listings/new', extra?: React.ReactNode) {
+  return renderPage(
+    <>
+      <Routes>
+        <Route path="/storefront" element={<StorefrontPage />} />
+        <Route path="/storefront/listings/:id" element={<StorefrontListingPage />} />
+      </Routes>
+      {extra}
+    </>,
+    { route },
+  )
+}
+
+describe('StorefrontListingPage (#5282, #6157)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => vi.restoreAllMocks())
+
+  it('starts a new listing with the smart defaults, and previews the customer view', async () => {
+    const { user } = renderStorefront()
+    // #6131 — free text is the customer's; the geometry is the shop's.
+    const preview = await screen.findByTestId('listing-preview')
+    expect(await within(preview).findByLabelText('Name on the tag')).toBeInTheDocument()
+    expect(within(preview).queryByLabelText('Text size')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
+    expect(await within(preview).findByLabelText('Text size')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByText('Published')).toBeInTheDocument()
+
+    const [saved] = await stored()
+    expect(saved?.published).toBe(true)
+    expect(saved?.params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5 })
+    expect(saved?.params['name']).toEqual({ kind: 'text', max_length: 20 })
+    expect(saved?.fixed['thickness']).toBe(5.2)
+    expect(saved?.title).toBe('Name Keychain')
+    // The template's picture is shown.
+    expect(saved?.media_ids).toEqual(['thumbnail'])
+  })
+
+  it('opens from the list, keeps its own address, and goes back to the same page of the list', async () => {
+    for (const title of ['First', 'Second']) await seed(title)
+    const { user } = renderStorefront('/storefront?q=sec')
+    await user.click(await screen.findByRole('link', { name: 'Second' }))
+    expect(await screen.findByLabelText('Title')).toHaveValue('Second')
+    const title = screen.getByLabelText('Title')
+    await user.type(title, '!')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    // A save stays on the editor.
+    await waitFor(() => expect(screen.queryByText('Unsaved changes')).toBeNull())
+    expect(screen.getByLabelText('Title')).toHaveValue('Second!')
+    await user.click(screen.getByRole('link', { name: 'Back to listings' }))
+    // The list's search is kept.
+    expect(await screen.findByRole('link', { name: 'Second!' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'First' })).toBeNull()
+    expect(screen.getByRole('searchbox', { name: 'Search title or model' })).toHaveValue('sec')
+  })
+
+  it('moves a new listing’s address to its id at its first save', async () => {
+    const seen = recordRequests()
+    const { user } = renderStorefront('/storefront/listings/new', <Where />)
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect(await stored()).toHaveLength(1))
+    const [saved] = await stored()
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`/storefront/listings/${saved?.id}`))
+    // The next save edits it: no second create.
+    await user.type(screen.getByLabelText('Title'), '!')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() => expect(seen).toContain(`PUT /api/v1/storefront/listings/${saved?.id}`))
+    expect(await stored()).toHaveLength(1)
+  })
+
+  it('says a listing that is gone is gone', async () => {
+    renderStorefront('/storefront/listings/nope')
+    expect(await screen.findByRole('alert')).toHaveTextContent('That listing is gone.')
+  })
+
+  it('shows the shop’s text as text, never as HTML', async () => {
+    const { user } = renderStorefront()
+    const description = await screen.findByLabelText('Description')
+    await user.type(description, '<img src=x onerror=alert(1)>')
+    const preview = screen.getByTestId('listing-preview')
+    expect(within(preview).getByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
+    expect(preview.querySelector('img[src="x"]')).toBeNull()
+  })
+
+  it('unpublishes a listing', async () => {
+    const first = await seed('First')
+    await api.publishStorefrontListing(first.id)
+    const { user } = renderStorefront(`/storefront/listings/${first.id}`)
+    await user.click(await screen.findByRole('button', { name: 'Unpublish' }))
+    await waitFor(() => expect(screen.queryByText('Published')).toBeNull())
+    expect((await stored()).every((l) => !l.published)).toBe(true)
+  })
+
+  it('offers every colour, from every priced filament, unless the person locks it (#6131)', async () => {
+    const { user } = renderStorefront()
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Customer can change Text' })).toBeChecked()
+    // No filament is the keychain's colours, so every priced one is on offer, of any material.
+    expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'PETG Black' })).toBeChecked()
+    // Locking is the person's choice.
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text' }))
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect(await stored()).toHaveLength(1))
+    const [saved] = await stored()
+    expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] })
+    expect(saved?.fixed['text_color']).toBe('#E8532F')
+  })
+
+  it('shows why a publish is refused', async () => {
+    const detail = "'name-keychain' is a pipeline template; the storefront cannot list one yet"
+    server.use(
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_pipeline_unsupported', title: 'Unprocessable Content', status: 422, detail },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderStorefront()
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.queryByText('Published')).toBeNull()
+  })
+
+  it('says why an edit of a listing changed elsewhere is refused', async () => {
+    const listing = await seed('Mine')
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const title = await screen.findByLabelText('Title')
+    await api.updateStorefrontListing(listing.id, { slug: KEYCHAIN, commit: COMMIT, title: 'Theirs' }, listing.updated_at)
+    await user.type(title, '!')
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('changed since it was read')
+  })
+
+  it('keeps the listing opened while a publish of another was running', async () => {
+    const first = await seed('First')
+    const second = await seed('Second')
+    const release = hold('post', '/api/v1/storefront/listings/:id/publish')
+    const { user } = renderStorefront(`/storefront/listings/${first.id}`, <GoTo to={`/storefront/listings/${second.id}`} />)
+    await screen.findByLabelText('Title')
+    await user.click(await screen.findByRole('button', { name: 'Publish' }))
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second'))
+    release()
+    await waitFor(async () => expect((await stored()).find((l) => l.title === 'First')?.published).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(screen.getByLabelText('Title')).toHaveValue('Second')
+    expect(screen.queryByText('Published')).toBeNull()
+  })
+
+  it('stays on the listing opened while a delete of another was running', async () => {
+    const first = await seed('First')
+    const second = await seed('Second')
+    const release = hold('delete', '/api/v1/storefront/listings/:id')
+    const { user } = renderStorefront(`/storefront/listings/${first.id}`, <GoTo to={`/storefront/listings/${second.id}`} />)
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second'))
+    release()
+    await waitFor(async () => expect(await stored()).toHaveLength(1))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(screen.getByLabelText('Title')).toHaveValue('Second')
+  })
+
+  it('goes back to the list after a delete', async () => {
+    const listing = await seed('Gone soon')
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(await screen.findByText(/No listings yet/)).toBeInTheDocument()
+  })
+
+  it('says to choose a filament for a colour parameter left with none', async () => {
+    const seen = recordRequests()
+    const { user } = renderStorefront()
+    await screen.findByRole('switch', { name: 'Customer can change Plate' })
+    await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
+    await user.click(screen.getByRole('checkbox', { name: 'PETG Black' }))
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/“Plate” is offered with nothing to choose.*tick a colour on offer/)
+    expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
+  })
+
+  it('publishes again, unchanged, without saving first', async () => {
+    const seen = recordRequests()
+    const { user } = renderStorefront()
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByText('Published')).toBeInTheDocument()
+    const [listing] = await stored()
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    await waitFor(() => expect(seen.filter((r) => r === `POST /api/v1/storefront/listings/${listing?.id}/publish`)).toHaveLength(2))
+    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
+  })
+
+  it('publishes an unchanged published listing again without taking it down first', async () => {
+    const listing = await seed('Live')
+    await api.publishStorefrontListing(listing.id)
+    const seen = recordRequests()
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    await within(await screen.findByTestId('listing-preview')).findByText('Live')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    await waitFor(() => expect(seen).toContain(`POST /api/v1/storefront/listings/${listing.id}/publish`))
+    expect(seen.filter((r) => r.startsWith('PUT /api/v1/storefront/listings/'))).toEqual([])
+  })
+
+  it('drops the parameters a newly chosen version does not have', async () => {
+    const older = versionIds.edited
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', ({ params }) =>
+        params['commit'] === older
+          ? HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).filter((p) => p.name !== 'text_size' && p.name !== 'padding') })
+          : undefined,
+      ),
+    )
+    const listing = await api.createStorefrontListing({
+      slug: KEYCHAIN,
+      commit: versionIds.raised,
+      title: 'Tag',
+      params: { text_size: { kind: 'number', min: 6, max: 20, step: null } },
+      fixed: { padding: 6, corner_radius: 4 },
+    })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    await user.click(await screen.findByRole('button', { name: 'Change' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Version' }))
+    await user.click(await screen.findByRole('option', { name: /Update name-keychain metadata/ }))
+    await user.click(await screen.findByRole('button', { name: /^Show all/ }))
+    await waitFor(() => expect(screen.queryByRole('group', { name: /Text size/ })).toBeNull())
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect((await stored())[0]?.commit).toBe(older))
+    const [saved] = await stored()
+    expect(saved?.params).toEqual({})
+    expect(saved?.fixed).toEqual({ corner_radius: 4 })
+  })
+
+  it('keeps unsaved edits when a link to another listing arrives, and says so (#6140 review)', async () => {
+    const listing = await seed('Linked')
+    const { user } = renderStorefront('/storefront/listings/new', <GoTo to={`/storefront/listings/${listing.id}`} />)
+    const title = await screen.findByLabelText('Title')
+    await user.clear(title)
+    await user.type(title, 'Mine')
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    // The link is held, and the page asks (#6157 review): Stay keeps the edits.
+    const ask = await screen.findByRole('alertdialog', { name: 'Leave without saving?' })
+    await user.click(within(ask).getByRole('button', { name: 'Stay' }))
+    expect(screen.getByLabelText('Title')).toHaveValue('Mine')
+    // Leave opens the link.
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Leave without saving' }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
+  })
+
+  it('keeps an edited saved listing when its design’s settings fail to load (#6140 review)', async () => {
+    server.use(http.get('/api/v1/models/:slug/versions/:commit/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const open = await seed('Open')
+    const other = await seed('Other')
+    const { user } = renderStorefront(`/storefront/listings/${open.id}`, <GoTo to={`/storefront/listings/${other.id}`} />)
+    const title = await screen.findByLabelText('Title')
+    await waitFor(() => expect(title).toHaveValue('Open'))
+    await user.type(title, ' edited')
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Open edited')
+  })
+
+  it('asks before Back, or any other link, drops unsaved edits (#6157 review)', async () => {
+    const listing = await seed('Edited')
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`, <a href="/models">Models</a>)
+    await user.type(await screen.findByLabelText('Title'), '!')
+    await user.click(screen.getByRole('link', { name: 'Back to listings' }))
+    await user.click(within(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).getByRole('button', { name: 'Stay' }))
+    expect(screen.getByLabelText('Title')).toHaveValue('Edited!')
+    // A link outside the editor, as the sidebar's, is held too.
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    expect(await screen.findByRole('alertdialog', { name: 'Leave without saving?' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toHaveValue('Edited!')
+  })
+
+  it('warns that saving a published listing takes it off the store', async () => {
+    const listing = await seed('Live')
+    await api.publishStorefrontListing(listing.id)
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const title = await screen.findByLabelText('Title')
+    expect(screen.queryByText(/takes this listing off the store/)).toBeNull()
+    await user.type(title, '!')
+    expect(screen.getByText(/takes this listing off the store/)).toBeInTheDocument()
+  })
+
+  it('says why Publish waits for a title', async () => {
+    const { user } = renderStorefront()
+    await user.clear(await screen.findByLabelText('Title'))
+    expect(screen.getByText('Give the product a title to publish.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Publish' })).toBeDisabled()
+  })
+
+  describe('Sell on storefront (#6131)', () => {
+    /** A render of the keychain the person changed: their name, a bigger text, a yellow plate, slow. */
+    function serveJob(over: Record<string, unknown> = {}) {
+      server.use(
+        http.get('/api/v1/jobs/:id', ({ params }) =>
+          HttpResponse.json({
+            id: params['id'],
+            slug: KEYCHAIN,
+            status: 'done',
+            model_version: versionIds.edited,
+            params: { name: 'Mum', text_size: 20, body_color: '#f9d72c', text_color: '#E8532F' },
+            inputs: {},
+            created_at: '2026-11-13T10:00:00Z',
+            started_at: '2026-11-13T10:00:00Z',
+            finished_at: '2026-11-13T10:02:30Z',
+            diagnostics: [],
+            outputs: [],
+            log_tail: [],
+            ...over,
+          }),
+        ),
+      )
+    }
+
+    it('opens the listing filled in from a render, unsaved, and publishes it once its colours are fixed', async () => {
+      serveJob()
+      const seen = recordRequests()
+      // The old address still works: the list sends it on to the new listing.
+      const { user } = renderStorefront('/storefront?sell=job:j1')
+      // The slow render is said before publishing (#6120); the note shows once the fill-in is in.
+      expect(await screen.findByRole('note')).toHaveTextContent('took 150 s to render')
+      expect(screen.getByLabelText('Title')).toHaveValue('Name Keychain')
+      // The design and the version the render read.
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
+      // Both colours are offered; the plate's yellow is a PLA, so the PLA filaments are on offer.
+      // A customer who picks none gets each template default, which no filament on offer has.
+      const problems = await screen.findByTestId('colour-problems')
+      expect(problems).toHaveTextContent('Plate is #1B6CA8')
+      expect(problems).toHaveTextContent('Text is #E8532F')
+      expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+      expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
+      expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
+
+      // Choosing a filament for each locks it there: the person's choice. (A listing cannot set an
+      // offered colour's default yet, so locking is the one fix today.)
+      await user.click(within(problems).getByRole('combobox', { name: 'Filament for Text' }))
+      await user.click(await screen.findByRole('option', { name: 'PETG Black' }))
+      await user.click(within(problems).getByRole('combobox', { name: 'Filament for Plate' }))
+      await user.click(await screen.findByRole('option', { name: 'PLA Sunflower Yellow' }))
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      expect(await screen.findByText('Published')).toBeInTheDocument()
+
+      const [saved] = await stored()
+      expect(saved?.commit).toBe(versionIds.edited)
+      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20 } })
+      expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#F9D72C', text_color: '#1E1E1E', thickness: 5.2 })
+      expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
+      expect(saved?.media_ids).toEqual(['thumbnail'])
+    })
+
+    it('takes the output’s name, less a colour the customer chooses, and the current version for one outside the history', async () => {
+      serveJob({ model_version: 'f'.repeat(40) })
+      server.use(
+        // A plate whose default is the price book's yellow: offered, so its name leaves the title.
+        http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+          HttpResponse.json({ ...keychainSchema, parameters: (keychainSchema.parameters ?? []).map((p) => (p.name === 'body_color' ? { ...p, initial: '#F9D72C' } : p)) }),
+        ),
+        http.get('/api/v1/outputs/:id', ({ params }) =>
+          HttpResponse.json({
+            id: params['id'],
+            slug: KEYCHAIN,
+            model_version: 'f'.repeat(40),
+            name: 'Name tag – Sunflower Yellow',
+            job_id: 'j2',
+            created_at: '2026-11-13T10:00:00Z',
+            bbox_mm: { x: 1, y: 1, z: 1 },
+            params: { name: 'Mum' },
+            has_thumbnail: false,
+          }),
+        ),
+      )
+      renderStorefront('/storefront/listings/new?sell=output:o1')
+      // The blank new listing shows first; the fill-in replaces it.
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Name tag'))
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent(`version ${versionIds.raised.slice(0, 7)} (current)`)
+      expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
+    })
+
+    it('leaves a listing opened while the fill-in ran alone when the fill-in answers (#6140 review)', async () => {
+      const mine = await seed('Mine')
+      serveJob()
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      server.use(
+        http.get('/api/v1/models/:slug/versions', async () => {
+          await gate
+          return undefined
+        }),
+      )
+      const { user } = renderStorefront('/storefront/listings/new?sell=job:j1', <GoTo to={`/storefront/listings/${mine.id}`} />)
+      await screen.findByText('Filling in the listing…')
+      await user.click(screen.getByRole('button', { name: 'Go' }))
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Mine'))
+      await user.type(screen.getByLabelText('Title'), '!')
+      release()
+      await waitFor(() => expect(screen.queryByText('Filling in the listing…')).toBeNull())
+      expect(screen.getByLabelText('Title')).toHaveValue('Mine!')
+      // The person is told why their Sell click did nothing.
+      expect(screen.getByRole('alert')).toHaveTextContent('was not opened, because another listing was opened meanwhile')
+    })
+
+    it('fills the listing in when the models list fails to load, named by its slug (#6140 review)', async () => {
+      serveJob()
+      server.use(http.get('/api/v1/models', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront('/storefront/listings/new?sell=job:j1')
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue(KEYCHAIN))
+    })
+
+    it('says why a sell address that names nothing opens nothing', async () => {
+      renderStorefront('/storefront/listings/new?sell=nonsense')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not fill in the listing: Nothing to sell: "nonsense" names no render or saved output.')
+    })
+
+    it('says why a listing could not be filled in', async () => {
+      server.use(
+        http.get('/api/v1/jobs/:id', () =>
+          HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no such job' }, { status: 404, headers: { 'Content-Type': 'application/problem+json' } }),
+        ),
+      )
+      renderStorefront('/storefront/listings/new?sell=job:gone')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not fill in the listing: no such job')
+    })
+
+    it('opens the listing the assistant names', async () => {
+      const listing = await seed('From the assistant')
+      renderStorefront(`/storefront?listing=${listing.id}`)
+      expect(await screen.findByLabelText('Title')).toHaveValue('From the assistant')
+    })
+  })
+
+  it('lists every picture the listing holds, so what it shows is what Save draft sends (#6213)', async () => {
+    const keychain = (await api.getModel(KEYCHAIN)).media ?? []
+    const video: MediaView = { id: 'd4e5f6a1b2c3', file: 'd4e5f6a1b2c3.mp4', kind: 'video', caption: 'Clip', poster: null, missing: false, readonly: false, content_type: 'video/mp4', size: 24 }
+    setMockMedia(KEYCHAIN, [...keychain, video])
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: [video.id, 'thumbnail', '0123456789ab'] })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+
+    await waitFor(() => expect(screen.getAllByTestId('listing-picture').map((row) => row.textContent)).toEqual([
+      expect.stringContaining('A video'),
+      expect.stringContaining('thumbnail.png'),
+      expect.stringContaining('Not in the design’s media'),
+    ]))
+    await user.click(screen.getByRole('button', { name: 'Remove Clip' }))
+    await user.click(screen.getByRole('button', { name: 'Remove 0123456789ab' }))
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['thumbnail']))
+    expect(screen.getAllByTestId('listing-picture')).toHaveLength(1)
+  })
+
+  it('keeps the edits made while a picture uploads, and adds the picture to them (#6213)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: ['thumbnail'] })
+    let finish: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => (finish = resolve))
+    vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug) => {
+      await gate
+      const model = await api.getModel(slug)
+      const added: MediaView = { id: 'f6a1b2c3d4e5', file: 'f6a1b2c3d4e5.png', kind: 'image', caption: '', poster: null, missing: false, readonly: false, content_type: 'image/png', size: 8 }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const title = await screen.findByLabelText('Title')
+    await user.upload(screen.getByLabelText('Upload a picture'), new File(['png'], 'new.png', { type: 'image/png' }))
+    expect(await screen.findByText(/Uploading new\.png/)).toBeInTheDocument()
+
+    // While it uploads: the title changes and the old picture is taken out.
+    await user.clear(title)
+    await user.type(title, 'Name tag')
+    await user.click(screen.getByRole('button', { name: /^Remove / }))
+    finish()
+
+    await waitFor(() => expect(screen.getAllByTestId('listing-picture')).toHaveLength(1))
+    expect(screen.getByLabelText('Title')).toHaveValue('Name tag')
+    expect(within(screen.getByTestId('listing-picture')).getByRole('img')).toHaveAttribute('src', expect.stringContaining('f6a1b2c3d4e5'))
+  })
+
+  it('marks the pictures the public site shows as live (#6213)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: ['thumbnail'] })
+    await api.publishStorefrontListing(listing.id)
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    const [row] = await screen.findAllByTestId('listing-picture')
+    expect(within(row!).getByText('Live')).toBeInTheDocument()
+    // Taken out of the draft, it is offered to add back.
+    await user.click(within(row!).getByRole('button', { name: /^Remove / }))
+    expect(screen.queryByTestId('listing-picture')).toBeNull()
+    expect(screen.getByRole('button', { name: /^Add / })).toBeInTheDocument()
+  })
+})

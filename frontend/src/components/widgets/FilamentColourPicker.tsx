@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
 import { trayPlace } from '../../lib/filaments'
-import { spoolColour, spoolName } from '../../lib/filamentColour'
+import { spoolColour, spoolName, spoolValue } from '../../lib/filamentColour'
 import { ClearSwatch, Swatch } from '../print/Swatch'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Button } from '@/components/ui/button'
@@ -23,7 +23,8 @@ function order(a: InventorySpool, b: InventorySpool): number {
  * #1026 — take a colour parameter's hex from a filament in Bambuddy's inventory, so the
  * preview shows what will actually print. The inventory is read when the list is shown
  * (the colour popover opens), never on page load. A clear spool with no recorded tint
- * has no colour to take and is listed disabled; a translucent one gives its tint.
+ * has no colour to take and is listed disabled; a translucent one gives its tint. `onPick`
+ * gets the hex and the parameter value (`spoolValue`: with the alpha of a translucent spool).
  */
 export function FilamentColourPicker({
   label,
@@ -32,7 +33,7 @@ export function FilamentColourPicker({
 }: {
   label: string
   value: string
-  onPick: (hex: string) => void
+  onPick: (hex: string, value: string) => void
 }) {
   const [state, setState] = useState<State>({ kind: 'loading' })
   // Each mount is one read; closing the popover unmounts the list, so a late answer
@@ -98,7 +99,8 @@ export function FilamentColourPicker({
                 disabled={colour === null}
                 data-checked={chosen}
                 onSelect={() => {
-                  if (colour) onPick(colour.hex)
+                  const picked = spoolValue(spool)
+                  if (colour && picked) onPick(colour.hex, picked)
                 }}
                 className="text-xs"
               >

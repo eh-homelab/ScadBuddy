@@ -11,8 +11,10 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.orders.models import ColourSlot, Filament
+from scadbuddy.orders.storefront.drafts import _captions
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
     listing_reference,
@@ -24,6 +26,8 @@ from scadbuddy.orders.storefront.wire import (
     ListingSnapshot,
     PublicChoice,
     PublicListing,
+    PublicText,
+    TextBound,
 )
 from scadbuddy.render.job_models import render_key
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
@@ -248,3 +252,163 @@ def test_a_listing_republished_at_another_commit_renders_its_values(listing: Lis
         }
     )
     assert listing_values(at_b, {}, FILAMENTS)["height"] == 9
+
+
+def _with_captions(listing: Listing, captions: dict[str, str]) -> Listing:
+    assert listing.snapshot is not None
+    parameters = [
+        p.model_copy(update={"caption": captions.get(p.name, p.caption)})
+        for p in listing.snapshot.schema_.parameters
+    ]
+    schema = listing.snapshot.schema_.model_copy(update={"parameters": parameters})
+    return listing.model_copy(
+        update={"snapshot": listing.snapshot.model_copy(update={"schema_": schema})}
+    )
+
+
+@pytest.mark.parametrize(
+    ("caption", "shown"),
+    [
+        ("Letter colour (extruder 2)", "Letter colour"),
+        ("Base and border colour (Extruder 1)", "Base and border colour"),
+        ("Colour (extruder 1) of the rim", "Colour of the rim"),
+        ("Width (mm)", "Width (mm)"),
+        # A caption that is only the note keeps it, rather than show nothing.
+        ("(extruder 1)", "(extruder 1)"),
+        # Only "(extruder N)" is the note; other forms are the template's own words.
+        ("Colour (ext. 1)", "Colour (ext. 1)"),
+        ("Colour (AMS slot 2)", "Colour (AMS slot 2)"),
+        # The same rule as the preview's `shownLabel` (params.test.ts has this table).
+        ("Rim(extruder 2)colour", "Rim colour"),
+        ("Colour (extruder \uff12)", "Colour (extruder \uff12)"),
+    ],
+)
+def test_a_public_label_leaves_out_the_extruder_note(
+    listing: Listing, caption: str, shown: str
+) -> None:
+    """#6137: a template's caption is written for the shop; the customer never reads
+    which extruder prints a colour."""
+    labelled = _with_captions(listing, {"colour": caption})
+    assert _public(labelled, FILAMENTS).params["colour"].label == shown
+
+
+def test_a_listings_own_label_wins_over_the_caption(listing: Listing) -> None:
+    labelled = _with_captions(listing, {"colour": "Letter colour (extruder 2)"})
+    bounds = dict(labelled.params)
+    bounds["colour"] = bounds["colour"].model_copy(update={"label": "Colour of the letters"})
+    shown = _public(labelled.model_copy(update={"params": bounds}), FILAMENTS)
+    assert shown.params["colour"].label == "Colour of the letters"
+    # A parameter with neither keeps its name.
+    assert shown.params["width"].label == "width"
+
+
+def test_a_text_parameter_shows_its_default_as_its_placeholder(listing: Listing) -> None:
+    """#6137: the field's placeholder is what the design uses when it is left blank."""
+    text = _public(listing, FILAMENTS).params["label"]
+    assert isinstance(text, PublicText) and text.placeholder == "Hi"
+
+
+def test_a_label_must_say_something() -> None:
+    with pytest.raises(ValidationError):
+        TextBound.model_validate({"kind": "text", "max_length": 10, "label": "   "})
+    bound = TextBound.model_validate({"kind": "text", "max_length": 10, "label": " Your name "})
+    assert bound.label == "Your name"
+
+
+def test_the_cart_names_a_value_as_the_listing_does(listing: Listing) -> None:
+    """The cart's labels follow the same rule as the listing page (#6137)."""
+    labelled = _with_captions(
+        listing, {"colour": "Letter colour (extruder 2)", "label": "Name (extruder 1)"}
+    )
+    bounds = dict(labelled.params)
+    bounds["label"] = bounds["label"].model_copy(update={"label": "Your name"})
+    found = _captions([labelled.model_copy(update={"params": bounds})])
+    assert found[("demo", COMMIT)] == {"colour": "Letter colour", "label": "Your name"}
+
+
+def test_the_cart_never_shows_another_listings_label(listing: Listing) -> None:
+    """Two listings at one slug and commit label ``colour`` differently, and the cart
+    item does not say which one it came from: it reads the caption's label, never the
+    other listing's (#6142 review)."""
+    labelled = _with_captions(listing, {"colour": "Letter colour (extruder 2)"})
+
+    def with_label(listing_id: str, label: str | None) -> Listing:
+        bounds = dict(labelled.params)
+        bounds["colour"] = bounds["colour"].model_copy(update={"label": label})
+        return labelled.model_copy(update={"id": listing_id, "params": bounds})
+
+    found = _captions([with_label("a", "Letters"), with_label("b", "Rim colour")])
+    assert found[("demo", COMMIT)]["colour"] == "Letter colour"
+    found = _captions([with_label("a", "Letters"), with_label("b", None)])
+    assert found[("demo", COMMIT)]["colour"] == "Letter colour"
+    # Every listing at the pair agrees, so the cart shows the listings' own label.
+    found = _captions([with_label("a", "Letters"), with_label("b", "Letters")])
+    assert found[("demo", COMMIT)]["colour"] == "Letters"
+    # A listing that does not offer the parameter has no say in its label.
+    bounds = {k: v for k, v in labelled.params.items() if k != "colour"}
+    locked = labelled.model_copy(update={"id": "c", "params": bounds})
+    found = _captions([with_label("a", "Letters"), locked])
+    assert found[("demo", COMMIT)]["colour"] == "Letters"
+
+
+def test_an_unpicked_value_is_the_listings_default(listing: Listing) -> None:
+    """#6144: the listing's default stands in for the template's while the customer
+    picks none; a picked value still wins."""
+    bounds = dict(listing.params)
+    bounds["colour"] = bounds["colour"].model_copy(update={"default": "#0000FF"})
+    bounds["width"] = bounds["width"].model_copy(update={"default": 30})
+    defaulted = listing.model_copy(update={"params": bounds})
+    values = listing_values(defaulted, {}, FILAMENTS)
+    assert (values["colour"], values["width"]) == ("#0000FF", 30)
+    assert listing_values(defaulted, {"width": 40}, FILAMENTS)["width"] == 40
+
+
+def test_the_page_preselects_what_an_unpicked_render_takes(listing: Listing) -> None:
+    bounds = dict(listing.params)
+    bounds["width"] = bounds["width"].model_copy(update={"default": 30})
+    bounds["label"] = bounds["label"].model_copy(update={"default": "Ada"})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["width"].default == 30
+    assert shown["shape"].default == "round"
+    assert shown["colour"].default == "#FF0000"
+    assert shown["label"].default == "Ada"
+    assert getattr(shown["label"], "placeholder", None) == "Ada"
+
+
+def test_a_colour_default_no_filament_is_left_for_is_not_shown(listing: Listing) -> None:
+    """The template's red with red archived: the page preselects nothing."""
+    left = {k: v for k, v in FILAMENTS.items() if k != PLA_RED}
+    assert _public(listing, left).params["colour"].default is None
+
+
+def test_a_choice_default_outside_its_choices_is_not_shown(listing: Listing) -> None:
+    """A listing saved before #6144 may start a choice outside what it offers: the page
+    preselects nothing rather than a value it cannot show."""
+    bounds = dict(listing.params)
+    bounds["shape"] = bounds["shape"].model_copy(update={"default": "square"})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["shape"].default is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"min": 60, "max": 80}, {"default": 85}, {"default": 30.5}],
+    ids=["template default below range", "listing default above range", "off step"],
+)
+def test_a_number_default_outside_its_bound_is_not_shown(
+    listing: Listing, update: dict[str, float]
+) -> None:
+    """A listing saved before #6144 may start a number outside its range or off its step
+    (the template's 50 on a 60 to 80 field): the page shows no default it would refuse."""
+    bounds = dict(listing.params)
+    bounds["width"] = bounds["width"].model_copy(update=update)
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["width"].default is None
+
+
+def test_a_choice_default_is_matched_as_publish_matches_it(listing: Listing) -> None:
+    """``True`` is not ``1`` (`same_value`): the page shows no default publish would refuse."""
+    bounds = dict(listing.params)
+    bounds["shape"] = bounds["shape"].model_copy(update={"choices": [1], "default": True})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["shape"].default is None

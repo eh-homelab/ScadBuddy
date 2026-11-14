@@ -11,10 +11,13 @@ dependencies that read them, and every route takes both but ``pay/checkout`` and
 ``storefront`` credential reaches these routes (`crud_router`), so no other caller can
 send either header here.
 
-Area ``listings``: ``GET …/listings`` and ``GET …/listings/{id}``, the published listings
-as the public site shows them (`orders/storefront/listings.py` `public_listing`), with
-each media file as a presigned GET of an hour. An unpublished or unknown listing is 404
-``…/storefront/listing_not_found``; any store but S3 is 503
+Area ``listings``: ``GET …/listings`` is one keyset page of published listing cards
+(`orders/storefront/listings.py` `public_card`: the first picture as a presigned GET of
+an hour, ``available``, ``next_cursor``), at most ``limit``, after ``cursor``, titles
+matching ``q``; a cursor the shop never gave is 422 ``…/storefront/listing_cursor_invalid``
+(#6154). ``GET …/listings/{id}`` is the full listing as the public site shows it
+(`public_listing`), with each media file as a presigned GET of an hour. An unpublished
+or unknown listing is 404 ``…/storefront/listing_not_found``; any store but S3 is 503
 ``…/storefront/storefront_needs_s3`` with reason ``not_configured`` and a text a visitor
 may read (the edge shows it).
 
@@ -46,6 +49,14 @@ committed request (`request_sent`); then the body is read with
 its caps and under this process's upload gate as it arrives (`storefront/uploads.py`), then
 each file again (`orders/storefront/drafts.py` `add_request`): this side never trusts the
 edge's checks.
+
+Area ``models`` (#6133, `orders/storefront/model_requests.py`): a customer's own models.
+``POST …/uploads`` (``Idempotency-Key`` required) answers a presigned PUT per file into the
+store's staging area; ``POST …/draft/models`` claims the uploads it names (each frozen by a
+server-side copy, no byte read) and adds a request item with its files and links as text; ``GET
+…/uploads/config`` is the origin of those PUTs, for the edge's page CSP. Both writes are
+404 ``requests_disabled`` while "Ask for a design" is off (unless the key holds a committed
+answer), and every route is 503 ``storefront_needs_s3`` on a store that is not S3.
 
 Area ``accounts`` (#5283, `orders/storefront/accounts.py`): the edge sends the session
 token of its verified ``sb_session`` cookie in `SESSION_HEADER`, which `store_account`
@@ -119,23 +130,35 @@ from scadbuddy.orders.storefront.addresses import check_address
 from scadbuddy.orders.storefront.drafts import (
     add_listing_item,
     add_request,
+    answer,
     get_draft,
     remove_item,
     request_sent,
     requests_disabled,
 )
+from scadbuddy.orders.storefront.intake import draft_preview
 from scadbuddy.orders.storefront.listings import (
+    cursor_after,
+    listing_cursor,
     problem,
+    public_card,
     public_content,
     public_listing,
     published_listing,
 )
 from scadbuddy.orders.storefront.mail import queue_mail
+from scadbuddy.orders.storefront.model_requests import (
+    MODELS_ROUTE,
+    UPLOADS_ROUTE,
+    add_model_request,
+    presign_uploads,
+    upload_origin,
+)
 from scadbuddy.orders.storefront.renders import (
     owned_job,
     render_estimate,
+    shown_render,
     start_render,
-    store_render,
 )
 from scadbuddy.orders.storefront.submit import submit_draft
 from scadbuddy.orders.storefront.turnstile import (
@@ -145,6 +168,9 @@ from scadbuddy.orders.storefront.turnstile import (
     verify,
 )
 from scadbuddy.orders.storefront.wire import (
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     AccountOrder,
     AccountOrders,
     AccountView,
@@ -152,6 +178,8 @@ from scadbuddy.orders.storefront.wire import (
     CancelBody,
     CustomerOrderView,
     DraftView,
+    ModelRequestBody,
+    PublicFilament,
     PublicListing,
     PublicListings,
     RenderBody,
@@ -160,11 +188,14 @@ from scadbuddy.orders.storefront.wire import (
     StoreRender,
     SubmitBody,
     SubmittedOrder,
+    UploadSlots,
+    UploadSlotsBody,
 )
 from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    PREVIEW_HEADERS,
     SESSION_HEADER,
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
@@ -244,15 +275,32 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
 
 @router.get("/listings", name="crud_storefront_listings")
 async def listings(
-    state: StateDep, orders: OrdersDep, _visitor: Visitor, _client: StoreClient
+    state: StateDep,
+    orders: OrdersDep,
+    _visitor: Visitor,
+    _client: StoreClient,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=LISTINGS_MAX_PAGE)] = 24,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
 ) -> PublicListings:
-    """The published listings, in the shop's order, and whether "Ask for a design" is on."""
+    """One page of the published listings as cards, in the shop's order, after
+    ``cursor`` and with ``q`` in the title when given, and whether "Ask for a design" is
+    on (#6154). A card presigns one picture; the whole listing is
+    ``…/listings/{id}``."""
     content = public_content(state)
-    published = await asyncio.to_thread(orders.listings.published)
+    after = cursor_after(cursor) if cursor else None
+    query = q.strip() if q else None
+    page = await asyncio.to_thread(
+        orders.listings.published, limit=limit + 1, after=after, query=query or None
+    )
     filaments = await asyncio.to_thread(_filaments, orders)
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    shown = page[:limit]
     return PublicListings(
-        listings=[await public_listing(content, item, filaments) for item in published],
+        listings=[await public_card(content, item, filaments) for item in shown],
+        next_cursor=listing_cursor(shown[-1]) if len(page) > limit else None,
         requests_enabled=snapshot.runtime.storefront_requests_enabled,
     )
 
@@ -319,7 +367,7 @@ async def render_status(
 ) -> StoreRender:
     """The visitor's render; 404 ``render_not_found`` unless the visitor asked for it."""
     _, job = await owned_job(state, visitor, job_id)
-    return store_render(job)
+    return await shown_render(state, job)
 
 
 @router.get(
@@ -456,12 +504,12 @@ async def draft_submit(
     return await submit_draft(state, visitor, key, body, account)
 
 
-def _requests_enabled(state: StateDep, key: str | None = None) -> bool:
-    """Whether "Ask for a design" is on, or ``key`` holds a committed request (a retry,
-    answered whatever changed since)."""
+def _requests_enabled(state: StateDep, key: str | None = None, route: str | None = None) -> bool:
+    """Whether "Ask for a design" is on, or ``key`` holds a committed request of ``route``
+    (a design request's by default; a retry, answered whatever changed since)."""
     if state.settings_store.snapshot().runtime.storefront_requests_enabled:
         return True
-    return key is not None and request_sent(state, key)
+    return key is not None and request_sent(state, key, route)
 
 
 class RequestsEnabled(BaseModel):
@@ -495,6 +543,13 @@ async def requests_enabled(
                         "required": ["text"],
                         "properties": {
                             "text": {"type": "string"},
+                            "purchase_links": {
+                                "type": "string",
+                                "description": (
+                                    "The things to buy (#6133): a JSON list of at most 5"
+                                    ' {"url", "note"} objects.'
+                                ),
+                            },
                             "files": {
                                 "type": "array",
                                 "items": {"type": "string", "format": "binary"},
@@ -520,9 +575,110 @@ async def draft_request(
         raise requests_disabled()
     upload = await read_request(request)
     try:
-        return await add_request(state, visitor, key, text=upload.text, files=upload.files)
+        return await add_request(
+            state,
+            visitor,
+            key,
+            text=upload.text,
+            files=upload.files,
+            purchase_links=upload.purchase_links,
+        )
     finally:
         await upload.close()
+
+
+class UploadConfig(BaseModel):
+    """What the edge's page CSP needs for the browser's direct uploads (#6133)."""
+
+    origin: str
+
+
+class ModelColours(BaseModel):
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1): the price
+    book's filaments not archived, never a price."""
+
+    filaments: list[PublicFilament]
+
+
+@router.get("/models/colours", name="crud_storefront_model_colours")
+async def model_colours(orders: OrdersDep, _visitor: Visitor, _client: StoreClient) -> ModelColours:
+    """The filaments a customer may ask for on an own-model request; the request takes at
+    most `MAX_COLOUR_CHOICES` of their ids (`model_requests._checked_colours`)."""
+    filaments = await asyncio.to_thread(_filaments, orders)
+    return ModelColours(
+        filaments=[
+            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            for f in filaments.values()
+        ]
+    )
+
+
+@router.get("/uploads/config", name="crud_storefront_upload_config")
+async def upload_config(state: StateDep) -> UploadConfig:
+    """The origin of the store's presigned PUTs (`model_requests.upload_origin`); 503
+    ``storefront_needs_s3`` on a store that is not S3."""
+    return UploadConfig(origin=await upload_origin(state))
+
+
+@router.post(
+    "/uploads",
+    name="crud_storefront_uploads",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": _inlined(UploadSlotsBody)}},
+        }
+    },
+)
+async def uploads_route(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> UploadSlots:
+    """Upload slots for a "print my own model" request (#6133,
+    `orders/storefront/model_requests.py` `presign_uploads`): a presigned PUT per file,
+    straight to the store's staging area. 404 ``requests_disabled`` while "Ask for a
+    design" is off, unless the key holds a committed answer."""
+    key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state, key, UPLOADS_ROUTE):
+        raise requests_disabled()
+    body = await _body(
+        request, UploadSlotsBody, "draft_body_invalid", "This request is not a list of files."
+    )
+    return await presign_uploads(state, visitor, key, body)
+
+
+@router.post(
+    "/draft/models",
+    name="crud_storefront_draft_models",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": _inlined(ModelRequestBody)}},
+        }
+    },
+)
+async def draft_models(
+    request: Request,
+    state: StateDep,
+    visitor: Visitor,
+    _client: StoreClient,
+    idempotency_key: MaybeIdempotencyKey = None,
+) -> DraftView:
+    """A "print my own model" request added to the visitor's draft (#6133,
+    `model_requests.add_model_request`): the uploads it names, each frozen by a
+    server-side copy and claimed, and its links as text. 404 ``requests_disabled`` as
+    ``…/uploads``."""
+    key = required_key(idempotency_key)
+    if not await asyncio.to_thread(_requests_enabled, state, key, MODELS_ROUTE):
+        raise requests_disabled()
+    body = await _body(
+        request, ModelRequestBody, "draft_body_invalid", "This request is not a model request."
+    )
+    reply = await add_model_request(state, visitor, key, body)
+    return await answer(state, visitor, reply)
 
 
 class PayCheckoutRead(BaseModel):
@@ -901,3 +1057,50 @@ async def account_orders_route(
     return AccountOrders(
         orders=[AccountOrder.model_validate(row, from_attributes=True) for row in rows]
     )
+
+
+#: A preview route's answer: the PNG, or a bare 404.
+_PREVIEW_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_200_OK: {"content": {"image/png": {}}},
+    status.HTTP_404_NOT_FOUND: {"description": "No preview for this reader (an empty body)"},
+}
+
+
+def _preview(data: bytes | None) -> Response:
+    """A stored preview with `PREVIEW_HEADERS`, whatever its bytes; a bare 404 for none."""
+    if data is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    return Response(content=data, headers=PREVIEW_HEADERS)
+
+
+@router.get(
+    "/draft/sources/{source_id}/preview",
+    name="crud_storefront_draft_source_preview",
+    response_class=Response,
+    responses=_PREVIEW_RESPONSES,
+)
+async def draft_source_preview(
+    source_id: str, state: StateDep, visitor: Visitor, _client: StoreClient
+) -> Response:
+    """The checked preview of a line of the visitor's own cart (#6133, spec 2026-11-13 §4.3,
+    §7 "Serving the preview"): the stored bytes, never decoded, with `PREVIEW_HEADERS`. Any
+    other source, or none, is a 404 with no body."""
+    return _preview(await draft_preview(state, visitor, source_id))
+
+
+@router.post(
+    "/order/sources/{source_id}/preview",
+    name="crud_storefront_order_source_preview",
+    response_class=Response,
+    responses=_PREVIEW_RESPONSES,
+    openapi_extra=_order_body(),
+)
+async def order_source_preview(
+    source_id: str, request: Request, state: StateDep, account: StoreAccount
+) -> Response:
+    """The checked preview of a source of the order the body's reader opens (#6133, spec
+    2026-11-13 §10.5), with `PREVIEW_HEADERS`. The reader is the order page's (`resolve`):
+    any reader that reads nothing, another order's source, or no preview, is a 404 with no
+    body."""
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
+    return _preview(await order_page.preview(state, reader, source_id))
