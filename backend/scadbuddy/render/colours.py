@@ -192,6 +192,16 @@ def colour_alpha(value: object) -> int | None:
     return None if alpha == 255 else max(alpha, MIN_PART_ALPHA)
 
 
+def stored_alpha(value: object) -> int:
+    """A part's alpha as a file stored it (a GLB's `scadbuddy_alpha`, a layout's
+    ``alpha``): an integer below 255, floored at :data:`MIN_PART_ALPHA` as
+    :func:`colour_alpha` floors it, so a file written otherwise never draws a part at
+    alpha 0 (the covers would divide by it); anything else is opaque, 255."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 255:
+        return 255
+    return max(value, MIN_PART_ALPHA)
+
+
 def without_alpha(value: str) -> str:
     """A colour value as OpenSCAD is given it: a hex value's alpha left off (`#RGBA` is
     `#RGB`, `#RRGGBBAA` is `#RRGGBB`), so a part's colour, and the per-colour solids

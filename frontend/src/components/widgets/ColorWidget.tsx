@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Param } from '../../api/types'
-import { colourHex, colourOpacity, paramLabel, rangeProblem } from '../../lib/params'
+import { colourHex, colourValue, paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
 import { Input } from '@/components/ui/input'
@@ -8,11 +8,12 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Separator } from '@/components/ui/separator'
 
 /**
- * A whole `#RRGGBB` as typed: taken at once, before the field loses focus. An 8-digit
- * `#RRGGBBAA` therefore sends one render at its sixth digit; the value on blur is still
- * the whole one, so that render is only an extra step on the way.
+ * A whole `#RRGGBB` or `#RRGGBBAA` as typed: taken at once, before the field loses focus.
+ * An 8-digit one therefore sends one render at its sixth digit and another at its eighth;
+ * the first is only an extra step on the way. The alpha is kept (`colourValue`): it
+ * draws the part see-through in the preview and the covers.
  */
-const WHOLE_HEX = /^#?[0-9a-f]{6}$/i
+const WHOLE_HEX = /^#?([0-9a-f]{6}|[0-9a-f]{8})$/i
 
 export function ColorWidget({
   param,
@@ -28,7 +29,9 @@ export function ColorWidget({
 }) {
   const id = `p-${param.name}`
   const colour = colourHex(value)
-  const hex = colour ?? value
+  // What the field shows and compares: the colour with its alpha, when it has one.
+  const kept = colourValue(value)
+  const hex = kept ?? value
   // #2357 — what is being typed, until it is a whole colour or the field loses focus: a
   // partial or wrong value is never padded into a colour ("red" was sent as "#RREEDD");
   // a colour name becomes its hex.
@@ -46,10 +49,10 @@ export function ColorWidget({
   function commit(text: string) {
     setDraft(null)
     // Typed without its `#`, a hex is still taken as one; the value sent always has it.
-    const next = colourHex(text) ?? colourHex(`#${text.trim()}`) ?? text.trim()
+    const next = colourValue(text) ?? colourValue(`#${text.trim()}`) ?? text.trim()
     // The same colour as the value, only spelt otherwise (a focus and blur of `#ff0000`):
     // not sent, or a lowercase default would read as a change from it.
-    if (colour !== null && next === colour) return
+    if (kept !== null && next === kept) return
     onChange(next)
   }
 
@@ -88,7 +91,9 @@ export function ColorWidget({
                 // That holds while the popover is non-modal; a modal one would narrow fill's
                 // search to itself (agent/dom activeDialog) and find no field by the caption.
                 aria-label={`${paramLabel(param)} picker`}
-                onChange={(event) => commit(event.target.value)}
+                // It has no alpha channel: a new tint keeps the value's alpha, so a
+                // translucent colour stays translucent (#6289 review).
+                onChange={(event) => commit(`${event.target.value}${kept?.slice(7) ?? ''}`)}
                 className="h-8 w-14 shrink-0 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
               />
               Any colour
@@ -98,11 +103,11 @@ export function ColorWidget({
             <FilamentColourPicker
               label={paramLabel(param)}
               value={hex}
+              alpha
               onPick={(_hex, picked) => {
-                // Not through commit, which drops a translucent spool's alpha. The colour
+                // Through commit, which keeps a translucent spool's alpha: the colour
                 // already set, at the same alpha, sends nothing.
-                setDraft(null)
-                if (colourHex(picked) !== colour || colourOpacity(picked) !== colourOpacity(value)) onChange(picked)
+                commit(picked)
                 setOpen(false)
               }}
             />

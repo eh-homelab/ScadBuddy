@@ -2,10 +2,11 @@
 
 A combination is one value for each offered colour parameter of a published listing:
 the colours of its bound that the public listing offers (`public_listing`: the listing
-filaments the price book still has), each colour once whatever its case. Every other
-offered parameter stays at its effective default (`effective_default`). A visitor's page
-sends only the values the visitor set, so a colour at its effective default is left out
-of what a combination asks, exactly as the page leaves it out on its first load.
+filaments the price book still has, never a support filament, #6152), each colour once
+whatever its case. Every other offered parameter stays at its effective default
+(`effective_default`). A visitor's page sends only the values the visitor set, so a
+colour at its effective default is left out of what a combination asks, exactly as the
+page leaves it out on its first load.
 
 `combinations` builds each one through the visitor path's own `listing_values` and
 `listing_reference`, so its render key is the key a visitor's render of the same choice
@@ -38,7 +39,7 @@ from scadbuddy.orders.storefront.inputs import (
     listing_values,
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
-from scadbuddy.orders.storefront.wire import ChoiceBound, Listing
+from scadbuddy.orders.storefront.wire import ChoiceBound, Listing, is_support
 from scadbuddy.render.job_models import QueueFullError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import PREPARE_PRIORITY
@@ -91,7 +92,11 @@ def colour_choices(listing: Listing, filaments: Mapping[str, Filament]) -> dict[
     its bound that the public listing offers, in the bound's order, each once (casefolded)."""
     assert listing.snapshot is not None
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
-    offered = {filaments[f].colour.casefold() for f in listing.colours if f in filaments}
+    offered = {
+        filaments[f].colour.casefold()
+        for f in listing.colours
+        if f in filaments and not is_support(filaments[f].material)
+    }
     choices: dict[str, list[str]] = {}
     for name, bound in listing.params.items():
         parameter = by_name.get(name)

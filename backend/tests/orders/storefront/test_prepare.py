@@ -85,6 +85,17 @@ def test_a_colour_the_public_listing_does_not_offer_is_left_out() -> None:
     assert colour_choices(listing, book) == {"body": ["#ff0000"]}
 
 
+def test_a_support_filament_is_never_a_combination() -> None:
+    """#6152: support is the shop's choice, so its colour is never prepared."""
+    pva = FILAMENTS[PETG_GREEN].model_copy(update={"material": "PVA"})
+    book = {**FILAMENTS, PETG_GREEN: pva}
+    listing = a_listing(
+        {"body": {"kind": "choice", "choices": ["#ff0000", "#00FF00"]}},
+        colours=[PLA_RED, PETG_GREEN],
+    )
+    assert colour_choices(listing, book) == {"body": ["#ff0000"]}
+
+
 def test_the_count_is_the_product_of_the_colour_parameters() -> None:
     listing = a_listing(
         {"body": BOTH, "trim": BOTH, "width": {"kind": "number", "min": 20, "max": 80}}
