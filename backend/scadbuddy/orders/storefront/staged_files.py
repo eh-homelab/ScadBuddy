@@ -162,7 +162,8 @@ async def poke(state: AppState, upload_ids: Sequence[str], signal: str) -> None:
 async def poke_order(state: AppState, order_id: str, signal: str) -> None:
     """Wake the watchers of the order's staged files, after a commit that ended or reopened
     it. The read and the signal are logged on failure, never raised: the change is already
-    committed, and each watcher reads the order again within the hour (#6164)."""
+    committed, and each watcher reads the order again at its next recheck or deadline, so a
+    lost signal costs time, never a file (#6164)."""
     try:
         uploads = await asyncio.to_thread(uploads_of, state, order_id=order_id)
     except Exception:
