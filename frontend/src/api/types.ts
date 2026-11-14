@@ -531,6 +531,9 @@ export type MachineRateInputs = {
 /** Every field is always sent: the ones the spec marks optional have defaults. */
 export type StorefrontListing = Required<Schemas['Listing']>
 export type StorefrontListingInput = Defaulted<Schemas['ListingInput'], 'description' | 'params' | 'fixed' | 'colours' | 'media_ids'>
+/** #6237 — a listing's colour combinations and how far their renders are; a prepare's answer. */
+export type ListingPrepareProgress = Schemas['PrepareProgress']
+export type ListingPrepareStarted = Schemas['PrepareStarted']
 export type ListingBound = Schemas['NumberBound'] | Schemas['ChoiceBound'] | Schemas['TextBound']
 /** #6157 — one row of the back office's list, and a page of them. */
 export type StorefrontListingRow = Schemas['ListingRow']

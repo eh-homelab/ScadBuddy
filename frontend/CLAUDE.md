@@ -145,6 +145,10 @@ same way, `vite.config.ts`).
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
+  Prepared colours (#6237): `components/storefront/PrepareColours.tsx`, under a published
+  listing's actions, shows the count (`GET …/prepare`), confirms, starts (`POST …/prepare`)
+  and shows "n of N ready", read again while renders are in the queue; over the cap it says
+  the count and the cap. Mocks in `src/mocks/features/storefront.ts` (`setPrepareCap`).
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

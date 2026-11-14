@@ -113,6 +113,10 @@ logger = logging.getLogger(__name__)
 #: previews never holds a render someone is waiting for. `RenderPreview` passes it to its
 #: activity (Temporal 1.32 no longer passes a workflow's priority on by itself).
 PREVIEW_PRIORITY = 4
+#: A storefront listing's prepared colour combinations (#6237): last on the queue, below
+#: the previews too, so a run of many never holds a render a visitor or the shop waits
+#: for. `RenderPiece` and the pipeline's own activities pass it on.
+PREPARE_PRIORITY = 5
 
 #: How long a request waits on one Temporal call it makes besides the start (a release,
 #: a describe): the SDK's own retry budget is ~10 s per call.
@@ -251,6 +255,7 @@ class RenderService:
         request_id: str | None = None,
         accept_within: timedelta | None = None,
         reuse_finished: bool = False,
+        priority: int | None = None,
     ) -> tuple[Job, bool]:
         """The job, and whether the submit joined an open run or reused a finished job
         (``coalesced``) rather than start a run of its own (the storefront counts only
@@ -269,7 +274,8 @@ class RenderService:
         on the closed one (until another run of the key starts). ``accept_within`` is
         how long the Update is waited on before `CommandStillAcceptingError` (``None``:
         `COMMAND_ANSWER_DEADLINE`), shorter for a client that follows the Update itself
-        (`follow`, spec 2026-10-13)."""
+        (`follow`, spec 2026-10-13). ``priority`` is the priority key of a run the
+        submit starts (#6237; None: Temporal's default); a run it joins keeps its own."""
         refusal: Exception | None = None
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
             try:
@@ -283,6 +289,7 @@ class RenderService:
                     request_id=request_id,
                     accept_within=accept_within,
                     reuse_finished=reuse_finished,
+                    priority=priority,
                 )
             except (ApiError, QueueFullError) as error:
                 if isinstance(error, ApiError) and error.status >= 500:
@@ -316,6 +323,7 @@ class RenderService:
         request_id: str | None = None,
         accept_within: timedelta | None = None,
         reuse_finished: bool = False,
+        priority: int | None = None,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
@@ -370,7 +378,7 @@ class RenderService:
                 await self._supersede(previous, request_id)
             self.metrics.render_coalesced.labels("render").inc()
             return done, True
-        return await self._answer(start, previous, request_id, accept_within)
+        return await self._answer(start, previous, request_id, accept_within, priority=priority)
 
     async def _answer(
         self,
@@ -378,11 +386,15 @@ class RenderService:
         previous: Job | None,
         request_id: str | None,
         accept_within: timedelta | None = None,
+        *,
+        priority: int | None = None,
     ) -> tuple[Job, bool]:
         """The job ``start`` was answered with, and whether it joined an open one;
         counted under its kind."""
         try:
-            answer = await self._started(start, previous, request_id, accept_within)
+            answer = await self._started(
+                start, previous, request_id, accept_within, priority=priority
+            )
         except (CommandStillAcceptingError, CommandClosedError):
             # Re-sent by the client with the same key: pending, not an error (review
             # #1066 (5) 3.1).
@@ -499,6 +511,8 @@ class RenderService:
         previous: Job | None,
         request_id: str | None,
         accept_within: timedelta | None = None,
+        *,
+        priority: int | None = None,
     ) -> RenderAnswer:
         """`_accepted`, then the supersede, under one `SUBMIT_DEADLINE`. Past it the
         request is still accepting if the execution exists; if Temporal cannot say (a
@@ -512,7 +526,7 @@ class RenderService:
         bound = asyncio.timeout(seconds)
         try:
             async with bound:
-                answer = await self._accepted(start, request_id, accept_within)
+                answer = await self._accepted(start, request_id, accept_within, priority=priority)
                 # Started first, so a refused submit supersedes nothing.
                 if answer.job is not None and previous is not None:
                     # Never raises: a release that fails is a warning (#3575).
@@ -528,6 +542,8 @@ class RenderService:
         start: RenderStart,
         request_id: str | None,
         accept_within: timedelta | None = None,
+        *,
+        priority: int | None = None,
     ) -> RenderAnswer:
         """The `accepted` answer of ``render-<render_key>``, started or joined. An
         execution closing (its last claim released, or its render raised) is waited out
@@ -552,6 +568,7 @@ class RenderService:
                     **deadline,
                     # Bounds a pipeline that never yields; `settle_closed` fails its row.
                     execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
+                    priority=Priority(priority_key=priority),
                 )
             except TemporalBusyError as error:
                 # `start_command` classifies its `RPCError` (#1316); the cause says which.

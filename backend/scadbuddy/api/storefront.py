@@ -30,6 +30,12 @@ from scadbuddy.orders.storefront.listings import (
     unpublish,
 )
 from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
+from scadbuddy.orders.storefront.prepare import (
+    PrepareProgress,
+    PrepareStarted,
+    prepare,
+    progress,
+)
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -173,6 +179,42 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows."""
     return await publish(state, orders.listings, listing_id)
+
+
+@router.get(
+    "/listings/{listing_id}/prepare",
+    response_model=PrepareProgress,
+    summary="A storefront listing's colour combinations and how far they are prepared",
+)
+async def get_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareProgress:
+    """How many colour combinations the published listing has (``count``: the product of
+    each offered colour parameter's colours; 0 with none), the cap
+    (``storefront_prepare_cap``), and how many have a done, an open and a failed render
+    (#6237). Over the cap only the count is computed. 404 ``listing_not_found``, 409
+    ``listing_not_published``."""
+    return await progress(state, orders, listing_id)
+
+
+@router.post(
+    "/listings/{listing_id}/prepare",
+    response_model=PrepareStarted,
+    summary="Prepare every colour combination of a storefront listing",
+)
+async def post_prepare(listing_id: str, orders: OrdersDep, state: StateDep) -> PrepareStarted:
+    """Queue a render of each colour combination of the published listing (#6237), at
+    the values a visitor's page sends for it, so a visitor's render of it reuses the job.
+    Every other parameter stays at its default. The renders wait behind every other
+    render (`PREPARE_PRIORITY`). ``queued`` is how many combinations now have a render
+    queued, running or done; less than ``count`` when the queue was full or the request
+    ran out of time, and a second call queues the rest. 404 ``listing_not_found``, 409
+    ``listing_not_published``, 422 ``listing_no_colours``, 422
+    ``listing_combinations_over_cap`` (with ``count`` and ``cap``), 503
+    ``render_unavailable``.
+
+    Prepared renders follow ``job_ttl`` as any other render does: with ``job_ttl`` 0
+    (#6244) they are kept, else the prune takes each one a ``job_ttl`` after its finish or
+    its last reuse. They carry no keep mark."""
+    return await prepare(state, orders, listing_id)
 
 
 @router.post(

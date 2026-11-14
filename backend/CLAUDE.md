@@ -1392,6 +1392,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   by a subtype's name. A density read Bambuddy refuses leaves the density
   empty and fails nothing. `filaments.density_profile` keeps where it came from; a
   person's density clears it. An estimate reads only the record's own density.
+- Prepared colour combinations (#6237): `orders/storefront/prepare.py`, routes `GET`/`POST
+  /storefront/listings/{id}/prepare` (`api/storefront.py`). A combination is one colour per
+  offered colour parameter (the public listing's colours, each once whatever its case); each
+  is built by the visitor path's `listing_values` and `listing_reference`, a colour at its
+  effective default left out as the page leaves it out, so a visitor's render reuses the
+  prepared job. No table: progress reads the newest `render_jobs` row of each render key.
+  The run is `RenderService.submit_answer(..., priority=PREPARE_PRIORITY)` (5, below
+  previews); `RenderPiece`'s activities, its child start and `write_output` pass
+  `workflow.info().priority` on. Capped by `storefront_prepare_cap` (default 256; 422
+  `listing_combinations_over_cap` with `count` and `cap`, `listing_no_colours`, 409
+  `listing_not_published`). Prepared renders follow `job_ttl`; there is no keep mark.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

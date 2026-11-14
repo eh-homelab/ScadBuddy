@@ -31,6 +31,29 @@ export function refuseNextRepublish(slug: string): void {
 }
 let ticks = 0
 
+/** #6237 — the mock's `storefront_prepare_cap`; see `setPrepareCap`. */
+let prepareCap = 256
+/** #6237 — each prepared listing's combinations made ready so far, by id. */
+let prepared = new Map<string, number>()
+
+export function setPrepareCap(cap: number): void {
+  prepareCap = cap
+}
+
+const HEX = /^#[0-9a-f]{6}$/i
+
+/**
+ * #6237 — the listing's colour combinations: the product of each choice bound whose
+ * choices are colours, each colour once whatever its case. The mock's snapshot has no
+ * schema, so a colour parameter is told by its choices (the backend reads its type).
+ */
+function combinationCount(listing: StorefrontListing): number {
+  const sizes = Object.values(listing.params)
+    .filter((bound) => bound.kind === 'choice' && bound.choices.length > 0 && bound.choices.every((c) => typeof c === 'string' && HEX.test(c)))
+    .map((bound) => new Set((bound.kind === 'choice' ? bound.choices : []).map((c) => String(c).toLowerCase())).size)
+  return sizes.length === 0 ? 0 : sizes.reduce((a, b) => a * b, 1)
+}
+
 function save(): void {
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(listings))
@@ -282,6 +305,34 @@ export const handlers = [
     return HttpResponse.json(published)
   }),
 
+  // #6237 — each read moves a started run on by two combinations, until all are ready.
+  http.get(`${base}/:id/prepare`, ({ params }) => {
+    const id = String(params['id'])
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (!found.published) return refused(409, 'listing_not_published', 'Publish this listing before you prepare its colours.')
+    const count = combinationCount(found)
+    const before = prepared.get(id)
+    if (count > prepareCap || before === undefined) return HttpResponse.json({ count, cap: prepareCap, ready: 0, running: 0, failed: 0 })
+    const ready = Math.min(count, before + 2)
+    prepared.set(id, ready)
+    return HttpResponse.json({ count, cap: prepareCap, ready, running: count - ready, failed: 0 })
+  }),
+
+  http.post(`${base}/:id/prepare`, ({ params }) => {
+    const id = String(params['id'])
+    const found = listings.find((l) => l.id === id)
+    if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    if (!found.published) return refused(409, 'listing_not_published', 'Publish this listing before you prepare its colours.')
+    const count = combinationCount(found)
+    if (count === 0) return refused(422, 'listing_no_colours', 'This listing offers no colour to choose.')
+    if (count > prepareCap) {
+      return refused(422, 'listing_combinations_over_cap', `This listing has ${count} colour combinations. The shop prepares at most ${prepareCap} at a time.`, { count, cap: prepareCap })
+    }
+    if (!prepared.has(id)) prepared.set(id, 0)
+    return HttpResponse.json({ count, queued: count })
+  }),
+
   http.post(`${base}/:id/unpublish`, ({ params }) => {
     const id = String(params['id'])
     const found = listings.find((l) => l.id === id)
@@ -306,6 +357,8 @@ export const handlers = [
 export function reset(): void {
   listings = []
   republishRefusal = null
+  prepareCap = 256
+  prepared = new Map()
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {
