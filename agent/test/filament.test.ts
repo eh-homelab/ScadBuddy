@@ -261,3 +261,57 @@ describe('filament spool tools', () => {
     expect((await runTool(tool('filament_spool_bind_tag'), { spool_id: ROW }, ctx())).isError).toBe(true)
   })
 })
+
+const LOCATIONS = `${BACKEND}/api/v1/filament/locations`
+
+describe('filament location tools', () => {
+  it.each([
+    ['filament_location_list', 'read'],
+    ['filament_location_upsert', 'write'],
+    ['filament_spool_move', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists the tree, adds a place and edits another', async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.get(LOCATIONS, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('include_archived')).toBe('true')
+        return HttpResponse.json([{ id: ROW, children: [] }])
+      }),
+      http.post(LOCATIONS, async ({ request }) => {
+        calls.push(['add', await request.json()])
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(`${LOCATIONS}/${ROW}`, async ({ request }) => {
+        calls.push(['edit', await request.json()])
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const listed = await runTool(tool('filament_location_list'), { include_archived: true }, ctx())
+    expect(firstText(listed)).toEqual([{ id: ROW, children: [] }])
+    const fields = { name: 'Shelf A', kind_id: ROW }
+    expect((await runTool(tool('filament_location_upsert'), { fields }, ctx())).isError).toBeFalsy()
+    const edit = { location_id: ROW, fields: { note: null }, archived: true }
+    expect((await runTool(tool('filament_location_upsert'), edit, ctx())).isError).toBeFalsy()
+    expect(calls).toEqual([['add', fields], ['edit', { note: null, archived: true }]])
+    expect((await runTool(tool('filament_location_upsert'), { archived: true }, ctx())).isError).toBe(true)
+  })
+
+  it('moves a spool, and takes one out of its place', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOLS}/${ROW}/move`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const to = { spool_id: ROW, location_id: ROW }
+    expect((await runTool(tool('filament_spool_move'), to, ctx())).isError).toBeFalsy()
+    const out = { spool_id: ROW, location_id: null }
+    expect((await runTool(tool('filament_spool_move'), out, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([{ location_id: ROW }, { location_id: null }])
+  })
+})

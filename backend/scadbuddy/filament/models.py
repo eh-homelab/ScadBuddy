@@ -355,6 +355,19 @@ class Location(_Catalog):
     note: str | None
 
 
+class LocationNode(Location):
+    """A place in the tree: the unarchived spools in it, and the places under it."""
+
+    spool_count: int
+    children: list[LocationNode] = Field(default_factory=list)
+
+
+class SpoolMove(_In):
+    """Where a spool goes; ``null`` takes it out of every place."""
+
+    location_id: UUID | None
+
+
 # -- spool types ----------------------------------------------------------------------
 
 

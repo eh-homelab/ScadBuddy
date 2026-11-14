@@ -452,4 +452,85 @@ export const filamentTools: Tool[] = [
         ),
       ),
   }),
+
+  defineTool({
+    name: 'filament_location_list',
+    label: 'List filament locations',
+    description:
+      'The places spools sit in (room, shelf, bin, dry box, AMS tray), nested under their parents, each level by ' +
+      'sort order then name. Each has `spool_count` (unarchived spools in it) and `children`. Archived places only ' +
+      'with `include_archived`.',
+    input: z.object({ include_archived: z.boolean().default(false) }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/locations'],
+    handler: async ({ include_archived }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/locations', { params: { query: { include_archived } } }),
+          'list the filament locations',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_location_upsert',
+    label: 'Add or edit a filament location',
+    description:
+      'Add a place (no `location_id`), or edit one: only the `fields` given change, and `null` clears a nullable ' +
+      'one. A place needs a `name` and a `kind_id` (filament_catalog_list kind `location-kinds`); `parent_id` puts ' +
+      'it under another place. `archived: true` takes a place off the tree and frees its name, `false` puts it back. ' +
+      '409 when the name is taken under that parent, or the parent would make the place its own ancestor. Only what ' +
+      'the user says. Writes ScadBuddy only.',
+    input: z.object({
+      location_id: z.string().uuid().optional().describe("A place's `id` from filament_location_list; omit to add"),
+      fields: z.record(z.string(), z.unknown()).default({}).describe('The place fields to set'),
+      archived: z.boolean().optional(),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/locations', 'PATCH /api/v1/filament/locations/{location_id}'],
+    summarize: ({ location_id, fields }) =>
+      location_id ? `Edit location ${location_id}` : `Add location ${String(fields['name'] ?? '')}`.trim(),
+    handler: async ({ location_id, fields, archived }, { backend }) => {
+      if (location_id === undefined) {
+        if (archived !== undefined) throw new ToolError('archived needs a location_id')
+        return json(await ok(backend.POST('/api/v1/filament/locations', { body: fields as never }), 'add a location'))
+      }
+      return json(
+        await ok(
+          backend.PATCH('/api/v1/filament/locations/{location_id}', {
+            params: { path: { location_id } },
+            body: (archived === undefined ? fields : { ...fields, archived }) as never,
+          }),
+          `edit location ${location_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_spool_move',
+    label: 'Move a spool',
+    description:
+      'Put a spool in a place (`location_id` from filament_location_list); `null` takes it out of every place. ' +
+      "The spool's ledger records the move as `{from, to}`. A spool already there is left as it is. 422 for a place " +
+      'that does not exist or is archived. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({ spool_id: z.string().uuid(), location_id: z.string().uuid().nullable() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/spools/{spool_id}/move'],
+    summarize: ({ spool_id, location_id }) =>
+      location_id ? `Move spool ${spool_id} to ${location_id}` : `Take spool ${spool_id} out of its place`,
+    handler: async ({ spool_id, location_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/move', {
+            params: { path: { spool_id } },
+            body: { location_id },
+          }),
+          `move spool ${spool_id}`,
+        ),
+      ),
+  }),
 ]

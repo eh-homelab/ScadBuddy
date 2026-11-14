@@ -198,6 +198,62 @@ def test_a_missing_spool_is_404(client: TestClient) -> None:
     assert client.post(f"{one}/events", json={"kind": "weighed", "grams": 1}).status_code == 404
     tag = {"tag_uid": "AA", "kind": "other"}
     assert client.post(f"{one}/tags", json=tag).status_code == 404
+    assert client.post(f"{one}/move", json={"location_id": None}).status_code == 404
+
+
+LOCATIONS = "/api/v1/filament/locations"
+
+
+def _kind_id(client: TestClient, name: str = "Shelf") -> str:
+    rows = client.get(f"{URL}/location-kinds").json()
+    found: str = next(row["id"] for row in rows if row["name"] == name)
+    return found
+
+
+def _location(client: TestClient, name: str, **over: object) -> dict[str, object]:
+    made = client.post(LOCATIONS, json={"name": name, "kind_id": _kind_id(client)} | over)
+    assert made.status_code == 201, made.text
+    row: dict[str, object] = made.json()
+    return row
+
+
+def test_locations_nest_and_a_move_is_answered_with_the_spool(client: TestClient) -> None:
+    room = _location(client, "Room")
+    shelf = _location(client, "Shelf A", parent_id=room["id"])
+    spool = _spool(client)
+    moved = client.post(f"{SPOOLS}/{spool['id']}/move", json={"location_id": shelf["id"]})
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["location_id"] == shelf["id"]
+    tree = client.get(LOCATIONS).json()
+    assert [n["name"] for n in tree] == ["Room"]
+    assert [(n["name"], n["spool_count"]) for n in tree[0]["children"]] == [("Shelf A", 1)]
+    again = client.post(f"{SPOOLS}/{spool['id']}/move", json={"location_id": shelf["id"]})
+    assert again.status_code == 200
+    events = client.get(f"{SPOOLS}/{spool['id']}/events").json()
+    assert [e["kind"] for e in events] == ["created", "moved"]
+    assert events[1]["data"] == {"from": None, "to": shelf["id"]}
+
+
+def test_a_location_cycle_or_clash_is_409_and_a_bad_move_is_422(client: TestClient) -> None:
+    a = _location(client, "A")
+    b = _location(client, "B", parent_id=a["id"])
+    cycle = client.patch(f"{LOCATIONS}/{a['id']}", json={"parent_id": b["id"]})
+    assert cycle.status_code == 409, cycle.text
+    clash = client.post(LOCATIONS, json={"name": "a", "kind_id": _kind_id(client)})
+    assert clash.status_code == 409, clash.text
+    spool = _spool(client)
+    gone = client.post(f"{SPOOLS}/{spool['id']}/move", json={"location_id": MISSING})
+    assert gone.status_code == 422, gone.text
+    archived = client.patch(f"{LOCATIONS}/{b['id']}", json={"archived": True})
+    assert archived.json()["archived_at"] is not None
+    refused = client.post(f"{SPOOLS}/{spool['id']}/move", json={"location_id": b["id"]})
+    assert refused.status_code == 422, refused.text
+    assert client.patch(f"{LOCATIONS}/{MISSING}", json={"note": "x"}).status_code == 404
+    bad_kind = client.post(LOCATIONS, json={"name": "Z", "kind_id": MISSING})
+    assert bad_kind.status_code == 422, bad_kind.text
+    assert [n["name"] for n in client.get(LOCATIONS, params={"include_archived": True}).json()] == [
+        "A"
+    ]
 
 
 def test_one_person_is_one_actor_by_session_or_token() -> None:

@@ -24,6 +24,11 @@ from scadbuddy.filament.catalog import (
     CatalogSpec,
 )
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.locations import (
+    LocationCycleError,
+    LocationExistsError,
+    MoveTargetError,
+)
 from scadbuddy.filament.spools import (
     SpoolInUseError,
     SpoolTypelessError,
@@ -77,7 +82,13 @@ def _refused(exc: ValueError) -> ApiError:
     code = (
         status.HTTP_409_CONFLICT
         if isinstance(
-            exc, CatalogExistsError | FilamentExistsError | SpoolInUseError | TagKeysClashError
+            exc,
+            CatalogExistsError
+            | FilamentExistsError
+            | SpoolInUseError
+            | TagKeysClashError
+            | LocationExistsError
+            | LocationCycleError,
         )
         else status.HTTP_422_UNPROCESSABLE_CONTENT
     )
@@ -512,3 +523,94 @@ async def add_spool_event(
     if made is None:
         raise _no_spool(spool_id)
     return made
+
+
+# -- locations ------------------------------------------------------------------------
+
+_LOCATION_REFUSED = (CatalogRefError, LocationExistsError, LocationCycleError)
+
+
+@router.get(
+    "/locations",
+    response_model=list[m.LocationNode],
+    summary="The location tree",
+    description=(
+        "The places spools sit in (room, shelf, bin, AMS tray) nested under their parents, "
+        "each level by sort order then name. Each carries `spool_count`, the unarchived "
+        "spools in it, and its `children`. Archived places only with `include_archived`; a "
+        "place whose parent is left out is then a root."
+    ),
+)
+async def list_locations(
+    filament: FilamentDep, include_archived: bool = False
+) -> list[m.LocationNode]:
+    return await asyncio.to_thread(filament.locations.tree, include_archived=include_archived)
+
+
+@router.post(
+    "/locations",
+    response_model=m.Location,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a location",
+    description=(
+        "A place has a `name`, a `kind_id` (the `location-kinds` catalog) and optionally a "
+        "`parent_id`. An AMS tray also names its `printer_id`, `ams_id` and `tray_id`. 409 "
+        "when an unarchived place of the name is under the parent, or one is already that "
+        "tray; 422 for a bad field or a row it points at that does not exist."
+    ),
+)
+async def create_location(filament: FilamentDep, body: m.LocationCreate) -> m.Location:
+    try:
+        return await asyncio.to_thread(filament.locations.create, body)
+    except _LOCATION_REFUSED as exc:
+        raise _refused(exc) from None
+
+
+@router.patch(
+    "/locations/{location_id}",
+    response_model=m.Location,
+    summary="Change a location",
+    description=(
+        "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
+        "the place off the tree and frees its name, `false` puts it back. 404 for no such "
+        "place, 409 for a name or tray taken, or a `parent_id` that would make the place "
+        "its own ancestor; 422 for a bad field."
+    ),
+)
+async def patch_location(
+    filament: FilamentDep, location_id: UUID, body: m.LocationPatch
+) -> m.Location:
+    try:
+        changed = await asyncio.to_thread(filament.locations.update, location_id, body)
+    except _LOCATION_REFUSED as exc:
+        raise _refused(exc) from None
+    if changed is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no location {location_id}")
+    return changed
+
+
+@router.post(
+    "/spools/{spool_id}/move",
+    response_model=m.Spool,
+    summary="Move a spool",
+    description=(
+        "Put the spool in a place (`location_id: null`: in none) and write a `moved` ledger "
+        "event, `{from, to}`. A spool already there is answered as it is, with no event. "
+        "404 for no such spool, 422 for a place that does not exist or is archived."
+    ),
+)
+async def move_spool(
+    filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolMove
+) -> m.Spool:
+    try:
+        await asyncio.to_thread(
+            filament.locations.move, spool_id, body.location_id, actor=actor(caller)
+        )
+    except LookupError:
+        raise _no_spool(spool_id) from None
+    except MoveTargetError as exc:
+        raise _refused(exc) from None
+    moved = await asyncio.to_thread(filament.spools.get, spool_id)
+    if moved is None:
+        raise _no_spool(spool_id)
+    return moved
