@@ -75,7 +75,8 @@ SIGNALS = (
 
 class StagedFileState(BaseModel):
     """What `staged_file_step` found: the phase, the next deadline (None: none), and, once
-    ``ended``, why (``unclaimed``, ``expired``, ``removed``, ``declined``, ``gone``)."""
+    ``ended``, why (``unclaimed``, ``expired``, ``removed``, ``declined``, ``order_ended``,
+    ``gone``)."""
 
     phase: Phase
     due: datetime | None = None

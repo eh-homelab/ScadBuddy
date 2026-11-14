@@ -2332,6 +2332,83 @@ holds the manifests (until that PR merges, the deploy below skips the file with 
   three `scadbuddy.eh-homelab.io/{version,revision,source}` annotations, which the
   manifest must carry or the deploy fails.
 
+### Intake worker (#6133)
+
+A customer's own model files are checked by their own Deployment, `scadbuddy-intake`, from
+the same image: `python -m scadbuddy.intake_worker` polls the Temporal queue
+`customer-files` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES`, which the API names too)
+and answers `/healthz` on port 9090. The design is spec
+`docs/superpowers/specs/2026-11-13-storefront-customer-models-design.md` §7; eh-homelab/clusters
+holds the manifest (spec §12).
+
+- **No database and no key.** It refuses to start when `SCADBUDDY_DATABASE_URL`,
+  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set
+  (`intake_worker/settings.py` `FORBIDDEN_ENV`, #5295): it parses untrusted files. It is an
+  HTTP client of the CRUD port (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`) with a
+  projected ServiceAccount token of `scadbuddy-intake` (audience `scadbuddy`) named by
+  `SCADBUDDY_SERVICE_TOKEN_FILE`, and reaches the bucket only through the URLs the API
+  presigns. It holds no store credential.
+- **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
+  `SCADBUDDY_INTAKE_WORK_DIR` (a writable volume for downloads, since the root file system
+  is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`. A pod checks one file at a time,
+  fixed (spec §7, the isolation rule): scale with the Deployment's replicas.
+- **Two Deployments (spec §7, "The child's sandbox").** The worker never parses a file. It
+  runs with `SCADBUDDY_INTAKE_SANDBOX=true` and `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain
+  `http://` URL of the sandbox's Service, e.g. `http://scadbuddy-intake-sandbox:8090`; any
+  other scheme, a user, a path or a query is refused). `SCADBUDDY_INTAKE_SANDBOX` is
+  required: the worker refuses to start without it, and only the dev-only value
+  `unsafe-local` starts the child in the worker's own container. A second Deployment,
+  `scadbuddy-intake-sandbox`, runs `python -m scadbuddy.intake_worker.sandbox`, which runs
+  each check's child. The worker sends it each file over HTTP (`POST /check` on
+  `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090; `GET /healthz` there for its probes; the
+  wire format is `intake_worker/runner.py`'s docstring). The two pods share no network
+  namespace, no volume and no ServiceAccount token.
+- **The RPC token.** Each `POST /check` carries `Authorization: Bearer <token>`; without
+  the right one the sandbox answers 401 before it reads the body. Create a Secret
+  `scadbuddy-intake-sandbox-rpc` holding one random token of at least 32 bytes of visible
+  ASCII (e.g. `openssl rand -hex 32`), mount it in the worker's and the sandbox's pods only,
+  outside `/var/run/secrets/` (e.g. at `/etc/scadbuddy-intake-rpc/token`), and set
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` to that file in both. Both refuse to start without
+  the file, with an empty file or with a shorter token. The token authorizes calls to the
+  sandbox and nothing else, so it is the one secret the sandbox may hold, and each check's
+  parser sees an empty tmpfs over the token's directory. A request's head
+  and whole body must arrive within 60 s (`REQUEST_DEADLINE`), or the sandbox drops it.
+- **The sandbox's environment** is `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where
+  each check gets a box that is removed after it), `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`,
+  `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing else: it refuses to
+  start with `SCADBUDDY_SERVICE_TOKEN_FILE`, `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of
+  `FORBIDDEN_ENV` set, and (exit 2) with any file under `/var/run/secrets/`, so its pod
+  must set `automountServiceAccountToken: false` and mount no secret there. The worker
+  reads every answer as untrusted. The sandbox runs one check at a time and answers a
+  second request 503 (the worker tries again for up to 60 s), so give it as many replicas
+  as the worker.
+- **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
+  minutes, so size the sandbox's memory limit for one such child and its work volume for
+  one 256 MiB upload; size the worker's work volume for one 256 MiB download.
+- **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
+  user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
+  a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
+  runs with the seccomp and AppArmor profiles `Unconfined`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
+  [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)), its pod only, until
+  the nodes can carry a `Localhost` profile that allows exactly that call; the worker's pod
+  keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason`
+  (`unauthorized`, `busy`, `unreachable`, `timeout`, `transport`, `check-timeout`,
+  `crashed`, `status`, `bad-answer`; `/metrics` on port 9090). Alert on it and on the
+  sandbox's restarts.
+- **Pods:** `runAsNonRoot` and `readOnlyRootFilesystem` in both, and no ServiceAccount token
+  automount in either. The only ServiceAccount token is the projected one the worker's
+  proof needs, in the worker's pod. No `fsGroup` is needed: no volume is shared.
+- **Network
+  ([NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)):**
+  the worker's egress allows DNS, the API's 8082, Temporal, the bucket host and the
+  sandbox's 8090 only; only the worker is on the Temporal frontend's allowlist. The
+  sandbox's ingress admits the worker's pods on 8090 only, and its egress allows nothing.
+  The policies ship in the eh-homelab/clusters PR, with a check that fails without the
+  sandbox's.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:

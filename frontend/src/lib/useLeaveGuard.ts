@@ -232,11 +232,11 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     }
   }, [dirty, arm])
 
-  const go = (to: string) => {
+  const go = (to: string, options?: { replace?: boolean; state?: unknown }) => {
     bypass.current = true
     try {
       // Replacing the sentinel, so Back from `to` comes to this page, not to it.
-      void navigate(to, { replace: onSentinel() })
+      void navigate(to, { replace: onSentinel() || options?.replace === true, state: options?.state })
     } finally {
       bypass.current = false
     }
@@ -259,7 +259,8 @@ export function useLeaveGuard(dirty: boolean, options?: { within?: string }) {
     },
     /**
      * #997 — leaves for `to` without asking: for a page that has just saved, whose
-     * `dirty` has not caught up yet in this render.
+     * `dirty` has not caught up yet in this render. `replace` and `state` are the
+     * router's (#6157: a new listing's first save moves to its id).
      */
     leaveTo: go,
   }

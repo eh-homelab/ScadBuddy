@@ -22,8 +22,11 @@ during an outage reads of new slices do not queue behind each other's connects, 
 to `CONNECT_TIMEOUT` seconds (#6162). A lock lost with its connection lets another
 replica follow the slice too, until one follow ends.
 
-A process that stops frees its locks at once when its kernel closes the socket (an exit
-or a crash of the process). A host that vanishes with no FIN or RST (a node lost, a
+A process that stops frees its locks when its kernel closes the socket (an exit or a
+crash of the process): the server frees them when its backend for that session ends, a
+little after the client's close returns (#6195).
+
+A host that vanishes with no FIN or RST (a node lost, a
 partition) leaves the server a half-open session, and its locks stay held, with no
 follower, until the server sees the session is dead. The client's `TCP_KEEPALIVE` does
 not help there: it only lets this process see a dead server. The server sees a dead

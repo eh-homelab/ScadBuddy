@@ -706,9 +706,12 @@ doubled, at most 30 s) for `START_FOLLOW_S` (254 s: `CLIENT_ACCEPTING`, 240 s, p
 the print run refuses itself on its own clock, plus one `ACCEPT_BUDGET`, 14 s, since that
 clock starts within the first send, #6187) (#6138). Before that fix the operation failed
 on the first such answer, nothing sent the start again, and the claim never got its run.
-When the bound runs out, the run's key is read once (as a retry reads it, below), for at
-most `LOOK_TIMEOUT_S` (22 s, what is left of the run's 300 s after the bound, the last
-send and the attach): a run there is attached; neither a run nor an open `print-<key>`
+When the bound runs out, the run's key is read once (as a retry reads it, below), for the
+time left on the run's one clock, with no cap of its own (#6193: taken on the run's first
+line, before the item's project and the claim, against the run's 300 s less a 10 s attach
+margin; the follow is cut so that the last send and at least 5 s of look stay; with
+nothing slow before the start the look has at least 22 s, and more when the last send
+answers at once): a run there is attached; neither a run nor an open `print-<key>`
 workflow releases the claim; and when it cannot tell (the workflow still accepting,
 Temporal away, or no answer in time) the claim is kept, since a run may exist and a released claim would let a new print
 print the item twice, and the failure names the attempt to settle by hand. Any other 5xx
@@ -720,8 +723,9 @@ hold, the item still `queued`, the attempt still open). Otherwise its earlier st
 have made the run all the same (a 5xx after the workflow started), so the retry looks for
 it by the run's key (`print_runs`, then the `print-<key>` workflow): a run there is
 attached and followed, the hold or cancel applying to what comes next; a workflow still
-accepting is a 503 for the retry; only with neither is the open claim released and the
-retry refused. A claim with no run keeps the item `queued` (it is a
+accepting is a 503 for the retry; with no answer in the time left on the run's clock the
+claim is kept and the failure names the attempt (#6193); only with neither is the open
+claim released and the retry refused. A claim with no run keeps the item `queued` (it is a
 print's attempt, not one by hand), and its `PATCH` is refused (`print_starting`) while its
 `order_item_print` operation still runs. The item follows the run from what the print path
 records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and

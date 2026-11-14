@@ -26,6 +26,9 @@ from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import LISTINGS_MAX_PAGE as LISTINGS_MAX_PAGE
+from scadbuddy.storefront.wire import LISTINGS_MAX_QUERY as LISTINGS_MAX_QUERY
+from scadbuddy.storefront.wire import LISTINGS_QUERY_PATTERN as LISTINGS_QUERY_PATTERN
 from scadbuddy.storefront.wire import (
     MAX_COLOUR_CHOICES,
     MAX_LINK_NOTE,
@@ -199,7 +202,73 @@ class ListingOrder(BaseModel):
     ids: list[str]
 
 
-# -- the public site's view (Task 6) --------------------------------------------------
+#: How many rows one page of ``GET …/listings`` holds at most, and by default (#6157).
+LISTING_PAGE_MAX = 200
+LISTING_PAGE_DEFAULT = 50
+#: The furthest a page may start: far past any shop, well inside Postgres's bigint.
+LISTING_OFFSET_MAX = 1_000_000
+
+type ListingSort = Literal["position", "title", "slug", "updated"]
+type ListingStatus = Literal["published", "draft"]
+
+
+class ListingQuery(BaseModel):
+    """``GET …/listings``'s query (#6157): a search, filters, a sort and a page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Matches the title or the template's slug, case-insensitive, anywhere in it.
+    q: str = Field(default="", max_length=200)
+    status: ListingStatus | None = None
+    #: Templates; a listing of any of them.
+    slug: list[str] = Field(default_factory=list, max_length=100)
+    #: Price-book materials (``PLA``); a listing whose colours include a filament of any.
+    material: list[str] = Field(default_factory=list, max_length=50)
+    sort: ListingSort = "position"
+    dir: Literal["asc", "desc"] = "asc"
+    limit: int = Field(default=LISTING_PAGE_DEFAULT, ge=1, le=LISTING_PAGE_MAX)
+    #: Bounded so a huge offset is a 422, never a bigint overflow in Postgres.
+    offset: int = Field(default=0, ge=0, le=LISTING_OFFSET_MAX)
+
+
+class ListingRow(BaseModel):
+    """One row of the back office's list: what the table shows, never the bounds or
+    the snapshot."""
+
+    id: str
+    slug: str
+    commit: str
+    title: str
+    #: The listing's place in the shop's order, from 1.
+    place: int
+    published: bool
+    #: The first media id the listing shows, for the row's picture; None for none.
+    media_id: str | None
+    published_at: datetime | None
+    updated_at: datetime
+
+
+class ListingPage(BaseModel):
+    """A page of ``GET …/listings``: its rows, how many match in all (``total``), and how
+    many listings the shop has (``places``: the last place a move can name)."""
+
+    items: list[ListingRow]
+    total: int
+    places: int
+    limit: int
+    offset: int
+
+
+class ListingMove(BaseModel):
+    """``POST …/listings/{id}/move``: the place to put the listing at, from 1. A place
+    past the end puts it last."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place: int = Field(ge=1)
+
+
+# -- the public site's view (Task 6)--------------------------------------------------
 
 
 class _Shown(BaseModel):
@@ -264,8 +333,25 @@ class PublicListing(BaseModel):
     updated_at: datetime
 
 
+class PublicListingCard(BaseModel):
+    """One listing in the public list (#6154): what a card shows, and no more. The page
+    reads the whole listing (`PublicListing`) only when the visitor opens it."""
+
+    id: str
+    title: str
+    description: str
+    #: The listing's first picture, as a presigned GET, if it has one.
+    image: PublicMedia | None
+    #: False when a colour the customer must pick has no filament left (`colourGone`).
+    available: bool
+
+
 class PublicListings(BaseModel):
-    listings: list[PublicListing]
+    """One page of the published listings, in the shop's order."""
+
+    listings: list[PublicListingCard]
+    #: The next page's ``cursor``; null on the last page.
+    next_cursor: str | None
     #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
     requests_enabled: bool
 

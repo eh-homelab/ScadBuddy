@@ -101,14 +101,27 @@ same way, `vite.config.ts`).
   `src/mocks/features/storefrontAccount.ts`, e2e `e2e/storefront-account.spec.ts`.
 
 - "Sell on storefront" (#6131, design 2026-11-13): Generate's menu (`/storefront?sell=job:<id>`)
-  and a History row (`?sell=output:<id>`) open the back office's Storefront page with the
-  listing filled in, unsaved (`components/storefront/sellSource.ts`); `?listing=<id>` opens a
-  saved one. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
+  and a History row (`?sell=output:<id>`) open the listing editor with the listing filled in,
+  unsaved (`components/storefront/sellSource.ts`; the list redirects the address to
+  `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
   a support setting is never offered, `isSupport`), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
+
+- The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
+  server searches, filters, sorts and pages (`GET /storefront/listings` answers 50 rows, the
+  matches' `total` and the shop's `places`, the last place a move can name; a page past the
+  last moves to the last); `components/storefront/listingsQuery.ts` keeps that state in the URL. Bulk
+  Publish, Unpublish and Delete run one listing at a time. "Move to top" and "Move to
+  position…" send `POST /storefront/listings/{id}/move`; there is no drag. The editor is
+  `pages/StorefrontListingPage.tsx` at `/storefront/listings/<id>` (or `new`); the list's
+  links pass its query in the history state, which "Back to listings" returns to. While it
+  holds unsaved edits, `lib/useLeaveGuard.ts` holds every in-app navigation away and asks. The old
+  `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
+  `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
+  listings into the mock's `sessionStorage`.
 
 - Customer messages (#5660): Settings → Orders' `components/settings/CustomerMessaging.tsx`
   (bind, check, test send, unbind) and the order page's `components/orders/OrderMessages.tsx`

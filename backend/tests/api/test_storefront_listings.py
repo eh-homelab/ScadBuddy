@@ -231,7 +231,7 @@ def test_a_listing_its_commit_does_not_back_is_refused(
     refused = client.post(f"{LISTINGS}/{listing['id']}/publish")
     assert refused.status_code == 422, refused.text
     assert refused.json()["type"] == STOREFRONT_PROBLEMS + problem
-    assert client.get(LISTINGS).json()[0]["published"] is False
+    assert client.get(LISTINGS).json()["items"][0]["published"] is False
 
 
 def test_a_colour_parameter_offers_the_listings_filaments(
@@ -292,14 +292,27 @@ def test_the_listing_routes_round_trip(
     assert client.post(f"{LISTINGS}/{made['id']}/publish").json()["published"] is True
     assert client.delete(f"{LISTINGS}/{made['id']}").status_code == 409
     listed = client.get(LISTINGS).json()
-    assert [listing["id"] for listing in listed] == [made["id"], other["id"]]
+    assert [listing["id"] for listing in listed["items"]] == [made["id"], other["id"]]
+    assert (listed["total"], listed["places"], listed["limit"], listed["offset"]) == (2, 2, 50, 0)
     # The order is the one given, and survives a read.
     ordered = client.put(f"{LISTINGS}/order", json={"ids": [other["id"], made["id"]]})
     assert ordered.status_code == 200, ordered.text
-    assert [listing["id"] for listing in client.get(LISTINGS).json()] == [other["id"], made["id"]]
+    assert [row["id"] for row in client.get(LISTINGS).json()["items"]] == [other["id"], made["id"]]
     assert client.put(f"{LISTINGS}/order", json={"ids": [made["id"]]}).status_code == 409
+    # One listing moves by its place alone.
+    moved = client.post(f"{LISTINGS}/{made['id']}/move", json={"place": 1})
+    assert moved.status_code == 200, moved.text
+    assert [row["id"] for row in client.get(LISTINGS).json()["items"]] == [made["id"], other["id"]]
+    assert client.post(f"{LISTINGS}/nope/move", json={"place": 1}).status_code == 404
+    assert client.post(f"{LISTINGS}/{made['id']}/move", json={"place": 0}).status_code == 422
+    # The list filters, and refuses a query it does not know.
+    drafts = client.get(LISTINGS, params={"status": "draft", "q": "OTH"}).json()
+    assert [row["id"] for row in drafts["items"]] == [other["id"]]
+    assert client.get(LISTINGS, params={"limit": 201}).status_code == 422
+    assert client.get(LISTINGS, params={"offset": 10**20}).status_code == 422
     # An edit names the time it read the listing, and unpublishes it.
-    current = client.get(LISTINGS).json()[1]
+    current = client.get(f"{LISTINGS}/{made['id']}").json()
+    assert client.get(f"{LISTINGS}/nope").status_code == 404
     edited = client.put(
         f"{LISTINGS}/{made['id']}",
         json={
