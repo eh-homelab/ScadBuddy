@@ -905,7 +905,9 @@ export const orderTools: Tool[] = [
       'One order whole: its status, number and addresses, its line items with their quotes, design `revisions` ' +
       'and fulfilment attempts (every attempt has a `purpose`: `production`, or `test` for a revision\'s test print), ' +
       'charges, payments, shipments and totals. A payment\'s `method` says how it was paid: a provider id, ' +
-      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand.',
+      '`venmo` for a PayPal payment funded by Venmo (#4960), or a method recorded by hand. A customer\'s own ' +
+      'models request (#6133) adds `sources` (each file and link: its check, status, `import_stuck`, cost and ' +
+      'charge) and `model_requests` (the colours the customer asked for, per item).',
     input: z.object({ order_id: orderId }),
     risk: 'read',
     routes: ['GET /api/v1/orders/{order_id}'],
@@ -1459,6 +1461,76 @@ export const orderTools: Tool[] = [
             body: { shop_note },
           }),
           `decline purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  // A customer's own models (#6133 PR 4, spec 2026-11-13 §11): the back office's actions on
+  // a request's files and links, as `order_get`'s `sources` lists them. Download, the
+  // preview and "Open link" are the page's (coverage.ts).
+  defineTool({
+    name: 'order_item_source_decline',
+    label: "Decline a customer's model",
+    description:
+      "Decline a file or link of a customer's own models request: the shop will not print it. A staged file is " +
+      'deleted by its watcher. `reason` is the shop\'s; the customer never reads it. ' +
+      'A source already declined is returned as it is. 409 source_not_print for a thing to buy (use ' +
+      'order_purchase_decline), source_imported once it is in the library.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe("A source id, as order_get's sources list them"),
+      reason: z.string().max(500).default('').describe('Why, for the shop; empty is "Declined by the shop."'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Decline source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, reason }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { reason },
+          }),
+          `decline source ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_check_again',
+    label: "Check a customer's file again",
+    description:
+      "Start the check of a customer's staged file again after it failed (`check_status` `failed`). A file still " +
+      '`checking` is not refused: it is returned as it is and its check is started again (a running check is ' +
+      'joined), for a check that stalled. 409 source_not_failed for a file that is ready or refused, ' +
+      'source_not_staged once its staged copy is gone.',
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/check'],
+    title: ({ order_id, source_id }) => `Check source ${source_id} of order ${order_id} again`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/check', { params: { path: { order_id, source_id } } }),
+          `check source ${source_id} of order ${order_id} again`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_item_source_retry_import',
+    label: "Retry a customer's file import",
+    description:
+      "Ask the watcher of a customer's file to import it into the library again, when `import_stuck` says the " +
+      'import has not finished an hour after the order was sent. 409 import_not_stuck otherwise.',
+    input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/retry-import'],
+    title: ({ order_id, source_id }) => `Retry the import of source ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/sources/{source_id}/retry-import', {
+            params: { path: { order_id, source_id } },
+          }),
+          `retry the import of source ${source_id} of order ${order_id}`,
         ),
       ),
   }),

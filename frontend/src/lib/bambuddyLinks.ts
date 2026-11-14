@@ -9,7 +9,9 @@ import { isEmbedded } from './embed'
  * `bambuddy_web_urls` when set: the first is the default, and the others are more
  * hostnames of the same Bambuddy. The server builds its links on the default; a page
  * framed by one of the others moves them there, since that is the Bambuddy the user is
- * looking at.
+ * looking at. Outside such a frame, a page on a host that matches one of them moves
+ * them there too (#6212, {@link pageMatch}), so each hostname of ScadBuddy links to the
+ * Bambuddy beside it.
  */
 type LinkSettings = Pick<Settings, 'bambuddy_url' | 'bambuddy_web_urls'>
 
@@ -76,15 +78,62 @@ function originOf(url: string): string | null {
   }
 }
 
-/** The web URL a link should be built on: the framing one when listed, else the default. */
-export function bambuddyBase(urls: string[] = current, parent = framingOrigin()): string | null {
-  return (parent && urls.find((url) => originOf(url) === parent)) || urls[0] || null
+/**
+ * The web URL a link should be built on: the framing one when listed, else the one for
+ * the page's host ({@link pageMatch}), else the default.
+ */
+export function bambuddyBase(
+  urls: string[] = current,
+  parent = framingOrigin(),
+  page = window.location.hostname,
+): string | null {
+  return (parent && urls.find((url) => originOf(url) === parent)) || pageMatch(urls, page) || urls[0] || null
+}
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return null
+  }
+}
+
+const IP_HOST = /^(\d+\.){3}\d+$|^\[.*\]$/
+
+function parentDomain(host: string): string | null {
+  const dot = host.indexOf('.')
+  return dot > 0 && !IP_HOST.test(host) ? host.slice(dot + 1) : null
+}
+
+/**
+ * #6212 — the listed web URL for the host the page is on: one on the same host (another
+ * port), else one whose name differs only in its first label (`scadbuddy.sso.example`
+ * picks `bambuddy.sso.example`). It picks from the configured list only, so no host the
+ * browser reports ever becomes a link by itself.
+ */
+export function pageMatch(urls: string[], page: string): string | null {
+  if (!page) return null
+  const same = urls.find((url) => hostOf(url) === page)
+  if (same) return same
+  const wanted = parentDomain(page)
+  if (!wanted) return null
+  return (
+    urls.find((url) => {
+      const host = hostOf(url)
+      return host != null && parentDomain(host) === wanted
+    }) ?? null
+  )
 }
 
 /** `url`, built on the default web URL by the server, moved to {@link bambuddyBase}. */
-export function bambuddyLink(url: string, urls: string[] = current, parent = framingOrigin()): string {
+export function bambuddyLink(
+  url: string,
+  urls: string[] = current,
+  parent = framingOrigin(),
+  page = window.location.hostname,
+): string {
   const fallback = urls[0]
-  const base = bambuddyBase(urls, parent)
+  const base = bambuddyBase(urls, parent, page)
   if (!fallback || !base || base === fallback) return url
   const rest = url.slice(fallback.length)
   if (!url.startsWith(fallback) || (rest !== '' && !/^[/?#]/.test(rest))) return url

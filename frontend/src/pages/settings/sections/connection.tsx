@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { Spinner } from '../../../components/ui/spinner'
+import { bambuddyLink } from '../../../lib/bambuddyLinks'
 import { syncSummary } from '../../../lib/printerRegistry'
 import { useSettingsConnectionAgent, useSettingsAgentField } from '../agentFields'
 import { useBambuddyResources } from '../bambuddyResources'
@@ -380,7 +381,7 @@ export function Component() {
                     <>
                       {' · '}
                       <a
-                        href={bambuddy.settings_url}
+                        href={bambuddyLink(bambuddy.settings_url)}
                         target="_blank"
                         rel="noreferrer"
                         className="text-primary underline-offset-2 hover:underline"

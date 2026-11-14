@@ -305,6 +305,40 @@ describe('order tools (#4249)', () => {
     ).toThrow('shop_note')
   })
 
+  it("declines, checks again and retries the import of a customer's model through their routes (#6133)", async () => {
+    const SOURCE = '6e7f8091-1111-4222-8333-944455556666'
+    const sent: { path: string; body?: unknown }[] = []
+    const base = `${BACKEND}/api/v1/orders/${ORDER}/sources/${SOURCE}`
+    const view = { id: SOURCE, order_id: ORDER, item_id: ITEM, kind: 'file', purpose: 'print', status: 'open' }
+    server.use(
+      http.post(`${base}/decline`, async ({ request }) => {
+        sent.push({ path: 'decline', body: await request.json() })
+        return HttpResponse.json({ ...view, status: 'declined' })
+      }),
+      http.post(`${base}/check`, () => {
+        sent.push({ path: 'check' })
+        return HttpResponse.json({ ...view, check_status: 'checking' })
+      }),
+      http.post(`${base}/retry-import`, () => {
+        sent.push({ path: 'retry-import' })
+        return HttpResponse.json(view)
+      }),
+    )
+    expect(
+      ['order_item_source_decline', 'order_item_source_check_again', 'order_item_source_retry_import'].map((n) => tool(n).risk),
+    ).toEqual(['write', 'write', 'write'])
+    const declined = await tool('order_item_source_decline').execute({ order_id: ORDER, source_id: SOURCE, reason: 'Too big.' }, ctx())
+    const checked = await tool('order_item_source_check_again').execute({ order_id: ORDER, source_id: SOURCE }, ctx())
+    const retried = await tool('order_item_source_retry_import').execute({ order_id: ORDER, source_id: SOURCE }, ctx())
+    expect(firstText(declined)).toEqual({ ...view, status: 'declined' })
+    expect(firstText(checked)).toEqual({ ...view, check_status: 'checking' })
+    expect(firstText(retried)).toEqual(view)
+    expect(sent).toEqual([{ path: 'decline', body: { reason: 'Too big.' } }, { path: 'check' }, { path: 'retry-import' }])
+    expect(() =>
+      tool('order_item_source_decline').execute({ order_id: ORDER, source_id: SOURCE, reason: 'x'.repeat(501) }, ctx()),
+    ).toThrow('reason')
+  })
+
   it('tells the charges tools to leave the purchase and handling rows out (review of #6200)', () => {
     for (const name of ['order_update', 'order_charges_update_after_acceptance']) {
       expect(tool(name).description).toMatch(/`purchase` and `handling` rows/)

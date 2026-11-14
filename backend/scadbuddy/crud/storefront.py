@@ -399,6 +399,34 @@ class StorefrontCrud:
         verdict = answer.get("verdict") if isinstance(answer, dict) else None
         return verdict if isinstance(verdict, str) else "unavailable"
 
+    async def model_colours(self, *, visitor_id: str, client: str) -> Any:
+        """``GET …/storefront/models/colours`` (#6133): the filaments the form offers."""
+        return await self._call("GET", "/models/colours", visitor_id=visitor_id, client=client)
+
+    async def draft_source_preview(
+        self, source_id: str, *, visitor_id: str, client: str
+    ) -> CrudStream:
+        """``GET …/storefront/draft/sources/{id}/preview`` (#6133), its body unread. The
+        caller checked ``source_id``; a bare 404 raises `CrudRefusedError`."""
+        return await self._crud.stream(
+            "GET",
+            f"{BASE}/draft/sources/{source_id}/preview",
+            headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+        )
+
+    async def order_source_preview(
+        self, source_id: str, body: bytes, *, session: str | None = None
+    ) -> CrudStream:
+        """``POST …/storefront/order/sources/{id}/preview`` (#6133), its body unread: the
+        page's body goes on unread, as `order`'s does, since it holds the order link's
+        token. A reader that reads nothing raises `CrudRefusedError` 404 with no problem."""
+        return await self._crud.stream(
+            "POST",
+            f"{BASE}/order/sources/{source_id}/preview",
+            content=body,
+            headers=None if session is None else {SESSION_HEADER: session},
+        )
+
     async def render_preview(
         self, job_id: str, *, plate: int | None, visitor_id: str, client: str
     ) -> CrudStream:

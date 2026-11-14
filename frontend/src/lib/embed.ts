@@ -82,6 +82,29 @@ export async function downloadBlob(
   }
 }
 
+/**
+ * Download from a URL that `load` gives, such as a presigned GET served as an attachment
+ * (#6133). A blank window is opened first, while the click still allows one (an `await`
+ * may use up the click's activation, after which Safari and Firefox block it), then sent
+ * to the URL once it is known. The window is the only way out of Bambuddy's frame, so it
+ * is opened embedded or not. A blocked window rejects with `DownloadBlockedError`, one
+ * closed before the URL arrived with `DownloadWindowClosedError`; neither falls back to
+ * anything that could fail without a word. The window is closed when `load` fails.
+ */
+export async function downloadUrl(load: () => Promise<string>): Promise<void> {
+  const popup = openDownloadWindow()
+  if (!popup || popup.closed) throw new DownloadBlockedError()
+  try {
+    const url = await load()
+    if (popup.closed) throw new DownloadWindowClosedError()
+    popup.opener = null
+    popup.location.href = url
+  } catch (cause) {
+    popup.close()
+    throw cause
+  }
+}
+
 function openDownloadWindow(): Window | null {
   try {
     return window.open('', '_blank')

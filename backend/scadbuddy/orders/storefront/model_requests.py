@@ -43,6 +43,7 @@ from scadbuddy.orders.attachments import clean_filename
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.customer_links import LinkInvalidError, checked_link, link_type
 from scadbuddy.orders.lifecycle import LifecycleError, NewRequestItem
+from scadbuddy.orders.models import IMPORT_STUCK as IMPORT_STUCK
 from scadbuddy.orders.models import Order, OrderItem
 from scadbuddy.orders.storefront.listings import problem, public_content
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
@@ -60,6 +61,7 @@ from scadbuddy.storefront.wire import (
     MAX_PRINT_LINKS,
     MAX_PURCHASE_LINKS,
     UPLOAD_ID,
+    draft_preview_path,
 )
 
 if TYPE_CHECKING:
@@ -102,6 +104,8 @@ EXPIRED: Final = "This file expired before the order was sent; upload it again."
 #: The status reason of a staged file's source cleaned up `ENDED_GRACE` after its order ended.
 #: The customer's order page shows it (spec §10.5); a new request uploads the file again.
 ENDED: Final = "The order ended; the staged file was removed. Upload it again."
+#: How long after the submit a staged file's import may run before it reads `IMPORT_STUCK`.
+IMPORT_STUCK_AFTER: Final = timedelta(hours=1)
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 
 
@@ -646,12 +650,16 @@ def draft_sources(state: AppState, order_id: str) -> dict[str, tuple[bool, list[
         }
         rows = conn.execute(
             "SELECT id, item_id, kind, purpose, filename, size, url, note, check_status,"
-            " check_reason, status FROM order_item_sources WHERE order_id = %s"
+            " check_reason, status, preview_key FROM order_item_sources WHERE order_id = %s"
             " ORDER BY item_id, position",
             (order_id,),
         ).fetchall()
     found: dict[str, tuple[bool, list[DraftSource]]] = {item_id: (True, []) for item_id in own}
     for row in rows:
         item_id = row.pop("item_id")
-        found.setdefault(item_id, (item_id in own, []))[1].append(DraftSource(**row))
+        preview = row.pop("preview_key")
+        source = DraftSource(
+            **row, preview_url=draft_preview_path(row["id"]) if preview is not None else None
+        )
+        found.setdefault(item_id, (item_id in own, []))[1].append(source)
     return found

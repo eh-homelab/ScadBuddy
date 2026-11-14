@@ -137,9 +137,14 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
         <section className="sf-ask">
           <h2 className="sf-h2">Have something else in mind?</h2>
           <p>Tell us what you need and send a photo or a sketch. We reply with a design and a price.</p>
-          <Link className="sf-button" to="/request">
-            Ask for a design
-          </Link>
+          <p className="sf-actions">
+            <Link className="sf-button" to="/request">
+              Ask for a design
+            </Link>
+            <Link className="sf-button sf-button-quiet" to="/print-my-model">
+              Print my own model
+            </Link>
+          </p>
         </section>
       )}
     </>

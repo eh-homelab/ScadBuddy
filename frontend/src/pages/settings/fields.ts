@@ -143,6 +143,21 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     kind: 'bool',
     help: 'On, the tax is also on the shipping charges. Fees and discounts are never taxed.',
   },
+  // #6133 — the handling fee on the things the shop buys for a customer (spec 2026-11-13 §10.3).
+  {
+    name: 'orders_purchase_fee_flat_minor',
+    section: 'orders',
+    label: 'Handling fee per bought item, minor units',
+    kind: 'count',
+    help: 'Added once for each thing the shop records as bought for a customer, in the minor unit of the orders currency, such as 150 for 1.50. An order in another currency takes only the percent below. 0 adds none.',
+  },
+  {
+    name: 'orders_purchase_fee_percent',
+    section: 'orders',
+    label: 'Handling fee on bought items, percent',
+    kind: 'text',
+    help: 'Added as a percent of what the shop paid for the things it bought for a customer, such as 10 or 7.50. 0 to 100, at most two decimals. The flat fee and this percent make one charge, "Handling for bought items", rounded half up once.',
+  },
   {
     name: 'pricing_usd_rate',
     section: 'orders',
