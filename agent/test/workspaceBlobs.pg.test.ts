@@ -175,7 +175,9 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     })
   const row = async (path: string, workspace = `session:${sessionId}`) => {
     const [r] = await db.sql<{ data: Buffer | null; blob_key: string | null; key_sealed: Buffer | null; key_kek_id: string | null }[]>`
-      SELECT data, blob_key, key_sealed, key_kek_id FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path}`
+      SELECT coalesce(f.data, b.data) AS data, f.blob_key, f.key_sealed, f.key_kek_id
+      FROM ai_session_files f LEFT JOIN ai_session_file_bytes b ON b.sha256 = f.bytes_sha256
+      WHERE f.workspace = ${workspace} AND f.path = ${path}`
     return r
   }
   const holders = async () =>
@@ -333,8 +335,10 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     await inline.write(principal, 'p.txt', Buffer.from('mine'))
     expect(await files.moveToBlobs()).toEqual({ moved: 3, local: false })
     expect(await files.moveToBlobs()).toEqual({ moved: 0, local: false })
-    const rows = await db.sql<{ data: Buffer | null; blob_key: string | null }[]>`SELECT data, blob_key FROM ai_session_files`
-    expect(rows.every((r) => r.data === null && r.blob_key !== null)).toBe(true)
+    const rows = await db.sql<{ data: Buffer | null; bytes_sha256: string | null; blob_key: string | null }[]>`
+      SELECT data, bytes_sha256, blob_key FROM ai_session_files`
+    expect(rows.every((r) => r.data === null && r.bytes_sha256 === null && r.blob_key !== null)).toBe(true)
+    expect(await db.sql`SELECT 1 FROM ai_session_file_bytes`).toHaveLength(0)
     expect((await files.read(ws, 'a.txt'))?.bytes.toString()).toBe('one')
     expect((await files.read(ws, 'dir/big.bin'))?.bytes.equals(big)).toBe(true)
     expect((await files.read(principal, 'p.txt'))?.bytes.toString()).toBe('mine')

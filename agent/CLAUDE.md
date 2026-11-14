@@ -309,7 +309,8 @@ opens every one and seals it again byte for byte).
     a row no hold names; no trigger;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
-    in `data`; on any other backend a write that cannot be sealed and stored is refused
+    in Postgres, one `ai_session_file_bytes` row per sha256 that every file with those bytes
+    names, so a fork shares them (#4212); on any other backend a write that cannot be sealed and stored is refused
     `unavailable`, never kept in plaintext. Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).

@@ -4,6 +4,7 @@ import { backgroundWorkflowId } from '../background/service.js'
 import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
+import { dropUnnamedBytes } from '../workspace/store.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
 
@@ -30,8 +31,10 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      working directory on this pod, and
 //      delete our rows, as a session's deletion always did: `ai_sessions`, whose
 //      cascade takes its events, `ai_pending_input`, `ai_input_responses`, blobs,
-//      resources, approvals and questions, and `ai_session_entries`, which is not keyed
-//      to it. The audit log keeps its rows, as it does for every session.
+//      resources, approvals and questions, and its workspace files, and `ai_session_entries`,
+//      which is not keyed to it; then its files' bytes kept in Postgres
+//      (`ai_session_file_bytes`) that no other workspace, a fork's among them, names. The
+//      audit log keeps its rows, as it does for every session.
 // Its callers: an operator (`node dist/forget-subject.js <subject>`) and any delete
 // route added later. `SessionStore.delete` is never reached for a durable session,
 // whose conversation is in its workflow, not in ai_session_entries.
@@ -126,9 +129,12 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   let rows = 0
   if (subject.startsWith('session-')) {
     const id = subject.slice('session-'.length)
+    const shared = await deps.sql<{ bytes_sha256: string }[]>`
+      SELECT DISTINCT bytes_sha256 FROM ai_session_files WHERE session_id = ${id} AND bytes_sha256 IS NOT NULL`
     const entries = await deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${id}`
     const sessions = await deps.sql`DELETE FROM ai_sessions WHERE id = ${id}`
     rows = entries.count + sessions.count
+    await dropUnnamedBytes(deps.sql, shared.map((row) => row.bytes_sha256))
     // A classic session's warm process, on whichever replica holds it (spec 2026-10-13 §5.3, warmEvict.ts).
     await notifyWarmEvict(deps.sql, id)
   }
