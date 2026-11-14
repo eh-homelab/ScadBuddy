@@ -63,7 +63,7 @@ export async function grantBackendRoles(sql: Sql, projectsRole: string = PROJECT
 
 /** The `pg_advisory_xact_lock` key every grant and revoke of the backend's roles takes, so
  * the API and this sidecar starting together run them one after the other, never into
- * "tuple concurrently updated". It must equal `backend/scadbuddy/render/worker_role.py`
+ * "tuple concurrently updated". It must equal `backend/scadbuddy/auth/caller_grants.py`
  * `GRANT_LOCK` ("SCADRNDR" in ASCII); `test/grants.pg.test.ts` checks that. */
 export const GRANT_LOCK = 0x5343_4144_524e_4452n
 

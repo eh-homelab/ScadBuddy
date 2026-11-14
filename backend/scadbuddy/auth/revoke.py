@@ -1,13 +1,14 @@
-"""Take back a caller's database role (#5298 Tasks 11 and 35): every privilege the API granted it
-in the current schema, and its row policies, so the deployment can drop the role
+"""Take back a caller's database role (#5298 Tasks 11, 22 and 35): every privilege the API
+granted it in the current schema, and its row policies, so the deployment can drop the role
 (CNPG's `ensure: absent`). The role itself stays; dropping it is the deployment's. A
 caller that keeps its role loses only the tables dropped from its list
 (`RETIRED_GRANTS`, `revoke_tables`).
 
-The API granted a caller's role its tables and sequences (`render/worker_role.py`
-`grant_role`, from `auth/caller_grants.py`), USAGE on the schema, its credential view
-(`auth/service_credentials.py` `grant_caller_views`) and, for a held table, a restrictive
-row policy named ``only_<role>_<hash>`` (af75581's was the unsuffixed ``only_<role>``).
+The API granted a caller's role its tables (`auth/caller_grants.py` `grant_role`), USAGE
+on the schema and its credential view (`auth/service_credentials.py`
+`grant_caller_views`); an older API's `grant_role` (`render/worker_role.py`, gone since
+#5298 Task 22) also granted sequences and, for a held table, a restrictive row policy
+named ``only_<role>_<hash>`` (af75581's was the unsuffixed ``only_<role>``).
 Nothing granted functions, default privileges or memberships. The agent takes back its
 own `ai_*` grants (`agent/src/db/grants.ts` `revokeRole`): a grant is revoked only by
 the role that made it (or the owner's), so this revokes what a role this connection
@@ -23,12 +24,13 @@ from typing import Any
 from psycopg import Connection, sql
 from psycopg.rows import tuple_row
 
-from scadbuddy.render.worker_role import GRANT_LOCK
+from scadbuddy.auth.caller_grants import GRANT_LOCK
 
 #: The roles the API takes back at every start (`revoke_retired`): the projects worker's,
-#: unused since the worker holds no database (#5576), and the print worker's, unused since
-#: it holds no pool (#5298 Tasks 31 and 33).
-RETIRED_ROLES: tuple[str, ...] = ("scadbuddy_projects", "scadbuddy_print")
+#: unused since the worker holds no database (#5576), the print worker's, unused since it
+#: holds no pool (#5298 Tasks 31 and 33), and the render worker's, unused since it holds no
+#: database (#5298 Task 20).
+RETIRED_ROLES: tuple[str, ...] = ("scadbuddy_projects", "scadbuddy_print", "scadbuddy_render")
 
 
 def revoke_retired(conn: Connection[Any]) -> list[str]:
@@ -122,8 +124,9 @@ def revoke_role(conn: Connection[Any], role: str) -> list[str]:
             " AND pg_has_role(current_user, c.relowner, 'MEMBER')"
             " AND (p.polname = %(bare)s OR p.polname ~ %(hashed)s)"
             " ORDER BY c.relname, p.polname",
-            # `render/worker_role.py` `_hold_to_rows` names one ``only_<role>_<8 hex>``, so
-            # a role whose name only starts with this one keeps its policies.
+            # An older API's `grant_role` (`render/worker_role.py` `_hold_to_rows`) named
+            # one ``only_<role>_<8 hex>``, so a role whose name only starts with this one
+            # keeps its policies.
             {"bare": f"only_{role}", "hashed": f"^only_{re.escape(role)}_[0-9a-f]{{8}}$"},
         ).fetchall()
         for policy, table in policies:
