@@ -67,6 +67,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await awaitMigrations(db.sql, EXPECTED_MIGRATIONS, { attempts: 1, log })
     })
 
+    it("ready() reads the ledger once and fails fast; it says it is waiting once, and a later failure of another kind is not 'waiting'", async () => {
+      const errors: unknown[] = []
+      const fast = connectDatabase(TEST_DATABASE_URL!, {
+        searchPath: schema,
+        awaitMigrations: { log },
+        onMigrationError: (err) => errors.push(err),
+      })
+      try {
+        const started = performance.now()
+        expect(await fast.ready()).toBe(false)
+        expect(await fast.ready()).toBe(false)
+        expect(performance.now() - started).toBeLessThan(1_000)
+        expect(errors.map((e) => (e as Error).name)).toEqual(['MigrationsPendingError', 'MigrationsPendingError'])
+        expect(lines).toHaveLength(1)
+        expect(fast.waitingForMigrations()).toBe(true)
+        // A ledger it cannot read (the positional one from before #491): not "waiting".
+        await db.sql`CREATE TABLE ai_migrations (version integer PRIMARY KEY)`
+        expect(await fast.ready()).toBe(false)
+        expect((errors[2] as Error).name).not.toBe('MigrationsPendingError')
+        expect(fast.waitingForMigrations()).toBe(false)
+      } finally {
+        await fast.close()
+      }
+    })
+
     it('is what ready() runs: false while the API has not migrated, true at the next call once it has', async () => {
       const errors: unknown[] = []
       const waiting = connectDatabase(TEST_DATABASE_URL!, {

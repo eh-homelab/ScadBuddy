@@ -5,7 +5,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { migrate } from './support/migrations.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
-// PostgresTokenStore on `ai_mcp_tokens` (#251; db/migrations/20260928T0734Z_mcp_tokens.sql).
+// PostgresTokenStore on `ai_mcp_tokens` (#251; backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql).
 
 type Row = {
   id: string

@@ -1901,8 +1901,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   counted in that log line.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
   `ai_*` migrations have applied (`backend/scadbuddy/migrations_agent/`, which
-  the API applies at its start; the agent waits for them, up to 30 s a try,
-  retried on the next call, #5299), the key is loaded and a Claude credential is
+  the API applies at its start; the agent waits for them, #5299), the key is loaded and a Claude credential is
   saved. Otherwise `ai` names the first missing piece; each database step is
   bounded (2 s), so an API that has not migrated yet shows as
   `"unavailable (waiting for the API to apply the database migrations)"`, and any

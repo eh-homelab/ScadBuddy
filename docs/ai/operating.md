@@ -694,12 +694,12 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   `backend/scadbuddy/render/agent_migrations.py`), under the transaction-scoped advisory
   lock the agent used to take, with `lock_timeout` 10 s and `statement_timeout` 60 s. An
   already-applied migration whose SQL was edited, or a ledger still keyed by position
-  (before #491) that holds a row main never had, stops the API's start. The agent waits
-  in the background at start (`void database?.ready()` in `main.ts`) until
-  `ai_migrations` holds every file in `agent/src/db/expected-migrations.json`
-  (`agent/src/db/schema.ts`: 30 reads 1 s apart, then the next `ready()` call tries
-  again), and logs `waiting for the API to apply the agent's database migrations` once
-  per try while it waits. A row recorded with other SQL than the agent expects
+  (before #491) that holds a row main never had, stops the API's start. The agent's
+  `ready()` is true once `ai_migrations` holds every file in
+  `agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`; one read a call, so
+  a route fails fast while the API is behind). Its start work waits for `untilReady()`
+  (`agent/src/db.ts`: `ready()` again 1 s apart, doubling to 30 s), and it logs
+  `waiting for the API to apply the agent's database migrations` once a wait. A row recorded with other SQL than the agent expects
   (`MigrationChecksumError`) makes `main.ts` exit 1.
 
 ## 6. Origin allowlist and trusted proxies

@@ -15,8 +15,9 @@ export type Database = {
   /** Resolves true when `select 1` answers within the timeout. Never throws. */
   ping(timeoutMs?: number): Promise<boolean>
   /**
-   * Waits, bounded, until the API has applied the migrations this build expects
-   * (db/schema.ts `awaitMigrations`); resolves true when the schema is current.
+   * Reads `ai_migrations` once (db/schema.ts `awaitMigrations`), so it fails fast while the
+   * API has not applied every migration this build expects; resolves true when the schema
+   * is current.
    * Single-flight and memoised on success; a failure is retried by the next
    * call. Never throws.
    */
@@ -160,7 +161,7 @@ export type ConnectOptions = {
   idleTimeoutSeconds?: number
   /** Where to report a failed `ready()` attempt (the error, never the URL). */
   onMigrationError?: (err: unknown) => void
-  /** How long `ready()` waits for the API's migrations (db/schema.ts). */
+  /** How `ready()` reads `ai_migrations` (db/schema.ts): once an attempt unless `attempts` says otherwise. */
   awaitMigrations?: AwaitMigrationsOptions
   /**
    * Brings the schema in place of waiting for the API's migrations. Only the tests pass
@@ -255,11 +256,27 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     query.catch(() => {})
     return query
   })
+  // One read of the ledger an attempt, so a route that asks `ready()` fails fast while the
+  // API is behind; `untilReady()` is what waits. "Waiting" is said once until it ends.
   let waiting = false
+  let said = false
+  const log = options.awaitMigrations?.log ?? ((line: string) => console.log(line))
   const ready = makeReady(async () => {
+    waiting = false
     await (options.schema
       ? options.schema(sql)
-      : awaitMigrations(sql, undefined, { ...options.awaitMigrations, onWaiting: (now) => (waiting = now) }))
+      : awaitMigrations(sql, undefined, {
+          attempts: 1,
+          ...options.awaitMigrations,
+          log: (line) => {
+            if (!said) log(line)
+            said = true
+          },
+          onWaiting: (now) => {
+            waiting = now
+            if (!now) said = false
+          },
+        }))
     // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
     // waits or fails its own calls, and says which.
     await grantBackendRoles(sql).catch((error: unknown) => {

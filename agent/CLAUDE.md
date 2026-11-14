@@ -219,12 +219,13 @@ opens every one and seals it again byte for byte).
   - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
     CRUD routes and takes the agent's database secret away, #5299). The agent does not
     migrate them: the API applies their files at its start (root CLAUDE.md "Migrations
-    (#491)", #5299 D6), and `ready()` (`src/db.ts`) waits, at most 30 reads 1 s apart a
-    call, logging once, until `ai_migrations` holds every file in
-    `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`; a row with
-    other SQL than listed is `MigrationChecksumError`, and `main.ts` exits on it). Work a
-    process does once at start waits for `untilReady()`, which calls `ready()` again with
-    back-off until it is true, so an API that migrates late drops none of it; meanwhile
+    (#491)", #5299 D6), and `ready()` (`src/db.ts`) is true once `ai_migrations` holds
+    every file in `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`;
+    one read a call, so a route that asks fails fast; a row with other SQL than listed is
+    `MigrationChecksumError`, and `main.ts` exits on it). Work a process does once at start
+    waits for `untilReady()`, which calls `ready()` again 1 s apart, doubling to 30 s,
+    until it is true, so an API that migrates late drops none of it; the agent logs
+    `waiting for the API to apply the agent's database migrations` once a wait; meanwhile
     `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
     (`waitingForMigrations`). The
     tests make their schemas with the agent's old runner, `test/support/migrations.ts`
