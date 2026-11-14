@@ -103,9 +103,11 @@ function page(url: URL): StorefrontListingPage {
   const dir = get('dir') === 'desc' ? -1 : 1
   const key = (l: StorefrontListing): string | number =>
     sort === 'title' ? l.title.toLowerCase() : sort === 'slug' ? l.slug : sort === 'updated' ? l.updated_at : l.position
+  // As the backend's `_SORTS`: a slug sort breaks ties by position, then every sort by id.
+  const tie = (a: StorefrontListing, b: StorefrontListing) => (sort === 'slug' ? a.position - b.position : 0)
   const by = [...matched].sort((a, b) => {
     const [x, y] = [key(a), key(b)]
-    return (x < y ? -1 : x > y ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0) * dir
+    return (x < y ? -1 : x > y ? 1 : tie(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) * dir
   })
   return {
     items: by.slice(offset, offset + limit).map((l) => ({
