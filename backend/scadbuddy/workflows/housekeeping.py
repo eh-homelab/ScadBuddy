@@ -361,7 +361,8 @@ PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=15)
 #: each call at most 20 s (`plaid.TIMEOUT`): 10 minutes, then the matches, and a margin.
 BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
-#: deletes, then two deletes.
+#: deletes, then two deletes, then the staged files' backstop (a listing of the staging
+#: prefix and at most 1000 rows, one Temporal ``describe`` each, `SWEEP_PASS_BATCHES`).
 STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
 #: One `send_queued` call: a pass of up to 50 rows, and any pass a kick asked for meanwhile,
 #: all of which stop claiming `mail.PASS_BUDGET` (8 min) after the call started; a row in

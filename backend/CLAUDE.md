@@ -1408,7 +1408,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   so a lost signal costs time, never a file; the step retries with no limit.
   `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
-  running gets one started again, each counted in `scadbuddy_staged_files_repaired`.
+  running gets one started again, each counted in `scadbuddy_staged_files_repaired`. A pass
+  checks at most 1000 rows (`SWEEP_PASS_BATCHES`) and the next goes on from there.
   `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).

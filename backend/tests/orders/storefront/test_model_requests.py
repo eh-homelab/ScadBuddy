@@ -582,6 +582,48 @@ def test_the_backstop_walks_every_old_row_a_batch_at_a_time(
     assert watcher.started[len(ids) :] == [newest[0]["id"]]
 
 
+def test_a_backstop_pass_is_bounded_and_the_next_goes_on_from_there(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One pass checks at most `SWEEP_PASS_BATCHES` batches, so the drafts sweep keeps
+    inside its timeout; the next pass checks the rest, then starts again from the oldest."""
+    monkeypatch.setattr(staged_files, "SWEEP_BATCH", 1)
+    monkeypatch.setattr(staged_files, "SWEEP_PASS_BATCHES", 2)
+    files = [("a.stl", STL, "model/stl"), ("b.stl", STL, "model/stl"), ("c.stl", STL, "model/stl")]
+    ids = uploaded(asks, files)
+    order = rows(s3_api, "SELECT id FROM storefront_uploads ORDER BY created_at, id")
+    watcher.stopped = {order[2]["id"]}
+    later = datetime.now(UTC) + timedelta(days=2)
+    assert sweep(s3_api, later) == 0  # the first two rows only
+    assert sweep(s3_api, later) == 1  # the third, from where the first pass stopped
+    assert watcher.started[len(ids) :] == [order[2]["id"]]
+    watcher.stopped = {order[0]["id"]}
+    assert sweep(s3_api, later) == 1  # past the end: from the oldest again
+
+
+def test_a_concurrent_first_send_whose_watchers_failed_is_refused(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second first send of a key answers the slots the first committed; when the first
+    dropped them meanwhile (its watchers failed), it answers 503, never an empty 200."""
+    from scadbuddy.crud.idempotency import Replay, idempotent_write
+    from scadbuddy.orders.storefront import model_requests
+
+    def first_send_won(conn: Any, *args: Any) -> Any:
+        idempotent_write(conn, *args)
+        return Replay(200, {"ids": ["dropped-by-the-first-send"]})
+
+    monkeypatch.setattr(model_requests, "idempotent_write", first_send_won)
+    r = slots(asks, [("cube.stl", STL, "model/stl")])
+    assert r.status_code == 503, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{WATCH_UNAVAILABLE}"
+
+
 def test_the_backstop_does_nothing_on_another_store(api: TestClient) -> None:  # noqa: F811
     assert sweep(api, datetime.now(UTC)) == 0
 
@@ -589,4 +631,6 @@ def test_the_backstop_does_nothing_on_another_store(api: TestClient) -> None:  #
 @pytest.fixture(autouse=True)
 def _short_batches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(staged_files, "SWEEP_BATCH", 50)
+    staged_files._resume.clear()
     yield
+    staged_files._resume.clear()

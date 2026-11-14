@@ -324,7 +324,10 @@ Schedules) runs `staged_files.sweep_staged` after the carts; it owns no file's l
 deletes an object under `staging/` that no row names, older than `ORPHAN_AGE`, and it starts
 the watcher again of a row older than `ORPHAN_AGE` whose watcher is not running (Temporal's
 describe answers not found or closed); that watcher then applies the rules above, so a
-submitted file is never deleted by the backstop. Each repair is logged and counted
+submitted file is never deleted by the backstop. One pass checks at most 1000 rows
+(`SWEEP_PASS_BATCHES` batches of `SWEEP_BATCH`, one describe each, so the sweep keeps
+inside its 5-minute timeout); the next pass goes on from where it stopped, and past the
+newest row it starts again from the oldest. Each repair is logged and counted
 (`scadbuddy_staged_files_repaired`, by kind); it should find nothing, and a count is a bug
 to look into. `S3ContentBackend.sweep_unrecorded` skips keys outside `<kind>/<sha256>` (its
 `_OBJECT` pattern), so it never touches staging.

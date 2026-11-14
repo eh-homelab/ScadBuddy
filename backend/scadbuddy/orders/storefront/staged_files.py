@@ -23,7 +23,9 @@ deletes them again (``gone``). It never reads a byte of the file (#5295, #5296).
 
 `sweep_staged` is the backstop, in the storefront drafts sweep: a staging object no row
 names past `ORPHAN_AGE` is deleted, and a row past `ORPHAN_AGE` whose watcher is not running
-gets its watcher started again. Both count `scadbuddy_staged_files_repaired`; any count is
+gets its watcher started again. A pass checks at most `SWEEP_PASS_BATCHES` batches of rows
+and the next pass goes on from there (the cursor is the process's; a restart starts again
+from the oldest row). Both count `scadbuddy_staged_files_repaired`; any count is
 a bug to look into.
 """
 
@@ -42,12 +44,14 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
 from scadbuddy.core.events import OrderChanged, emit
+from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.model_requests import (
     EXPIRED,
     ORPHAN_AGE,
     STAGING_TTL,
     SWEEP_BATCH,
+    SWEEP_PASS_BATCHES,
     UNCLAIMED_GRACE,
 )
 from scadbuddy.store.s3 import S3ContentBackend, staging_key
@@ -122,17 +126,22 @@ def watcher(state: AppState) -> Watcher:
     return TemporalWatcher(ops.client, state.settings.temporal_task_queue_library)
 
 
+def unavailable() -> ApiError:
+    """503 ``uploads_unavailable``: send the presign again in a minute."""
+    return problem(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        WATCH_UNAVAILABLE,
+        "Uploads are not available now. Try again in a minute.",
+    )
+
+
 async def watch(state: AppState, upload_ids: Sequence[str]) -> None:
     """Start the uploads' watchers; 503 ``uploads_unavailable`` when Temporal refuses."""
     try:
         await watcher(state).watch(upload_ids)
     except Exception:
         logger.warning("could not start the watchers of %d staged files", len(upload_ids))
-        raise problem(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            WATCH_UNAVAILABLE,
-            "Uploads are not available now. Try again in a minute.",
-        ) from None
+        raise unavailable() from None
 
 
 async def poke(state: AppState, upload_ids: Sequence[str], signal: str) -> None:
@@ -282,6 +291,11 @@ def _old_rows(
     return [(row["created_at"], row["id"]) for row in rows]
 
 
+#: Where each app's next backstop pass goes on from (by the state's id; a test's app has its
+#: own).
+_resume: dict[int, tuple[datetime, str]] = {}
+
+
 def _named(state: AppState, keys: Sequence[str]) -> set[str]:
     with state.projection.pool.connection() as conn:
         rows = conn.execute(
@@ -312,8 +326,11 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
                 state.metrics.staged_files_repaired.labels("orphan_object").inc()
                 repaired += 1
     watching = watcher(state)
-    after: tuple[datetime, str] | None = None
-    while batch := await asyncio.to_thread(_old_rows, state, now, after):
+    after = _resume.pop(id(state), None)
+    for _ in range(SWEEP_PASS_BATCHES):
+        batch = await asyncio.to_thread(_old_rows, state, now, after)
+        if not batch:
+            break
         for _created, upload_id in batch:
             if await watching.running(upload_id) is False:
                 logger.warning("staged file %s had no running watcher; starting one", upload_id)
@@ -325,4 +342,8 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
                 state.metrics.staged_files_repaired.labels("unwatched_row").inc()
                 repaired += 1
         after = batch[-1]
+    else:
+        # The pass stopped before the last row: the next one goes on from here.
+        if after is not None:
+            _resume[id(state)] = after
     return repaired

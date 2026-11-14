@@ -79,8 +79,11 @@ STAGING_TTL: Final = timedelta(hours=72)
 #: The backstop deletes a staging object no row names, and restarts the watcher of a row
 #: whose watcher is not running, past this age.
 ORPHAN_AGE: Final = timedelta(days=1)
-#: The most rows one backstop pass reads.
+#: The rows one backstop query reads; a pass reads at most `SWEEP_PASS_BATCHES` of them.
 SWEEP_BATCH: Final = 200
+#: The batches one backstop pass walks (one Temporal ``describe`` per row), so the drafts
+#: sweep stays inside its timeout; the next pass goes on from where this one stopped.
+SWEEP_PASS_BATCHES: Final = 5
 #: A request item's title; its note is its notes.
 MODEL_REQUEST_TITLE: Final = "Your models"
 #: The check reason of a staged file cleaned up from a cart not submitted.
@@ -194,7 +197,7 @@ async def presign_uploads(
     ``uploads_unavailable`` (no watcher could be started; the new rows and the key's reply
     are dropped, so a retry starts afresh); 422
     ``upload_name``, ``upload_total``."""
-    from scadbuddy.orders.storefront.staged_files import watch
+    from scadbuddy.orders.storefront.staged_files import unavailable, watch
 
     backend = _backend(state)
     names = _checked_names(body)
@@ -249,6 +252,9 @@ async def presign_uploads(
     if ids != [slot.id for slot in made]:
         # A first send of the same key committed meanwhile: answer its slots.
         again = await asyncio.to_thread(_slots, state, ids, renew=False)
+        if len(again) != len(ids):
+            # That send's watchers failed and its rows were dropped: no slot to answer.
+            raise unavailable()
         await watch(state, [slot.id for slot in again])
         return await _signed(backend, again)
     try:
