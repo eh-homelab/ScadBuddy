@@ -86,6 +86,8 @@ function importSpools(): SpoolImportRow[] {
     const latest = spools.at(-1)
     if (!latest) return []
     const colour = latest.rgba && /^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(latest.rgba) ? `#${latest.rgba.slice(0, 6).toUpperCase()}` : null
+    // #6209: the alpha byte rides beside the RGB.
+    const alpha = latest.rgba && /^[0-9a-fA-F]{8}$/.test(latest.rgba) ? parseInt(latest.rgba.slice(6), 16) : 255
     const priced = spools.filter((s) => s.cost_per_kg != null)
     const prices = [...new Set(priced.map((s) => s.cost_per_kg as number))]
     const row: SpoolImportRow = {
@@ -95,6 +97,9 @@ function importSpools(): SpoolImportRow[] {
       brand: latest.brand ?? null,
       colour_name: latest.color_name ?? null,
       colour,
+      alpha,
+      extra_colours: [],
+      effect: null,
       spool_ids: spools.map((s) => s.id),
       min_cost_per_kg: prices.length > 1 ? String(Math.min(...prices)) : null,
       max_cost_per_kg: prices.length > 1 ? String(Math.max(...prices)) : null,
@@ -112,6 +117,10 @@ function importSpools(): SpoolImportRow[] {
         brand: row.brand ?? null,
         colour_name: row.colour_name ?? null,
         colour,
+        alpha,
+        extra_colours: [],
+        effect: null,
+        colour_source: 'import',
         cost_per_kg: cost,
         density_g_cm3: profile?.density_g_cm3 ?? null,
         density_profile: profile?.profile ?? null,
@@ -120,14 +129,15 @@ function importSpools(): SpoolImportRow[] {
         updated_at: now(),
       }
       state.filaments.push(made)
-      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost, density_g_cm3: made.density_g_cm3, density_profile: made.density_profile }]
+      return [{ ...row, action: 'created', filament_id: made.id, colour_source: 'import', cost_per_kg: cost, density_g_cm3: made.density_g_cm3, density_profile: made.density_profile }]
     }
     const previous = found.cost_per_kg
     const fill = found.density_g_cm3 ? null : profile
-    const action = Number(previous) === Number(cost) && !fill ? 'unchanged' : 'updated'
-    if (action === 'updated') Object.assign(found, { cost_per_kg: cost, updated_at: now() })
+    const look = found.colour_source === 'import' && found.alpha !== alpha ? { alpha } : {}
+    const action = Number(previous) === Number(cost) && !fill && !('alpha' in look) ? 'unchanged' : 'updated'
+    if (action === 'updated') Object.assign(found, { cost_per_kg: cost, ...look, updated_at: now() })
     if (fill) Object.assign(found, { density_g_cm3: fill.density_g_cm3, density_profile: fill.profile })
-    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: found.density_profile ?? null }]
+    return [{ ...row, action, filament_id: found.id, colour: found.colour, alpha: found.alpha, colour_source: found.colour_source, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: found.density_profile ?? null }]
   })
 }
 
@@ -291,6 +301,10 @@ export const handlers = [
       brand: body.brand ?? null,
       colour_name: body.colour_name ?? null,
       colour: body.colour,
+      alpha: body.alpha ?? 255,
+      extra_colours: body.extra_colours ?? [],
+      effect: body.effect ?? null,
+      colour_source: 'manual',
       cost_per_kg: body.cost_per_kg,
       // #6136: added with no density while Bambuddy is linked, it takes its spools'.
       ...(body.density_g_cm3 ? { density_g_cm3: body.density_g_cm3, density_profile: null } : added(body)),
@@ -311,6 +325,9 @@ export const handlers = [
     if (!found) return problem(request, 404, `no filament '${String(params.id)}'`)
     if (body.cost_per_kg != null && !DECIMAL.test(body.cost_per_kg)) return fieldProblem(request, 'cost_per_kg', 'Value error, the value must be at least 0')
     const next = { ...found, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)), updated_at: now() } as Filament
+    // #6209: a look sent that differs from the record's is a person's.
+    const differs = (['colour', 'alpha', 'effect'] as const).some((k) => body[k] !== undefined && String(body[k]).toUpperCase() !== String(found[k]).toUpperCase())
+    if (!body.colour_source && (differs || (body.extra_colours != null && body.extra_colours.join() !== found.extra_colours.join()))) next.colour_source = 'manual'
     const taken = state.filaments.find((f) => f.id !== found.id && !f.archived_at && !next.archived_at && identity(f) === identity(next))
     if (taken) {
       return problem(request, 409, `a filament with that material, subtype, brand and colour exists: ${taken.id}`, PROBLEMS + 'filament_exists', { filament_id: taken.id })

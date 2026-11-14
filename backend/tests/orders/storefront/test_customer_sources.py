@@ -101,7 +101,15 @@ def test_the_form_offers_the_price_books_colours_without_prices(asks: CrudCaller
     r = asks.get("/models/colours")
     assert r.status_code == 200, r.text
     [red] = [f for f in r.json()["filaments"] if f["colour_name"] == "Red"]
-    assert set(red) == {"id", "colour", "colour_name", "material"}
+    assert set(red) == {
+        "id",
+        "colour",
+        "colour_name",
+        "material",
+        "alpha",
+        "extra_colours",
+        "effect",
+    }
     assert red["material"] == "PLA"
 
 

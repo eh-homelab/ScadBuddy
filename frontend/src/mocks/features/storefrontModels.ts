@@ -37,8 +37,8 @@ const CORS = {
   'Access-Control-Expose-Headers': 'ETag',
 }
 const FILAMENTS = [
-  { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA' },
-  { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA' },
+  { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA', alpha: 255, extra_colours: [], effect: null },
+  { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA', alpha: 255, extra_colours: [], effect: null },
 ]
 
 /** The slots answered, by id: their names, for the request that claims them. */

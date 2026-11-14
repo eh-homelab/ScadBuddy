@@ -1067,6 +1067,11 @@ class Spool(BambuddyModel):
     subtype: str | None = None
     color_name: str | None = None
     rgba: str | None = None
+    #: Comma-separated 6- or 8-digit stops of a multi-colour spool, and its swatch
+    #: effect (#6209; ``models/spool.py`` at
+    #: https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/models/spool.py).
+    extra_colors: str | None = None
+    effect_type: str | None = None
     brand: str | None = None
     label_weight: int = 0
     core_weight: int = 0

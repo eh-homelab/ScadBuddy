@@ -14,11 +14,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Awaitable
 from contextlib import aclosing
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast, get_args
 
 from pydantic import ValidationError
 
@@ -54,6 +55,7 @@ from scadbuddy.orders.integrations import (
     ShelfSpool,
     SpoolGroup,
 )
+from scadbuddy.orders.models import FilamentEffect
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
 
@@ -70,6 +72,34 @@ def _colour(rgba: str | None) -> str | None:
     except ValueError:
         return None
     return "#" + text[:6].upper()
+
+
+def _hex(text: str) -> bool:
+    """Hex digits only: ``int(text, 16)`` would also take ``0x``, ``_`` and a sign."""
+    return re.fullmatch(r"[0-9a-fA-F]+", text) is not None
+
+
+def _alpha(rgba: str | None) -> int:
+    """A spool's ``RRGGBBAA`` alpha byte; 255 (opaque) for an ``RRGGBB`` or none."""
+    text = (rgba or "").strip()
+    return int(text[6:], 16) if len(text) == 8 and _hex(text) else 255
+
+
+def _stops(extra_colors: str | None) -> list[str]:
+    """Bambuddy's ``extra_colors`` (comma-separated 6- or 8-digit hex, ``#`` optional;
+    ``normalize_extra_colors`` in backend/app/schemas/spool.py at
+    https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/schemas/spool.py)
+    as ``#RRGGBB``/``#RRGGBBAA`` stops: a token it would refuse is dropped, and only
+    its ``MAX_EXTRA_COLOR_STOPS`` (8) first are kept."""
+    tokens = (t.strip().lstrip("#") for t in (extra_colors or "").split(","))
+    return ["#" + t.upper() for t in tokens if len(t) in (6, 8) and _hex(t)][:8]
+
+
+def _effect(effect_type: str | None) -> FilamentEffect | None:
+    """Bambuddy's ``effect_type`` as its ``normalize_effect_type`` spells it ("Dual
+    Color" is ``dual-color``); ``None`` for one outside ``ALLOWED_EFFECT_TYPES``."""
+    text = (effect_type or "").strip().lower().replace("_", "-").replace(" ", "-")
+    return cast(FilamentEffect, text) if text in get_args(FilamentEffect) else None
 
 
 def _identity(spool: Spool) -> tuple[str, str, str, str]:
@@ -131,6 +161,9 @@ def spool_groups(
                 brand=(latest.brand or "").strip() or None,
                 colour_name=(latest.color_name or "").strip() or None,
                 colour=colour,
+                alpha=_alpha(latest.rgba),
+                extra_colours=_stops(latest.extra_colors),
+                effect=_effect(latest.effect_type),
                 spools=[(s.id, s.cost_per_kg) for s in rows],
                 slicer_filament=slicer_filament,
                 k_profile_settings=settings,

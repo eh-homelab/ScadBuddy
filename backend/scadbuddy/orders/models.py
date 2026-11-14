@@ -96,6 +96,36 @@ Outcome = Literal["succeeded", "failed", "partial", "unknown"]
 
 #: The ``#RRGGBB`` of a colour slot as rendered (§3.3).
 Colour = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
+#: The ``rgba`` alpha byte of a filament (#6209): 255 is opaque, below it translucent.
+Alpha = Annotated[int, Field(ge=0, le=255)]
+#: One of a multi-colour filament's stops, as Bambuddy's ``extra_colors`` holds them
+#: (6 or 8 hex digits), upper-cased with a ``#``.
+ColourStop = Annotated[
+    str, Field(pattern=r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$"), AfterValidator(str.upper)
+]
+#: At most 8, as Bambuddy's ``MAX_EXTRA_COLOR_STOPS``.
+ColourStops = Annotated[list[ColourStop], Field(max_length=8)]
+#: Bambuddy's ``effect_type`` values (``ALLOWED_EFFECT_TYPES``, backend/app/schemas/spool.py
+#: at https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/schemas/spool.py).
+FilamentEffect = Literal[
+    "sparkle",
+    "wood",
+    "marble",
+    "glow",
+    "matte",
+    "silk",
+    "galaxy",
+    "rainbow",
+    "metal",
+    "translucent",
+    "gradient",
+    "dual-color",
+    "tri-color",
+    "multicolor",
+]
+#: Who set a filament's colour, alpha, stops and effect (#6209): the spool ``import``,
+#: which sets them again at each import, or a person (``manual``), which it never does.
+ColourSource = Literal["import", "manual"]
 
 
 def _rate(value: str) -> str:
@@ -1010,6 +1040,11 @@ class FilamentInput(BaseModel):
     cost_per_kg: CostPerKg
     #: For the rough estimate (§5.3); none gives no estimate.
     density_g_cm3: Density | None = None
+    #: #6209: what Bambuddy keeps beside the RGB. ``colour`` stays ``#RRGGBB``: a clear
+    #: filament is its RGB with ``alpha`` below 255.
+    alpha: Alpha = 255
+    extra_colours: ColourStops = Field(default_factory=list)
+    effect: FilamentEffect | None = None
 
 
 class FilamentPatch(BaseModel):
@@ -1025,10 +1060,21 @@ class FilamentPatch(BaseModel):
     colour: Colour | None = None
     cost_per_kg: CostPerKg | None = None
     density_g_cm3: Density | None = None
+    alpha: Alpha | None = None
+    extra_colours: ColourStops | None = None
+    #: ``null`` clears it.
+    effect: FilamentEffect | None = None
+    #: ``import`` hands the colour back to the spool import, which sets it at its next
+    #: run; a colour, alpha, stops or effect sent that differs from the record's makes
+    #: it ``manual`` (#6209).
+    colour_source: ColourSource | None = None
 
 
 class Filament(BaseModel):
     """A filament record, its decimals as strings on the wire (§3.6)."""
+
+    #: Every field is on the wire, so the clients' types need no fallback (#6209).
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
     id: str
     material: str
@@ -1043,6 +1089,13 @@ class Filament(BaseModel):
     #: (#6136, `orders/density.py`): the preset and the id that named it. ``None`` for
     #: a density a person set, or none.
     density_profile: str | None = None
+    #: #6209: the ``rgba`` alpha byte (255 opaque), the multi-colour stops and
+    #: Bambuddy's effect. ``colour`` alone is what a render splits parts by.
+    alpha: int = 255
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    #: Who set the colour, alpha, stops and effect: the spool ``import`` or a person.
+    colour_source: ColourSource = "manual"
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -1088,15 +1141,24 @@ class SpoolImportRow(BaseModel):
 
     action: SpoolImportAction
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
-    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price) or
-    #: ``too_long`` (a name past a record's 100 characters).
-    reason: Literal["no_colour", "no_price", "too_long"] | None = None
+    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price),
+    #: ``too_long`` (a name past a record's 100 characters) or ``colour_taken`` (another
+    #: record of its material, subtype and brand already has its RGB as its colour,
+    #: #6209). On a matched record, ``colour_taken`` says its colour, alpha, stops and
+    #: effect were kept: another record of its names has the spools' RGB.
+    reason: Literal["no_colour", "no_price", "too_long", "colour_taken"] | None = None
     #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
     subtype: str | None = None
     brand: str | None = None
     colour_name: str | None = None
+    #: The record's colour after the import: the spools' unless a person set it
+    #: (``colour_source`` ``manual``, #6209); the spools' for a skipped group.
     colour: str | None = None
+    alpha: int | None = None
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
+    colour_source: ColourSource | None = None
     #: The record made, updated or matched.
     filament_id: str | None = None
     #: The most recent priced spool's (the highest id), as the record now has it.

@@ -1170,7 +1170,15 @@ async def public_listing(
             name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
         },
         colours=[
-            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            PublicFilament(
+                id=f.id,
+                colour=f.colour,
+                colour_name=f.colour_name,
+                material=f.material,
+                alpha=f.alpha,
+                extra_colours=f.extra_colours,
+                effect=f.effect,
+            )
             for f in offered
         ],
         media=media,

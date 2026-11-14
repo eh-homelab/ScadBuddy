@@ -390,7 +390,9 @@ export function previewListing(
     params,
     colours: draft.colours.flatMap((id) => {
       const filament = filaments.find((f) => f.id === id)
-      return filament ? [{ id, colour: filament.colour, colour_name: filament.colour_name, material: filament.material }] : []
+      return filament
+        ? [{ id, colour: filament.colour, colour_name: filament.colour_name, material: filament.material, alpha: filament.alpha, extra_colours: filament.extra_colours, effect: filament.effect }]
+        : []
     }),
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)

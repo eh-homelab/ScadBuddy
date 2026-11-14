@@ -3,9 +3,11 @@
 
 A quote names a price-book filament per colour slot (§3.3), never a spool, so the print
 fills ``filament_plan.slots`` when it starts, on the printer it runs on. A spool is of a
-filament when its identity is the record's: material, subtype, brand and ``#RRGGBB``,
-upper-cased, as the spool import matches them (§8.3, ``orders/bambuddy.py``
-``spool_groups``). For each slot whose filament the item names:
+filament as the spool import matches them (#6209, ``orders/spool_import.py`` ``_matches``):
+the same material, subtype and brand, upper-cased, and the record's link to it (its
+``spool_ids``), else the spools' ``#RRGGBB`` at the last import (``spool_colour``), else,
+for a record the import never linked, its own ``colour``. So a colour a person set never
+hides the record's spools. For each slot whose filament the item names:
 
 - a spool the request names must be of that filament, else ``spool_not_filament``;
 - otherwise the spool of that filament loaded on the run's printer with the most grams
@@ -33,7 +35,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.integrations import NotLinkedError, ShelfSpool
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.problems import PROBLEMS
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import OrderStore, SpoolLink
 
 __all__ = ["ShelfSpool", "SpoolChoiceError", "fill_plan", "item_plan"]
 
@@ -61,14 +63,18 @@ def _key(*parts: str | None) -> tuple[str, ...]:
     return tuple((part or "").strip().upper() for part in parts)
 
 
-def record_key(record: Filament) -> tuple[str, ...]:
-    return _key(record.material, record.subtype, record.brand, record.colour)
-
-
-def spool_key(spool: ShelfSpool) -> tuple[str, ...] | None:
+def _of(spool: ShelfSpool, record: Filament, link: SpoolLink | None) -> bool:
+    """Whether ``spool`` is of ``record`` (``link``: the import's link to its spools)."""
     if spool.colour is None:
-        return None
-    return _key(spool.material, spool.subtype, spool.brand, spool.colour)
+        return False
+    if _key(spool.material, spool.subtype, spool.brand) != _key(
+        record.material, record.subtype, record.brand
+    ):
+        return False
+    if link is not None and spool.id in link.spool_ids:
+        return True
+    rgb = (link.spool_colour if link is not None else None) or record.colour
+    return spool.colour.upper() == rgb.upper()
 
 
 def fill_plan(
@@ -76,25 +82,26 @@ def fill_plan(
     spools: Sequence[ShelfSpool],
     printer_id: int | None,
     supplied: Mapping[int, int],
+    links: Mapping[str, SpoolLink] | None = None,
 ) -> dict[int, int]:
     """Every slot's spool (``{slot_id: spool_id}``, ``slot_id`` from 1 as the dialog's)
     for ``filaments`` (``{colour slot from 0: record}``), the request's ``supplied``
-    choices kept when they are of their slot's filament. Raises
-    :class:`SpoolChoiceError`."""
+    choices kept when they are of their slot's filament; ``links`` the import's link of
+    each record to its spools, by record id (#6209). Raises :class:`SpoolChoiceError`."""
     by_id = {spool.id: spool for spool in spools}
     plan = dict(supplied)
     wrong: list[int] = []
     missing: list[int] = []
     for slot, record in sorted(filaments.items()):
         slot_id = slot + 1
-        want = record_key(record)
+        link = (links or {}).get(record.id)
         named = supplied.get(slot_id)
         if named is not None:
             spool = by_id.get(named)
-            if spool is None or spool_key(spool) != want:
+            if spool is None or not _of(spool, record, link):
                 wrong.append(slot)
             continue
-        matching = [s for s in spools if not s.archived and spool_key(s) == want]
+        matching = [s for s in spools if not s.archived and _of(s, record, link)]
         here = [s for s in matching if printer_id is not None and s.loaded_printer_id == printer_id]
         shelf = [s for s in matching if s.loaded_printer_id is None]
         pick = max(here or shelf, key=lambda s: s.remaining_g, default=None)
@@ -121,17 +128,19 @@ def fill_plan(
     return plan
 
 
-def _item_filaments(store: OrderStore, item_id: str) -> dict[int, Filament]:
+def _item_filaments(
+    store: OrderStore, item_id: str
+) -> tuple[dict[int, Filament], dict[str, SpoolLink]]:
     item = store.item(item_id)
     if item is None:
-        return {}
+        return {}, {}
     named: dict[int, Filament] = {}
     for slot in item.colours:
         if slot.filament_id is not None:
             record = store.filament(slot.filament_id)
             if record is not None:
                 named[slot.slot] = record
-    return named
+    return named, store.spool_links([record.id for record in named.values()])
 
 
 async def item_plan(
@@ -147,7 +156,7 @@ async def item_plan(
     or ``spool_not_filament`` naming the colour slots; 503 when Bambuddy cannot be read."""
     if not integrations.linked:
         return None
-    filaments = await asyncio.to_thread(_item_filaments, store, item_id)
+    filaments, links = await asyncio.to_thread(_item_filaments, store, item_id)
     if not filaments:
         return None
     try:
@@ -164,7 +173,7 @@ async def item_plan(
         ) from error
     supplied = {slot.slot_id: slot.spool_id for slot in plan.slots}
     try:
-        filled = fill_plan(filaments, spools, printer_id, supplied)
+        filled = fill_plan(filaments, spools, printer_id, supplied, links)
     except SpoolChoiceError as error:
         raise ApiError(
             status.HTTP_409_CONFLICT,

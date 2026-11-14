@@ -22,7 +22,13 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
-from scadbuddy.orders.models import ChargeKind, ItemKind, OrderStatus, SubmitAddress
+from scadbuddy.orders.models import (
+    ChargeKind,
+    FilamentEffect,
+    ItemKind,
+    OrderStatus,
+    SubmitAddress,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -327,9 +333,16 @@ class PublicFilament(BaseModel):
     """A filament a visitor may pick: never its price."""
 
     id: str
+    #: ``#RRGGBB``: what a render splits parts by. A clear filament is its RGB with
+    #: ``alpha`` below 255 (#6209).
     colour: str
     colour_name: str | None
     material: str
+    #: The ``rgba`` alpha byte (255 opaque), the multi-colour stops (``#RRGGBB`` or
+    #: ``#RRGGBBAA``, at most 8) and Bambuddy's swatch effect, for the picker's swatch.
+    alpha: int
+    extra_colours: list[str]
+    effect: FilamentEffect | None
 
 
 class PublicMedia(BaseModel):

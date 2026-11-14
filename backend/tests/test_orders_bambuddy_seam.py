@@ -114,6 +114,34 @@ def test_spools_group_by_filament_key() -> None:
     assert by_ids[(5,)].spools == [(5, 20.0)]
 
 
+def test_a_group_carries_the_newest_spools_alpha_stops_and_effect() -> None:
+    """#6209: Bambuddy's ``rgba`` alpha, ``extra_colors`` and ``effect_type`` (at
+    https://github.com/maziggy/bambuddy/blob/1aa7bce166682fde929fec0d535bdaaa22685aad/backend/app/models/spool.py),
+    from the newest spool; a stop or an effect Bambuddy would refuse is dropped."""
+    groups = spool_groups(
+        [
+            _spool(3, rgba="00000000", color_name="Clear", effect_type="translucent"),
+            _spool(5, rgba="ff0000", extra_colors="ff0000, #00ff0080,zz,123,0x1234,+12345,12_345"),
+            _spool(6, rgba="00ff00ff", effect_type="Dual Color"),
+            _spool(7, rgba="0000ffff", effect_type="shiny"),
+            _spool(8, rgba="ffffffff", extra_colors=",".join(["abcdef"] * 9)),
+        ]
+    )
+    by_ids = {tuple(spool_id for spool_id, _ in g.spools): g for g in groups}
+    clear = by_ids[(3,)]
+    assert (clear.colour, clear.alpha, clear.extra_colours, clear.effect) == (
+        "#000000",
+        0,
+        [],
+        "translucent",
+    )
+    red = by_ids[(5,)]
+    assert (red.alpha, red.extra_colours, red.effect) == (255, ["#FF0000", "#00FF0080"], None)
+    assert by_ids[(6,)].effect == "dual-color"
+    assert by_ids[(7,)].effect is None
+    assert by_ids[(8,)].extra_colours == ["#ABCDEF"] * 8
+
+
 def _entry(entry_id: int, kind: str, brand: str, colour: str, density: float) -> CatalogFilament:
     return CatalogFilament(
         id=entry_id,

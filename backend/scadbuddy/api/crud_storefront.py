@@ -607,7 +607,15 @@ async def model_colours(orders: OrdersDep, _visitor: Visitor, _client: StoreClie
     filaments = await asyncio.to_thread(_filaments, orders)
     return ModelColours(
         filaments=[
-            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            PublicFilament(
+                id=f.id,
+                colour=f.colour,
+                colour_name=f.colour_name,
+                material=f.material,
+                alpha=f.alpha,
+                extra_colours=f.extra_colours,
+                effect=f.effect,
+            )
             for f in filaments.values()
         ]
     )

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.orders.models import FilamentEffect
 from scadbuddy.orders.problems import PROBLEMS
 
 if TYPE_CHECKING:
@@ -46,6 +47,11 @@ class SpoolGroup(BaseModel):
     #: ``#RRGGBB`` from the spools' ``rgba``; ``None`` for a group known only by its
     #: colour's name, which a record cannot carry as its colour.
     colour: str | None = None
+    #: The newest spool's ``rgba`` alpha byte (255 for a 6-digit ``rgba``), its
+    #: ``extra_colors`` as ``#RRGGBB``/``#RRGGBBAA`` stops and its ``effect_type`` (#6209).
+    alpha: int = 255
+    extra_colours: list[str] = Field(default_factory=list)
+    effect: FilamentEffect | None = None
     #: ``(spool id, cost_per_kg)`` of each spool, by id; a spool with no price has
     #: ``None``. A higher id is a spool Bambuddy recorded later.
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
