@@ -200,7 +200,7 @@ function whyNotOffered(param: Param, draft: ListingDraft, schema: CustomizerSche
   if (isSupport(param)) return 'Support settings are yours: a customer never sees them.'
   if (param.type === 'font') return 'A customer cannot choose a typeface.'
   if (!offerable(param)) return 'A customer cannot upload a file.'
-  if (param.type === 'color' && !filaments.some((filament) => draft.colours.includes(filament.id) && !isSupportOnly(filament, draft, schema))) {
+  if (param.type === 'color' && !filaments.some((filament) => draft.colours.includes(filament.id) && !isSupportOnly(filament, draft, schema, filaments))) {
     return 'Tick a colour on offer first.'
   }
   return null
@@ -471,7 +471,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
                       />
                       <Swatch colour={filament.colour} />
                       {name}
-                      {offersColour && isSupportOnly(filament, draft, schema) && (
+                      {offersColour && isSupportOnly(filament, draft, schema, filaments) && (
                         <span className="text-xs text-muted-foreground">(for supports only, not offered)</span>
                       )}
                     </label>

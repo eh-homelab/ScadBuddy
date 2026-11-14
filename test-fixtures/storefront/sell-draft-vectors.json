@@ -126,6 +126,27 @@
     "input": { "body": { "kind": "choice", "choices": ["#ffffff", "#000000"] } }
   },
   {
+    "name": "a filament of the design's material stays a choice when a support setting uses its colour: only a support material's filament is kept from the customer",
+    "schema": {
+      "groups": ["Supports", "Colours"],
+      "parameters": [
+        { "name": "support_colour", "type": "color", "group": "Supports", "caption": "Support material", "initial": "#000000" },
+        { "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#FFFFFF" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-black", "material": "PLA", "subtype": null, "brand": null, "colour_name": "Black", "colour": "#000000", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [] } },
+      "fixed": { "support_colour": "#000000" },
+      "colours": ["f-white", "f-black"]
+    },
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff", "#000000"] } }
+  },
+  {
     "name": "a support colour whose filament has no density is not added: the estimate could not price it, so it stays a colour with no filament",
     "schema": {
       "groups": ["Supports", "Colours"],

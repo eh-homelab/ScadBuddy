@@ -163,6 +163,8 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
       { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#E8532F' },
     ],
   }
+  /** A support material: not the design's PLA, so its colour is the support setting's alone. */
+  const SUPPORT = { ...CORAL, id: 'coral-pva', material: 'PVA' }
 
   it('saves no support setting offered, and no colour only a support setting uses on offer', () => {
     const draft: ListingDraft = {
@@ -170,25 +172,36 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
       title: 'Tag',
       params: { body: { kind: 'choice', choices: [] }, supports: { kind: 'choice', choices: [true, false] } },
       fixed: { support_colour: '#E8532F' },
-      colours: [BLUE.id, CORAL.id],
+      colours: [BLUE.id, SUPPORT.id],
     }
-    const body = listingInput(draft, schema, [BLUE, CORAL])
+    const body = listingInput(draft, schema, [BLUE, SUPPORT])
     expect(body.params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8'] } })
     expect(body.fixed).toEqual({ support_colour: '#E8532F', supports: true })
     // The support colour's filament stays on the listing: publish checks a locked colour
     // against the listing's filaments (`checked_fixed`, `listing_colour_unknown`).
-    expect(body.colours).toEqual([BLUE.id, CORAL.id])
+    expect(body.colours).toEqual([BLUE.id, SUPPORT.id])
   })
 
   it('leaves a colour only a support setting uses in the title: no customer can choose it (#6140 review)', () => {
     const draft: ListingDraft = {
       ...emptyDraft('tag', 'c'.repeat(40)),
-      title: `Tag ${CORAL.colour_name} ${BLUE.colour_name}`,
+      title: `Tag ${SUPPORT.colour_name} ${BLUE.colour_name}`,
+      params: { body: { kind: 'choice', choices: [] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, SUPPORT.id],
+    }
+    expect(titleColours(draft, schema, [BLUE, SUPPORT])).toEqual([BLUE.colour_name])
+  })
+
+  it('keeps a filament of the design’s material a choice when a support setting uses its colour too (#6140 review)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
       params: { body: { kind: 'choice', choices: [] } },
       fixed: { support_colour: '#E8532F' },
       colours: [BLUE.id, CORAL.id],
     }
-    expect(titleColours(draft, schema, [BLUE, CORAL])).toEqual([BLUE.colour_name])
+    expect(listingInput(draft, schema, [BLUE, CORAL]).params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8', '#E8532F'] } })
   })
 })
 

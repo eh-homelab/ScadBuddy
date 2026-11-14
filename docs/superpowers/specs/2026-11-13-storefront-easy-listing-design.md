@@ -111,13 +111,17 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
     2026-11-13: support material selection is internal). A parameter whose name, caption
     or group says "support" or "interface" is one (`isSupport`). It stays locked, the editor's
     switch says why, a save locks one an older listing offers, and a support colour neither
-    picks the design's material nor becomes a colour on offer: a colour only a support
-    setting uses is left out of every offered colour's choices. Its filament still joins the
+    picks the design's material nor becomes a colour on offer. Its filament still joins the
     listing when the price book has that colour exactly, with a density, because publish
-    checks every locked colour against the listing's filaments (`listing_colour_unknown`);
-    the editor marks that filament "for supports only, not offered" (`isSupportOnly`). One
-    with no density is not added (the estimate could not price it): it stays a colour with
-    no filament (`colourProblems`).
+    checks every locked colour against the listing's filaments (`listing_colour_unknown`).
+    A listing filament is support-only when only a support setting uses its colour and its
+    material is not the design's (that of a listing filament a customer colour's value names,
+    or, when none is named, that of the listing filaments no support setting's colour names).
+    Its colour is left out of every offered colour's choices, and the editor marks it "for
+    supports only, not offered" (`isSupportOnly`). A filament of the design's material stays
+    a choice whatever a support setting uses. A support filament with no density is not
+    added (the estimate could not price it): it stays a colour with no filament
+    (`colourProblems`).
 - Colours on offer (`offeredFilaments`): every price-book filament with a density (one priced
   by weight) of the design's material, which is the material of the first filament whose
   colour one of the colour values is, compared case aside as publish compares them; every
@@ -136,8 +140,8 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
 - Render time: when the job (or the output's job) took more than 100 s, a note: "This design
   took N s to render. The store's preview and price give up after about 100 s" (#6120).
 
-`test-fixtures/storefront/sell-draft-vectors.json` pins `defaultsFor`'s rules; the frontend
-test and the assistant's tool test (§6) both read it.
+`test-fixtures/storefront/sell-draft-vectors.json` pins `defaultsFor`'s rules, and `listingInput`'s choices where a case has `input`; the frontend
+test reads it, and the assistant's tool test (§6) will read it too when that tool lands.
 
 ## 5. A simpler editor
 

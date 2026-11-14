@@ -445,6 +445,13 @@ describe('StorefrontPage (#5282)', () => {
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
     })
 
+    it('fills the listing in when the models list fails to load, named by its slug (#6140 review)', async () => {
+      serveJob()
+      server.use(http.get('/api/v1/models', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderPage(<StorefrontPage />, { route: '/storefront?sell=job:j1' })
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue(KEYCHAIN))
+    })
+
     it('leaves a listing opened while the fill-in ran alone when the fill-in answers (#6140 review)', async () => {
       await seed('Mine')
       serveJob()
