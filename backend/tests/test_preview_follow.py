@@ -520,6 +520,9 @@ def test_a_failed_release_starts_the_back_off_too(monkeypatch: pytest.MonkeyPatc
     claims.release("native:7:x")
     assert opened[0].closed
     assert claims.open_connections() == 0
+    # #6182: the dropped connection freed the lock, so a second release does not connect.
+    claims.release("native:7:x")
+    assert len(opened) == 1
     now[0] += claims_module.CONNECT_BACKOFF - 1
     assert claims.claim("native:8:x") is True
     assert len(opened) == 1
