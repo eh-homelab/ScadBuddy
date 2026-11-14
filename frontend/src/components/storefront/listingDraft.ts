@@ -1,6 +1,6 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
-import { shownLabel } from '../../storefront/params'
+import { shownLabel, valueProblem } from '../../storefront/params'
 
 /**
  * #5282 (spec 2026-11-02 §5.3) — a listing as the Storefront page edits it, and what the
@@ -106,8 +106,8 @@ export function offeredFilaments(colourValues: readonly ParamValue[], filaments:
  * and every colour are the customer's (the owner: "why can't I specify colors"), the rest,
  * support settings always (`isSupport`), is locked at its value. A colour is locked only by the person, or when the price book has
  * no filament to offer (`offeredFilaments`). A customer who picks no colour gets the
- * template's default (`orders/storefront/inputs.py` `listing_values`), which must be a
- * listing filament's: `colourProblems` names one that is not.
+ * listing's default, else the template's (`orders/storefront/inputs.py` `listing_values`,
+ * #6144), which must be a listing filament's: `colourProblems` names one that is not.
  * `test-fixtures/storefront/sell-draft-vectors.json` pins these rules, so another copy of
  * them (the assistant's tool, design §6) can be checked against the same cases.
  */
@@ -152,13 +152,16 @@ export interface ColourProblem {
 
 /**
  * #6131 — every colour publish would refuse (422 `listing_colour_unknown`): a locked
- * colour, or an offered one's default, that none of the listing's filaments has.
+ * colour, or an offered one's default, that none of the listing's filaments has. An
+ * offered colour's default is the listing's `default`, else the template's, as publish
+ * checks it (`effective_default`, #6144).
  */
 export function colourProblems(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): ColourProblem[] {
   const listed = filaments.filter((filament) => draft.colours.includes(filament.id))
   return shownParams(schema).flatMap((param) => {
     if (param.type !== 'color') return []
-    const value = draft.params[param.name] ? param.initial : (draft.fixed[param.name] ?? param.initial)
+    const offered = draft.params[param.name]
+    const value = offered ? (offered.default ?? param.initial) : (draft.fixed[param.name] ?? param.initial)
     if (typeof value !== 'string' || filamentOf(value, listed)) return []
     return [{ name: param.name, label: param.caption || param.name, colour: value }]
   })
@@ -361,12 +364,14 @@ export function previewListing(
     if (!bound) continue
     // What an unpicked render takes (`effective_default`): the listing's, else the template's.
     // A choice shows it only while it is one of its choices, as `_public_param` does: a
-    // colour's are the listing filaments' colours, support-only ones left out (#6144).
+    // colour's are the listing filaments' colours, support-only ones left out. A number
+    // shows it only inside its range and on its step, the schema's when it has none (#6144).
     const start = bound.default ?? param.initial ?? null
-    const shownDefault =
-      bound.kind !== 'choice' || bound.choices.some((choice) => (param.type === 'color' ? sameColour(choice, start) : choice === start))
-        ? start
-        : null
+    const allowed =
+      bound.kind === 'choice'
+        ? bound.choices.some((choice) => (param.type === 'color' ? sameColour(choice, start) : choice === start))
+        : bound.kind !== 'number' || start === null || valueProblem({ ...bound, step: bound.step ?? param.step ?? null } as PublicParam, start) === null
+    const shownDefault = allowed ? start : null
     const placeholder = bound.kind === 'text' && typeof start === 'string' && start.trim() ? start : null
     params[param.name] = {
       ...bound,

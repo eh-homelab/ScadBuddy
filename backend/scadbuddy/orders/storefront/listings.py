@@ -920,7 +920,8 @@ def _public_param(
     """``bound`` with what the page shows. A colour's choices keep only ``colours`` (the
     listing filaments the price book still has, casefolded), and its ``default`` only
     when it is one of them. ``default`` is what a render takes while the customer picks
-    none (`effective_default`)."""
+    none (`effective_default`); a choice's outside its choices, or a number's outside its
+    range or off its step, is not shown (#6144)."""
     parameter = by_name.get(name)
     shown = {
         "label": shown_label(name, bound.label, parameter.caption if parameter else None),
@@ -941,6 +942,14 @@ def _public_param(
             fields["default"] = None
     elif isinstance(bound, ChoiceBound) and start not in bound.choices:
         # Publish refuses such a default; a listing saved before #6144 may still hold one.
+        fields["default"] = None
+    elif (
+        isinstance(bound, NumberBound)
+        and parameter is not None
+        and start is not None
+        and value_reason(parameter, bound, start, colours) is not None
+    ):
+        # The same for a number outside its range or off its step (#6144).
         fields["default"] = None
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)

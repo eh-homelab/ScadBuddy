@@ -253,6 +253,22 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(stale.shape!.default).toBeNull()
   })
 
+  it('previews no number default outside its range or off its step, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [{ name: 'size', type: 'slider', initial: 50, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param],
+    }
+    const draft = (size: ListingDraft['params'][string]): ListingDraft => ({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag', params: { size } })
+    const shown = (size: ListingDraft['params'][string]) => previewListing(draft(size), schema, [], [], () => '').params.size!.default
+    // A listing saved before #6144: the template's 50 on a 60 to 80 field.
+    expect(shown({ kind: 'number', min: 60, max: 80, step: 1 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 85 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30.5 })).toBeNull()
+    // With no step of its own, the schema's applies, as the backend checks it.
+    expect(shown({ kind: 'number', min: 20, max: 80, default: 30.5 })).toBeNull()
+    expect(shown({ kind: 'number', min: 20, max: 80, step: 1, default: 30 })).toBe(30)
+  })
+
   it('locks a numeric select at one of its options, as a number', async () => {
     const seen: ListingDraft[] = []
     const holeSide = (keychainSchema.parameters ?? []).find((p) => p.name === 'hole_side') as Param

@@ -388,3 +388,19 @@ def test_a_choice_default_outside_its_choices_is_not_shown(listing: Listing) -> 
     bounds["shape"] = bounds["shape"].model_copy(update={"default": "square"})
     shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
     assert shown["shape"].default is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"min": 60, "max": 80}, {"default": 85}, {"default": 30.5}],
+    ids=["template default below range", "listing default above range", "off step"],
+)
+def test_a_number_default_outside_its_bound_is_not_shown(
+    listing: Listing, update: dict[str, float]
+) -> None:
+    """A listing saved before #6144 may start a number outside its range or off its step
+    (the template's 50 on a 60 to 80 field): the page shows no default it would refuse."""
+    bounds = dict(listing.params)
+    bounds["width"] = bounds["width"].model_copy(update=update)
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["width"].default is None
