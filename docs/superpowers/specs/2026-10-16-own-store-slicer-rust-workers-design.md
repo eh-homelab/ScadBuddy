@@ -457,7 +457,13 @@ each change is published as `preview_slice.progress` or `preview_slice.settled` 
 `preview-slice:<slicer>:<job id>`. The event carries ids only; the browser reads the
 route again for the percent. The browser polls every 2 s only while the socket is
 unavailable, or while the read says `followed: false` (past the 64 slices one process
-follows at once) (`usePreviewSlice.ts`). A native
+follows at once) (`usePreviewSlice.ts`). One API replica follows a slice (#6158; prod
+runs three): a follow first takes a session advisory lock on its slice
+(`preview_follow/claims.py`, all of one process's locks on one connection of its own),
+and a read on a replica that finds the lock held elsewhere starts nothing and answers
+`followed: true`, because the follower's events reach every replica's sockets over the
+Postgres bus. A follow releases its lock before its last event, so the read that event
+causes can follow the slice again on any replica. A native
 slice's slots carry no `side` (`slicing/preview.py`), so the side-mismatch warning does
 not fire for it until #4232.
 

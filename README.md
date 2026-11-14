@@ -445,9 +445,11 @@ on shutdown.
     the settings and the jobs each had a pool of this size, so twice it); the print
     worker has no pool (#5298). Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
     too small. The schema is created and migrated at startup.
-    An API process's pools hold at most that plus 13 connections: the event bus's 2,
+    An API process's pools hold at most that plus 14 connections: the event bus's 2,
     the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
-    2 and the `LISTEN` connection (#5226). On top of the pools come short-lived
+    2, the `LISTEN` connection (#5226) and `scadbuddy-preview-follows`, the one
+    connection that holds the print dialog's background-slice follow locks, so that one
+    replica follows each slice (#6158, `preview_follow/claims.py`). On top of the pools come short-lived
     connections of their own, one per lock or claim held at that moment: the models and
     flows repository write locks (`library/repo_lock.py`), an order's project lock
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
