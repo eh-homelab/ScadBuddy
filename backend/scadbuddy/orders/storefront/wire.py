@@ -198,6 +198,8 @@ class ListingOrder(BaseModel):
 #: How many rows one page of ``GET …/listings`` holds at most, and by default (#6157).
 LISTING_PAGE_MAX = 200
 LISTING_PAGE_DEFAULT = 50
+#: The furthest a page may start: far past any shop, well inside Postgres's bigint.
+LISTING_OFFSET_MAX = 1_000_000
 
 type ListingSort = Literal["position", "title", "slug", "updated"]
 type ListingStatus = Literal["published", "draft"]
@@ -218,7 +220,8 @@ class ListingQuery(BaseModel):
     sort: ListingSort = "position"
     dir: Literal["asc", "desc"] = "asc"
     limit: int = Field(default=LISTING_PAGE_DEFAULT, ge=1, le=LISTING_PAGE_MAX)
-    offset: int = Field(default=0, ge=0)
+    #: Bounded so a huge offset is a 422, never a bigint overflow in Postgres.
+    offset: int = Field(default=0, ge=0, le=LISTING_OFFSET_MAX)
 
 
 class ListingRow(BaseModel):
