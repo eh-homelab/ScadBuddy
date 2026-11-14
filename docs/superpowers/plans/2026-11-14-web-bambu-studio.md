@@ -48,17 +48,17 @@
 
 **Files:**
 - Create: `tools/bbs-catalogue/generate.py` (reads the source at the pinned tag, writes JSON)
-- Create: `backend/scadbuddy/slicing/catalogue.py` (loads the JSON, answers queries)
+- Create: `backend/scadbuddy/slicing/settings_catalogue.py` (loads the JSON, answers queries; a new module, because `slicing/catalogue.py` is the native run's preset catalogue, #3818)
 - Modify: `Dockerfile` (`slicer-dist` stage: fetch the three source files at `v${BAMBU_STUDIO_VERSION}`, run the generator, copy `settings-catalogue.json` next to `/opt/slicer-profiles`)
 - Create: `backend/scadbuddy/api/settings_catalogue.py` (`GET /api/v1/print/settings-catalogue?q=&section=&scope=`)
 - Create: `agent/src/tools/slicerSettings.ts` (`search_slicer_settings`)
-- Test: `backend/tests/slicing/test_catalogue.py`, `agent/src/tools/slicerSettings.test.ts`; fixture: the three source files at the tag, under `backend/tests/fixtures/bbs-v02.08.02.61/` (LFS)
+- Test: `backend/tests/slicing/test_settings_catalogue.py`, `agent/src/tools/slicerSettings.test.ts`; fixture: the three source files at the tag, under `backend/tests/fixtures/bbs-v02.08.02.61/` (LFS)
 
 **Interfaces:**
 - Produces: `SettingDef(key: str, label: str, tooltip: str, type: Literal['bool','int','float','percent','float_or_percent','string','enum','point','points','ints','floats','bools','strings'], unit: str | None, min: float | None, max: float | None, enum_values: list[str], enum_labels: list[str], mode: Literal['simple','advanced','develop'], page: str | None, group: str | None, order: int | None, wiki: str | None, scope: Literal['print','object','region','filament','machine'])`; `load_catalogue() -> dict[str, SettingDef]`; `search(q: str, section: str | None, scope: str | None) -> list[SettingDef]`; `check_value(key: str, value: object) -> str | None` (a warning, never an exception).
 
 - [ ] **Step 1: Write the failing tests** — `test_print_sequence_def`: `cat['print_sequence'].type == 'enum'`, `enum_values == ['by layer', 'by object']`, `mode == 'simple'`. `test_no_sparse_layers_wiki`: `cat['wipe_tower_no_sparse_layers'].page == 'Others'`, `group == 'Prime tower'`, `wiki == 'parameter/prime-tower'`. `test_scope`: `cat['wall_loops'].scope == 'region'`, `cat['enable_prime_tower'].scope == 'print'`. `test_process_keys_count`: the set of keys with `scope in {'print','object','region'}` equals `s_Preset_print_options` at the tag (count fixed in the test). `test_check_value_warns_never_raises`: `check_value('wall_loops', -3)` returns a string; `check_value('no_such_key', 1)` returns `"unknown key"`-style text.
-- [ ] **Step 2: Run** `cd backend && uv run pytest tests/slicing/test_catalogue.py -v` — expect FAIL (module missing).
+- [ ] **Step 2: Run** `cd backend && uv run pytest tests/slicing/test_settings_catalogue.py -v` — expect FAIL (module missing).
 - [ ] **Step 3: Implement the generator.** Parse `def = this->add("<key>", co<Type>);` blocks up to the next `def = this->add`, reading `label`, `tooltip`, `sidetext`, `min`, `max`, `enum_values.push_back`, `enum_labels.push_back`, `mode`. Read `TabPrint::build` for `add_options_page(L("<page>")`, `new_optgroup(L("<group>")`, `append_single_option_line("<key>", "<wiki>")` in order. Scope from `PrintObjectConfig`/`PrintRegionConfig`/`PrintConfig` class membership (the `PRINT_CONFIG_CLASS_DEFINE` blocks in `PrintConfig.hpp`; fetch it too).
 - [ ] **Step 4: Run the tests** — expect PASS. Add the route and the tool (`risk: 'read'`, routes list); `cd agent && pnpm test src/tools/slicerSettings.test.ts`.
 - [ ] **Step 5: Commit** `feat(print): a settings catalogue generated from Bambu Studio's source (#6273)`.
@@ -68,14 +68,14 @@
 **Files:**
 - Modify: `backend/scadbuddy/render/plate_profiles.py` (`CLEARANCES` → `Clearances` dataclass per printer, generated from `/opt/slicer-profiles` machine JSON at import, with today's table as the fallback for tests without the tree)
 - Create: `backend/scadbuddy/render/plate_rules.py`
-- Create: `backend/tests/render/vectors/plate_rules/*.json` (shared with Task 12's TypeScript port)
-- Test: `backend/tests/render/test_plate_rules.py`
+- Create: `backend/tests/vectors/plate_rules/*.json` (shared with Task 12's TypeScript port)
+- Test: `backend/tests/test_plate_rules.py`
 
 **Interfaces:**
 - Produces: `Clearances(max_radius: float, radius: float, height_to_rod: float, height_to_lid: float, dist_to_rod: float, nozzle_height: float, printable_height: float, bed_exclude: list[Polygon2], wrapping_exclude: list[Polygon2])`; `clearances_for(printer_model: str) -> Clearances | None`; `RuleObject(id: str, hull: list[tuple[float,float]], height: float)`; `RuleWarning(rule: Literal['hull_clearance','too_tall_rod','too_tall_lid','bed_exclude','wrapping_exclude'], objects: list[str], detail: str, source: str)`; `check_plate(objects: Sequence[RuleObject], *, sequence: Literal['by layer','by object'], clearances: Clearances, skirt_mm: float, wrapping_detection: bool) -> list[RuleWarning]`; `obj_distance(objects, clearances, skirt_mm, by_object: bool) -> float`.
 
 - [ ] **Step 1: Write the failing tests** — `test_h2c_values`: `clearances_for('Bambu Lab H2C')` has `max_radius == 96`, `radius == 49`, `height_to_rod == 47.4`, `height_to_lid == 201`, `dist_to_rod == 50`, `wrapping_exclude == [[(145,310),(251,310),(251,326),(145,326)]]`. `test_hull_clearance_h2c`: two 20 mm squares 95 mm apart in X, both 30 mm tall (shorter than `height_to_rod` 47.4, so no rod rule applies, and taller than the H2C's `nozzle_height` 4, so `max_radius` applies), by object → one `hull_clearance` warning; 96 mm apart → none. `test_skirt_adds`: skirt 10 mm → `obj_distance == max(47.9 + 5, 10)`. `test_tall_before_overlapping_y`: object A 70 mm prints first, B 30 mm (shorter than `height_to_rod`) prints after in an overlapping Y band (bands grown by 25 mm per side) → `too_tall_rod` on A; swap order → none. `test_last_object_uses_printable_height`. `test_wrapping_exclude_warns_in_both_modes`: an object in the wrapping area → `wrapping_exclude` in both modes (spec assumption 11). `test_menorah_layout`: the owner's 3-plate layout from #6246 → no warnings; all 10 candles on one plate → warnings.
-- [ ] **Step 2: Run** `cd backend && uv run pytest tests/render/test_plate_rules.py -v` — expect FAIL.
+- [ ] **Step 2: Run** `cd backend && uv run pytest tests/test_plate_rules.py -v` — expect FAIL.
 - [ ] **Step 3: Implement** with shapely. It is not a backend dependency today, so add `shapely` to `backend/pyproject.toml` and `backend/uv.lock`. Use `buffer(obj_distance, join_style='round')` for the grown hull. Each rule's docstring carries its `Print.cpp` link from spec §5.2. Write each test case also as a vector file (`{input, expected}`).
 - [ ] **Step 4: Run** — expect PASS.
 - [ ] **Step 5: Commit** `feat(render): Bambu Studio's by-object rules in one module (#6274)`.
@@ -87,14 +87,14 @@
 - Modify: `backend/scadbuddy/workflows/outputs.py` (write the document blob beside each output it writes; `Layout` becomes a view of it)
 - Modify: `backend/scadbuddy/render/objects3mf.py` (expose volume types and instances to the reader)
 - Create: routes `GET /api/v1/outputs/{id}/plate-document` and `GET /api/v1/library/files/{id}/plate-document` in `backend/scadbuddy/api/outputs.py`
-- Test: `backend/tests/render/test_plate_document.py`; fixtures: an Arrange output, a declared-objects output, a Bambu Studio project with a modifier and two instances (LFS)
+- Test: `backend/tests/test_plate_document.py`; fixtures: an Arrange output, a declared-objects output, a Bambu Studio project with a modifier and two instances (LFS)
 
 **Interfaces:**
 - Produces: `PlateDocument(version: Literal[1], plates: list[DocPlate], objects: dict[str, DocObject], parts: dict[str, DocPart], groups: dict[str, DocGroup], process_overrides: dict[str, Any])`; `DocPlate(id: str, name: str | None, objects: list[str])`; `DocObject(id: str, name: str, transform: Matrix34, parts: list[str], settings: dict[str, Any], group: str | None)`; `DocPart(id: str, mesh: BlobPointer, volume_type: Literal['part','negative','modifier','support_blocker','support_enforcer'], slot: int, transform: Matrix34, settings: dict[str, Any])`; `read_document(threemf: BinaryIO) -> PlateDocument`; `write_3mf(doc: PlateDocument, out: BinaryIO, *, project: ProjectSettings) -> None`; `document_of(output_id: str) -> PlateDocument` (reads the blob, or reads the 3MF once and stores the blob for an older output).
 - Ids: `o1`, `o2`, … and `o1.p1`, …; stored in `model_settings.config` metadata `scadbuddy_id`.
 
 - [ ] **Step 1: Write the failing tests** — `test_round_trip_ids`: read → write → read keeps every id, transform (to 1e-6), slot, volume type and setting. `test_bbs_project_modifier_kept` (Review Focus 1). `test_order_is_object_order`: the written `<build>` items follow `DocPlate.objects`. `test_old_output_reads`: an output with no blob gets one on first `document_of`.
-- [ ] **Step 2: Run** `cd backend && uv run pytest tests/render/test_plate_document.py -v` — expect FAIL.
+- [ ] **Step 2: Run** `cd backend && uv run pytest tests/test_plate_document.py -v` — expect FAIL.
 - [ ] **Step 3: Implement.** Reuse `bambu3mf.py`'s writer pieces; do not add a second XML writer.
 - [ ] **Step 4: Run** — expect PASS; also `uv run pytest tests/ -k "outputs or arrange" -n auto`.
 - [ ] **Step 5: Commit** `feat(render): a plate document with stable object and part ids (#6275)`.
@@ -109,7 +109,7 @@
 
 ### Task 4b: Split a template plate into objects (issue #6245)
 
-**Files:** Modify `backend/scadbuddy/workflows/outputs.py`, `backend/scadbuddy/render/split.py`; Modify `docs/superpowers/specs/2026-10-13-declared-objects-design.md` §2 (one line pointing at the new rule); Test `backend/tests/render/test_template_objects.py`.
+**Files:** Modify `backend/scadbuddy/workflows/outputs.py`, `backend/scadbuddy/render/split.py`; Modify `docs/superpowers/specs/2026-10-13-declared-objects-design.md` §2 (one line pointing at the new rule); Test `backend/tests/test_template_objects.py`.
 
 **Interfaces:** Produces `group_shells(parts: Sequence[ColourPart], gap_mm: float = GAP_MM) -> list[list[ColourPart]]`.
 
@@ -148,14 +148,14 @@ As #3770's body says. Additional requirement from this epic: the tower model ans
 **Files:**
 - Create: `backend/scadbuddy/render/plate_ops.py`
 - Modify: `backend/scadbuddy/api/outputs.py` (`POST /api/v1/plate-edits` (body `source: {output_id} | {library_file_id}`, optional `order_item_id`), `POST /api/v1/plate-rules/check`)
-- Test: `backend/tests/render/test_plate_ops.py`, `backend/tests/api/test_plate_edits.py`
+- Test: `backend/tests/test_plate_ops.py`, `backend/tests/api/test_plate_edits.py`
 
 **Interfaces:**
 - Consumes: Task 3's `PlateDocument`, Task 2's `check_plate`.
 - Produces: `PlateOp` (a pydantic discriminated union on `op`: `move{ids, delta}`, `rotate{ids, axis, degrees, about}`, `scale{ids, factors}`, `lay_on_face{id, face_normal}`, `drop_to_bed{ids}`, `to_plate{ids, plate}`, `delete{ids}`, `duplicate{id, count}`, `split_to_objects{id}`, `split_to_parts{id}`, `merge{ids}`, `set_filament{part, slot}`, `set_settings{id, values}`, `clear_settings{id, keys}`, `group{ids, name}`, `ungroup{id}`, `reorder{plate, objects}`, `arrange{plate, pinned}`); `apply_ops(doc: PlateDocument, ops: Sequence[PlateOp]) -> PlateDocument`; route body `{ops: list[PlateOp], print: PrintSettingsRef | None}` → `{output_id: str, warnings: list[RuleWarning]}`.
 
 - [ ] **Step 1: Tests** — one per op (ids kept; new ids for new objects; `drop_to_bed` puts min z at 0; split and merge write new mesh blobs); `test_source_unchanged`; `test_library_file_source`; `test_order_item_revision_only_with_order_item_id`; `test_two_saves_two_outputs` (Review Focus 3); `test_storefront_role_refused` (403 for a storefront principal, Review Focus 5); `test_unknown_setting_saved_with_warning` (Review Focus 2).
-- [ ] **Steps 2–4:** fail, implement, pass (`cd backend && uv run pytest tests/render/test_plate_ops.py tests/api/test_plate_edits.py -v`).
+- [ ] **Steps 2–4:** fail, implement, pass (`cd backend && uv run pytest tests/test_plate_ops.py tests/api/test_plate_edits.py -v`).
 - [ ] **Step 5: Commit** `feat(api): plate edits as an operation list, saved as a new output (#6276)`.
 
 ### Task 9: `PlateEditor`: capabilities, selection, object list (issue #6277)
@@ -189,16 +189,16 @@ As #3770's body says. Additional requirement from this epic: the tower model ans
 
 ### Task 12: Assemblies and print order (issue #6280)
 
-**Files:** Modify `ObjectList.tsx` (drag to reorder, group, ungroup); Create `frontend/src/lib/plateRules.ts` (TypeScript port of `plate_rules.check_plate`, run against `backend/tests/render/vectors/plate_rules/*.json`); Test `plateRules.test.ts`, `ObjectList.order.test.tsx`.
+**Files:** Modify `ObjectList.tsx` (drag to reorder, group, ungroup); Create `frontend/src/lib/plateRules.ts` (TypeScript port of `plate_rules.check_plate`, run against `backend/tests/vectors/plate_rules/*.json`); Test `plateRules.test.ts`, `ObjectList.order.test.tsx`.
 
 - [ ] **Step 1: Tests** — every vector file passes in TypeScript; `drag reorders and emits reorder`; `order change re-runs the rules and marks a too-tall object`.
 - [ ] **Steps 2–4.** **Step 5: Commit** `feat(ui): assemblies and print order in the object list (#6280)`.
 
 ### Task 13: Per-object and per-part settings, any key (issue #6253)
 
-**Files:** Modify `backend/scadbuddy/render/bambu3mf.py` (`set_part_settings` → `set_settings(doc)` for objects and parts, any key), `backend/scadbuddy/bambuddy/part_settings.py` (no key list); Create `frontend/src/components/plate/SettingsPanel.tsx` (reuses #2998's settings list; shows the level that set each value, spec §7.4); Test `backend/tests/render/test_object_settings.py`, `SettingsPanel.test.tsx`.
+**Files:** Modify `backend/scadbuddy/render/bambu3mf.py` (`set_part_settings` → `set_settings(doc)` for objects and parts, any key), `backend/scadbuddy/bambuddy/part_settings.py` (no key list); Create `frontend/src/components/plate/SettingsPanel.tsx` (reuses #2998's settings list; shows the level that set each value, spec §7.4); Test `backend/tests/test_object_settings.py`, `SettingsPanel.test.tsx`.
 
-**Interfaces:** Consumes Task 1's `search`, `SettingDef.scope`; Task 8's `set_settings` op.
+**Interfaces:** Consumes Task 1's `settings_catalogue.search`, `SettingDef.scope`; Task 8's `set_settings` op.
 
 - [ ] **Step 1: Tests** — `test_any_key_written` (`{"brim_type": "no_brim", "x_made_up": 1}` on `o2` → both in that object's metadata); `test_print_scope_key_warns` (`enable_prime_tower` on an object → warning "applies to the whole print only"); `test_precedence` (part beats object beats slot beats print); `panel shows which level set the value`.
 - [ ] **Steps 2–4.** **Step 5: Commit** `feat(print): slicer settings per object and per part, any key (#6253)`.
@@ -278,7 +278,7 @@ Queue all writes each file's choices and the bed type; the quote dialog writes t
           └─> #6277 ─┬─> #6278, #6279, #3772, #6282, #6253
 #3770 ─> #3772
 #6280 ─> #3772
-#2998 ─> #6253, #6281
+#2998 ─> #6246, #6253, #6281
 #6245, #6246, #6253, #6278, #6283 ─> #6284
 #6218, #6219: no blockers
 ```
