@@ -421,7 +421,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     await db.sql`
       INSERT INTO ai_escalation_deliveries (request_id, session_id)
       SELECT 'flow:gone-' || lpad(g::text, 4, '0') || ':wr1:c1', ${parent}::uuid FROM generate_series(1, ${STILL_WAITING_BATCH + 7}) g`
-    expect(await escalations.deliver()).toBe(0)
+    // Each ask names one batch at most (#6251 review): counted on the reads the prune calls.
+    const sql = new SqlFlowRunReads(db.sql)
+    const asked: number[] = []
+    const counted: FlowRunReads = {
+      starter: (runId, execution) => sql.starter(runId, execution),
+      decisions: (requestId, inputHash) => sql.decisions(requestId, inputHash),
+      grantInForce: (grantId) => sql.grantInForce(grantId),
+      queue: (runId) => sql.queue(runId),
+      waitingRuns: () => sql.waitingRuns(),
+      steps: (runId) => sql.steps(runId),
+      parentHopApprovals: (after, limit) => sql.parentHopApprovals(after, limit),
+      stillAtParentHop: (requestIds) => {
+        asked.push(requestIds.length)
+        return sql.stillAtParentHop(requestIds)
+      },
+    }
+    const batched = new Escalations({ sql: db.sql, reads: counted, durable: () => undefined, send })
+    expect(await batched.deliver()).toBe(0)
+    expect(asked).toEqual([STILL_WAITING_BATCH, 8])
     const records = (await db.sql<{ request_id: string }[]>`SELECT request_id FROM ai_escalation_deliveries`).map((r) => r.request_id)
     expect(records).toEqual([ownCall])
   })

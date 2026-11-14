@@ -20,10 +20,13 @@ export class CrudReadError extends Error {
   override name = 'CrudReadError'
   /** The answer's status, when there was one. */
   readonly status: number | undefined
+  /** Whether the answer was the route's own (`X-ScadBuddy-Crud: 1`), not a proxy's. */
+  readonly fromRoute: boolean
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, fromRoute = false) {
     super(message)
     this.status = status
+    this.fromRoute = fromRoute
   }
 }
 
@@ -61,7 +64,7 @@ export async function crudRead<T>(
   const detail = crud ? await detailOf(response) : ''
   if (!crud) await response.body?.cancel()
   const who = crud ? 'the backend refused' : 'no CRUD route answered'
-  throw new CrudReadError(`${who} ${step} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`, response.status)
+  throw new CrudReadError(`${who} ${step} (HTTP ${response.status}${detail ? `: ${detail}` : ''})`, response.status, crud)
 }
 
 export type CrudAreasOptions = {
@@ -86,7 +89,7 @@ export class CrudAreas {
   #timer: NodeJS.Timeout | undefined
   #started = false
   #stopped = false
-  /** The reasons for waiting already logged, each once. */
+  /** The kinds of reason for waiting already logged, each once (`refresh`). */
   readonly #logged = new Set<string>()
 
   constructor(baseUrl: string, options: CrudAreasOptions) {
@@ -120,9 +123,14 @@ export class CrudAreas {
     clearTimeout(this.#timer)
   }
 
-  /** One read of the areas; whether every wanted one is listed now. Logs once while it waits. */
+  /**
+   * One read of the areas; whether every wanted one is listed now. Logs each kind of reason for
+   * waiting once (the areas missing, a status and whose answer it was, a transport failure),
+   * never again for a detail that varies.
+   */
   async refresh(): Promise<boolean> {
     let why: string
+    let kind: string
     try {
       const { areas } = await crudRead<{ areas: unknown }>(this.#fetch, this.#base, 'its areas', '/areas')
       const before = this.complete
@@ -134,18 +142,24 @@ export class CrudAreas {
         return true
       }
       why = `missing ${this.#wanted.filter((a) => !this.#listed.has(a)).join(', ')}`
+      kind = why
     } catch (error) {
-      const status = error instanceof CrudReadError ? error.status : undefined
-      if (status === 401 || status === 403) {
-        // Not an older pod: no live credential, or one without `crud.agent` (#6234 review).
-        why = `the backend refused the agent's service credential (HTTP ${status}); check SCADBUDDY_SERVICE_TOKEN_FILE or the credential view`
+      const refusal = error instanceof CrudReadError ? error : undefined
+      if (refusal?.fromRoute && (refusal.status === 401 || refusal.status === 403)) {
+        // The route's own refusal, not an older pod's or a proxy's: no live credential, or one
+        // without `crud.agent` (#6234 review).
+        why = `the backend refused the agent's service credential (HTTP ${refusal.status}); check SCADBUDDY_SERVICE_TOKEN_FILE or the credential view`
       } else {
         why = (error as Error).message
       }
+      // A status (and whose answer it was), or a transport failure's message, which names only
+      // its kind: a problem's detail that varies (a request id) logs nothing more.
+      kind = refusal?.status === undefined ? why : `HTTP ${refusal.status}${refusal.fromRoute ? ' route' : ''}`
     }
-    // Each reason once: a refused credential is not hidden behind an earlier "missing".
-    if (!this.#logged.has(why)) {
-      this.#logged.add(why)
+    // Each kind once: a refused credential is not hidden behind an earlier "missing", and the
+    // set stays as small as the kinds a wait meets.
+    if (!this.#logged.has(kind)) {
+      this.#logged.add(kind)
       this.#log(`CRUD areas: waiting for the backend's agent areas (${why}); reading over SQL until it lists them`)
     }
     return false
