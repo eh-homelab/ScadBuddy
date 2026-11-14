@@ -27,6 +27,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
   },
   {
+    operation: 'GET /api/v1/storefront/listings/{listing_id}',
+    reason: "The Storefront page's editor reads one listing at its own address (#6157); an agent tool follows with #5283.",
+  },
+  {
+    operation: 'POST /api/v1/storefront/listings/{listing_id}/move',
+    reason: "The Storefront page's \"Move to top\" and \"Move to position…\" (#6157); an agent tool follows with #5283.",
+  },
+  {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); an agent tool follows with #5283.",
   },

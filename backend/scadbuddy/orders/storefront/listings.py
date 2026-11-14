@@ -54,7 +54,11 @@ from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
     ListingMedia,
+    ListingPage,
+    ListingQuery,
+    ListingRow,
     ListingSnapshot,
+    ListingSort,
     NumberBound,
     ParamBound,
     PublicChoice,
@@ -106,6 +110,13 @@ _COLUMNS = (
     " media_ids, snapshot, media, published_at, created_at, updated_at"
 )
 _NUMBERS = frozenset({"number", "integer", "slider"})
+#: Each sort's columns, the last of each the id, so a page boundary never splits ties.
+_SORTS: Final[Mapping[ListingSort, tuple[str, ...]]] = {
+    "position": ("position", "id"),
+    "title": ("lower(title)", "id"),
+    "slug": ("slug", "position", "id"),
+    "updated": ("updated_at", "id"),
+}
 
 type Pool = ConnectionPool[Connection[DictRow]]
 
@@ -115,7 +126,7 @@ def problem(status_code: int, slug: str, detail: str, **extensions: Any) -> ApiE
     return ApiError(status_code, detail, type_=STOREFRONT_PROBLEMS + slug, **extensions)
 
 
-def _not_found(listing_id: str) -> ApiError:
+def listing_not_found(listing_id: str) -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", f"no listing {listing_id!r}")
 
 
@@ -134,6 +145,11 @@ def _changed(listing_id: str) -> ApiError:
         "listing_changed",
         f"listing {listing_id!r} changed since it was read; load it again",
     )
+
+
+def _like_escaped(text: str) -> str:
+    """``text`` with LIKE's wildcards and its escape character taken literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _listing(row: DictRow) -> Listing:
@@ -267,7 +283,7 @@ class ListingStore:
         found = conn.execute(
             "SELECT 1 FROM storefront_listings WHERE id = %s", (listing_id,)
         ).fetchone()
-        return _not_found(listing_id) if found is None else _changed(listing_id)
+        return listing_not_found(listing_id) if found is None else _changed(listing_id)
 
     def get(self, listing_id: str) -> Listing | None:
         with self.pool.connection() as conn:
@@ -306,6 +322,77 @@ class ListingStore:
             ).fetchall()
         return [_listing(row) for row in rows]
 
+    def page(self, query: ListingQuery) -> ListingPage:
+        """One page of the listings that match ``query`` (#6157), and how many match.
+        Each row's ``place`` is its place in the shop's whole order, filtered or not."""
+        where: list[str] = []
+        args: list[object] = []
+        if query.q.strip():
+            pattern = f"%{_like_escaped(query.q.strip().lower())}%"
+            where.append("(lower(title) LIKE %s OR lower(slug) LIKE %s)")
+            args += [pattern, pattern]
+        if query.status is not None:
+            where.append("published" if query.status == "published" else "NOT published")
+        if query.slug:
+            where.append("slug = ANY(%s)")
+            args.append(query.slug)
+        if query.material:
+            where.append(
+                "EXISTS (SELECT 1 FROM filaments f WHERE f.id = ANY(colours)"
+                " AND upper(f.material) = ANY(%s))"
+            )
+            args.append([material.upper() for material in query.material])
+        filtered = f"WHERE {' AND '.join(where)}" if where else ""
+        direction = "DESC" if query.dir == "desc" else "ASC"
+        order = ", ".join(f"{column} {direction}" for column in _SORTS[query.sort])
+        with self.pool.connection() as conn:
+            total_row = conn.execute(
+                f"SELECT count(*) AS n FROM storefront_listings {filtered}", args
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT id, slug, commit, title, place, published, media_ids[1] AS media_id,"
+                " published_at, updated_at FROM ("
+                "  SELECT *, row_number() OVER (ORDER BY position, id) AS place"
+                "  FROM storefront_listings"
+                f") ranked {filtered} ORDER BY {order} LIMIT %s OFFSET %s",
+                [*args, query.limit, query.offset],
+            ).fetchall()
+        assert total_row is not None
+        return ListingPage(
+            items=[ListingRow.model_validate(row) for row in rows],
+            total=total_row["n"],
+            limit=query.limit,
+            offset=query.offset,
+        )
+
+    def move(self, listing_id: str, place: int) -> Listing:
+        """The listing put at ``place`` (from 1; past the end is last) in the shop's
+        order (#6157); the others keep their order around it. 404 when it is gone."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM storefront_listings ORDER BY position, id FOR UPDATE"
+                ).fetchall()
+            ]
+            if listing_id not in ids:
+                raise listing_not_found(listing_id)
+            ids.remove(listing_id)
+            ids.insert(min(place, len(ids) + 1) - 1, listing_id)
+            conn.execute(
+                "UPDATE storefront_listings SET position = given.position - 1"
+                " FROM unnest(%s::text[]) WITH ORDINALITY AS given(id, position)"
+                " WHERE storefront_listings.id = given.id"
+                " AND storefront_listings.position IS DISTINCT FROM given.position - 1",
+                (ids,),
+            )
+            row = conn.execute(
+                f"SELECT {_COLUMNS} FROM storefront_listings WHERE id = %s", (listing_id,)
+            ).fetchone()
+        assert row is not None
+        return _listing(row)
+
     def reorder(self, ids: Sequence[str]) -> list[Listing]:
         """Every listing, in the order of ``ids``. ``ids`` must name each listing once:
         an order made from a list that has since gained or lost one is 409
@@ -337,7 +424,7 @@ class ListingStore:
                 (listing_id,),
             ).fetchone()
             if row is None:
-                raise _not_found(listing_id)
+                raise listing_not_found(listing_id)
             if row["published"]:
                 raise problem(
                     status.HTTP_409_CONFLICT,
@@ -388,7 +475,7 @@ class ListingStore:
                 (listing_id,),
             ).fetchone()
             if row is None:
-                raise _not_found(listing_id)
+                raise listing_not_found(listing_id)
             _drop_holds(conn, listing_id)
         return _listing(row)
 
@@ -709,7 +796,7 @@ async def publish(core: Core, store: ListingStore, listing_id: str) -> Listing:
     :data:`PUBLISH_LOCKS_MAX` other publishes run."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
-        raise _not_found(listing_id)
+        raise listing_not_found(listing_id)
     snapshots = core.store.snapshots
     # The public site serves listing media as presigned GETs, and a visitor's render
     # reads the snapshot from the content store (plan).
