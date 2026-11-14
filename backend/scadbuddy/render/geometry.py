@@ -116,6 +116,7 @@ from scadbuddy.render.bambu3mf import (
     PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
+    TooManyTrianglesError,
     laid_out_plates,
     parse_model,
 )
@@ -351,22 +352,31 @@ class Unreadable3MFError(ValueError):
     """
 
 
-def parts_from_3mf(path: Path | IO[bytes], plate: int = 1) -> list[ColourPart]:
+def parts_from_3mf(
+    path: Path | IO[bytes], plate: int = 1, *, max_triangles: int | None = None
+) -> list[ColourPart]:
     """The parts on one plate of a ScadBuddy 3MF, in extruder order.
 
     Read from the ``3D/Objects/object_<n>.model`` files `bambu3mf.write_plates_3mf`
     wrote for that plate -- the meshes in model coordinates, without the build
     item's placement. Each part's ``material_index`` is its extruder, which on a
     later plate is not its position. Raises :class:`NoSuchPlateError` when there is
-    no such plate and :class:`Unreadable3MFError` when the file is damaged.
+    no such plate and :class:`Unreadable3MFError` when the file is damaged. With
+    ``max_triangles``, the plate's meshes together may hold at most that many
+    triangles, and three vertices for each: past it, :class:`TooManyTrianglesError`,
+    raised as the parse reaches it.
     """
-    return _plate_parts(path, plate)[0]
+    return _plate_parts(path, plate, max_triangles)[0]
 
 
-def _plate_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
+def _plate_parts(
+    path: Path | IO[bytes], plate: int, max_triangles: int | None = None
+) -> tuple[list[ColourPart], int]:
     """The plate's parts and how many plates the 3MF has."""
     try:
-        return _read_parts(path, plate)
+        return _read_parts(path, plate, max_triangles)
+    except TooManyTrianglesError:
+        raise
     except (zipfile.BadZipFile, ET.ParseError, zlib.error, EOFError, ValueError) as error:
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
@@ -400,8 +410,11 @@ def _placed(
     return moved, faces[:, ::-1] if mirrors else faces
 
 
-def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
+def _read_parts(
+    path: Path | IO[bytes], plate: int, max_triangles: int | None = None
+) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
+    left = max_triangles
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         laid_out = laid_out_plates(archive)
@@ -444,7 +457,14 @@ def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], i
             if index in negative:
                 continue
             name = f"3D/Objects/object_{index}.model"
-            model = parse_model(archive, name)
+            model = parse_model(
+                archive,
+                name,
+                max_triangles=left,
+                max_vertices=None if left is None else 3 * left,
+            )
+            if left is not None:
+                left -= sum(len(arrays.faces) for arrays in model.meshes.values())
             obj = model.root.find(f".//{{{CORE_NS}}}object")
             meshes = list(model.meshes.values())
             vertices = meshes[0].vertices if meshes else np.empty((0, 3))

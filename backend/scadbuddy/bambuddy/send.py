@@ -43,6 +43,7 @@ from scadbuddy.render.bambu3mf import (
     FilamentMap,
     PartOverrides,
     PartSettingsUnwritableError,
+    TooManyTrianglesError,
     hint_painted_slots,
     layout_of,
     plate_origin,
@@ -455,16 +456,31 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     return _with_parts(hint_painted_slots(payload), target.part_settings)
 
 
+#: The most triangles an author's file may hold, every covered plate's together, for its
+#: covers to be redrawn (:func:`_recoloured_covers`). The file is untrusted and the read
+#: budget's default sets no triangle limit (``read_max_triangles`` 0), so this bounds the
+#: parse and the rasteriser on its own: at most about 200 MB of vertex and face arrays.
+#: The prod file of #6170 holds 24,540.
+COVER_MAX_TRIANGLES = 2_000_000
+
+
 def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
     """An author's file with its covers redrawn in ``colours`` (:func:`recolour_3mf`):
     the slicer keeps the covers it is handed, so the author's colours would become the
     sliced file's plate image, Bambuddy's job cover (#6170). A file whose plates do not
-    read back (still the author's, :func:`layout_of`) keeps its covers."""
+    read back (still the author's, :func:`layout_of`), or whose meshes hold more than
+    :data:`COVER_MAX_TRIANGLES` (:class:`TooManyTrianglesError`), keeps its covers."""
     if colours is None:
         return payload
     try:
-        return recolour_3mf(payload, colours)
-    except (LookupError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
+        return recolour_3mf(payload, colours, max_triangles=COVER_MAX_TRIANGLES)
+    except (
+        TooManyTrianglesError,
+        LookupError,
+        ValueError,
+        ET.ParseError,
+        zipfile.BadZipFile,
+    ) as error:
         logger.warning(
             "the 3MF's covers could not be redrawn in the spools' colours",
             extra={"error": type(error).__name__},

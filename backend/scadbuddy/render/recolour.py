@@ -26,7 +26,9 @@ from scadbuddy.render.split import normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 
 
-def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
+def recolour_3mf(
+    payload: bytes, colours: Sequence[str], *, max_triangles: int | None = None
+) -> bytes:
     """Return ``payload`` with ``filament_colour`` set to ``colours`` and every plate's
     cover images redrawn in them.
 
@@ -34,7 +36,10 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
     raises :class:`ValueError`, since the extruder numbers of every part index into it.
     A file written without covers gets none. Written in the writer's policy, every entry
     it does not change copied as its compressed bytes (:func:`rezipped`, #3679). An
-    author's ``plate_no_light_<n>.png`` is replaced by the lit cover.
+    author's ``plate_no_light_<n>.png`` is replaced by the lit cover. With
+    ``max_triangles``, the meshes read for the covers, every plate's together, may hold
+    at most that many triangles: past it, :class:`TooManyTrianglesError`, raised as the
+    parse reaches it, so an untrusted file cannot make the read unbounded.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
@@ -52,8 +57,12 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
         # Read from the recoloured archive, in memory: that is what gives each part its
         # new colour through its extruder number.
         recoloured = io.BytesIO(rezipped(payload, changed))
+        left = max_triangles
         for index in covered:
-            drawn = render_plate_thumbnails(parts_from_3mf(recoloured, index))
+            parts = parts_from_3mf(recoloured, index, max_triangles=left)
+            if left is not None:
+                left -= sum(len(part.mesh.faces) for part in parts)
+            drawn = render_plate_thumbnails(parts)
             changed.update(
                 zip(
                     cover_names(index),

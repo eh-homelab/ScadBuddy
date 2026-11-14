@@ -813,6 +813,30 @@ def test_an_authors_file_whose_plates_do_not_read_back_keeps_its_covers(
     assert settings["filament_colour"] == ["#00C000", "#00C000"]
 
 
+def test_an_authors_file_past_the_cover_budget_keeps_its_covers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An author's file is untrusted: its meshes are read for the covers only within
+    :data:`send.COVER_MAX_TRIANGLES`, counted over every plate. Past it, the print goes
+    on with the covers the file has (#6172 review)."""
+    # Each plate is a box of 12 triangles: the first plate fits, the second does not.
+    monkeypatch.setattr(send, "COVER_MAX_TRIANGLES", 20)
+    payload = _authors_3mf(tmp_path, covers=True)
+
+    laid_out = send._laid_out_for(
+        payload, Target(DEFAULT_PLATE, "0.4", colours=("#00C000", "#00C000"))
+    )
+
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(laid_out)) as after,
+    ):
+        for name in ("Metadata/plate_1.png", "Metadata/plate_2.png"):
+            assert after.read(name) == before.read(name), name
+        settings = json.loads(after.read(PROJECT_SETTINGS_NAME))
+    assert settings["filament_colour"] == ["#00C000", "#00C000"]
+
+
 async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_exists() -> None:
     """B7: read the way an output's is, from a recorded copy when one exists; before
     any, from the file itself, which Bambuddy has already, so nothing is uploaded."""
