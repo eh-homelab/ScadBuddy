@@ -86,8 +86,9 @@ def test_the_templates_print_settings_are_saved_into_the_file(
     assert settings["wipe_tower_no_sparse_layers"] == "1"
     assert settings["enable_support"] == "0"
     # The process first, then one per filament, then the printer: as Bambu Studio saves it.
+    # The keys in model.json's order (#2998: no allowlist orders them).
     assert settings["different_settings_to_system"] == [
-        "enable_prime_tower;wipe_tower_no_sparse_layers;enable_support",
+        "enable_support;enable_prime_tower;wipe_tower_no_sparse_layers",
         "",
         "",
     ]
@@ -117,8 +118,8 @@ def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
         "job_id"
     ]
     wait_for_job(client, job_id)
-    # An int, not a string: print_settings values are StrictStr.
-    _declare(paths, model, {"enable_support": 1})
+    # An object: no setting takes one (#2998 takes any string, number or list).
+    _declare(paths, model, {"enable_support": {"on": 1}})
 
     saved = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
