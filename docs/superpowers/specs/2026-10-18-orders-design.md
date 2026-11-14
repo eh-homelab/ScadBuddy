@@ -714,7 +714,10 @@ nothing slow before the start the look has at least 22 s, and more when the last
 answers at once): a run there is attached; neither a run nor an open `print-<key>`
 workflow releases the claim; and when it cannot tell (the workflow still accepting,
 Temporal away, or no answer in time) the claim is kept, since a run may exist and a released claim would let a new print
-print the item twice, and the failure names the attempt to settle by hand. Any other 5xx
+print the item twice, and the failure names the attempt to settle by hand. A follow cut
+short by slow work before the start can end before the `print-<key>` workflow refuses
+itself, so its look is more likely to find it still accepting and keep the claim: the safe
+outcome, at the cost of a claim to settle by hand (#6202). Any other 5xx
 (a start Temporal refused, 500) fails the operation at once with the claim kept. The
 `request_id` is made from the item and the key, and a claim found under it on another item
 is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
