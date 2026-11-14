@@ -24,7 +24,8 @@ test.describe('sell on storefront', () => {
     const preview = page.getByTestId('listing-preview')
     await expect(preview.getByLabel('Name on the tag')).toBeVisible()
     await expect(preview.getByLabel('Text size')).toHaveCount(0)
-    await expect(page.getByRole('region', { name: 'Set by you' })).toContainText('Text size 14')
+    // #6290 — a locked setting shows its value in place, in the one list.
+    await expect(page.getByRole('region', { name: 'Settings' }).getByLabel('Value of Text size')).toHaveValue('14')
 
     const problems = page.getByTestId('colour-problems')
     await expect(problems).toContainText('Plate is #1B6CA8')

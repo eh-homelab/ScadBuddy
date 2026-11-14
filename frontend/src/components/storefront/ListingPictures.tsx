@@ -23,7 +23,7 @@ function pictureNote(id: string, item: MediaView | undefined, images: readonly s
   return null
 }
 
-/** The image types a listing's upload takes: the storefront shows images only (#6131). */
+/** The image types a listing's upload takes. The store also shows a video a listing names, but an upload here adds an image (#6290). */
 const PICTURE_ACCEPT = 'image/png,image/jpeg,image/webp'
 
 /**
