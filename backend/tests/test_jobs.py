@@ -26,7 +26,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import GLYPH_CHECK_TIMEOUT
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.meshmodel.scene import SCENE_NAME
-from scadbuddy.render import jobs
+from scadbuddy.render import jobs, submit
 from scadbuddy.render import solids as solids_module
 from scadbuddy.render import split as split_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
@@ -65,6 +65,7 @@ from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender, solid_file, solid_mesh
 from scadbuddy.render.split import ColourPart, Paint, split_by_material
+from scadbuddy.render.submit import RenderService
 from tests.conftest import PgPool, write_openscad_3mf
 from tests.meshmodel.test_paint import (
     GREEN,
@@ -1923,3 +1924,24 @@ async def test_the_solids_stage_splits_and_writes_its_meshes_off_the_event_loop(
     # Both were reached, so an empty `on_loop` is not a guard that never ran.
     assert {"split", "write_glb"} <= set(ran)
     assert on_loop == []
+
+
+@pytest.mark.parametrize(("job_ttl", "pruned"), [(0.0, []), (600.0, [600.0])])
+async def test_the_prune_keeps_revision_exports_for_the_sweep_grace_at_any_job_ttl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job_ttl: float, pruned: list[float]
+) -> None:
+    """#6236: at ``job_ttl`` 0 the prune asks the store to remove no job. It still prunes
+    the revision exports, after ``sweep_grace`` (the default day), not after 0."""
+    jobs: list[float] = []
+    exports: list[float] = []
+    monkeypatch.setattr(submit, "prune_revision_exports", lambda paths, ttl: exports.append(ttl))
+    service = object.__new__(RenderService)
+    service.store = mock.Mock(prune=jobs.append)
+    service.config = Config(data_dir=tmp_path, job_ttl=job_ttl)
+    service.paths = DataPaths(tmp_path)
+    service.settle = mock.AsyncMock()  # type: ignore[method-assign]
+    await service.prune()
+    assert jobs == pruned
+    assert exports == [service.config.sweep_grace]
+    assert exports != [0.0]
+    service.settle.assert_awaited_once()

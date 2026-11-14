@@ -1092,7 +1092,8 @@ def _make_staging(staging: Path) -> None:
     directory, that ``rmdir`` cannot take it, so only this make is exposed.
 
     That rests on the prune's ``rmtree`` also passing it by: it takes only exports
-    older than its TTL (``job_ttl``, in seconds; 24 h by default), and a staging
+    older than ``Config.sweep_grace`` (``job_ttl`` in seconds, 24 h by default; 24 h
+    also while ``job_ttl`` is 0, which keeps renders forever), and a staging
     directory is seconds old for as long as ``git archive`` runs. A TTL that short
     would reopen the race."""
     for attempt in range(_STAGING_TRIES):
