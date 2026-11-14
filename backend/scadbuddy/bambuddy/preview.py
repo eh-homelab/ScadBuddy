@@ -97,6 +97,11 @@ class SlicePreview(BaseModel):
     progress: int | None = None
     warnings: list[str] = Field(default_factory=list)
     slicer: Literal["bambuddy", "native"] = "bambuddy"
+    #: #265: the API process follows this running slice and publishes its next change on
+    #: ``preview-slice:<slicer>:<job id>`` (`preview_follow/follows.py`). False when it
+    #: does not (too many slices followed at once): the caller then reads on a timer.
+    #: None from a read that does not say (not through the route).
+    followed: bool | None = None
 
 
 async def _planned(

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.authorship import AgentAuthor, authored_as
+from scadbuddy.core.events import Event, FlowChanged, InProcessEventBus
 from scadbuddy.core.gitrepo import GitError, git_env
 from scadbuddy.flows.definitions import (
     FlowDefinitions,
@@ -319,3 +320,23 @@ async def test_a_commitless_row_a_commit_names_is_joined_to_it(
     await definitions.start()
     got = await definitions.get("old")
     assert got is not None and (got.version, got.script) == (1, ONE)
+
+
+async def test_each_write_of_a_flow_tells_the_flows_topic(
+    root: Path, store: FlowStore, jobs: JobProjection
+) -> None:
+    """#265: the panel of runs waiting re-reads the flows list on ``flow.changed``,
+    never on a timer."""
+    bus = InProcessEventBus()
+    seen: list[Event] = []
+    bus.add_listener(seen.append)
+    definitions = FlowDefinitions(FlowHistory(root), store, FlowStates(jobs.pool), events=bus)
+    await definitions.start()
+    one = await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
+    await definitions.update_details("swap", display_name="Swap", description=None)
+    await definitions.restore("swap", one.commit or "", BROWSER)
+    await definitions.archive("swap", BROWSER)
+    await definitions.unarchive("swap")
+    await definitions.delete("swap", BROWSER)
+    assert [(e.kind, getattr(e, "name", None)) for e in seen] == [("flow.changed", "swap")] * 6
+    assert all(isinstance(e, FlowChanged) for e in seen)

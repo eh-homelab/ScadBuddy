@@ -2,13 +2,22 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, type Slicer } from '../api/client'
 import type { NozzlePlan, PrintRunRequest, SlicePreview } from '../api/types'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
+import { getRealtime } from './realtime'
 import { useDebounced } from './useDebounced'
 import { useLatest } from './useLatest'
 
 /** How long the choices settle before they are resliced. */
 export const RESLICE_DEBOUNCE_MS = 1500
-/** How often a slice under way is read. */
+/** How often a slice under way is read while the realtime socket is unavailable (#265). */
 export const RESLICE_POLL_MS = 2000
+
+/**
+ * #265 — the topic a background slice's changes come on: the backend follows the slice
+ * from each read of it and publishes `preview_slice.*` there (`preview_follow/follows.py`).
+ */
+export function previewSliceTopic(slicer: Slicer, jobId: number): string {
+  return `preview-slice:${slicer}:${jobId}`
+}
 
 export interface PreviewSliceState {
   /** The newest finished slice for this source; kept while a newer one runs. */
@@ -64,6 +73,11 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled'])
  * path slices them in the background (`POST …/preview-slice`, nothing queued), and the
  * job is read until it finishes. The last result stays on screen, marked stale, while
  * the next one runs. `request: null` slices nothing.
+ *
+ * #265 — the job is read once now and once per signal on its topic
+ * (`previewSliceTopic`), one read at a time. It is read on a timer only while the
+ * realtime socket is unavailable, or while the last read said the backend does not
+ * follow the slice (`followed: false`).
  */
 export function usePreviewSlice(source: PrintSource | undefined, request: PrintRunRequest | null): PreviewSliceState {
   const latest = useLatest(source)
@@ -87,6 +101,7 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     used.current = forced
     const token = ++attempt.current
     let timer: ReturnType<typeof setTimeout> | undefined
+    let unfollow: (() => void) | undefined
     const live = () => token === attempt.current
     const supersede = () => {
       if (fresh) setShown((old) => (old ? { ...old, superseded: true } : old))
@@ -95,22 +110,67 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     setReslicing(fresh)
     setProgress(null)
     setError(null)
-    const follow = async (jobId: number, plan: NozzlePlan | null, slicer: Slicer) => {
-      const read = await sourceApi(current).readPreview(jobId, slicer)
-      if (!live()) return
-      if (!FINISHED.has(read.status)) {
-        setProgress(read.progress ?? null)
-        timer = setTimeout(() => void follow(jobId, plan, slicer).catch(fail), RESLICE_POLL_MS)
-        return
+    const follow = (jobId: number, plan: NozzlePlan | null, slicer: Slicer) => {
+      const realtime = getRealtime()
+      let ended = false
+      let reading = false
+      let again = false
+      // #265 review: the backend follows at most so many slices at once; a read past that
+      // says `followed: false`, and no event will come, so the timer reads instead.
+      let unfollowed = false
+      const end = () => {
+        ended = true
+        unfollow?.()
+        unfollow = undefined
+        if (timer) clearTimeout(timer)
       }
-      setSlicing(false)
-      setReslicing(false)
-      setProgress(null)
-      if (read.status === 'completed') setShown({ source: own, request: key, result: read, plan, slicer })
-      else {
-        supersede()
-        setError(read.failure ?? 'The slice failed.')
+      const read = async () => {
+        if (ended || !live()) return
+        if (reading) {
+          again = true
+          return
+        }
+        reading = true
+        try {
+          const answer = await sourceApi(current).readPreview(jobId, slicer)
+          if (ended || !live()) return
+          if (!FINISHED.has(answer.status)) {
+            unfollowed = answer.followed === false
+            setProgress(answer.progress ?? null)
+            return
+          }
+          end()
+          setSlicing(false)
+          setReslicing(false)
+          setProgress(null)
+          if (answer.status === 'completed') setShown({ source: own, request: key, result: answer, plan, slicer })
+          else {
+            supersede()
+            setError(answer.failure ?? 'The slice failed.')
+          }
+        } catch (cause) {
+          if (ended) return
+          end()
+          fail(cause)
+        } finally {
+          reading = false
+          if (again) {
+            again = false
+            void read()
+          }
+        }
       }
+      unfollow = realtime.subscribe(previewSliceTopic(slicer, jobId), () => void read())
+      // An open socket confirms the subscription within a round trip, which reads.
+      if (!realtime.willResync) void read()
+      const fallback = () => {
+        timer = setTimeout(() => {
+          if (ended || !live()) return
+          if (unfollowed || realtime.status === 'unavailable') void read()
+          fallback()
+        }, RESLICE_POLL_MS)
+      }
+      fallback()
     }
     const fail = (cause: unknown) => {
       if (!live()) return
@@ -122,12 +182,13 @@ export function usePreviewSlice(source: PrintSource | undefined, request: PrintR
     }
     sourceApi(current)
       .preview(JSON.parse(key) as PrintRunRequest, fresh)
-      .then((started) =>
-        live() ? follow(started.job_id, started.nozzle_plan ?? null, started.slicer ?? 'bambuddy') : undefined,
-      )
+      .then((started) => {
+        if (live()) follow(started.job_id, started.nozzle_plan ?? null, started.slicer ?? 'bambuddy')
+      })
       .catch(fail)
     return () => {
       attempt.current += 1
+      unfollow?.()
       if (timer) clearTimeout(timer)
     }
   }, [own, key, latest, forced])
