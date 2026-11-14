@@ -15,11 +15,12 @@
 - Checkout charges the cached price, looked up by key, and never a price from the browser.
 - "Quoting should be no different than slicing and printing in back office": support and process come from the model, and the profile holds only the printer and a spool per material.
 - "An order can mix and match firm prices and estimates. If unsure, don't show a price."
+- "The page never shows grams or print time" (the last decision of 2026-11-14). The visitor reads only the price. The API may keep grams and print time for the shop.
 - #6236 (renders may be kept forever) and #6237 (a batch pre-renders, pre-slices and pre-prices every colour combination) are noted only.
 
 These decisions supersede the spec's §4 "A price shown as exact. It stays 'about'", §5.4's rough fallback, §5.6.1's process and support profile, and §5.6.2's "Never the Bambuddy path". PR A edits the spec to say so.
 
-Base: origin/main `af6ff3299`. Assumes **#6178** (picks, `one_material`, `RenderLimits.job_of`, `OwnedRender.picks`, `slots_from_picks`, `customer_filaments`, `is_support`) and **#6166** (listing defaults) merge first. Line numbers are on `af6ff3299`.
+Base: origin/main `e76f876c7`. **#6166** (listing defaults) is merged (`6fc158e0d`). Assumes **#6178** (picks, `one_material`, `RenderLimits.job_of`, `OwnedRender.picks`, `slots_from_picks`, `customer_filaments`, `is_support`) merges first. Line numbers are on `e76f876c7`. Each PR re-checks them on its own base before it starts, because #6178 and other merges move them.
 
 ---
 
@@ -34,7 +35,7 @@ Base: origin/main `af6ff3299`. Assumes **#6178** (picks, `one_material`, `Render
 - **If unsure, show no price.** The visitor reads a number only from a completed slice priced with no error. The volume estimate never reaches a visitor.
 - **Support stays internal** (spec §4). Support settings, the support filament and a support line never reach a visitor. `ESTIMATE_FIELDS` (`storefront/routes.py:190-192`) lists every field a visitor reads.
 - Exact copy:
-  - A firm price: `"$X for one"`, and under it `"From {g} g of filament, about {h} h {m} min to print."`.
+  - A firm price: `"$X for one"`. Nothing else: the page never shows grams or print time.
   - While the slice runs or waits: `"Working out the price…"`.
   - With no price (failed, unavailable, unsure): the existing `"We price this design by hand"` and `"Add it to your order, and we will send you the price before you pay."` (`Estimate.tsx:15-16`).
 - Migrations: new files only, named `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`.
@@ -47,7 +48,7 @@ Base: origin/main `af6ff3299`. Assumes **#6178** (picks, `one_material`, `Render
 2. **The price book changes between add and submit.** Expected: 409 `price_changed`, new prices from the cached plates, and no slice. Test: `test_submit_reprices_from_cached_plates_without_slicing` (B2).
 3. **The slice fails, or its execution is lost.** Expected: no number on the page, and the line is priced by the shop. Test: `test_failed_slice_shows_no_price_and_never_restarts` (A3).
 4. **Two visitors with one variant at once, at capacity 1.** Expected: one slice and one cache row. Test: `test_two_reads_one_slice` (A3).
-5. **A mixed cart with a pending purchase link** (#6200 gate, `lifecycle.py:2870-2884`). Expected: the firm quotes are recorded but not accepted, and nothing is charged before the purchase is priced. Test: `test_submit_with_pending_purchase_records_but_does_not_accept` (B2).
+5. **A mixed cart with a pending purchase link** (#6200 gate, `_no_pending_purchase`, `lifecycle.py:2873-2886`). Expected: the firm quotes are recorded but not accepted, and nothing is charged before the purchase is priced. Test: `test_submit_with_pending_purchase_records_but_does_not_accept` (B2).
 
 ---
 
@@ -55,18 +56,18 @@ Base: origin/main `af6ff3299`. Assumes **#6178** (picks, `one_material`, `Render
 
 - **R1. PR order is C → A → B.** — A cannot slice without a profile. — Cost if wrong: none. C alone changes no visitor's view.
 - **R2. A storefront spool per material is a spool id the shop picks from its own inventory** (Bambuddy's or native, as the print dialog's `filament_plan` names it, `bambuddy/filaments.py:229-242`). It is not a preset. — `SliceQuoteRequest.filament_plan` needs a spool per slot (`bambuddy/models.py:548-553`), and the dialog resolves each slot's filament preset from its spool. The spool only picks the preset: the slot's colour comes from the 3MF, and its price from the price-book filament the visitor picked. — Cost if wrong: if the shop runs out of that spool, the profile names a spool that is gone. The slice then fails and the line shows no price, which is the safe side. Task C2 refuses a missing spool at save time.
-- **R3. The subject is an output, not a library copy.** The visitor's done render is saved by the same create-output operation the quote uses (`orders/operations.py:530-531`), under `storefront_output_id(model_sha256)` = `uuid5(NAMESPACE_URL, "scadbuddy:storefront_variant_output:<sha256>")`. — A library copy's `LibrarySource.print_settings` is `{}` (`bambuddy/print_source.py:1134-1136`), so it would lose the template's support and process settings. An output keeps them (`print_source.py:802-806`). — Cost if wrong: outputs grow. `OutputMeta` gains `storefront: bool = False`, which hides them from the back office's lists. They are swept with the cache rows (R12).
+- **R3. The subject is an output, not a library copy.** The visitor's done render is saved by the same create-output operation the quote uses (`orders/operations.py:530-531`), under `storefront_output_id(model_sha256)` = `uuid5(NAMESPACE_URL, "scadbuddy:storefront_variant_output:<sha256>")`. — A library copy's `LibrarySource.print_settings` is `{}` (`bambuddy/print_source.py:1134-1136`), so it would lose the template's support and process settings. An output keeps them (`print_source.py:802-806`). — Cost if wrong: outputs grow. `OutputMeta` gains `storefront: bool = False`, which hides them from the back office's lists. They are swept with the cache rows (R13).
 - **R4. `quote_run` is split, not called.** `quote_run` needs an order item (`quote.py:968-1058`). Its item-free core moves into `slice_and_price(run, output_id, request, subject, slot_filaments, *, quantity, currency) -> SlicedPrice`. That core is `slice_item` → `fetch` → `read_plate` → `rated_policy` → `price_plates`. `quote_run` / `_priced` call it, and the storefront calls it. — The one-cent equality test then follows from one shared function. — Cost if wrong: low. It is a refactor that the existing `test_quote.py` covers.
 - **R5. A new quote source, `storefront`,** is added to `QuoteSource` and `MEASURED_SOURCES` (`orders/models.py:73-75`). It is not `slice`. — The cache keeps plates, not the sliced file, and `printing.py:358` / `:604` reuse a `slice` quote's file. The print slices again with the spools that are loaded. — Cost if wrong: any `source == "slice"` switch misses storefront quotes. Task B1 greps for them.
 - **R6. Slices are recorded on read.** The price GET, the draft add and the prune tick poll the stored `PreviewStarted` list (`PreviewSlicer.poll`) and record the plates when every plate is done. — No workflow change. — Cost if wrong: a slice nobody reads before its blob is swept slices once more.
 - **R7. Capacity is enforced on the CRUD side.** At most `storefront_slices_concurrent` (default 1) rows are `running`. A visitor's variant goes ahead of a `batch` variant (#6237). — No second Temporal task queue. — Cost if wrong: a large batch delays a visitor by at most one slice.
 - **R8. The price key includes the quantity.** `price()` takes `quantity` (`orders/pricing.py:103-112`).
 - **R9. The volume estimate is gone from the storefront.** `render_estimate` no longer calls the part analysis. PR A deletes the unused analysis code from `renders.py` (`_parts`, `_begin`, the executor, `renders.py:506-705`). The `storefront_job_parts` table stays until a later migration drops it. — "If unsure, don't show a price." — Cost if wrong: the shop loses a volume hint. `rough_estimate` stays for the back office's `GET /orders/estimate`.
-- **R10. Mixed-order payment.** At submit, the firm lines' quotes are accepted. A mixed order's deposit is set to `max(policy deposit, totals.total_minor at submit)`, which is the firm lines plus shipping and their tax (`_set_deposit`, `lifecycle.py:1587`). That opens a `deposit` request the customer pays at once. When the shop's lines are quoted and accepted, `_accepted_by_the_last` (`lifecycle.py:4588`) accepts the order. `_open_balance` (`lifecycle.py:1755-1790`) then opens a `balance` request for what is not paid. The payments seam already supports this: request kinds are `deposit` and `balance` (`payments/models.py:13`), and a paid deposit counts in `totals.paid_minor`. — No new request kind. — Cost if wrong: a shop deposit policy higher than the firm total charges more up front, and that is the policy's own choice.
-- **R11. An all-firm order always opens a balance request at acceptance,** deposit or not. Today `_open_balance` returns early with neither (`lifecycle.py:1764`). The flag is passed only from the submit.
+- **R10. Mixed-order payment.** At submit, the firm lines' quotes are accepted. A mixed order's deposit is set to `max(policy deposit, totals.total_minor at submit)`, which is the firm lines plus shipping and their tax (`_set_deposit`, `lifecycle.py:1587`). That opens a `deposit` request the customer pays at once. When the shop's lines are quoted and accepted, `_accepted_by_the_last` (`lifecycle.py:4591-4611`) accepts the order. `_open_balance` (`lifecycle.py:1755-1795`) then opens a `balance` request for what is not paid. The payments seam already supports this: request kinds are `deposit` and `balance` (`payments/models.py:13`), and a paid deposit counts in `totals.paid_minor`. — No new request kind. — Cost if wrong: a shop deposit policy higher than the firm total charges more up front, and that is the policy's own choice.
+- **R11. An all-firm order always opens a balance request at acceptance,** deposit or not. Today `_open_balance` returns early with neither (`lifecycle.py:1764-1765`). One flag, `always_balance: bool = False`, is added to `_accepted_by_the_last`, `_accept_order` (`lifecycle.py:2834`) and `_open_balance`, and each passes it to the next (`_accept_order` calls `_open_balance` at `lifecycle.py:2870`). Only the submit sets it.
 - **R12. The submit's answer gains `accepted` and `pay_url`,** read after the commit. They are not in the ledger's stored reply (`submit.py:7-9`). Pages are linked after the commit (`payments/service.py:356-363`).
 - **R13. Cache rows are swept 90 days after their last use,** and the storefront outputs with them (`STOREFRONT_VARIANT_TTL_DAYS = 90`).
-- **R14. A pending purchase link (#6200) in the cart:** the firm quotes are recorded at submit but not accepted. `_accept_quote` refuses `purchase_pending` (`lifecycle.py:4644`). The customer accepts them on the order page once the shop prices the purchase. — It keeps #6200's gate as it is.
+- **R14. A pending purchase link (#6200) in the cart:** the firm quotes are recorded at submit but not accepted. `_accept_quote` (`lifecycle.py:4642`) refuses `purchase_pending` through `_no_pending_purchase` (`lifecycle.py:4651`). The customer accepts them on the order page once the shop prices the purchase. — It keeps #6200's gate as it is.
 
 ---
 
@@ -236,10 +237,11 @@ class StorePrice(BaseModel):
     slice_state: Literal["done", "running", "waiting", "failed", "unavailable"]
     price_minor: Money | None = None       # set only when source == "slice"
     currency: str; minor_exponent: int
-    grams: str | None = None; print_seconds: int | None = None
+    grams: str | None = None; print_seconds: int | None = None   # for the shop; the page never shows them
 ```
 `ESTIMATE_FIELDS = {"source","slice_state","price_minor","currency","minor_exponent","grams","print_seconds"}`. `render_estimate` builds a `Variant` with the slot filaments from `_filament_for(…, owned.picks)` (#6178) in slot order, and calls `ensure([variant])`. When the state is `done`, it answers `source: "slice"`. Otherwise it answers `source: "shop"` with no number.
 - [ ] **Step 1: Failing tests:** `test_price_is_slice_when_done`, `test_running_slice_has_no_price`, `test_failed_slice_has_no_price`, `test_no_volume_estimate_reaches_a_visitor` (no `parts`, `unknown_parts` or `estimate` key), `test_slice_price_has_no_rate_or_cost`.
+- The page reads only `source`, `slice_state`, `price_minor`, `currency` and `minor_exponent`. `grams` and `print_seconds` stay in the answer for the shop (owner, 2026-11-14).
 - [ ] **Step 2–4:** FAIL, then implement, then PASS. **Step 5:** Commit.
 
 ### Task A5: the page
@@ -252,7 +254,7 @@ class StorePrice(BaseModel):
 - Modify: `frontend/src/storefront/pages/CustomizePage.test.tsx`
 - Modify: `docs/superpowers/specs/2026-11-13-storefront-customize-ux-design.md` §4, §5.4, §5.6 (the owner's decisions)
 
-- [ ] **Step 1: Failing vitest:** `firm price shows "$4.20 for one" with grams and time`, `running shows "Working out the price…" and no number`, `failed shows "We price this design by hand" and no number`, `never shows "about" or "rough"`, `polls until slice_state is done`.
+- [ ] **Step 1: Failing vitest:** `firm price shows "$4.20 for one" and no grams or print time`, `running shows "Working out the price…" and no number`, `failed shows "We price this design by hand" and no number`, `never shows "about" or "rough"`, `polls until slice_state is done`.
 - [ ] **Step 2:** `pnpm gen:api && pnpm exec vitest run src/storefront` gives FAIL. **Step 3–4:** Implement, then PASS. **Step 5:** Commit.
 
 ---
@@ -264,21 +266,21 @@ class StorePrice(BaseModel):
 **Files:**
 - Create: `backend/scadbuddy/migrations/<UTC>_storefront_quote_source.sql`. It re-adds the `quotes.source` CHECK (last in `20261107T2214Z_order_items_origin_archives.sql:12`) with `'storefront'`, and adds `order_items.storefront_price_key text`.
 - Modify: `backend/scadbuddy/orders/models.py:73-75`, the `OrderItem` model; `backend/scadbuddy/orders/store.py`
-- Modify: `backend/scadbuddy/orders/storefront/drafts.py:361-410`, `backend/scadbuddy/orders/storefront/wire.py:451-470` (`DraftItem.price: DraftPrice | None`, with `DraftPrice{source: "slice"|"shop", price_minor: int | None}`)
+- Modify: `backend/scadbuddy/orders/storefront/drafts.py:361-410`, `backend/scadbuddy/orders/storefront/wire.py:456-474` (`DraftItem.price: DraftPrice | None`, with `DraftPrice{source: "slice"|"shop", price_minor: int | None}`)
 - Modify: `backend/scadbuddy/storefront/routes.py` (draft item fields, if filtered); `frontend/src/components/orders/QuoteEditor.tsx` (label a `storefront` quote "From the shop's slice")
-- Modify, only if the grep shows a need: `backend/scadbuddy/orders/printing.py:358`, `:604`; `backend/scadbuddy/orders/costs.py:269`, `:323`
-- Test: `backend/tests/orders/storefront/test_drafts.py`
+- Modify, only if the grep shows a need: `backend/scadbuddy/orders/printing.py:358`, `:604`. The grep covers `source == "slice"` switches and every `MEASURED_SOURCES` user (`costs.py:269`, `:323`).
+- Test: `backend/tests/orders/storefront/test_drafts.py`, `backend/tests/orders/test_costs.py`
 
 - `add_listing_item` reads the visitor's render (`RenderLimits.job_of`, #6178), builds the `Variant` with the item's own slots (`resolved.colours`) and `quantity`, and calls `ensure`. When the state is `done`, it sets `storefront_price_key` in the add's transaction. Otherwise it leaves it null, and the shop prices the line.
-- [ ] **Step 1: Failing tests:** `test_add_with_sliced_render_keeps_price_key`, `test_add_while_slicing_has_no_price`, `test_draft_view_shows_firm_and_shop_lines`, `test_add_body_cannot_name_a_price`.
+- [ ] **Step 1: Failing tests:** `test_add_with_sliced_render_keeps_price_key`, `test_add_while_slicing_has_no_price`, `test_draft_view_shows_firm_and_shop_lines`, `test_add_body_cannot_name_a_price`, `test_storefront_quote_prices_job_cost_from_its_plates` (`test_costs.py`: `costs.py` reads `MEASURED_SOURCES` at `:269` (`_unit`, the job cost) and `:323` (`weights_of`), so a `storefront` quote prices the job cost and the slot weights from its plates, as a `slice` quote does).
 - [ ] **Step 2–4:** FAIL, then implement, then PASS. **Step 5:** Commit.
 
 ### Task B2: the submit accepts firm lines and asks for payment
 
 **Files:**
-- Modify: `backend/scadbuddy/orders/lifecycle.py:901-994` (`submit_order`), `:1755-1790` (`_open_balance(..., always=False)`), `:4588-4609` (`_accepted_by_the_last`)
+- Modify: `backend/scadbuddy/orders/lifecycle.py:901-994` (`submit_order`), `:1755-1795` (`_open_balance`), `:2834-2871` (`_accept_order`), `:4591-4611` (`_accepted_by_the_last`): each gains `always_balance: bool = False` (R11)
 - Modify: `backend/scadbuddy/orders/storefront/submit.py:118-195`
-- Modify: `backend/scadbuddy/orders/storefront/wire.py:573-579` (`SubmittedOrder.accepted: bool = False`, `pay_url: str | None = None`)
+- Modify: `backend/scadbuddy/orders/storefront/wire.py:578-584` (`SubmittedOrder.accepted: bool = False`, `pay_url: str | None = None`)
 - Modify: `backend/scadbuddy/api/crud_storefront.py:497-504` (wrap the submit in `Payments.run_closing_linked`; run the `ensure_order_projects` hook as `order_page.py:817-820` does)
 - Test: `backend/tests/orders/storefront/test_submit.py`, `backend/tests/api/test_orders_storefront.py`
 
