@@ -135,7 +135,9 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
 #: One ``order_item_print`` run: the print run's accept, which answers within the command
-#: deadline, and the attempt's row. Its slices and queueing are the print run's own.
+#: deadline, and the attempt's row. Its slices and queueing are the print run's own. A
+#: start still being accepted is sent again for ``START_FOLLOW_S`` (240 s, #6138), and
+#: the last send (``ACCEPT_BUDGET``, 14 s) and the attach fit in the 60 s left.
 PRINT_TIMEOUT = timedelta(minutes=5)
 
 
@@ -975,7 +977,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             item_print_check,
             item_print_run,
             # A retry repeats the same print run (its `request_id` is the operation's),
-            # so a start that found Temporal busy is tried again, never printed twice.
+            # never prints twice: a crash, or Bambuddy not making the item's project, is
+            # tried again. A start still being accepted, or one that found Temporal busy
+            # or away, is sent again inside the run (`print_item`, #6138).
             run_attempts=3,
             queue="library",
             run_timeout=PRINT_TIMEOUT,
