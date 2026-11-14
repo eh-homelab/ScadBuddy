@@ -59,9 +59,12 @@ class SupportsChoice(BaseModel):
     on_build_plate_only: bool | None = None
 
 
-def wanted_settings(template: Mapping[str, str], choice: SupportsChoice | None) -> dict[str, str]:
+def wanted_settings(
+    template: Mapping[str, ProcessValue], choice: SupportsChoice | None
+) -> dict[str, str]:
     """The support settings a print asks for: the template's, then the print's own."""
-    wanted = {key: template[key] for key in SUPPORT_KEYS if key in template}
+    # A support key is one value; a list (#2998) is left to the overrides, which carry it.
+    wanted = {key: value for key in SUPPORT_KEYS if isinstance(value := template.get(key), str)}
     if choice is None:
         return wanted
     if not choice.enabled:

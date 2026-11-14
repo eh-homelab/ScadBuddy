@@ -200,7 +200,7 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
-def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, Any]) -> None:
     """Give ``model``'s model.json the ``print_settings`` (#770)."""
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta["print_settings"] = settings

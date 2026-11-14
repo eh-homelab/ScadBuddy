@@ -9,6 +9,7 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.catalogue import (
@@ -63,13 +64,15 @@ def test_any_key_and_value_is_taken(key: str, value: str) -> None:
         (False, "0"),
         (0.2, "0.2"),
         (5.0, "5"),
-        ([1, 2], "1,2"),
-        (["15%", "20%"], "15%,20%"),
+        ([1, 2], ["1", "2"]),
+        (["15%", "20%"], ["15%", "20%"]),
     ],
 )
-def test_a_value_that_is_not_a_string_is_stored_as_bambu_does(value: object, stored: str) -> None:
+def test_a_value_that_is_not_a_string_is_stored_as_bambu_does(
+    value: object, stored: object
+) -> None:
     """Bambu's configs store every value as a string: a number, a boolean or a list is
-    taken and written so (#2998), never refused."""
+    taken and written so (#2998), a list as a list of strings, never refused."""
     meta = meta_from_raw({"print_settings": {"skirt_loops": value}}, "demo")
 
     assert meta.print_settings == {"skirt_loops": stored}
@@ -130,3 +133,26 @@ def test_a_prints_own_sequence_is_bambus_print_sequence() -> None:
     annotation: object = PrintRunRequest.model_fields["print_sequence"].annotation
     assert annotation == PrintSequence | None
     assert get_args(PrintSequence) == ("by layer", "by object")
+
+
+def test_a_template_never_sets_scadbuddys_own_project_keys() -> None:
+    """#6291 review: the layout marker and spec §3's required options are the file's."""
+    meta = meta_from_raw(
+        {
+            "print_settings": {
+                "print_settings_id": "mine",
+                "Nozzle_Diameter": ["0.2"],
+                "skirt_loops": "1",
+            }
+        },
+        "demo",
+    )
+
+    assert meta.print_settings == {"skirt_loops": "1"}
+
+
+def test_a_part_setting_never_sets_the_parts_structure() -> None:
+    """#6291 review: ``extruder`` would move the part past the plan and the AMS mapping."""
+    settings = PartSettings.model_validate({"extruder": "1", "name": "x", "skirt_loops": 2})
+
+    assert settings.metadata() == (("skirt_loops", "2"),)

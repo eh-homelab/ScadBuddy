@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -99,8 +100,12 @@ def setting_refused(
     """``problem``, a failed slice, as a 422 naming the process override its text names
     (``process_overrides.named_key``), with that key as the extension ``key``. ``None``
     when it names none: the failure then stays as it was. No setting is refused before
-    the slice (#2998); this is how the slicer's refusal of one comes back."""
-    if problem.status < 400:
+    the slice (#2998); this is how the slicer's refusal of one comes back. Only a failure
+    of the slice itself is read (its text names the slicer or the slice, as
+    ``workflows/slicing.py`` ``slice_failure`` and Bambuddy's slice errors do), so an
+    upload or a queue failure whose text holds a common key such as ``timeout`` stays as
+    it was."""
+    if problem.status < 400 or not re.search(r"\bslic(e|er|ing)\b", problem.detail, re.I):
         return None
     key = named_key(problem.detail, overrides)
     if key is None:

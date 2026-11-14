@@ -242,7 +242,8 @@ Bambuddy cannot resolve fails the slice naming a preset nobody chose.
 its `model.json`: Bambu Studio process keys and their values (prime tower, support, brim,
 or any other process key). Since #2998 there is no allowlist: any key and any value is
 taken, a number or a boolean is stored as the string a Bambu config stores (`true` is
-`"1"`), and a list is joined with commas (`library/catalogue.py` `_print_setting_text`);
+`"1"`), and a list stays a list of such strings, written over a per-extruder option
+position by position (`library/catalogue.py` `_print_setting_text`);
 the slicer judges them. They are read as the template's `model.json` has them *now*, not
 as they were at render time, and they go two places:
 

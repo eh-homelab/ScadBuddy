@@ -32,12 +32,15 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.bambuddy.part_settings import ColourParameter, PartSettings
 from scadbuddy.bambuddy.process_overrides import (
+    PROJECT_KEYS,
     ProcessInput,
-    joined_text,
     scalar_text,
+    value_text,
     without_host_side,
+    without_reserved,
 )
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
@@ -293,14 +296,16 @@ PrintSequence = Literal["by layer", "by object"]
 
 def _print_setting_text(value: Any) -> Any:
     """One ``print_settings`` value as a Bambu config stores it (#2998): a number or a
-    boolean as its string (``process_overrides.scalar_text``), a list joined with commas
-    as Bambu Studio's JSON loader reads one. Anything else is left for the field's type."""
+    boolean as its string (``process_overrides.scalar_text``), a list as a list of such
+    strings, so a per-extruder option is written position by position
+    (``slicing/presets.py`` ``apply_overrides``, ``render/provenance.py``
+    ``with_print_settings``). Anything else is left for the field's type."""
     if isinstance(value, bool | int | float):
         return scalar_text(value)
     if isinstance(value, list) and all(
         isinstance(item, bool | int | float | str) for item in value
     ):
-        return joined_text(value)
+        return value_text(value)
     return value
 
 
@@ -406,7 +411,7 @@ class ModelMeta(BaseModel):
     #: The template's default slicer settings (#770): process overrides on the print
     #: run's slice, and edits to the system process in a downloaded 3MF. Any Bambu Studio
     #: process key (#2998: no allowlist); not in `ModelPatch`, it is edited in the file.
-    print_settings: dict[str, StrictStr] = Field(
+    print_settings: dict[str, StrictStr | list[StrictStr]] = Field(
         default_factory=dict,
         description=(
             "The template's own default slicer settings, as Bambu Studio process keys "
@@ -420,15 +425,20 @@ class ModelMeta(BaseModel):
     @classmethod
     def _print_setting_texts(cls, value: Any) -> Any:
         """Every key is taken (#2998): the slicer, not ScadBuddy, judges a key and its
-        value. A number, a boolean or a list is written as the string a Bambu config
-        stores; only a value that is no setting at all (an object, null) fails the
+        value. A number or a boolean is written as the string a Bambu config stores, a
+        list as a list of them; only a value that is no setting at all (an object, null) fails the
         field's type. A host-side key (``process_overrides.HOST_SIDE_KEYS``:
         ``post_process``, the print host's) is dropped and logged: a template, which may
         come from an import, never runs a command on the machine that slices, nor reaches
         a downloaded 3MF's ``project_settings.config``."""
         if not isinstance(value, dict):
             return value
-        kept = without_host_side(value, where="print_settings")
+        # ScadBuddy's own project keys (the layout marker, spec §3's required options)
+        # are the file's, never a template's (#6291 review).
+        kept = without_host_side(
+            without_reserved(value, PROJECT_KEYS, where="print_settings"),
+            where="print_settings",
+        )
         return {key: _print_setting_text(setting) for key, setting in kept.items()}
 
     #: The template's slicer settings per colour part (#5626): each key a ``// color``
@@ -960,7 +970,7 @@ class Catalogue:
         except (OSError, UnicodeDecodeError):
             return 0
 
-    def print_settings(self, slug: str) -> dict[str, str]:
+    def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);
         none for a template that is gone. One whose model.json is invalid is
         :class:`InvalidModelMetaError`, naming the key."""

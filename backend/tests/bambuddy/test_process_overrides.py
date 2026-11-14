@@ -173,6 +173,12 @@ def test_a_failure_naming_no_override_stays_as_it_was() -> None:
     assert setting_refused(failed("skirt_loops: bad"), None) is None
 
 
+def test_a_failure_outside_the_slice_naming_a_key_stays_as_it_was() -> None:
+    """#6291 review: an upload or queue failure whose text holds a common key word is
+    not the slicer refusing that setting."""
+    assert setting_refused(failed("the upload hit a timeout"), {"timeout": "5"}) is None
+
+
 def test_a_key_is_named_only_as_a_whole_word() -> None:
     assert named_key("bad wall_loops_extra value", {"wall_loops": "1"}) is None
     # The longest key wins where one key holds another.

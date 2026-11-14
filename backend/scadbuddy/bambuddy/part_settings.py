@@ -25,11 +25,13 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.bambuddy.process_overrides import (
+    PART_STRUCTURE_KEYS,
     ProcessInput,
     ProcessScalar,
     joined_text,
     scalar_text,
     without_host_side,
+    without_reserved,
 )
 from scadbuddy.render.bambu3mf import PartOverrides
 from scadbuddy.render.colours import colour_hex
@@ -86,7 +88,10 @@ class PartSettings(BaseModel):
     def _drop_host_side(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        return without_host_side(data, where="part_settings")
+        # The part's own structure (its filament, name, mesh) is never a setting (#6291
+        # review): `extruder` here would move it past the plan and the AMS mapping.
+        kept = without_reserved(data, PART_STRUCTURE_KEYS, where="part_settings")
+        return without_host_side(kept, where="part_settings")
 
     top_shell_layers: ProcessScalar | None = None
     bottom_shell_layers: ProcessScalar | None = None

@@ -66,8 +66,8 @@ A template that prints best with a process setting changed says so in `model.jso
 - Write values as Bambu Studio's configs store them (`"1"` for a switch, `"tree(auto)"`,
   `"5"`); the keys and the values each takes are Bambu Studio's
   [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp).
-  A JSON number or boolean is stored as that string (`true` as `"1"`), and a list is
-  joined with commas.
+  A JSON number or boolean is stored as that string (`true` as `"1"`), and a list stays
+  a list, one value per position of a per-extruder option.
 - **Supports (#1899).** A template whose overhangs cannot be designed away declares
   them: `"enable_support": "1"` with `"support_type": "tree(auto)"` (Bambu's default,
   and the one to reach for on an H2C) or `"normal(auto)"`, and optionally the angle and

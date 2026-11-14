@@ -130,6 +130,57 @@ def without_host_side[V](values: Mapping[str, V], *, where: str) -> dict[str, V]
     return {key: value for key, value in values.items() if not is_host_side(key)}
 
 
+#: The keys a part's ``<metadata>`` in ``model_settings.config`` carries for the file's own
+#: structure, never a slicer setting (``render/bambu3mf.py`` writes ``name`` and
+#: ``extruder``; Bambu Studio saves the rest): a part setting of one of them would move
+#: the part to another filament past the plan and the AMS mapping, or rename or reshape it.
+PART_STRUCTURE_KEYS = frozenset(
+    {
+        "name",
+        "extruder",
+        "subtype",
+        "matrix",
+        "source_file",
+        "source_object_id",
+        "source_volume_id",
+        "source_offset_x",
+        "source_offset_y",
+        "source_offset_z",
+        "mesh_stat",
+        "object_id",
+        "instance_id",
+    }
+)
+
+#: The ``project_settings.config`` keys ScadBuddy itself states in a file it writes
+#: (``render/bambu3mf.py`` ``project_settings``): ``print_settings_id`` marks the layout
+#: as ScadBuddy's (``layout_of``), and the rest are spec §3's required-or-segfault options
+#: and the bed. A template's ``print_settings`` never sets them.
+PROJECT_KEYS = frozenset(
+    {
+        "printer_settings_id",
+        "print_settings_id",
+        "filament_settings_id",
+        "nozzle_diameter",
+        "printable_height",
+        "printable_area",
+        "filament_colour",
+        "different_settings_to_system",
+    }
+)
+
+
+def without_reserved[V](
+    values: Mapping[str, V], reserved: frozenset[str], *, where: str
+) -> dict[str, V]:
+    """``values`` without the ``reserved`` keys, any case, each one dropped logged with
+    ``where`` it came in: they are ScadBuddy's file structure, not slicer settings."""
+    dropped = sorted(key for key in values if key.strip().lower() in reserved)
+    if dropped:
+        logger.warning("reserved settings dropped", extra={"where": where, "keys": dropped})
+    return {key: value for key, value in values.items() if key.strip().lower() not in reserved}
+
+
 def scalar_text(value: Any) -> str:
     """One value as a Bambu config stores it: a boolean as ``"1"``/``"0"``, a number with
     no exponent and no trailing ``.0``, a string as it is."""

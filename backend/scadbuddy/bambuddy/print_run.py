@@ -408,7 +408,12 @@ class PrintRunRequest(BaseModel):
         """Strip the host-side keys before any field reads them, noting each."""
         if not isinstance(data, dict):
             return data
-        dropped = set(data.get("dropped_settings") or [])
+        # A dump read back (the run's history) carries what was dropped; a caller may send
+        # the field too, so only host-side key names are kept: any other text never
+        # reaches a `host-setting-dropped` warning (#6291 review).
+        sent = data.get("dropped_settings")
+        named = [key for key in sent if isinstance(key, str)] if isinstance(sent, list) else []
+        dropped = set(host_side_keys(named))
         overrides = data.get("process_overrides")
         if isinstance(overrides, dict):
             dropped |= set(host_side_keys(overrides))
@@ -2017,7 +2022,7 @@ async def check_for_output(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
-    print_settings: dict[str, str] | None = None,
+    print_settings: dict[str, ProcessValue] | None = None,
     printers: PrinterStore | None = None,
     reports: PrinterReportStore | None = None,
     catalogue: ReadCatalogue | None = None,

@@ -1,6 +1,6 @@
 """``/api/v1/print/process-values`` — every value of the process preset a print resolves
 to (#2998): what the print dialog's "Slicer settings" editor lists, and what the agent's
-``get_print_choices`` reads, so any Bambu Studio key can be found and set by name.
+``get_process_values`` reads, so any Bambu Studio key can be found and set by name.
 
 Read only. On ``slicer_backend`` ``native`` the image's BBL profiles answer (no Bambuddy
 call, ``slicing/values.py``); otherwise Bambuddy's ``GET /slicer/preset-values``. Bambu
@@ -18,7 +18,9 @@ from pydantic import BaseModel, Field
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.process_overrides import without_host_side
 from scadbuddy.bambuddy.resolver import PrintChoices, process_preset_for
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.component import SlicingDep
@@ -70,6 +72,9 @@ async def process_values(
             answer = await values_for(reach, native=native)(process)
         except ApiError as error:
             return ProcessValues(process=process, reason=f"the read failed: {error.detail}")
+    # As every other preset read (#6291 review): no print-host credential and no
+    # host-side setting reaches the browser.
+    values = without_host_side(strip_credentials(answer.values), where="process_values")
     return ProcessValues(
-        process=process, resolved=answer.resolved, reason=answer.reason, values=answer.values
+        process=process, resolved=answer.resolved, reason=answer.reason, values=values
     )
