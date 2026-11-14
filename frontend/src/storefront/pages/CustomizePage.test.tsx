@@ -357,6 +357,41 @@ describe('CustomizePage', () => {
     expect(posts).toBe(2)
   })
 
+  it('says no preview is coming after a refused first render, and lets the visitor try again', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return posts === 1
+          ? HttpResponse.json({ type: `${PROBLEMS}render_unavailable`, status: 503, detail: 'Previews are paused. Try again later.' }, { status: 503 })
+          : HttpResponse.json(DONE)
+      }),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
+    )
+    const { user } = show()
+    expect(await screen.findByText('Previews are paused. Try again later.')).toBeInTheDocument()
+    expect(screen.getByText('No preview yet.')).toBeInTheDocument()
+    expect(screen.queryByText('Making your preview…')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(posts).toBe(2)
+  })
+
+  it('drops the delayed retry once the visitor has changed the choices to ones the page refuses', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '1' } })
+      }),
+    )
+    const { user } = show()
+    expect(await screen.findByText('You have made a lot of previews. Try again in 1 second.')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Length (mm)'), '200')
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
+    expect(posts).toBe(1)
+  })
+
   it('keeps the visitor’s choices when they leave and come back', async () => {
     const first = show()
     await first.user.type(await screen.findByLabelText('Name'), 'Ada')

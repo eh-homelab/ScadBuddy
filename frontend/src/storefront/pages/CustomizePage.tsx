@@ -49,7 +49,8 @@ function passing(error: unknown): error is StoreError {
 }
 
 function inSeconds(error: StoreError): string {
-  return error.retryAfter === null ? 'in a minute' : `in ${error.retryAfter} seconds`
+  if (error.retryAfter === null) return 'in a minute'
+  return error.retryAfter === 1 ? 'in 1 second' : `in ${error.retryAfter} seconds`
 }
 
 /** What a visitor reads when a render or an add is refused. */
@@ -135,6 +136,8 @@ export function CustomizePage({
   /** Whether the page rendered yet: the first render does not wait out the debounce. */
   const started = useRef(false)
   const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
+  /** The choices on screen, and whether the page refuses them: what a delayed retry checks. */
+  const choicesNow = useRef({ key: '', blocked: true })
   const draftChanged = useDraftChanged()
 
   useEffect(() => {
@@ -170,10 +173,18 @@ export function CustomizePage({
   }, [listing, values, quantity])
 
   useEffect(() => {
+    choicesNow.current = { key: current, blocked }
+  }, [current, blocked])
+
+  useEffect(() => {
     if (blocked || shown?.key === current) return
-    const delay = started.current ? debounceMs : 0
-    started.current = true
-    const timer = setTimeout(() => void renderNow.current(current, false), delay)
+    const timer = setTimeout(
+      () => {
+        started.current = true
+        void renderNow.current(current, false)
+      },
+      started.current ? debounceMs : 0,
+    )
     return () => clearTimeout(timer)
   }, [blocked, current, shown, debounceMs])
 
@@ -285,7 +296,9 @@ export function CustomizePage({
       if (retryable(caught) && !retry) {
         const after = Math.min((caught.retryAfter ?? 60) * 1000, RETRY_RENDER_CAP_MS)
         setTimeout(() => {
-          if (live()) void renderNow.current(key, true)
+          // Only the same choices, and only while the page still takes them: a change in
+          // the meantime renders through the debounce as any other does.
+          if (live() && choicesNow.current.key === key && !choicesNow.current.blocked) void renderNow.current(key, true)
         }, after)
       }
     } finally {
@@ -353,7 +366,13 @@ export function CustomizePage({
             <Preview job={shown?.job ?? job} unit="mm" rendering={rendering} />
           </Suspense>
         ) : (
-          <div className="sf-stage-empty">{blocked ? 'Your design shows here once your choices are complete.' : 'Making your preview…'}</div>
+          <div className="sf-stage-empty">
+            {blocked
+              ? 'Your design shows here once your choices are complete.'
+              : renderError && !rendering
+                ? 'No preview yet.'
+                : 'Making your preview…'}
+          </div>
         )}
       </div>
       <div className="sf-controls">
@@ -375,9 +394,16 @@ export function CustomizePage({
           </p>
         )}
         {renderError && (
-          <p className="sf-error" role="alert">
-            {renderError}
-          </p>
+          <div className="sf-retry">
+            <p className="sf-error" role="alert">
+              {renderError}
+            </p>
+            {!rendering && !blocked && (
+              <button type="button" className="sf-button sf-button-quiet" onClick={() => void renderNow.current(current, false)}>
+                Try again
+              </button>
+            )}
+          </div>
         )}
         {estimate && shownIsCurrent && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
         <div className="sf-order">
