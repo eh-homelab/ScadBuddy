@@ -22,12 +22,13 @@ def vectors() -> dict[str, Any]:
     return data
 
 
-MIGRATIONS = Path(__file__).resolve().parents[2] / "agent" / "src" / "db" / "migrations"
+MIGRATIONS = Path(__file__).resolve().parents[2] / "backend" / "scadbuddy" / "migrations_agent"
 
 
 @pytest.fixture
 async def agent_db() -> AsyncIterator[psycopg.AsyncConnection[Any]]:
-    """A throwaway schema holding the agent's tables, from its own migration files."""
+    """A throwaway schema holding the agent's tables, from its migration files (which the
+    API applies in production, #5299)."""
     url = os.environ.get("SCADBUDDY_TEST_DATABASE_URL")
     if not url:
         pytest.skip("SCADBUDDY_TEST_DATABASE_URL is not set")

@@ -32,7 +32,7 @@ import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
 import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
-import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { MigrationChecksumError } from './db/schema.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
@@ -199,9 +199,9 @@ if (previousKek && !previousKek.ok) {
 const database = config.databaseUrl
   ? connectDatabase(config.databaseUrl, {
       onMigrationError: (err) => {
-        console.error('database migrations failed:', (err as Error).message)
-        // An edited migration or an unreadable ledger is not a transient failure: stop, visibly.
-        if (err instanceof MigrationChecksumError || err instanceof MigrationLedgerError) process.exit(1)
+        console.error('the database is not ready:', (err as Error).message)
+        // An edited migration is not a transient failure: stop, visibly.
+        if (err instanceof MigrationChecksumError) process.exit(1)
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return

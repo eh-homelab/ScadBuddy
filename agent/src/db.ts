@@ -1,12 +1,13 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
 import { grantBackendRoles } from './db/grants.js'
-import { type MigrateOptions, migrate, MIGRATIONS } from './db/migrations.js'
+import { type AwaitMigrationsOptions, awaitMigrations } from './db/schema.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
-// database"). The `ai_*` tables are created by db/migrations.ts, applied by
-// `ready()` rather than before listening, so a database that is down at
-// start-up is reported by /healthz instead of crashing the pod.
+// database"). The `ai_*` tables are created by the API, which applies the agent's
+// migrations at its start (#5299 D6); `ready()` waits for them (db/schema.ts) rather
+// than before listening, so a database that is down at start-up is reported by
+// /healthz instead of crashing the pod.
 
 export type Database = {
   /** The pool, for the stores that own `ai_*` tables. Query only after `ready()` resolved true. */
@@ -14,7 +15,8 @@ export type Database = {
   /** Resolves true when `select 1` answers within the timeout. Never throws. */
   ping(timeoutMs?: number): Promise<boolean>
   /**
-   * Applies pending migrations once; resolves true when the schema is current.
+   * Waits, bounded, until the API has applied the migrations this build expects
+   * (db/schema.ts `awaitMigrations`); resolves true when the schema is current.
    * Single-flight and memoised on success; a failure is retried by the next
    * call. Never throws.
    */
@@ -147,12 +149,18 @@ export type ConnectOptions = {
   searchPath?: string
   /** `IDLE_TIMEOUT_SECONDS` unless set; tests shorten it. */
   idleTimeoutSeconds?: number
-  /** Where to report a failed migration (the error, never the URL). */
+  /** Where to report a failed `ready()` attempt (the error, never the URL). */
   onMigrationError?: (err: unknown) => void
-  /** lock_timeout / statement_timeout for migrations (db/migrations.ts). */
-  migrate?: MigrateOptions
+  /** How long `ready()` waits for the API's migrations (db/schema.ts). */
+  awaitMigrations?: AwaitMigrationsOptions
   /**
-   * Runs after migrations succeed, as part of the same `ready()` attempt: key
+   * Brings the schema in place of waiting for the API's migrations. Only the tests pass
+   * it, to migrate a schema of their own (test/support/migrations.ts): the agent never
+   * migrates (#5299 D6).
+   */
+  schema?: (sql: Sql) => Promise<void>
+  /**
+   * Runs once the schema is current, as part of the same `ready()` attempt: key
    * rotation (main.ts). A throw fails the attempt and the next `ready()` retries.
    */
   afterMigrate?: (sql: Sql) => Promise<void>
@@ -225,7 +233,7 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     sql,
     ping,
     ready: makeReady(async () => {
-      await migrate(sql, MIGRATIONS, options.migrate)
+      await (options.schema ? options.schema(sql) : awaitMigrations(sql, undefined, options.awaitMigrations))
       // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
       // waits or fails its own calls, and says which.
       await grantBackendRoles(sql).catch((error: unknown) => {

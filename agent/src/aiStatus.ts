@@ -56,9 +56,9 @@ export async function aiStatus(
     return { ai: 'disabled (no database)', credential: 'unknown' }
   }
   if (!dbOk) return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
-  // Both steps are bounded: ready() may be waiting on the migration advisory
-  // lock (bounded itself by lock_timeout, db/migrations.ts), and a liveness
-  // probe must answer well inside its own timeout regardless.
+  // Both steps are bounded: ready() may be waiting for the API to apply the
+  // agent's migrations (bounded itself, db/schema.ts), and a liveness probe must
+  // answer well inside its own timeout regardless.
   const timeoutMs = deps.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS
   const ready = await within(deps.database.ready(), timeoutMs)
   if (ready === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
