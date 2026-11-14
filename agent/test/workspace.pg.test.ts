@@ -190,6 +190,21 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect((await files.read({ kind: 'session', sessionId: child.id }, 'a.txt'))?.bytes.toString()).toBe('kept by the fork')
     })
 
+    it('puts the bytes again when a sweep deletes them while a write waits on them', async () => {
+      const digest = sha256(Buffer.from('raced'))
+      await db.sql`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${Buffer.from('raced')})`
+      let written: Promise<unknown> | undefined
+      await db.sql.begin(async (tx) => {
+        // A sweep's delete, holding the row until it commits.
+        await tx`DELETE FROM ai_session_file_bytes WHERE sha256 = ${digest}`
+        written = files.write(ws, 'raced.txt', Buffer.from('raced'))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      await written
+      expect((await files.read(ws, 'raced.txt'))?.bytes.toString()).toBe('raced')
+      expect(await db.sql`SELECT 1 FROM ai_session_file_bytes WHERE sha256 = ${digest}`).toHaveLength(1)
+    })
+
     it('never names bytes under a sha256 that is not theirs', async () => {
       await expect(db.sql`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${'0'.repeat(64)}, ${Buffer.from('x')})`).rejects.toThrow(/check/)
     })

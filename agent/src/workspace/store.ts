@@ -354,8 +354,8 @@ type Stored = { data: Buffer | null; blob_key: string | null; key_sealed: Buffer
 
 /**
  * Deletes the rows of `ai_session_file_bytes` no file names any more, of `shas` or all, and
- * answers how many went. A row a write is naming meanwhile is locked by that write's upsert and
- * skipped; one a file names by the time of the delete fails it on the foreign key, so a row a
+ * answers how many went. A row a write or a fork is naming meanwhile is locked `FOR KEY SHARE`
+ * by that write's putBytes or the fork's copy, and skipped; one a file names by the time of the delete fails it on the foreign key, so a row a
  * file names is never lost.
  */
 export async function dropUnnamedBytes(sql: Sql, shas?: readonly string[]): Promise<number> {
@@ -370,16 +370,16 @@ export async function dropUnnamedBytes(sql: Sql, shas?: readonly string[]): Prom
 }
 
 /**
- * Puts `data` in `ai_session_file_bytes` unless the row is there, then locks it (`FOR KEY
- * SHARE`, which dropUnnamedBytes's `FOR UPDATE SKIP LOCKED` skips) so no sweep takes it
- * before the caller's row names it. A row a sweep deleted between the two is put again. A
- * row already there is neither rewritten nor hashed again.
+ * Locks the row of `ai_session_file_bytes` for `digest` (`FOR KEY SHARE`, which
+ * dropUnnamedBytes's `FOR UPDATE SKIP LOCKED` skips), putting `data` there first when it is
+ * not, so no sweep takes it before the caller's row names it. A row already there is neither
+ * sent, rewritten nor hashed again; one a sweep deletes meanwhile is put again.
  */
 async function putBytes(tx: TransactionSql, digest: string, data: Buffer): Promise<void> {
   for (;;) {
-    await tx`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${data}) ON CONFLICT (sha256) DO NOTHING`
     const [held] = await tx`SELECT 1 FROM ai_session_file_bytes WHERE sha256 = ${digest} FOR KEY SHARE`
     if (held) return
+    await tx`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${data}) ON CONFLICT (sha256) DO NOTHING`
   }
 }
 
@@ -929,17 +929,21 @@ export class SessionFiles {
         SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
         WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')
         ORDER BY sha256
-        ON CONFLICT (sha256) DO UPDATE SET created_at = ai_session_file_bytes.created_at`
+        ON CONFLICT (sha256) DO NOTHING`
+      // The bytes the parent's rows name, or are about to, stay until the child commits: a delete
+      // in the parent meanwhile cannot drop them under the child's foreign key. A row already gone
+      // is one no parent file names any more, so the insert below, reading afresh, leaves that
+      // file out.
+      await tx`
+        SELECT 1 FROM ai_session_file_bytes
+        WHERE sha256 IN (
+          SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL
+          UNION
+          SELECT sha256 FROM ai_session_files WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex'))
+        FOR KEY SHARE`
       await tx`
         UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
         WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
-      // The bytes the child names stay until it commits: a delete in the parent meanwhile cannot
-      // drop them under the child's foreign key. A row already gone is one no parent file names
-      // any more, so the insert below, reading afresh, leaves that file out.
-      await tx`
-        SELECT 1 FROM ai_session_file_bytes
-        WHERE sha256 IN (SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL)
-        FOR KEY SHARE`
       await tx`
         INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at)
         SELECT ${to}, ${toSession}, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at
