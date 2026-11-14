@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 
 from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from scadbuddy.bambuddy.catalogue import Catalogue, ReadCatalogue
 from scadbuddy.bambuddy.clearance import (
@@ -135,6 +136,8 @@ from scadbuddy.bambuddy.print_source import (
 )
 from scadbuddy.bambuddy.process_overrides import (
     ProcessOverrides,
+    host_side_keys,
+    host_side_message,
     normalised_overrides,
     override_warnings,
 )
@@ -387,9 +390,36 @@ class PrintRunRequest(BaseModel):
         description=(
             "Any Bambu Studio process settings for this print, as {key: value}: every key"
             " is accepted, and the slicer judges it. Wins over the template's defaults and"
-            " over prime_tower, supports and print_sequence."
+            " over prime_tower, supports and print_sequence. Only the settings that act on"
+            " the machine that slices (post_process, filename_format, the print host's)"
+            " are dropped, with a host-setting-dropped warning."
         ),
     )
+    #: The host-side keys (``process_overrides.HOST_SIDE_KEYS``) this request's
+    #: ``process_overrides`` or ``part_settings`` named, dropped before anything else read
+    #: them (#2998), so the check and the run can say so. Set by the request's own
+    #: validation, never by a caller (not in the API's schema), and never part of the run
+    #: key: a request that named one slices as one that did not.
+    dropped_settings: SkipJsonSchema[list[str]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_host_side(cls, data: Any) -> Any:
+        """Strip the host-side keys before any field reads them, noting each."""
+        if not isinstance(data, dict):
+            return data
+        dropped = set(data.get("dropped_settings") or [])
+        overrides = data.get("process_overrides")
+        if isinstance(overrides, dict):
+            dropped |= set(host_side_keys(overrides))
+        parts = data.get("part_settings")
+        if isinstance(parts, dict):
+            for settings in parts.values():
+                if isinstance(settings, dict):
+                    dropped |= set(host_side_keys(settings))
+        if not dropped:
+            return data
+        return {**data, "dropped_settings": sorted(dropped)}
 
     @field_validator("part_settings")
     @classmethod
@@ -1447,18 +1477,23 @@ async def _override_warnings(
 ) -> list[FilamentWarning]:
     """#2998: what to say of the request's process overrides against the process
     preset's values (``process_overrides.override_warnings``). Nothing when there are
-    none, or the values cannot be read: an override is never refused."""
+    none, or the values cannot be read: an override is never refused. A host-side key the
+    request named, and its validation dropped, is said too (``host-setting-dropped``)."""
+    dropped = host_side_message(request.dropped_settings)
+    warnings = (
+        [] if dropped is None else [FilamentWarning(kind="host-setting-dropped", message=dropped)]
+    )
     overrides = request.overrides()
     if not overrides or process is None:
-        return []
+        return warnings
     try:
         answer = await read(process)
     except ApiError:
-        return []
+        return warnings
     said = override_warnings(overrides, answer.values if answer.resolved else None)
-    return (
-        [] if said is None else [FilamentWarning(kind="process-override-unchecked", message=said)]
-    )
+    if said is not None:
+        warnings.append(FilamentWarning(kind="process-override-unchecked", message=said))
+    return warnings
 
 
 async def _native_check(

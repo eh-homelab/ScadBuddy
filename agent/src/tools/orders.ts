@@ -679,7 +679,7 @@ const sliceQuote = z
     // #2998: any process setting, sliced with and recorded as part of the quote's print setup.
     process_overrides: processOverrides.describe(
       'Any Bambu Studio process settings to slice the quote with (#2998), as {key: value}, e.g. ' +
-        '{"skirt_loops": 0, "wipe_tower_no_sparse_layers": true}: every key is accepted, with no allowlist, and the ' +
+        '{"skirt_loops": 0, "wipe_tower_no_sparse_layers": true}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and the ' +
         "slicer judges it (a slice it refuses over one is a 422 naming the key). They win over the template's " +
         "defaults and over prime_tower, supports and print_sequence. Recorded in the quote's print setup " +
         "(`choices.process_overrides`), so order_item_print slices what was priced",
@@ -2209,7 +2209,7 @@ export const orderTools: Tool[] = [
       ),
       // #2998: any process setting; omitted is the quote's (`choices.process_overrides`).
       process_overrides: processOverrides.describe(
-        'Any Bambu Studio process settings (#2998), as {key: value}: every key is accepted, with no allowlist, and ' +
+        'Any Bambu Studio process settings (#2998), as {key: value}: every key but the host-side ones (post_process, print_host*: dropped) is accepted, and ' +
           'the slicer judges it (a refusal is a 422 naming the key). Omit to print with the accepted quote\'s ' +
           "(order_item_quote's `slice.process_overrides`); others are refused `requote_needed`: quote with them first",
       ),

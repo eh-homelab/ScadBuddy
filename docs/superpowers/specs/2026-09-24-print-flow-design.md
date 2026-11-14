@@ -282,6 +282,21 @@ slicer is the only judge.
   against the resolved process preset's own values: a key it has no value for, or a
   list over one value, is a `process-override-unchecked` warning on the dialog's check
   and the run (`process_overrides.override_warnings`), never a refusal.
+- **Host-side settings are stripped.** "Allow everything" covers what the slicer does with
+  the print, not commands or files on the machine that slices (the native slicer's pod,
+  Bambuddy's slicer sidecar). `process_overrides.HOST_SIDE_KEYS` lists every option of
+  Bambu Studio v02.08.02.61's `PrintConfigDef` that runs a command, names a file or path,
+  or reaches a print host: `post_process` (runs scripts on the exported G-code),
+  `filename_format`, `bed_custom_texture`, `bed_custom_model`, and the print host's
+  options (`print_host`, `print_host_webui`, `printhost_*`, `host_type`), with any other
+  `printhost_`/`print_host` key. They are dropped and logged where a setting comes in
+  (`normalised_overrides`, `PartSettings`' extra keys, a template's `print_settings`), and
+  again where the slice is built (`slicing/presets.py` `build_presets`, from the plan's
+  overrides and from every preset document, beside `strip_credentials`;
+  `dispatch.slice_request` for Bambuddy). A request that named one has it in
+  `dropped_settings` (no schema, not in the run key), and its check and run say so in a
+  `host-setting-dropped` warning. Custom G-code (`*_gcode`) stays allowed: it changes
+  what the printer does and runs nothing on our servers.
 - **The slicer's refusal.** A slice that fails is the run's failure, as before. When its
   text names one of the plan's overrides as a whole word, the run's error is a 422,
   `https://scadbuddy.dev/problems/slicer-setting-refused`, with the key as the extension
@@ -373,33 +388,38 @@ older run keeps its key.
 
 The dialog sets them (#5627). In the filament step, each slot row of an output or a
 library file (#5628) has a "Settings for this colour" disclosure
-(`components/print/PartSettingsDisclosure.tsx`). A sliced file has none. Each control
-opens on the slot's default: what the slot prints with when the request sets nothing.
-That is the process's value, with a template's `part_print_settings` for the slot (#5626)
-laid over it, per key, as the run lays the request over the template's
-(`run_part_settings`). Once a slot's disclosure is open, the dialog's check asks for them
+(`components/print/PartSettingsDisclosure.tsx`). A sliced file has none. Since #2998 it is
+the same editor as the whole print's "Slicer settings"
+(`components/print/SlicerSettingsEditor.tsx`): every key of the resolved process preset
+(`POST /print/process-values`, read when it opens), searchable by key, with a "Changed
+only" filter and a row to add any other key by name; a typed value is sent as text, and
+nothing is refused or clamped. Each row shows the slot's default: what the slot prints with
+when the request sets nothing. That is the process's value, with a template's
+`part_print_settings` for the slot (#5626) laid over it, per key, as the run lays the
+request over the template's (`run_part_settings`). Once a slot's disclosure is open, the
+dialog's check asks for the first six keys' defaults
 (`?process_values=true` on `POST …/check`). The check reads the process's values with the
 preset's other values (`PrintCheck.process_part_settings`,
 `part_settings.process_part_settings`; a fractional density is rounded to a whole
-percent, and named in `PrintCheck.process_inexact`, so choosing that whole percent is still
+percent, and named in `PrintCheck.process_inexact`, so that whole percent typed is still
 sent), and gives, for each slot the template sets on the copy
 (`template_part_settings`), the process's values with the template's over them
 (`PrintCheck.slot_part_settings`). A check that does not ask reads nothing more, since the
 read can be one more Bambuddy call. The values are `None` when the preset cannot be read;
-the controls are then empty. They stay off until a check that asked for the choices as they
+the rows then show no default. They stay off until a check that asked for the choices as they
 stand has answered. The request's own `part_settings` do not change the process, so the
 dialog asks only until the values are read for the other choices as they stand
 (`lib/usePrintCheck.ts` `processKey`, #5686): a settled edit of a setting checks again
 without reading the preset again. An answer whose values are `None` (the preset could not
 be read, or the check refused before it read the process) is not a read: the next check
-asks again. The controls still turn on for it, empty, so the person can type a value. A
+asks again. The rows still turn on for it, with no default, so the person can type a value. A
 process preset edited in Bambuddy while the dialog is open is read again only after a
 change of printer, nozzle or other choice, or when the dialog opens again. A re-check that fails keeps the values already read for
-those choices, so the controls stay on; a change of printer, nozzle or other choice drops
+those choices, so the rows stay on; a change of printer, nozzle or other choice drops
 them, and another process's values are never shown. A value set back to the slot's default, or reset, is unset, and only
 what is set is sent (`lib/partSettings.ts` `sentPartSettings`, `withSetting`,
-`slotBaseline`). So on a slot whose template sets 5 top shell layers over the process's 3,
-choosing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once
+`slotBaseline`; a value compares as Bambu writes it, so `"8"` and `8` are one). So on a
+slot whose template sets 5 top shell layers over the process's 3, typing 3 sends 3. A remembered or quoted value equal to the slot's default is dropped once
 the defaults are read (`withoutSeededDefaults`); a value the user set in the dialog is never
 dropped. The check,
 the background slice, the run, a batch step and the quote send the same field
@@ -537,7 +557,7 @@ copy carries, so a change to them makes a new copy. A slice quote records only t
 request's settings (`order_item_quotes.part_settings`); a print reads the template's as
 they are at that time, as with `print_settings`.
 
-The print dialog's controls (#5627, above) open on each slot's default, the template's
+The print dialog's rows (#5627, above) show each slot's default, the template's
 settings laid over the process's values (`PrintCheck.slot_part_settings`), and send only
 what the user changes from it. The template's still lie under that request in
 `run_part_settings`. A run records only the request's settings

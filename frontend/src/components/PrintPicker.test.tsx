@@ -3449,6 +3449,8 @@ describe('PrintPicker · Remembered choices', () => {
       print_sequence: null,
       // #5627 — no settings per colour changed: none remembered.
       part_settings: null,
+      // #2998 — no slicer settings set: none remembered.
+      process_overrides: null,
     })
   })
 

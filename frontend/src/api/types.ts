@@ -566,10 +566,11 @@ export type SliceQuoteRequest = Schemas['ItemSliceQuoteRequest']
 /** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
  * item's copies, plates and request id are the server's. `part_settings` (#5627): the dialog
  * sends the quote's own, so the body matches the background slice's; the server refuses
- * others (`requote_needed`), and a body with none prints with the quote's. */
+ * others (`requote_needed`), and a body with none prints with the quote's. `process_overrides`
+ * (#2998) the same. */
 export type OrderItemPrintRequest = Pick<
   RegistryRunRequest,
-  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings'
+  'printer' | 'printer_id' | 'filament_plan' | 'choices' | 'part_settings' | 'process_overrides'
 >
 export type OrderEstimate = Schemas['OrderEstimate']
 /** #5328, job cost spec §6.3 — `GET /orders/history/unit-cost`: the quote warning's history. */

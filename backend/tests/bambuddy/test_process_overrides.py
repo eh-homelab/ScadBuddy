@@ -8,10 +8,14 @@ from __future__ import annotations
 import pytest
 from temporalio.contrib.pydantic import pydantic_data_converter
 
+from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.part_settings import PartSettings, overrides_of
-from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult, _override_warnings
 from scadbuddy.bambuddy.process_overrides import (
+    HOST_SIDE_KEYS,
+    is_host_side,
     named_key,
     normalised_overrides,
     override_warnings,
@@ -19,6 +23,7 @@ from scadbuddy.bambuddy.process_overrides import (
 )
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import PrintRunError, run_key
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.printing import QUOTED_SETUP, setup_differences
 from scadbuddy.orders.quote import SETUP_FIELDS, SliceQuoteRequest, print_setup
@@ -210,6 +215,87 @@ def test_a_print_with_other_overrides_than_its_quote_differs() -> None:
     assert setup_differences({"process_overrides": {"skirt_loops": "0"}}, recorded) == []
     # One not sent is the quote's.
     assert setup_differences({}, recorded) == []
+
+
+# ── host-side settings are stripped at every point ────────────────────────────────
+
+HOSTILE = {
+    "post_process": ["/bin/sh -c 'id > /tmp/pwned'"],
+    "filename_format": "../../x.gcode",
+    "print_host": "http://attacker",
+    "printhost_apikey": "k",
+    "PrintHost_Something_New": "x",
+    "bed_custom_model": "/etc/passwd",
+}
+
+
+@pytest.mark.parametrize("key", sorted(HOST_SIDE_KEYS))
+def test_every_host_side_key_is_one(key: str) -> None:
+    assert is_host_side(key) and is_host_side(f" {key.upper()} ")
+
+
+def test_custom_gcode_and_ordinary_keys_are_not_host_side() -> None:
+    for key in ("machine_end_gcode", "change_filament_gcode", "wall_loops", "skirt_loops"):
+        assert not is_host_side(key)
+
+
+def test_a_requests_host_side_overrides_are_dropped_and_named() -> None:
+    sent = request(process_overrides={**HOSTILE, "machine_end_gcode": "M84", "wall_loops": 3})
+
+    assert sent.overrides() == {"machine_end_gcode": "M84", "wall_loops": "3"}
+    assert sent.dropped_settings == sorted(HOSTILE)
+    # It slices as one that never named them, so it keys as one too.
+    clean = request(process_overrides={"machine_end_gcode": "M84", "wall_loops": 3})
+    assert run_key("o" * 32, sent) == run_key("o" * 32, clean)
+
+
+def test_part_settings_host_side_keys_are_dropped_and_named() -> None:
+    sent = request(part_settings={"1": {"post_process": "x", "wall_loops": 3}})
+
+    assert sent.part_settings is not None
+    assert sent.part_settings[1].metadata() == (("wall_loops", "3"),)
+    assert sent.dropped_settings == ["post_process"]
+    assert PartSettings.model_validate({"printhost_cafile": "/x"}).metadata() == ()
+
+
+async def test_the_check_says_what_was_dropped() -> None:
+    sent = request(process_overrides={"post_process": "x"})
+
+    async def unread(_: object) -> object:
+        raise AssertionError("no process is read without one")
+
+    [warning] = await _override_warnings(sent, None, unread)  # type: ignore[arg-type]
+
+    assert warning.kind == "host-setting-dropped"
+    assert "post_process (runs a command on the machine that slices)" in warning.message
+
+
+def test_remembered_and_quoted_overrides_drop_them() -> None:
+    assert normalised_overrides(HOSTILE) is None
+    remembered = ModelPrintChoices.model_validate({"process_overrides": HOSTILE})
+    assert remembered.process_overrides is None
+
+
+def test_a_templates_print_settings_drop_them() -> None:
+    meta = meta_from_raw(
+        {"print_settings": {"post_process": "x", "print_host": "h", "enable_support": "1"}},
+        "demo",
+    )
+
+    assert meta.print_settings == {"enable_support": "1"}
+
+
+def test_a_bambuddy_slice_request_drops_them_whatever_built_the_plan() -> None:
+    plan = SlicePlan(
+        printer_preset=PresetRef(source="cloud", id="GM"),
+        process_preset=PresetRef(source="cloud", id="GP"),
+        filament_presets=[],
+        filament_colours=[],
+        bed_type="Textured PEI Plate",
+        process_overrides={"post_process": "x", "wall_loops": "3"},
+    )
+
+    assert slice_request(plan, 1).process_overrides == {"wall_loops": "3"}
 
 
 # ── part settings take any key too ────────────────────────────────────────────────

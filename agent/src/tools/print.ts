@@ -339,7 +339,7 @@ export const partSettings = z
   .describe(
     'Slicer settings for the parts of one filament slot (#5571), keyed by slot id (from 1, as `filament_plan`), ' +
       'e.g. {"2": {"top_shell_layers": 8}} for 8 top layers on slot 2\'s parts only. Any Bambu Studio process key ' +
-      'is accepted, with no allowlist (#2998): e.g. top_shell_layers, wall_loops, sparse_infill_density (a number ' +
+      'is accepted, with no allowlist, except the host-side ones (post_process, print_host*), which are dropped (#2998): e.g. top_shell_layers, wall_loops, sparse_infill_density (a number ' +
       "is a percent), sparse_infill_pattern, ironing_type; the slicer judges each key and value. Each omitted " +
       "setting is the process's. An output and a library file take them; a library file's slot is the filament its " +
       "author gave the part, and a setting replaces the part's own value for that key. A slot no printed part of the " +
@@ -367,8 +367,11 @@ export const processOverrides = z
       'allowlist; a boolean is sent as Bambu\'s "1"/"0", a list sets each extruder variant. The slicer judges ' +
       'each key and value: a key the process preset has no value for is a warning (process-override-unchecked), ' +
       "and a slice the slicer refuses over one comes back as a 422 naming the key. These win over the template's " +
-      'defaults and over prime_tower, supports and print_sequence. get_process_values lists the resolved ' +
-      "process's keys and the value each prints with.",
+      'defaults and over prime_tower, supports and print_sequence. Only the settings that act on the machine ' +
+      'that slices are dropped, with a host-setting-dropped warning: post_process, filename_format, ' +
+      "bed_custom_texture, bed_custom_model and the print host's (print_host*, printhost_*, host_type); " +
+      "custom G-code (*_gcode) goes. get_process_values lists the resolved process's keys and the value each " +
+      'prints with.',
   )
 
 /** `process_overrides`' phrase in an approval line. */
@@ -1327,7 +1330,7 @@ export const printTools: Tool[] = [
           .describe("An Advanced-mode print sequence (#4970); omit for the template's own"),
         part_settings: partSettings,
         process_overrides: processOverrides.describe(
-          'Any Bambu Studio process settings the dialog opens on (#2998), as {key: value}: every key is accepted, ' +
+          'Any Bambu Studio process settings the dialog opens on (#2998), as {key: value}: every key but the host-side ones is accepted, ' +
             "with no allowlist, and the slicer judges it when the print slices; they win over the template's defaults " +
             'and over the prime tower, supports and print sequence. Omit to forget them.',
         ),
