@@ -99,7 +99,7 @@ def test_a_slot_is_a_short_signed_put_of_one_staging_key(
     assert r.status_code == 200, r.text
     [slot] = r.json()["uploads"]
     assert slot["filename"] == "cube.stl"
-    assert slot["headers"] == {"Content-Type": "model/stl"}
+    assert slot["headers"] == {"Content-Type": "model/stl", "x-amz-acl": "private"}
     assert f"/staging/{slot['id']}?" in slot["url"]
     assert "X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost" in slot["url"]
     assert "X-Amz-Expires=900" in slot["url"]
