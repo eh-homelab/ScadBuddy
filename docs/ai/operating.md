@@ -688,15 +688,18 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). That test is the only
   reader of `ai` today; no backend or frontend code on `main` reads it (the `AiStatus`
   comment in `agent/src/app.ts`).
-- **Migrations** (one file each in `agent/src/db/migrations/`, applied by
-  `agent/src/db/migrations.ts`) run in the background at start
-  (`void database?.ready()` in `main.ts`). They run under a transaction-scoped advisory
-  lock with `lock_timeout` 10 s and `statement_timeout` 60 s
-  (`DEFAULT_LOCK_TIMEOUT_MS`, `DEFAULT_STATEMENT_TIMEOUT_MS`). A failure is retried on
-  the next `ready()` call. An already-applied migration whose SQL was edited fails its
-  recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
-  does a ledger still keyed by position (before #491) that holds a row main never had
-  (`MigrationLedgerError`): that database ran an unmerged branch's migration.
+- **Migrations** (one file each in `backend/scadbuddy/migrations_agent/`) are the
+  API's to apply, at its start, after its own (#5299 D6;
+  `backend/scadbuddy/render/agent_migrations.py`), under the transaction-scoped advisory
+  lock the agent used to take, with `lock_timeout` 10 s and `statement_timeout` 60 s. An
+  already-applied migration whose SQL was edited, or a ledger still keyed by position
+  (before #491) that holds a row main never had, stops the API's start. The agent waits
+  in the background at start (`void database?.ready()` in `main.ts`) until
+  `ai_migrations` holds every file in `agent/src/db/expected-migrations.json`
+  (`agent/src/db/schema.ts`: 30 reads 1 s apart, then the next `ready()` call tries
+  again), and logs `waiting for the API to apply the agent's database migrations` once
+  per try while it waits. A row recorded with other SQL than the agent expects
+  (`MigrationChecksumError`) makes `main.ts` exit 1.
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -826,9 +829,10 @@ logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
 
 ## 7. Database tables
 
-The agent owns and migrates its `ai_*` tables (spec §9;
-[`agent/src/db/migrations/`](../../agent/src/db/migrations/), applied by
-[`agent/src/db/migrations.ts`](../../agent/src/db/migrations.ts)):
+The agent owns its `ai_*` tables (spec §9); the API applies their migrations
+([`backend/scadbuddy/migrations_agent/`](../../backend/scadbuddy/migrations_agent/), by
+[`backend/scadbuddy/render/agent_migrations.py`](../../backend/scadbuddy/render/agent_migrations.py),
+#5299):
 
 - `ai_migrations`: the ledger, one row per applied file (its id is the file name
   without `.sql`), with a checksum each. `version` and `story` are set only for the
@@ -1550,7 +1554,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   user writes later counts in either direction.
 - `on` is also allowed on a single item, but only in `package:*` sources and in
   `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
-  (`agent/src/db/migrations/20261026T2200Z_access.sql`).
+  (`backend/scadbuddy/migrations_agent/20261026T2200Z_access.sql`).
 - A source's switch folds onto its items when they are read: while it is off, each reads
   `access: off` with a reason, and `own_access` keeps the item's own choice, which its
   select shows and edits and Reset resets (`switched` in `agent/src/access/capabilities.ts`).
@@ -1563,7 +1567,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
 - The old keys no longer decide. These are `ai_settings` `builtin_tools.scadbuddy`,
   `scadbuddy_plugin_enabled`, `http_request_enabled` and `printer_camera_enabled`, and
   `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
-  `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
+  `backend/scadbuddy/migrations_agent/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
   `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
   triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
@@ -1573,9 +1577,9 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   reads the deleted keys as absent, which means on. Rolling back to a build that names the
   dropped columns (any build before #4828) is not supported either: its plugin reads and writes
   fail. Build `sha-7626da9` and later are safe. The copied `migration:2171` rows stay.
-  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql),
-  [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql)
-  and [`20261101T1527Z_access_drop_columns.sql`](../../agent/src/db/migrations/20261101T1527Z_access_drop_columns.sql).
+  See [`20261026T2201Z_access_copy.sql`](../../backend/scadbuddy/migrations_agent/20261026T2201Z_access_copy.sql),
+  [`20261030T1020Z_access_drop_mirrors.sql`](../../backend/scadbuddy/migrations_agent/20261030T1020Z_access_drop_mirrors.sql)
+  and [`20261101T1527Z_access_drop_columns.sql`](../../backend/scadbuddy/migrations_agent/20261101T1527Z_access_drop_columns.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
   replaces the old switch (spec §4.2, #1911). The old route `/api/v1/ai/settings/printer-camera`
   is gone (#4828): change it in Settings → Tools & plugins, or with

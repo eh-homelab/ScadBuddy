@@ -107,20 +107,28 @@ Each area's layout is in its own CLAUDE.md (see "Where the notes are").
 
 ## Migrations (#491)
 
-Both services keep one file per migration, named by UTC timestamp plus a slug:
-`backend/scadbuddy/migrations/` (ledger `scadbuddy_migrations`, applied by
-`render/pg_store.py` `migrate`) and `agent/src/db/migrations/` (ledger `ai_migrations`,
-applied by `src/db/migrations.ts`). To add one, create a NEW file named
-`$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else. Never
-edit, rename or remove a merged file; the agent checks each applied file's sha256 and
-stops at start on a mismatch. At start every file not yet in the ledger is applied, in
-timestamp order, under the service's advisory lock; that includes a file OLDER than ones
-already applied (a branch that merged late), so a migration may depend only on files
-already on main. The pre-#491 positional entries are frozen as `LEGACY_VERSIONS` in each
-module; a ledger still keyed by position is rewritten to file ids once, and a positional
-row main never had (a dev database that ran an unmerged branch's entry) stops the
-service with `MigrationLedgerError` rather than being guessed at. The agent's files reach
-the image because `pnpm build` copies them into `dist/db/migrations/`.
+Both schemas keep one file per migration, named by UTC timestamp plus a slug, and the
+API applies both at its start (#5299 D6): `backend/scadbuddy/migrations/` (ledger
+`scadbuddy_migrations`, `render/pg_store.py` `migrate`), then the agent's
+`backend/scadbuddy/migrations_agent/` (ledger `ai_migrations`, `render/agent_migrations.py`
+`migrate_agent`, under the agent's old advisory lock "SCADAGNT"). The agent no longer
+migrates: its `ready()` waits until `ai_migrations` holds every file in
+`agent/src/db/expected-migrations.json` (`agent/src/db/schema.ts`), so a new agent
+migration is a file in `migrations_agent/` plus its entry there
+(`UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec vitest run test/schema.test.ts`, which also checks
+that the API's runner and the agent's tests' runner, `agent/test/support/migrations.ts`,
+read the files alike). To add one, create a NEW file named
+`$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else (an agent
+file adds its entry to `expected-migrations.json` too). Never
+edit, rename or remove a merged file; the agent's ledger keeps each applied file's
+sha256, and the API stops at start on a mismatch (`AgentMigrationChecksumError`). At
+start every file not yet in a ledger is applied, in timestamp order, under that ledger's
+advisory lock; that includes a file OLDER than ones already applied (a branch that
+merged late), so a migration may depend only on files already on main. The pre-#491
+positional entries are frozen as `LEGACY_VERSIONS` / `AGENT_LEGACY_VERSIONS`; a ledger
+still keyed by position is rewritten to file ids once, and a positional row main never
+had (a dev database that ran an unmerged branch's entry) stops the start with
+`MigrationLedgerError` / `AgentMigrationLedgerError` rather than being guessed at.
 
 The backend's migration files and its settings tables: `backend/CLAUDE.md`.
 

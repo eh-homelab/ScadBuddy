@@ -110,7 +110,7 @@ spec §6 "Handoff": ownership moves "explicitly"). Now (`handoff()` in `manager.
 - **To `"browser"`** it moves at once. The human may take any session over anyway, and
   sees every one.
 - **To an MCP principal** it is an **offer**: `pending_owner_*` on `ai_sessions`
-  (`agent/src/db/migrations/20260929T1825Z_session_handoff_offers.sql`). The owner keeps
+  (`backend/scadbuddy/migrations_agent/20260929T1825Z_session_handoff_offers.sql`). The owner keeps
   the session. Only the named principal can accept it, with `sessions_accept_handoff` or
   a `sessions_handoff` to itself, the way `confirm_action` completes only for the
   principal that prepared the call (`claim()` in
@@ -156,7 +156,7 @@ per-token grant". §8.2: "Only the browser user decides, or another principal wi
 per-token grant (§6), and never for its own calls or sessions."
 
 - **The grant** is `approval_grant` on `ai_mcp_tokens`
-  (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off for
+  (`backend/scadbuddy/migrations_agent/20260929T0249Z_mcp_token_approval_grant.sql`), off for
   every token. Mint a token with it through `POST /api/v1/ai/mcp-tokens`
   (`{"name":…, "tier":"outward", "approval_grant":true}`,
   [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → MCP access →
