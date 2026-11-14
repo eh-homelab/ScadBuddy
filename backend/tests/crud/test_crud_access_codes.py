@@ -43,8 +43,13 @@ from scadbuddy.bambuddy.virtual_printers import (
 )
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.secrets import Kek, SealError, kek_from_base64
-from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient
-from scadbuddy.crud.print import API_NEEDS_KEK, RemotePrinterStore
+from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, CrudUnavailableError
+from scadbuddy.crud.print import (
+    API_NEEDS_KEK,
+    WATCH_CALL_BUDGET,
+    WATCH_CALL_TIMEOUT,
+    RemotePrinterStore,
+)
 from scadbuddy.crud.wire import CRUD_HEADERS
 from scadbuddy.library.settings_store import PrintSettings
 from scadbuddy.printers.component import PRINTERS
@@ -335,3 +340,28 @@ async def test_with_a_kek_on_the_api_the_lan_path_is_open() -> None:
         with pytest.raises(RunRefusalError):
             await _registry_path(_row("native"), remote, None)
     assert path == "native"
+
+
+@pytest.mark.parametrize("preferred", ["auto", "native"])
+async def test_an_api_out_of_reach_is_retried_never_read_as_no_key(preferred: str) -> None:
+    """The gate's read failing is the client's retryable error, as the report's read
+    beside it is: neither a fallback to Bambuddy nor `LAN_NEEDS_KEK`. It gives up within
+    the watch's short bound, not the client's own budget."""
+    asked: list[httpx.Request] = []
+
+    def down(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return httpx.Response(502, headers=CRUD_HEADERS)
+
+    client = CrudSyncClient(
+        INTERNAL, "print", ServiceAuth(_Token("sbsvc_print")), transport=httpx.MockTransport(down)
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(CrudUnavailableError):
+            await _registry_path(_row(preferred), RemotePrinterStore(client), _Reports())  # type: ignore[arg-type]
+        assert time.monotonic() - started < WATCH_CALL_BUDGET + WATCH_CALL_TIMEOUT + 2
+    finally:
+        client.close()
+    assert asked
+    assert all(request.url.path.endswith("/print/access-codes") for request in asked)

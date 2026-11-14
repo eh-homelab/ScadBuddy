@@ -956,8 +956,12 @@ class RemotePrinterStore(PrinterStore):
 
     def opens_access_codes(self) -> bool:
         """Whether the API can open an access code (it holds the KEK), asked on each call:
-        an API pod may roll with or without its key."""
-        response = self._client.request("GET", f"{BASE}/access-codes")
+        an API pod may roll with or without its key. A short read, bounded as the watch's
+        calls are (`WATCH_CALL_TIMEOUT`, `WATCH_CALL_BUDGET`): an API out of reach is the
+        client's `CrudUnavailableError`, which the run's retry tries again."""
+        response = self._client.request(
+            "GET", f"{BASE}/access-codes", timeout=WATCH_CALL_TIMEOUT, budget=WATCH_CALL_BUDGET
+        )
         return bool(response.json()["opens"])
 
     def open_virtual_access_code(self, sealed: str, context: str) -> str:
@@ -967,7 +971,11 @@ class RemotePrinterStore(PrinterStore):
         body = {"sealed": sealed, "context": context}
         try:
             response = self._client.request(
-                "POST", f"{BASE}/access-codes/virtual-printer", json=body
+                "POST",
+                f"{BASE}/access-codes/virtual-printer",
+                json=body,
+                timeout=WATCH_CALL_TIMEOUT,
+                budget=WATCH_CALL_BUDGET,
             )
         except CrudRefusedError as error:
             if error.problem.get("reason") == NOT_CONFIGURED:

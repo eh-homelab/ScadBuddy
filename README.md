@@ -841,7 +841,8 @@ Service credentials lists, rotates and revokes them.
 It presents its proof at `POST /api/v1/auth/service-token` (RFC 8693 form fields
 `grant_type`, `subject_token`, `subject_token_type`) and renews the credential at half-life
 and at once after a 401. Each caller picks its proof with one variable; setting both is a
-start error, and setting neither reads the view as above:
+start error, and setting neither reads the view as above, except on the workers that hold
+no database (render, print and projects), which refuse to start:
 
 | Proof | On the caller | On the API |
 |---|---|---|

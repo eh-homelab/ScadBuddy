@@ -1184,9 +1184,9 @@ async def check_print(
 
     ``printers`` and ``reports`` are the registry, read as the run reads it (#4442 I2):
     a ``printer`` it refuses is an error here in the run's words, and on the LAN path
-    the status judged is the LAN report's. A print worker without the key is the run's
-    503, raised as it is. Like the run, a check makes the registry row of a Bambuddy
-    printer that has none (`PrinterStore.ensure_bambuddy`): that row is the printer's
+    the status judged is the LAN report's. An API that cannot open access codes (no
+    KEK) is the run's 503, raised as it is. Like the run, a check makes the registry row
+    of a Bambuddy printer that has none (`PrinterStore.ensure_bambuddy`): that row is the printer's
     identity, made once and idempotently, as the printers strip makes it on a read
     (`printers_now`), so a check that writes it changes nothing a run would not.
 
@@ -2718,7 +2718,9 @@ async def _registry_path(
     has no KEK; on the print worker, which holds none, the API is asked, #5298 Task 33)
     the run takes Bambuddy's path: an ``auto`` row it reaches through Bambuddy too takes
     that path (#4442 review), and only a row set to ``native`` is the 503
-    `LAN_NEEDS_KEK`.
+    `LAN_NEEDS_KEK`. An API out of reach while the worker asks is raised as the report's
+    read beside it is (`CrudUnavailableError`, which the run's retry tries again), never
+    read as "no key": a blip must not move a run to Bambuddy's path or refuse it.
     ``say_fallback`` logs that fallback: on for a run, off for the dialog's checks, which
     would repeat it on every re-check."""
     if printers is None or row is None:
