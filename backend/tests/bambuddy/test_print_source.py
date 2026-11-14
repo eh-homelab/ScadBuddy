@@ -62,8 +62,10 @@ from scadbuddy.render.bambu3mf import (
 )
 from scadbuddy.render.plate import DEFAULT_PLATE
 from scadbuddy.render.split import ColourPart
+from scadbuddy.render.thumbnail import render_plate_thumbnails
 from tests.bambuddy.conftest import BASE_URL, recording
 from tests.bambuddy.test_ensure_copy import MemoryUploads
+from tests.conftest import read_png
 
 API = f"{BASE_URL}/api/v1"
 
@@ -468,9 +470,9 @@ def _scadbuddy_3mf(tmp_path: Path) -> bytes:
     return out.read_bytes()
 
 
-def _authors_3mf(tmp_path: Path) -> bytes:
+def _authors_3mf(tmp_path: Path, *, covers: bool = False) -> bytes:
     """A two-plate project its author saved in Bambu Studio: their placement, their
-    plates, a real printer preset."""
+    plates, a real printer preset, and with ``covers`` each plate's cover images."""
     tray = ColourPart(1, "Tray", "#FF6AC1", trimesh.creation.box(extents=(30, 30, 4)))
     lid = ColourPart(2, "Lid", "#1F6FEB", trimesh.creation.box(extents=(12, 12, 2)))
     out = tmp_path / "maze.3mf"
@@ -478,7 +480,9 @@ def _authors_3mf(tmp_path: Path) -> bytes:
         [PlateParts((tray,), (1,)), PlateParts((lid,), (2,))],
         ["#FF6AC1", "#1F6FEB"],
         out,
-        thumbnails=None,
+        thumbnails=[render_plate_thumbnails([tray]), render_plate_thumbnails([lid])]
+        if covers
+        else None,
         model_name="maze",
     )
     with zipfile.ZipFile(out) as archive:
@@ -740,6 +744,73 @@ def test_a_rewrite_past_the_cap_falls_back_to_the_file_as_it_is(
     )
 
     assert laid_out == payload
+
+
+def _rgb(payload: bytes, name: str) -> set[tuple[int, int, int]]:
+    """The colours of the opaque pixels of the image ``name`` in ``payload``."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        image = read_png(archive.read(name))
+    return {(int(r), int(g), int(b)) for r, g, b, _ in image[image[..., 3] == 255]}
+
+
+def _hue_is(colours: set[tuple[int, int, int]], channel: int) -> bool:
+    """Whether some opaque pixel is clearly of ``channel``'s hue (0 red, 1 green, 2 blue)."""
+    return any(
+        all(rgb[channel] > rgb[other] + 40 for other in range(3) if other != channel)
+        for rgb in colours
+    )
+
+
+def test_an_authors_file_gets_its_covers_redrawn_in_the_spools_colours(tmp_path: Path) -> None:
+    """#6170: the Bambu Studio CLI keeps the plate images it is handed (it cannot draw
+    them headless), so an author's file printed in another spool's colour carried the
+    author's colour into the sliced file's ``plate_1.png``, Bambuddy's job cover."""
+    payload = _authors_3mf(tmp_path, covers=True)
+    assert layout_of(payload) == "author"
+
+    laid_out = send._laid_out_for(
+        payload,
+        Target(
+            DEFAULT_PLATE,
+            "0.4",
+            colours=("#00C000", "#00C000"),
+            nozzle_volume_type=tuple(HIGH_FLOW),
+        ),
+    )
+
+    for name in ("Metadata/plate_1.png", "Metadata/plate_2.png", "Metadata/top_1.png"):
+        colours = _rgb(laid_out, name)
+        assert _hue_is(colours, 1), name  # the spool's green
+        assert not _hue_is(colours, 2), name  # not the lid's own blue
+        assert not _hue_is(colours, 0), name  # nor the tray's own pink
+
+
+def test_an_authors_file_whose_plates_do_not_read_back_keeps_its_covers(
+    tmp_path: Path,
+) -> None:
+    """A file is the author's also when its plates do not read back (``layout_of``);
+    its covers cannot be redrawn then, and the print goes on with them."""
+    authors = _authors_3mf(tmp_path, covers=True)
+    with zipfile.ZipFile(io.BytesIO(authors)) as archive:
+        entries = [(name, archive.read(name)) for name in archive.namelist()]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries:
+            archive.writestr(name, b"<model/>" if name == "3D/3dmodel.model" else data)
+    payload = buffer.getvalue()
+    assert layout_of(payload) == "author"
+
+    laid_out = send._laid_out_for(
+        payload, Target(DEFAULT_PLATE, "0.4", colours=("#00C000", "#00C000"))
+    )
+
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as before,
+        zipfile.ZipFile(io.BytesIO(laid_out)) as after,
+    ):
+        assert after.read("Metadata/plate_1.png") == before.read("Metadata/plate_1.png")
+        settings = json.loads(after.read(PROJECT_SETTINGS_NAME))
+    assert settings["filament_colour"] == ["#00C000", "#00C000"]
 
 
 async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_exists() -> None:

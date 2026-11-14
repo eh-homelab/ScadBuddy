@@ -19,6 +19,7 @@ import zipfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import BinaryIO, Literal, NamedTuple, Protocol
+from xml.etree import ElementTree as ET
 
 from fastapi import status
 from pydantic import BaseModel
@@ -396,7 +397,8 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     fallback. Moving it now is what puts the object — and the prime tower a
     multi-colour print needs — where every extruder can reach them. An author's file
     keeps its placement and every plate it lays out; only the nozzles and colours are
-    stated (:func:`state_nozzles`). Either way each painted filament is named on a part
+    stated (:func:`state_nozzles`), and its covers redrawn in those colours
+    (:func:`_recoloured_covers`, #6170). Either way each painted filament is named on a part
     that prints nothing (:func:`hint_painted_slots`, #4013). Anything else comes back
     unchanged, and so takes no settings per part: a ``target`` with some is refused
     (422, :data:`PART_SETTINGS_AS_IS`), as the run refuses it first
@@ -414,12 +416,15 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         try:
             laid = hint_painted_slots(
                 towers_within_reach(
-                    state_nozzles(
-                        payload,
-                        nozzle_stats=target.nozzle_stats,
-                        nozzle_volume_type=target.nozzle_volume_type,
-                        filament_colour=colours,
-                        filament_map=target.filament_map,
+                    _recoloured_covers(
+                        state_nozzles(
+                            payload,
+                            nozzle_stats=target.nozzle_stats,
+                            nozzle_volume_type=target.nozzle_volume_type,
+                            filament_colour=colours,
+                            filament_map=target.filament_map,
+                        ),
+                        colours,
                     ),
                     target.plate,
                 )
@@ -448,6 +453,23 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     # Outside the ArchiveTooLargeError guard on purpose: that error is a ValueError,
     # which hint_painted_slots answers with the payload unchanged.
     return _with_parts(hint_painted_slots(payload), target.part_settings)
+
+
+def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:
+    """An author's file with its covers redrawn in ``colours`` (:func:`recolour_3mf`):
+    the slicer keeps the covers it is handed, so the author's colours would become the
+    sliced file's plate image, Bambuddy's job cover (#6170). A file whose plates do not
+    read back (still the author's, :func:`layout_of`) keeps its covers."""
+    if colours is None:
+        return payload
+    try:
+        return recolour_3mf(payload, colours)
+    except (LookupError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
+        logger.warning(
+            "the 3MF's covers could not be redrawn in the spools' colours",
+            extra={"error": type(error).__name__},
+        )
+        return payload
 
 
 def _source_bed(settings: dict[str, object]) -> tuple[float, float] | None:
