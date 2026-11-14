@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomizerSchema, StorefrontListing, StorefrontListingInput } from '../../api/types'
+import type { CustomizerSchema, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
 import { problem } from '../handlers'
+import * as orders from './orders/state'
 
 /**
  * #5282 (spec 2026-11-02 §5.3; backend `api/storefront.py`): the back office's storefront
@@ -79,8 +80,71 @@ const UNPUBLISHED: Pick<StorefrontListing, 'published' | 'snapshot' | 'media' | 
 
 const EMPTY_SCHEMA: CustomizerSchema = { title: null, source_sha256: '', groups: [], parameters: [] }
 
+/** The backend's `ListingStore.page` (#6157): search, filters, sort, a page and the total. */
+function page(url: URL): StorefrontListingPage {
+  const get = (key: string) => url.searchParams.get(key) ?? ''
+  const q = get('q').trim().toLowerCase()
+  const slugs = url.searchParams.getAll('slug')
+  const materials = url.searchParams.getAll('material').map((m) => m.toUpperCase())
+  const status = get('status')
+  const limit = Math.min(200, Math.max(1, Number(get('limit') || 50)))
+  const offset = Math.max(0, Number(get('offset') || 0))
+  const ordered = sorted()
+  const place = new Map(ordered.map((listing, index) => [listing.id, index + 1]))
+  const materialOf = new Map(orders.state.filaments.map((f) => [f.id, f.material.toUpperCase()]))
+  const matched = ordered.filter(
+    (l) =>
+      (!q || l.title.toLowerCase().includes(q) || l.slug.toLowerCase().includes(q)) &&
+      (!status || l.published === (status === 'published')) &&
+      (slugs.length === 0 || slugs.includes(l.slug)) &&
+      (materials.length === 0 || l.colours.some((id) => materials.includes(materialOf.get(id) ?? ''))),
+  )
+  const sort = get('sort') || 'position'
+  const dir = get('dir') === 'desc' ? -1 : 1
+  const key = (l: StorefrontListing): string | number =>
+    sort === 'title' ? l.title.toLowerCase() : sort === 'slug' ? l.slug : sort === 'updated' ? l.updated_at : l.position
+  const by = [...matched].sort((a, b) => {
+    const [x, y] = [key(a), key(b)]
+    return (x < y ? -1 : x > y ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0) * dir
+  })
+  return {
+    items: by.slice(offset, offset + limit).map((l) => ({
+      id: l.id,
+      slug: l.slug,
+      commit: l.commit,
+      title: l.title,
+      place: place.get(l.id) ?? 0,
+      published: l.published,
+      media_id: l.media_ids[0] ?? null,
+      published_at: l.published_at,
+      updated_at: l.updated_at,
+    })),
+    total: matched.length,
+    places: ordered.length,
+    limit,
+    offset,
+  }
+}
+
 export const handlers = [
-  http.get(base, () => HttpResponse.json(sorted())),
+  http.get(base, ({ request }) => HttpResponse.json(page(new URL(request.url)))),
+
+  http.get(`${base}/:id`, ({ params }) => {
+    const found = listings.find((l) => l.id === String(params['id']))
+    return found ? HttpResponse.json(found) : refused(404, 'listing_not_found', `no listing '${String(params['id'])}'`)
+  }),
+
+  http.post(`${base}/:id/move`, async ({ params, request }) => {
+    const id = String(params['id'])
+    const { place } = (await request.json()) as { place: number }
+    const ids = sorted().map((l) => l.id)
+    if (!ids.includes(id)) return refused(404, 'listing_not_found', `no listing '${id}'`)
+    const rest = ids.filter((other) => other !== id)
+    rest.splice(Math.min(place, rest.length + 1) - 1, 0, id)
+    listings = listings.map((l) => ({ ...l, position: rest.indexOf(l.id) }))
+    save()
+    return HttpResponse.json(listings.find((l) => l.id === id))
+  }),
 
   http.post(base, async ({ request }) => {
     const body = (await request.json()) as StorefrontListingInput

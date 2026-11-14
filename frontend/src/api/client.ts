@@ -275,6 +275,7 @@ import type {
   PriceBook,
   StorefrontListing,
   StorefrontListingInput,
+  StorefrontListingPage,
   ProviderConnect,
   ProviderStatus,
   Quote,
@@ -2798,7 +2799,14 @@ export const api = {
   /** The printer is priced at the price book's machine rate again. */
   deleteMachineRate: (printerId: string) => request<void>(`/printers/${seg(printerId)}/machine-rate`, { method: 'DELETE' }),
   // -- the storefront's listings (#5282, spec 2026-11-02 §5.3) ---------------------------------
-  storefrontListings: () => request<StorefrontListing[]>('/storefront/listings'),
+  /** #6157 — one page of the listings: searched, filtered and sorted on the server. */
+  storefrontListings: (query: URLSearchParams = new URLSearchParams()) =>
+    request<StorefrontListingPage>(`/storefront/listings${query.size ? `?${query}` : ''}`),
+  /** #6157 — one listing whole, for its editor. */
+  storefrontListing: (id: string) => request<StorefrontListing>(`/storefront/listings/${seg(id)}`),
+  /** #6157 — the listing put at `place` (from 1) in the public site's order. */
+  moveStorefrontListing: (id: string, place: number) =>
+    request<StorefrontListing>(`/storefront/listings/${seg(id)}/move`, { method: 'POST', body: JSON.stringify({ place }) }),
   createStorefrontListing: (body: StorefrontListingInput) =>
     request<StorefrontListing>('/storefront/listings', { method: 'POST', body: JSON.stringify(body) }),
   /** Replaces the listing whole and unpublishes it; `updatedAt` is the `updated_at` the editor read. */

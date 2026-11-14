@@ -195,7 +195,70 @@ class ListingOrder(BaseModel):
     ids: list[str]
 
 
-# -- the public site's view (Task 6) --------------------------------------------------
+#: How many rows one page of ``GET …/listings`` holds at most, and by default (#6157).
+LISTING_PAGE_MAX = 200
+LISTING_PAGE_DEFAULT = 50
+
+type ListingSort = Literal["position", "title", "slug", "updated"]
+type ListingStatus = Literal["published", "draft"]
+
+
+class ListingQuery(BaseModel):
+    """``GET …/listings``'s query (#6157): a search, filters, a sort and a page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Matches the title or the template's slug, case-insensitive, anywhere in it.
+    q: str = Field(default="", max_length=200)
+    status: ListingStatus | None = None
+    #: Templates; a listing of any of them.
+    slug: list[str] = Field(default_factory=list, max_length=100)
+    #: Price-book materials (``PLA``); a listing whose colours include a filament of any.
+    material: list[str] = Field(default_factory=list, max_length=50)
+    sort: ListingSort = "position"
+    dir: Literal["asc", "desc"] = "asc"
+    limit: int = Field(default=LISTING_PAGE_DEFAULT, ge=1, le=LISTING_PAGE_MAX)
+    offset: int = Field(default=0, ge=0)
+
+
+class ListingRow(BaseModel):
+    """One row of the back office's list: what the table shows, never the bounds or
+    the snapshot."""
+
+    id: str
+    slug: str
+    commit: str
+    title: str
+    #: The listing's place in the shop's order, from 1.
+    place: int
+    published: bool
+    #: The first media id the listing shows, for the row's picture; None for none.
+    media_id: str | None
+    published_at: datetime | None
+    updated_at: datetime
+
+
+class ListingPage(BaseModel):
+    """A page of ``GET …/listings``: its rows, how many match in all (``total``), and how
+    many listings the shop has (``places``: the last place a move can name)."""
+
+    items: list[ListingRow]
+    total: int
+    places: int
+    limit: int
+    offset: int
+
+
+class ListingMove(BaseModel):
+    """``POST …/listings/{id}/move``: the place to put the listing at, from 1. A place
+    past the end puts it last."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    place: int = Field(ge=1)
+
+
+# -- the public site's view (Task 6)--------------------------------------------------
 
 
 class _Shown(BaseModel):

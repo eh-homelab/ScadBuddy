@@ -240,9 +240,7 @@ def test_the_reference_matches_the_back_offices(
     published: dict[str, Any],
     pla_red: str,  # noqa: F811
 ) -> None:
-    listing = Listing.model_validate(
-        next(item for item in client.get(LISTINGS).json() if item["id"] == published["id"])
-    )
+    listing = Listing.model_validate(client.get(f"{LISTINGS}/{published['id']}").json())
     book = client.get(BOOK).json()
     filaments = {f["id"]: Filament.model_validate(f) for f in book["filaments"]}
     values = listing_values(listing, {"width": 40}, filaments)

@@ -27,6 +27,8 @@ from scadbuddy.orders.storefront.listings import (
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
+    ListingPage,
+    ListingQuery,
     ListingSnapshot,
     NumberBound,
     ParamBound,
@@ -150,6 +152,72 @@ def test_the_order_is_the_one_given(store: ListingStore) -> None:
     for stale in ([c.id, a.id], [c.id, a.id, b.id, "nope"], [a.id, a.id, b.id]):
         with refused_as("listing_changed"):
             store.reorder(stale)
+
+
+def ids_of(page: ListingPage) -> list[str]:
+    return [row.id for row in page.items]
+
+
+def test_a_move_puts_one_listing_at_a_place(store: ListingStore) -> None:
+    a, b, c, d = (store.create(body(title=t)) for t in "abcd")
+    assert store.move(d.id, 1).id == d.id
+    assert ids_of(store.page(ListingQuery())) == [d.id, a.id, b.id, c.id]
+    store.move(d.id, 3)
+    assert ids_of(store.page(ListingQuery())) == [a.id, b.id, d.id, c.id]
+    # A place past the end is last.
+    store.move(a.id, 99)
+    assert ids_of(store.page(ListingQuery())) == [b.id, d.id, c.id, a.id]
+    assert [row.place for row in store.page(ListingQuery()).items] == [1, 2, 3, 4]
+    # A move leaves the time an editor read alone.
+    assert store.get(a.id) == a.model_copy(update={"position": 3})
+    with refused_as("listing_not_found", 404):
+        store.move("nope", 1)
+
+
+def test_the_list_pages_searches_filters_and_sorts(store: ListingStore, pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        pla = conn.execute(
+            "INSERT INTO filaments (material, colour, cost_per_kg) VALUES ('PLA', '#ff0000', 20)"
+            " RETURNING id"
+        ).fetchone()
+        petg = conn.execute(
+            "INSERT INTO filaments (material, colour, cost_per_kg) VALUES ('PETG', '#00ff00', 25)"
+            " RETURNING id"
+        ).fetchone()
+    assert pla is not None and petg is not None
+    star = store.create(body(title="Star Keychain", slug="star-tag", colours=[pla["id"]]))
+    owl = store.create(body(title="Owl Cup", slug="owl-cup", colours=[petg["id"]]))
+    odd = store.create(body(title="100% _odd_", slug="odd", media_ids=["m1", "m2"]))
+    everything = store.page(ListingQuery())
+    assert (
+        ids_of(everything) == [star.id, owl.id, odd.id]
+        and everything.total == 3
+        and everything.places == 3
+    )
+    assert everything.items[2].media_id == "m1" and everything.items[0].media_id is None
+    # The search reads the title and the slug, whatever the case.
+    assert ids_of(store.page(ListingQuery(q="KEYCHAIN"))) == [star.id]
+    assert ids_of(store.page(ListingQuery(q="owl-c"))) == [owl.id]
+    # LIKE's wildcards are taken as they are written.
+    assert ids_of(store.page(ListingQuery(q="0%"))) == [odd.id]
+    assert ids_of(store.page(ListingQuery(q="_o"))) == [odd.id]
+    assert ids_of(store.page(ListingQuery(q="%"))) == [odd.id]
+    # The filters.
+    assert ids_of(store.page(ListingQuery(slug=["owl-cup", "odd"]))) == [owl.id, odd.id]
+    assert ids_of(store.page(ListingQuery(material=["petg"]))) == [owl.id]
+    assert ids_of(store.page(ListingQuery(status="published"))) == []
+    assert ids_of(store.page(ListingQuery(status="draft"))) == [star.id, owl.id, odd.id]
+    # The sorts, and a page past the first; the total counts every match.
+    assert ids_of(store.page(ListingQuery(sort="title"))) == [odd.id, owl.id, star.id]
+    backwards = store.page(ListingQuery(sort="position", dir="desc"))
+    assert ids_of(backwards) == [odd.id, owl.id, star.id]
+    second = store.page(ListingQuery(sort="title", limit=2, offset=2))
+    assert ids_of(second) == [star.id] and second.total == 3 and second.places == 3
+    # A row's place is its place in the whole order, filtered or not.
+    owls = store.page(ListingQuery(q="owl"))
+    assert [row.place for row in owls.items] == [2]
+    # `places` counts the whole shop, the last place a move can name, filtered or not.
+    assert (owls.total, owls.places) == (1, 3)
 
 
 def test_a_published_listing_is_not_deleted(

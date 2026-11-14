@@ -14,10 +14,10 @@ test.describe('sell on storefront', () => {
 
     await page.getByTestId('generate-menu').click()
     await page.getByTestId('generate-sell').click()
-    await expect(page).toHaveURL(/\/storefront$/)
+    await expect(page).toHaveURL(/\/storefront\/listings\/new$/)
 
     // Filled in: the title, the picture, the name the customer types, the geometry set.
-    await expect(page.getByLabel('Title')).toHaveValue('Name Keychain')
+    await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Name Keychain')
     await expect(page.getByRole('checkbox', { name: 'Show thumbnail.png' })).toBeChecked()
     const preview = page.getByTestId('listing-preview')
     await expect(preview.getByLabel('Name on the tag')).toBeVisible()
@@ -33,6 +33,8 @@ test.describe('sell on storefront', () => {
     await expect(problems).toHaveCount(0)
 
     await page.getByTestId('listing-actions').getByRole('button', { name: 'Publish' }).click()
-    await expect(page.getByRole('button', { name: 'Edit Name Keychain' })).toContainText('Published')
+    await expect(page.getByTestId('storefront-listing-page').getByText('Published', { exact: true })).toBeVisible()
+    await page.getByRole('link', { name: 'Back to listings' }).click()
+    await expect(page.getByTestId('storefront-listing')).toContainText('Published')
   })
 })
