@@ -503,7 +503,7 @@ class ServiceCredentialStore:
 def grant_caller_views(conn: Connection[Any]) -> list[str]:
     """Grants each caller's role, where the deployment made it, its own views only
     (:data:`VIEWS`); the roles granted. Idempotent and never revokes, as
-    `render/worker_role.py`."""
+    `auth/caller_grants.py` `grant_role`."""
     granted = []
     for caller, role in ROLES.items():
         if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:

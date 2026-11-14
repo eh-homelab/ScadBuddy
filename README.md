@@ -905,7 +905,7 @@ store or another caller's credential:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
-| render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
+| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start, so the deployment can drop it (#5298 Task 22) | `scadbuddy-render.yaml`, until eh-homelab/clusters removes it |
 | print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start, so the deployment can drop it (#5298 Task 35) | `scadbuddy-print.yaml`, until eh-homelab/clusters removes it |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
@@ -913,15 +913,16 @@ store or another caller's credential:
 Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
 CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
 the API itself stays on the database's owner role. At every start the API grants each
-role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
-render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
+role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`) and its
+credential's view; a role created
 after the API started is granted on the API's next start. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
 On 2026-11-05 the render, print and projects workers connected as their own roles (the
 projects worker has made no connection since 2026-11-07, and the print worker none since
-its build `sha-4d71920`, read in `pg_stat_activity` on 2026-11-14, #5298), and
+its build `sha-4d71920`, read in `pg_stat_activity` on 2026-11-14, #5298; the render
+worker has had no database client since #5298 Task 20, PR #5665), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
@@ -1128,10 +1129,10 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   name the token the worker took it under, and a lease or hold lives at most five
   minutes unless renewed.
 - **The role `scadbuddy_render` (#601)** is no longer used. Remove the worker's
-  database secret from its Deployment. Until #5298 Task 22 revokes and drops the role,
-  the API still grants it `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`),
-  now empty, at every start, and a role granted the older `render_settings` view or
-  the tables above keeps them.
+  database secret from its Deployment. The API grants the role nothing and, at every
+  start, takes back everything it held (the older `render_settings` view, the tables
+  above, the schema and its `activity` row policy; `backend/scadbuddy/auth/revoke.py`,
+  #5298 Task 22), so the deployment can drop it.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
   `store-folders`, `assets`, `libraries`) and answers its first read of the store
