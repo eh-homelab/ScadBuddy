@@ -155,11 +155,20 @@ def check_sandbox_environment(environ: Mapping[str, str]) -> None:
         raise IntakeRefusal(reasons)
 
 
-def probe_isolation(spool: Path) -> str | None:
+def covered_dirs(token_file: str) -> tuple[str, ...]:
+    """The directories the launcher covers with an empty tmpfs for each check besides the
+    spool: the RPC token's own, so the parser cannot read the token by its path. The token
+    sits on a read-only Secret volume, so it cannot be unlinked instead."""
+    return (os.path.dirname(os.path.abspath(token_file)),)
+
+
+def probe_isolation(spool: Path, covers: tuple[str, ...] = ()) -> str | None:
     """Whether a check can be confined here (`confine.py --strict`, running a program
-    that does nothing): None when it can, else why not."""
+    that does nothing, with the same covers as a check): None when it can, else why not."""
     out = subprocess.run(
-        confine.command(str(spool), [sys.executable, "-I", "-c", "pass"], strict=True),
+        confine.command(
+            str(spool), [sys.executable, "-I", "-c", "pass"], strict=True, covers=covers
+        ),
         capture_output=True,
         text=True,
         timeout=30,
@@ -274,8 +283,10 @@ class Sandbox:
     """The server's state: one check at a time (`busy`); `outlived` and `stopped` once a
     process of an earlier check will not die."""
 
-    def __init__(self, spool: Path, token: str) -> None:
+    def __init__(self, spool: Path, token: str, covers: tuple[str, ...] = ()) -> None:
         self.spool = spool
+        #: Covered with an empty tmpfs in each check's mount namespace (`covered_dirs`).
+        self.covers = covers
         self._authorization = f"Bearer {token}".encode("ascii")
         self.busy = False
         self.outlived: JobOutlivedError | None = None
@@ -434,6 +445,7 @@ class Sandbox:
                 timeout=request["timeout"],
                 address_space=request["address_space"],
                 cancelled=cancelled,
+                covers=self.covers,
             )
         except CheckCrashedError:
             if cancelled.is_set():
@@ -553,10 +565,11 @@ async def serve(
     token: str,
     host: str = "0.0.0.0",
     port: int = SANDBOX_PORT,
+    covers: tuple[str, ...] = (),
 ) -> None:
     """Serves checks one at a time until ``stop``; `JobOutlivedError` once a process of an
     earlier check will not die."""
-    sandbox = Sandbox(spool, token)
+    sandbox = Sandbox(spool, token, covers)
     server = await start(sandbox, host=host, port=port)
     logger.info("intake sandbox serving on %s:%d, one check at a time", host, port)
     waits = [asyncio.ensure_future(stop.wait()), asyncio.ensure_future(sandbox.stopped.wait())]
@@ -572,12 +585,12 @@ async def serve(
         raise sandbox.outlived
 
 
-async def _main(spool: Path, port: int, token: str) -> None:
+async def _main(spool: Path, port: int, token: str, covers: tuple[str, ...]) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
-    await serve(spool, stop, token=token, port=port)
+    await serve(spool, stop, token=token, port=port, covers=covers)
 
 
 def _port(value: str) -> int | None:
@@ -617,7 +630,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     forbid_dumping()
     spool = Path(os.environ.get("SCADBUDDY_INTAKE_WORK_DIR", "/tmp"))
-    refused = probe_isolation(spool)
+    covers = covered_dirs(token_file)
+    # A tmpfs hides a directory only from above: a cover that holds the spool, or lies in
+    # it, would leave the token reachable by ``..`` from the box.
+    real_spool = os.path.realpath(spool)
+    for cover in covers:
+        real_cover = os.path.realpath(cover)
+        if os.path.commonpath([real_spool, real_cover]) in (real_spool, real_cover):
+            logger.error(
+                "the intake sandbox refuses to start: the RPC token's directory %s and the"
+                " spool %s must not hold one another",
+                cover,
+                spool,
+            )
+            return 2
+    refused = probe_isolation(spool, covers)
     if refused is not None:
         logger.error(
             "the intake sandbox refuses to start: a check cannot be confined here (%s)."
@@ -630,7 +657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("the intake sandbox refuses to start: it cannot be the child subreaper")
         return 3
     try:
-        asyncio.run(_main(spool, port, token))
+        asyncio.run(_main(spool, port, token, covers))
     except JobOutlivedError as error:
         logger.error("the intake sandbox stops: %s", error)
         return 4

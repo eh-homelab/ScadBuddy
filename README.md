@@ -2370,7 +2370,8 @@ holds the manifest (spec §12).
   outside `/var/run/secrets/` (e.g. at `/etc/scadbuddy-intake-rpc/token`), and set
   `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` to that file in both. Both refuse to start without
   the file, with an empty file or with a shorter token. The token authorizes calls to the
-  sandbox and nothing else, so it is the one secret the sandbox may hold. A request's head
+  sandbox and nothing else, so it is the one secret the sandbox may hold, and each check's
+  parser sees an empty tmpfs over the token's directory. A request's head
   and whole body must arrive within 60 s (`REQUEST_DEADLINE`), or the sandbox drops it.
 - **The sandbox's environment** is `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where
   each check gets a box that is removed after it), `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE`,

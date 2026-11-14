@@ -1,5 +1,9 @@
 """The check's launcher (#6133, spec 2026-11-13 §7):
-``python -I -S confine.py [--strict] [--box-fd N] <hide> -- <program> [args...]``.
+``python -I -S confine.py [--strict] [--box-fd N] [--cover DIR]... <hide> -- <program> [args...]``.
+
+Each ``--cover`` directory gets an empty tmpfs (mode 0) over it in the new mount
+namespace, as ``hide`` does: the sandbox covers its RPC token's directory, which sits on a
+read-only Secret volume it cannot unlink, so the parser cannot read the token by its path.
 
 Its working directory is the job's box, or, with ``--box-fd``, the directory of that
 inherited descriptor, which it ``fchdir``s to and closes first. The sandbox
@@ -210,7 +214,7 @@ def _write(path: str, text: str) -> None:
         out.write(text)
 
 
-def isolate(libc: ctypes.CDLL, hide: str) -> str | None:
+def isolate(libc: ctypes.CDLL, hide: str, covers: tuple[str, ...] = ()) -> str | None:
     """Step 1 but the parser's own ``/proc`` (`hide_proc`, in the forked PID 1); None when
     all of it took, else what the kernel refused."""
     uid, gid = os.getuid(), os.getgid()
@@ -230,6 +234,9 @@ def isolate(libc: ctypes.CDLL, hide: str) -> str | None:
     if libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None) != 0:
         return _refused("mount(MS_REC | MS_PRIVATE)")
     flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    for cover in covers:
+        if libc.mount(b"tmpfs", cover.encode(), b"tmpfs", flags, b"size=4k,mode=0") != 0:
+            return _refused(f"mount(tmpfs over {cover})")
     # Opened in the new mount namespace (unshare moved the working directory into it): a
     # bind mount's source must be a mount of the caller's own namespace.
     box = os.open(".", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -291,8 +298,17 @@ def main(argv: list[str]) -> NoReturn:
         if len(rest) < 2 or not rest[1].isdigit():
             _fail("--box-fd takes a descriptor number")
         box_fd, rest = int(rest[1]), rest[2:]
+    covers: list[str] = []
+    while rest[:1] == ["--cover"]:
+        if len(rest) < 2 or not rest[1].startswith("/"):
+            _fail("--cover takes an absolute directory")
+        covers.append(rest[1])
+        rest = rest[2:]
     if len(rest) < 3 or rest[1] != "--":
-        _fail("usage: confine.py [--strict] [--box-fd N] <hide> -- <program> [args...]")
+        _fail(
+            "usage: confine.py [--strict] [--box-fd N] [--cover DIR]... <hide> -- <program>"
+            " [args...]"
+        )
     hide, command = rest[0], rest[2:]
     if box_fd is not None:
         try:
@@ -303,7 +319,7 @@ def main(argv: list[str]) -> NoReturn:
     if strict and os.getuid() == 0:
         _fail("refusing to run the parser as root: its exec would keep its capabilities")
     libc = _libc()
-    refused = forbid_dumping(libc) or isolate(libc, hide)
+    refused = forbid_dumping(libc) or isolate(libc, hide, tuple(covers))
     if refused is not None:
         if strict:
             _fail(refused)
@@ -345,7 +361,14 @@ def _exec(command: list[str]) -> NoReturn:
         _fail(f"{command[0]}: {error.strerror}")
 
 
-def command(hide: str, program: list[str], *, strict: bool, box_fd: int | None = None) -> list[str]:
+def command(
+    hide: str,
+    program: list[str],
+    *,
+    strict: bool,
+    box_fd: int | None = None,
+    covers: tuple[str, ...] = (),
+) -> list[str]:
     """The argv that runs ``program`` confined; with ``box_fd``, in that descriptor's
     directory, which the caller must pass on (``pass_fds``)."""
     return [
@@ -355,6 +378,7 @@ def command(hide: str, program: list[str], *, strict: bool, box_fd: int | None =
         str(Path(__file__).resolve()),
         *(["--strict"] if strict else []),
         *(["--box-fd", str(box_fd)] if box_fd is not None else []),
+        *(arg for cover in covers for arg in ("--cover", cover)),
         hide,
         "--",
         *program,

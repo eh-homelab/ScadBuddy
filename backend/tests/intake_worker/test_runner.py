@@ -226,10 +226,14 @@ def _hardened(code: str, *args: str) -> str:
     return out.stdout.strip()
 
 
-def _confined(hide: Path, code: str, *args: str, cwd: Path | None = None) -> str:
+def _confined(
+    hide: Path, code: str, *args: str, cwd: Path | None = None, covers: tuple[str, ...] = ()
+) -> str:
     """``code`` run through the launcher with ``--strict``, as the sandbox runs a parse."""
     out = subprocess.run(
-        confine.command(str(hide), [sys.executable, "-I", "-c", code, *args], strict=True),
+        confine.command(
+            str(hide), [sys.executable, "-I", "-c", code, *args], strict=True, covers=covers
+        ),
         capture_output=True,
         text=True,
         timeout=60,
@@ -313,6 +317,32 @@ def test_a_confined_child_reaches_only_its_own_box(tmp_path: Path) -> None:
         "print(','.join(seen))"
     )
     assert _confined(spool, code, str(other / "secret"), cwd=mine) == "mine,hidden,hidden"
+
+
+@needs_confinement
+def test_a_confined_child_cannot_read_the_rpc_token(tmp_path: Path) -> None:
+    """The sandbox's RPC token sits on a read-only Secret volume it cannot unlink: the
+    launcher covers the token's directory with an empty tmpfs, so the parser cannot read
+    it by its path, while the file stays in place for the sandbox."""
+    spool, secret = tmp_path / "spool", tmp_path / "rpc"
+    box = spool / "box"
+    box.mkdir(parents=True)
+    secret.mkdir()
+    (secret / "token").write_text("x" * 40)
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    print(open(sys.argv[1]).read())\n"
+        "except OSError:\n"
+        "    print('hidden')\n"
+    )
+    seen = _confined(spool, code, str(secret / "token"), cwd=box, covers=(str(secret),))
+    assert seen == "hidden"
+    assert (secret / "token").read_text() == "x" * 40
+
+
+def test_the_sandbox_covers_its_token_directory() -> None:
+    assert sandbox.covered_dirs("/etc/scadbuddy-intake-rpc/token") == ("/etc/scadbuddy-intake-rpc",)
 
 
 _PROBE_HEAD = (
@@ -490,9 +520,11 @@ def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
     for name in sandbox.SANDBOX_FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sandbox, "SECRETS_DIR", Path("/nowhere/secrets"))
-    (tmp_path / "rpc-token").write_text("Zk3q" * 10)
-    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "rpc-token"))
-    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "unshare: refused")
+    (tmp_path / "rpc").mkdir()
+    (tmp_path / "rpc" / "token").write_text("Zk3q" * 10)
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(tmp_path / "rpc" / "token"))
+    monkeypatch.setenv("SCADBUDDY_INTAKE_WORK_DIR", str(tmp_path / "spool"))
+    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool, covers=(): "unshare: refused")
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
     served: list[object] = []
     monkeypatch.setattr(sandbox, "_main", lambda *args: served.append(args))

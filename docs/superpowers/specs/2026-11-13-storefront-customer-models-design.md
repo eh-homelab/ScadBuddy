@@ -502,7 +502,12 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   `hmac.compare_digest` ([Python: hmac](https://docs.python.org/3/library/hmac.html#hmac.compare_digest))
   and answers 401 (`WWW-Authenticate: Bearer`) before it reads any byte of the body, then
   closes the connection without draining it. `/healthz` asks no token: the kubelet's
-  probes cannot read a Secret, and it tells nothing.
+  probes cannot read a Secret, and it tells nothing. The parser cannot read the token
+  either: the launcher covers the token's directory with an empty tmpfs (mode 0) in each
+  check's mount namespace, as it covers the spool and `/proc` (`confine.py --cover`,
+  `sandbox.covered_dirs`; the start's probe covers it too, so a refusal stops the start).
+  The file is not unlinked, because a Secret volume is read-only. Test:
+  `test_a_confined_child_cannot_read_the_rpc_token`.
 - The request deadline. A request's head and its whole body must arrive within
   `REQUEST_DEADLINE` (60 s) of the connection, on top of the 256 MiB cap; 256 MiB in 60 s
   is about 4.5 MB/s. Past it the sandbox drops the connection with no answer, frees the

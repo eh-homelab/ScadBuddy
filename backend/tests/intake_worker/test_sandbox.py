@@ -32,7 +32,10 @@ TOKEN = "Zk3q" * 10
 
 
 def _token_file(folder: Path, token: str = TOKEN) -> Path:
-    path = folder / "rpc-token"
+    """The token in a directory of its own, as its Secret volume mounts it (the launcher
+    covers that directory for each check)."""
+    path = folder / "rpc" / "token"
+    path.parent.mkdir(exist_ok=True)
     path.write_text(token)
     return path
 
@@ -110,7 +113,12 @@ def sleeper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     code = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
 
     def command(
-        hide: str, program: list[str], *, strict: bool, box_fd: int | None = None
+        hide: str,
+        program: list[str],
+        *,
+        strict: bool,
+        box_fd: int | None = None,
+        covers: tuple[str, ...] = (),
     ) -> list[str]:
         return [sys.executable, "-I", "-c", code]
 
@@ -529,6 +537,7 @@ def test_the_sandbox_takes_no_concurrency_setting() -> None:
         "token",
         "host",
         "port",
+        "covers",
     }
 
 
@@ -540,8 +549,9 @@ def start_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyP
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sandbox, "SECRETS_DIR", tmp_path / "no-secrets")
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE", str(_token_file(tmp_path)))
+    monkeypatch.setenv("SCADBUDDY_INTAKE_WORK_DIR", str(tmp_path / "spool"))
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
-    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "stop here")
+    monkeypatch.setattr(sandbox, "probe_isolation", lambda spool, covers=(): "stop here")
     return monkeypatch
 
 
@@ -827,3 +837,14 @@ def test_a_request_header_out_of_bounds_is_refused(header: str) -> None:
 
 def test_a_request_header_in_bounds_is_read() -> None:
     assert runner.parse_request(json.dumps(_request(timeout=5))) == _request(timeout=5.0)
+
+
+def test_the_sandbox_refuses_a_token_directory_that_holds_the_spool(
+    start_env: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tmpfs over a directory hides it only from above: a cover that holds the spool
+    (or lies in it) would leave the token reachable by ``..`` from the box, so the start
+    refuses it."""
+    start_env.setenv("SCADBUDDY_INTAKE_WORK_DIR", str(tmp_path / "rpc" / "spool"))
+    assert sandbox.main([]) == 2
+    assert "token" in capsys.readouterr().out

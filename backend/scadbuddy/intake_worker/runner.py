@@ -314,19 +314,24 @@ async def run_child(
     timeout: float = CHILD_TIMEOUT,
     address_space: int = CHILD_ADDRESS_SPACE,
     cancelled: asyncio.Event | None = None,
+    covers: tuple[str, ...] = (),
 ) -> int:
     """The child run in ``box`` (its working directory, holding ``upload.bin``: a path, or
     a descriptor of it, which the launcher inherits and ``fchdir``s to) through its
     launcher, with an empty tmpfs over ``hide`` in its own mount namespace (`confine.py`;
-    with ``strict``, a step refused exits 126 with no parse); its exit code.
-    `CheckCrashedError` past ``timeout``; the group is killed then, on cancellation and
-    when ``cancelled`` is set."""
+    with ``strict``, a step refused exits 126 with no parse) and over each of ``covers``;
+    its exit code. `CheckCrashedError` past ``timeout``; the group is killed then, on
+    cancellation and when ``cancelled`` is set."""
     # -I: the box (its working directory, which holds the customer's file) and the
     # environment never reach its import path.
     parser = [sys.executable, "-I", "-m", "scadbuddy.intake_worker.child"]
     box_fd = box if isinstance(box, int) else None
     argv = confine.command(
-        hide, [*parser, filename, str(address_space)], strict=strict, box_fd=box_fd
+        hide,
+        [*parser, filename, str(address_space)],
+        strict=strict,
+        box_fd=box_fd,
+        covers=covers,
     )
     process = await asyncio.create_subprocess_exec(
         *argv,
