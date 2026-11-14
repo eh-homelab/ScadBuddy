@@ -1,6 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
 import { ESTIMATE, KEYCHAIN, TAG_ID } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
@@ -23,8 +23,17 @@ const LIMITED = {
 /** Fast polls, so a test of the backoff takes milliseconds. */
 const FAST: PollTiming = { firstMs: 5, maxMs: 20, limitMs: 2_000 }
 
-function show(id = 'l1', timing: PollTiming = FAST) {
-  return renderPage(<CustomizePage id={id} timing={timing} />)
+function show(id = 'l1', timing: PollTiming = FAST, debounceMs = 10) {
+  return renderPage(<CustomizePage id={id} timing={timing} debounceMs={debounceMs} />)
+}
+
+/** Every render the page asked for, by its body. */
+function renders(): unknown[] {
+  const sent: unknown[] = []
+  server.events.on('request:start', async ({ request }) => {
+    if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
+  })
+  return sent
 }
 
 const PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
@@ -47,39 +56,47 @@ const DONE = {
 }
 
 describe('CustomizePage', () => {
-  it('shows the rough price as an estimate', async () => {
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+  beforeEach(() => {
+    window.localStorage.clear()
+    return () => server.events.removeAllListeners()
+  })
+
+  it('renders on load, and shows the rough price as an estimate', async () => {
+    const sent = renders()
+    show()
     expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
+    expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
 
   it('tells the visitor when to try again', async () => {
     server.use(http.post('/api/store/v1/renders', () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '42' } })))
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    show()
     expect(await screen.findByText('You have made a lot of previews. Try again in 42 seconds.')).toBeInTheDocument()
   })
 
-  it('sends only what the visitor changed, with an Idempotency-Key', async () => {
+  it('renders once after a burst of changes, sending only what the visitor changed, with an Idempotency-Key', async () => {
     const sent: { body: unknown; key: string | null }[] = []
     server.events.on('request:start', async ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') {
         sent.push({ body: await request.clone().json(), key: request.headers.get('Idempotency-Key') })
       }
     })
-    const { user } = show()
-    await user.type(await screen.findByLabelText('Name'), 'Ada')
-    await user.click(screen.getByRole('button', { name: 'Render' }))
+    const { user } = show('l1', FAST, 300)
     await screen.findByText('about $12.40, confirmed after we check it')
-    server.events.removeAllListeners()
-    expect(sent).toHaveLength(1)
-    expect(sent[0]!.body).toEqual({
+    await user.type(screen.getByLabelText('Name'), 'Ada')
+    await waitFor(() => expect(sent).toHaveLength(2))
+    await screen.findByText('about $12.40, confirmed after we check it')
+    expect(sent).toHaveLength(2)
+    expect(sent[1]!.body).toEqual({
       listing_id: 'l1',
       listing_updated_at: '2026-11-07T12:00:00Z',
       values: { name: 'Ada' },
       colours: {},
     })
-    expect(sent[0]!.key).toMatch(/^[0-9a-f-]{36}$/)
+    expect(sent[1]!.key).toMatch(/^[0-9a-f-]{36}$/)
+    expect(sent[1]!.key).not.toBe(sent[0]!.key)
   })
 
   it('sends a picked colour, and nothing once it is picked again', async () => {
@@ -110,7 +127,6 @@ describe('CustomizePage', () => {
       }
     })
     const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
     await screen.findByText('about $12.40, confirmed after we check it')
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     expect(await screen.findByText('Added to your order.')).toBeInTheDocument()
@@ -130,7 +146,6 @@ describe('CustomizePage', () => {
     show(TAG_ID)
     expect(await screen.findByText('No colour is available for this right now.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Render' })).toBeDisabled()
   })
 
   it('says plainly why the shop refused', async () => {
@@ -142,8 +157,7 @@ describe('CustomizePage', () => {
         ),
       ),
     )
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    void show()
     expect(await screen.findByText('Previews are paused. Try again later.')).toBeInTheDocument()
   })
 
@@ -152,7 +166,7 @@ describe('CustomizePage', () => {
     const size = await screen.findByLabelText('Length (mm)')
     await user.type(size, '200')
     expect(await screen.findByText('Choose from 40 to 80, in steps of 5.')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Render' })).toBeDisabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled())
   })
 
   it('keeps following a render through a limited or failed poll', async () => {
@@ -170,8 +184,7 @@ describe('CustomizePage', () => {
       }),
       http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
     )
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    void show()
     expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
     expect(polls).toBe(5)
     expect(screen.queryByText(/a lot of/)).toBeNull()
@@ -195,15 +208,13 @@ describe('CustomizePage', () => {
         return HttpResponse.json(RUNNING)
       }),
     )
-    const { user } = renderPage(
+    void renderPage(
       <CustomizePage id="l1" timing={{ firstMs: 20, maxMs: 80, limitMs: 600 }} wait={wait} now={() => clock} />,
     )
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
-    expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
+    expect(await screen.findByText('This preview is taking longer than usual. Change something, or come back in a few minutes.')).toBeInTheDocument()
     // Doubling from 20 ms to at most 80 ms, then only the 60 ms left before the limit.
     expect(asked).toEqual([20, 40, 80, 80, 80, 80, 80, 80, 60])
     expect(polls).toBe(8)
-    expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
   })
 
   it('stops at the time limit even when a poll is told to wait far longer', async () => {
@@ -216,12 +227,10 @@ describe('CustomizePage', () => {
       }),
     )
     const started = performance.now()
-    const { user } = show('l1', { firstMs: 20, maxMs: 40, limitMs: 400 })
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
-    expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
+    void show('l1', { firstMs: 20, maxMs: 40, limitMs: 400 })
+    expect(await screen.findByText('This preview is taking longer than usual. Change something, or come back in a few minutes.')).toBeInTheDocument()
     expect(performance.now() - started).toBeLessThan(2_500)
     expect(polls).toBe(1)
-    expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
   })
 
   it('reads no more once the wait reaches the time limit, even when the timer fires before the clock does', async () => {
@@ -237,9 +246,8 @@ describe('CustomizePage', () => {
         return HttpResponse.json({ type: `${PROBLEMS}rate_limited`, status: 429, detail: 'Slow down.' }, { status: 429, headers: { 'Retry-After': '99999' } })
       }),
     )
-    const { user } = renderPage(<CustomizePage id="l1" timing={{ firstMs: 20, maxMs: 40, limitMs: 400 }} wait={early} />)
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
-    expect(await screen.findByText('This preview is taking longer than usual. Try Render again in a few minutes.')).toBeInTheDocument()
+    void renderPage(<CustomizePage id="l1" timing={{ firstMs: 20, maxMs: 40, limitMs: 400 }} wait={early} />)
+    expect(await screen.findByText('This preview is taking longer than usual. Change something, or come back in a few minutes.')).toBeInTheDocument()
     expect(polls).toBe(1)
   })
 
@@ -252,8 +260,7 @@ describe('CustomizePage', () => {
         return HttpResponse.json(RUNNING)
       }),
     )
-    const { user, unmount } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    const { unmount } = show()
     await waitFor(() => expect(polls).toBeGreaterThan(0))
     unmount()
     const seen = polls
@@ -270,8 +277,7 @@ describe('CustomizePage', () => {
         HttpResponse.json({ type: PROBLEMS + slug, status: 429, detail: 'x' }, { status: 429, headers: { 'Retry-After': '7' } }),
       ),
     )
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+    show()
     expect(await screen.findByText(text)).toBeInTheDocument()
     expect(screen.queryByText(/a lot of previews/)).toBeNull()
   })
@@ -291,34 +297,101 @@ describe('CustomizePage', () => {
       }),
     )
     const { user } = show()
-    await user.type(await screen.findByLabelText('Name'), 'Ada')
-    await user.type(screen.getByLabelText('Length (mm)'), '50')
-    await user.click(screen.getByRole('button', { name: 'Render' }))
     expect(await screen.findByText('This listing has changed. Load it again.')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Name'), 'Ada')
+    await user.type(screen.getByLabelText('Length (mm)'), '50')
     expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
     republished = true
     await user.click(screen.getByRole('button', { name: 'Load the latest version' }))
     await waitFor(() => expect(screen.queryByLabelText('Length (mm)')).toBeNull())
     expect(screen.getByLabelText('Name')).toHaveValue('Ada')
-    expect(screen.getByRole('button', { name: 'Render' })).toBeEnabled()
     expect(screen.queryByText('This listing has changed. Load it again.')).toBeNull()
+    // The latest version renders on its own.
+    await waitFor(() => expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'running'))
   })
 
-  it('marks a preview of earlier choices', async () => {
-    const { user } = show()
-    await user.click(await screen.findByRole('button', { name: 'Render' }))
+  it('keeps the earlier preview on screen and hides its price while a change renders', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return posts === 1 ? HttpResponse.json(DONE) : HttpResponse.json(RUNNING, { status: 202 })
+      }),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
+    )
+    const { user } = show('l1', { firstMs: 5, maxMs: 20, limitMs: 60_000 })
     await screen.findByText('about $12.40, confirmed after we check it')
-    expect(screen.queryByText('Preview shows earlier choices. Render again to see your changes.')).toBeNull()
     await user.type(screen.getByLabelText('Name'), 'Bo')
-    expect(screen.getByText('Preview shows earlier choices. Render again to see your changes.')).toBeInTheDocument()
     expect(screen.queryByText('about $12.40, confirmed after we check it')).toBeNull()
+    expect(await screen.findByText('Updating your preview and price…')).toBeInTheDocument()
+    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+  })
+
+  it('reads the price again after the proxy times out', async () => {
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        return reads < 3 ? new HttpResponse('Gateway Timeout', { status: 504 }) : HttpResponse.json(ESTIMATE)
+      }),
+    )
+    show()
+    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(reads).toBe(3)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('tries a limited render once more after Retry-After', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => {
+        posts += 1
+        return posts === 1 ? HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '0' } }) : HttpResponse.json(DONE)
+      }),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
+    )
+    show()
+    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(posts).toBe(2)
+  })
+
+  it('keeps the visitor’s choices when they leave and come back', async () => {
+    const first = show()
+    await first.user.type(await screen.findByLabelText('Name'), 'Ada')
+    await first.user.click(screen.getByRole('button', { name: 'One more' }))
+    first.unmount()
+    const sent = renders()
+    show()
+    expect(await screen.findByLabelText('Name')).toHaveValue('Ada')
+    expect(screen.getByText('2')).toBeInTheDocument()
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]).toMatchObject({ values: { name: 'Ada' } })
+  })
+
+  it('drops a kept value the listing no longer allows', async () => {
+    window.localStorage.setItem('scadbuddy.storefront.customize.l1', JSON.stringify({ v: 1, values: { name: 'Ada', size: 999, gone: 1 }, quantity: 3 }))
+    const sent = renders()
+    show()
+    expect(await screen.findByLabelText('Name')).toHaveValue('Ada')
+    expect(screen.getByLabelText('Length (mm)')).toHaveValue('')
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]).toMatchObject({ values: { name: 'Ada' } })
+  })
+
+  it('forgets the choices once the design is in the order', async () => {
+    const { user } = show()
+    await user.type(await screen.findByLabelText('Name'), 'Ada')
+    await user.click(screen.getByRole('button', { name: 'Add to order' }))
+    await screen.findByText('Added to your order.')
+    expect(window.localStorage.getItem('scadbuddy.storefront.customize.l1')).toBeNull()
   })
 
   it('reads a hex number as no number', async () => {
     const { user } = show()
     await user.type(await screen.findByLabelText('Length (mm)'), '0x10')
     expect(await screen.findByText('Choose from 40 to 80, in steps of 5.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Render' })).toBeDisabled()
   })
 
   it('offers the text keyboard where a number may be negative', async () => {

@@ -13,6 +13,7 @@ import {
 } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
+import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
 import { keepOffered, listingUnavailable, slotFilaments, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
@@ -26,7 +27,13 @@ const MAX_QUANTITY = 100
 /** The longest a poll waits on a `Retry-After`: the limit is checked at least this often. */
 const RETRY_CAP_MS = 30_000
 
-const SLOW = 'This preview is taking longer than usual. Try Render again in a few minutes.'
+const SLOW = 'This preview is taking longer than usual. Change something, or come back in a few minutes.'
+
+/** How long the page waits after the last change before it renders (#6151). */
+const DEBOUNCE_MS = 900
+
+/** The longest the page waits on a `Retry-After` before its one retry of a refused render. */
+const RETRY_RENDER_CAP_MS = 60_000
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -54,22 +61,44 @@ function refusalText(error: unknown): string {
   return errorText(error)
 }
 
+/** A render the shop refused for now, that one retry after `Retry-After` may get. */
+function retryable(error: unknown): error is StoreError {
+  return error instanceof StoreError && (error.slug === 'render_limited' || error.slug === 'render_queue_full')
+}
+
 function changedListing(error: unknown): boolean {
   return error instanceof StoreError && error.slug === 'listing_changed'
 }
 
+/** A done render and the choices it was made of (`choicesKey`). */
+interface Shown {
+  job: StoreRender
+  key: string
+}
+
+/** The choices a render is of: the listing as read, and the visitor's values. */
+function choicesKey(listing: Listing, values: Record<string, ParamValue>): string {
+  return JSON.stringify([listing.updated_at, values])
+}
+
 /**
  * `/l/:id`: one listing to customize (spec §5.4). The visitor changes the parameters the
- * listing offers (`ListingView`, the same form the shop previews), renders a preview,
- * reads the rough price, and adds it to the order. Only the values the visitor set are
- * sent; every locked value and every default comes from the listing's published snapshot
- * on the shop's side, never from this page.
+ * listing offers (`ListingView`, the same form the shop previews), sees the preview and
+ * the rough price, and adds it to the order. Only the values the visitor set are sent;
+ * every locked value and every default comes from the listing's published snapshot on the
+ * shop's side, never from this page.
+ *
+ * #6151: the page renders on its own, at once on load and `debounceMs` after the last
+ * change, and follows only the latest render. The visitor's choices are kept per listing
+ * (`customizeState.ts`) until they are added to the order, so leaving the page loses
+ * nothing; coming back sends the same values, and the shop reuses the render it made.
  */
 export function CustomizePage({
   id,
   timing = POLL,
   wait = sleep,
   now = Date.now,
+  debounceMs = DEBOUNCE_MS,
 }: {
   id: string
   timing?: PollTiming
@@ -77,16 +106,20 @@ export function CustomizePage({
   wait?: (ms: number) => Promise<void>
   /** The clock the time limit is read on; a test passes one that moves only when `wait` does. */
   now?: () => number
+  /** How long the page waits after the last change before it renders. */
+  debounceMs?: number
 }) {
   const [listing, setListing] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
+  /** The latest render while it runs; the viewer shows its progress until one is done. */
   const [job, setJob] = useState<StoreRender>()
-  /** The values the job on screen was rendered with, as `JSON.stringify` wrote them. */
-  const [jobValues, setJobValues] = useState<string | null>(null)
+  /** The last done render: the viewer keeps it on screen while a newer one runs. */
+  const [shown, setShown] = useState<Shown>()
   const [rendering, setRendering] = useState(false)
   const [renderError, setRenderError] = useState<string | null>(null)
-  const [estimate, setEstimate] = useState<StoreEstimate>()
+  /** The rough price of the render `job` names. */
+  const [estimate, setEstimate] = useState<{ job: string; estimate: StoreEstimate }>()
   const [quantity, setQuantity] = useState(1)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -97,13 +130,26 @@ export function CustomizePage({
   const renderKey = useRef(new ActionKey())
   const addKey = useRef(new ActionKey())
   const alive = useRef(true)
+  /** Counts the renders this page started: only the latest may change what it shows. */
+  const latest = useRef(0)
+  /** Whether the page rendered yet: the first render does not wait out the debounce. */
+  const started = useRef(false)
+  const renderNow = useRef<(key: string, retry: boolean) => Promise<void>>(async () => undefined)
   const draftChanged = useDraftChanged()
 
   useEffect(() => {
     alive.current = true
     let live = true
     store.listing(id).then(
-      (answer) => live && setListing(answer),
+      (answer) => {
+        if (!live) return
+        const saved = loadChoices(id)
+        setListing(answer)
+        if (saved) {
+          setValues(keepOffered(answer, saved.values))
+          setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
+        }
+      },
       (caught: unknown) => live && setLoadError(errorText(caught)),
     )
     return () => {
@@ -116,28 +162,28 @@ export function CustomizePage({
     () => (listing ? Object.entries(listing.params).filter(([name, param]) => valueProblem(param, values[name]) !== null) : []),
     [listing, values],
   )
+  const blocked = !listing || listingUnavailable(listing) || problems.length > 0 || stale
+  const current = listing ? choicesKey(listing, values) : ''
 
-  if (loadError) {
-    return (
-      <section>
-        <p className="sf-error" role="alert">
-          {loadError}
-        </p>
-        <Link to="/">Back to the designs</Link>
-      </section>
-    )
-  }
-  if (!listing) return <p className="sf-hint">Loading the design…</p>
+  useEffect(() => {
+    if (listing) saveChoices(listing.id, { values, quantity })
+  }, [listing, values, quantity])
 
-  const blocked = listingUnavailable(listing) || problems.length > 0 || stale
-  const current = JSON.stringify(values)
-  const shownIsCurrent = job?.status === 'done' && jobValues === current
-  const input = (): RenderInput => ({
-    listing_id: listing.id,
-    listing_updated_at: listing.updated_at,
+  useEffect(() => {
+    if (blocked || shown?.key === current) return
+    const delay = started.current ? debounceMs : 0
+    started.current = true
+    const timer = setTimeout(() => void renderNow.current(current, false), delay)
+    return () => clearTimeout(timer)
+  }, [blocked, current, shown, debounceMs])
+
+  const shownIsCurrent = shown?.key === current
+  const input = (on: Listing): RenderInput => ({
+    listing_id: on.id,
+    listing_updated_at: on.updated_at,
     values,
     // The colours of the render on screen, when it is of these values.
-    colours: shownIsCurrent ? slotFilaments(job.colors, listing.colours) : {},
+    colours: shownIsCurrent ? slotFilaments(shown.job.colors, on.colours) : {},
   })
 
   const setValue = (name: string, next: ParamValue | undefined) => {
@@ -151,12 +197,12 @@ export function CustomizePage({
   }
 
   /** Reads the render again until it ends, backing off; a poll that fails for a passing reason waits and reads again. */
-  const follow = async (first: StoreRender): Promise<StoreRender | null> => {
+  const follow = async (first: StoreRender, live: () => boolean): Promise<StoreRender | null> => {
     let next = first
     let delay = timing.firstMs
-    const started = now()
+    const began = now()
     const timedOut = () => {
-      if (now() - started < timing.limitMs) return false
+      if (now() - began < timing.limitMs) return false
       setRenderError(SLOW)
       return true
     }
@@ -165,9 +211,9 @@ export function CustomizePage({
       // Never past the time limit, however long the edge asked to wait. A wait cut to the
       // time left ends at the limit: a timer can fire a millisecond before Date.now()
       // shows it (#5875), so that wait stops the reads without asking the clock.
-      const left = started + timing.limitMs - now()
+      const left = began + timing.limitMs - now()
       await wait(Math.min(delay, Math.max(0, left)))
-      if (!alive.current) return null
+      if (!live()) return null
       if (delay >= left) {
         setRenderError(SLOW)
         return null
@@ -175,7 +221,7 @@ export function CustomizePage({
       if (timedOut()) return null
       try {
         next = await store.render(next.id)
-        if (!alive.current) return null
+        if (!live()) return null
         setJob(next)
         delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
@@ -188,37 +234,78 @@ export function CustomizePage({
     return next
   }
 
-  const render = async () => {
-    const body: RenderInput = { ...input(), colours: {} }
-    setRendering(true)
-    setRenderError(null)
-    setEstimate(undefined)
-    try {
-      const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
-      renderKey.current.done()
-      setJob(first)
-      setJobValues(JSON.stringify(body.values))
-      const done = await follow(first)
-      if (!alive.current || done === null) return
-      if (done.status === 'done') setEstimate(await store.estimate(done.id))
-      else setRenderError(done.error ?? 'This preview could not be made. Change something and try again.')
-    } catch (caught) {
-      if (!alive.current) return
-      if (changedListing(caught)) setStale(true)
-      setRenderError(refusalText(caught))
-    } finally {
-      if (alive.current) setRendering(false)
+  /**
+   * The rough price of a done render. A read that fails for a passing reason (a 504 from
+   * the proxy while the shop works it out, #6120) waits and reads again, backing off, until
+   * the time limit.
+   */
+  const estimateOf = async (job: string, live: () => boolean): Promise<StoreEstimate | null> => {
+    const began = now()
+    let delay = timing.firstMs
+    for (;;) {
+      try {
+        return await store.estimate(job)
+      } catch (caught) {
+        if (!passing(caught)) throw caught
+        const left = began + timing.limitMs - now()
+        if (left <= 0) throw caught
+        await wait(Math.min(Math.max(delay, Math.min((caught.retryAfter ?? 0) * 1000, RETRY_CAP_MS)), left))
+        if (!live()) return null
+        delay = Math.min(delay * 2, timing.maxMs)
+      }
     }
   }
 
+  /** Renders the values on screen (`key`), and shows the render once it is done, unless a newer one started. */
+  const render = async (key: string, retry: boolean) => {
+    if (!listing) return
+    const body: RenderInput = { ...input(listing), colours: {} }
+    const mine = ++latest.current
+    const live = () => alive.current && latest.current === mine
+    setRendering(true)
+    setRenderError(null)
+    try {
+      const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
+      renderKey.current.done()
+      if (!live()) return
+      setJob(first)
+      const done = await follow(first, live)
+      if (!live() || done === null) return
+      if (done.status !== 'done') {
+        setRenderError(done.error ?? 'This preview could not be made. Change something and try again.')
+        return
+      }
+      setShown({ job: done, key })
+      const rough = await estimateOf(done.id, live)
+      if (rough && live()) setEstimate({ job: done.id, estimate: rough })
+    } catch (caught) {
+      if (!live()) return
+      if (changedListing(caught)) setStale(true)
+      setRenderError(refusalText(caught))
+      if (retryable(caught) && !retry) {
+        const after = Math.min((caught.retryAfter ?? 60) * 1000, RETRY_RENDER_CAP_MS)
+        setTimeout(() => {
+          if (live()) void renderNow.current(key, true)
+        }, after)
+      }
+    } finally {
+      if (live()) setRendering(false)
+    }
+  }
+  useEffect(() => {
+    renderNow.current = render
+  })
+
   const add = async () => {
-    const body = { ...input(), quantity }
+    if (!listing) return
+    const body = { ...input(listing), quantity }
     setAdding(true)
     setAddError(null)
     try {
       const draft = await store.addItem(body, addKey.current.for(JSON.stringify(body)))
       addKey.current.done()
       draftChanged(draft)
+      clearChoices(listing.id)
       setAdded(true)
     } catch (caught) {
       if (changedListing(caught)) setStale(true)
@@ -229,12 +316,13 @@ export function CustomizePage({
   }
 
   const reload = async () => {
+    if (!listing) return
     setReloading(true)
     try {
-      const latest = await store.listing(listing.id)
+      const fresh = await store.listing(listing.id)
       if (!alive.current) return
-      setListing(latest)
-      setValues((before) => keepOffered(latest, before))
+      setListing(fresh)
+      setValues((before) => keepOffered(fresh, before))
       setStale(false)
       setRenderError(null)
       setAddError(null)
@@ -245,15 +333,27 @@ export function CustomizePage({
     }
   }
 
+  if (loadError) {
+    return (
+      <section>
+        <p className="sf-error" role="alert">
+          {loadError}
+        </p>
+        <Link to="/">Back to the designs</Link>
+      </section>
+    )
+  }
+  if (!listing) return <p className="sf-hint">Loading the design…</p>
+
   return (
     <div className="sf-customize">
       <div className="sf-stage">
-        {job ? (
+        {shown || job ? (
           <Suspense fallback={<div className="sf-stage-empty">Loading the viewer…</div>}>
-            <Preview job={job} unit="mm" rendering={rendering} />
+            <Preview job={shown?.job ?? job} unit="mm" rendering={rendering} />
           </Suspense>
         ) : (
-          <div className="sf-stage-empty">Press Render to see your design in 3D.</div>
+          <div className="sf-stage-empty">{blocked ? 'Your design shows here once your choices are complete.' : 'Making your preview…'}</div>
         )}
       </div>
       <div className="sf-controls">
@@ -269,14 +369,9 @@ export function CustomizePage({
             </button>
           </div>
         )}
-        <div className="sf-actions">
-          <button type="button" className="sf-button sf-button-quiet" disabled={blocked || rendering} onClick={() => void render()}>
-            {rendering ? 'Rendering…' : 'Render'}
-          </button>
-        </div>
-        {job && !rendering && jobValues !== current && (
+        {rendering && (
           <p className="sf-hint" role="status">
-            Preview shows earlier choices. Render again to see your changes.
+            {shown ? 'Updating your preview and price…' : 'Making your preview and price…'}
           </p>
         )}
         {renderError && (
@@ -284,7 +379,7 @@ export function CustomizePage({
             {renderError}
           </p>
         )}
-        {estimate && jobValues === current && <Estimate estimate={estimate} />}
+        {estimate && shownIsCurrent && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">
             How many
