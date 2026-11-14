@@ -4,9 +4,11 @@ Bambuddy seam (§8), which lights up when a URL is set, without a restart."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import respx
 from fastapi.testclient import TestClient
 
@@ -288,3 +290,46 @@ def test_a_split_group_never_takes_over_its_record(client: TestClient) -> None:
     book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
     assert book[made["filament_id"]]["colour"] == "#FF0000"
     assert book[blue_row["filament_id"]]["colour"] == "#0000FF"
+
+
+MIGRATION = (
+    Path(__file__).parents[2] / "scadbuddy/migrations/20261114T1607Z_filaments_alpha_effect.sql"
+)
+
+
+@respx.mock
+def test_a_record_from_before_the_link_follows_a_colour_fix(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#6211 review: the migration's backfill, run on a record a person added by hand,
+    links it to no spools, so a colour fixed later is the one its spools are found by,
+    never the typo's."""
+    configure(client)
+    no_density_sources()
+    made = add_filament(client, colour="#0000EE", colour_name="Blue", cost_per_kg="20")
+    url = f"{BOOK}/filaments/{made['id']}"
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        # The row as the new columns' defaults left it, then the migration's updates.
+        conn.execute(
+            "UPDATE filaments SET colour_source = 'import', spool_colour = NULL WHERE id = %s",
+            (made["id"],),
+        )
+        sql = "\n".join(
+            line
+            for line in MIGRATION.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("--")
+        )
+        for statement in sql.split(";"):
+            if statement.strip().startswith("UPDATE"):
+                conn.execute(statement.encode())
+    assert client.patch(url, json={"colour": "#0000FF"}).json()["colour_source"] == "manual"
+    blue = {"rgba": "0000FFFF", "color_name": "Blue"}
+    typo = {"rgba": "0000EEFF", "color_name": "Blue"}
+    _inventory(spool(1, **blue, cost_per_kg=25), spool(2, **typo, cost_per_kg=30))
+
+    rows = {tuple(r["spool_ids"]): r for r in client.post(IMPORT).json()["rows"]}
+
+    assert (rows[(1,)]["action"], rows[(1,)]["filament_id"]) == ("updated", made["id"])
+    assert rows[(2,)]["action"] == "created"
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    assert (book[made["id"]]["colour"], book[made["id"]]["cost_per_kg"]) == ("#0000FF", "25")

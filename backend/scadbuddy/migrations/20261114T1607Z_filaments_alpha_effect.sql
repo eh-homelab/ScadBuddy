@@ -28,13 +28,16 @@ ALTER TABLE filaments
   ADD COLUMN spool_colour text CHECK (spool_colour ~ '^#[0-9A-F]{6}$'),
   ADD COLUMN spool_ids integer[] NOT NULL DEFAULT '{}';
 
--- Every record so far took its colour from the import, or matches it, so the next
--- import fills its alpha, stops and effect.
-UPDATE filaments SET spool_colour = upper(colour);
-
+-- Every record so far keeps `colour_source` `import` and no link (`spool_colour` NULL): the
+-- next import finds it by its own `colour`, links it and fills its alpha, stops and
+-- effect. A record a person added by hand has no spools, so a link copied from its colour
+-- would keep its old colour after a later colour fix (#6211 review).
+--
 -- Two records a person set by hand to an opaque stand-in for a clear spool, which the
 -- import had made `#000000` (prod, 2026-11-14): their colour stays, and the import still
--- finds them by the spools' `#000000`. Each guard is its id and its stand-in colour, so
+-- finds them by the spools' `#000000`. This is in the migration, not a manual UPDATE or a
+-- PATCH, because no route sets `spool_colour`, and without it the next import would add a
+-- second, `#000000` record for each. Each guard is its id and its stand-in colour, so
 -- elsewhere this is a no-op.
 UPDATE filaments SET colour_source = 'manual', spool_colour = '#000000'
 WHERE (id = 'a324599b-86dd-45fe-8408-579491da2f59' AND upper(colour) = '#EEF3F4')

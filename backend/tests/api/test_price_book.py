@@ -191,5 +191,6 @@ def test_a_colour_edit_is_manual_and_can_be_handed_back(client: TestClient) -> N
         client.patch(url, json={"colour_source": "import"})
         edited = client.patch(url, json=look).json()
         assert edited["colour_source"] == "manual", look
+    client.patch(url, json={"colour_source": "import"})
     stops = client.patch(url, json={"extra_colours": ["#010203"]}).json()
-    assert stops["extra_colours"] == ["#010203"]
+    assert (stops["extra_colours"], stops["colour_source"]) == (["#010203"], "manual")

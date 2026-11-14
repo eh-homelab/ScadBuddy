@@ -1397,7 +1397,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
   it makes no duplicate, and a spool whose material was corrected is another filament's (`spool_import.py` `_matches`, `_match`: a record linked to several groups goes
   first to the group with its spools' RGB, never to whichever group sorts first; a group
-  whose RGB is another record's hand-set colour is skipped `colour_taken`). An item
+  whose RGB is another record's colour is skipped `colour_taken`; the migration links no existing record, so the next import links each by its own `colour`). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
 - A customer's own models (#6133, spec 2026-11-13; migration

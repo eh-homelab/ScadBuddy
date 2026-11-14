@@ -66,7 +66,7 @@ const REASONS: Record<NonNullable<SpoolImportRow['reason']>, string> = {
   no_colour: 'its spools have only a colour name, no colour',
   no_price: 'none of its spools has a price',
   too_long: 'a name is longer than a filament record takes (100 characters)',
-  colour_taken: 'another filament of it has its colour, set by hand',
+  colour_taken: 'another filament of it already has this colour',
 }
 
 /** One line of an import's answer: what happened to a filament, and the spread of its spools' prices. */

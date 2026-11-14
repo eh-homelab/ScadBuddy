@@ -993,10 +993,9 @@ class SpoolImportRow(BaseModel):
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
     #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price),
     #: ``too_long`` (a name past a record's 100 characters) or ``colour_taken`` (another
-    #: record of its material, subtype and brand, linked to other spools, has its RGB as
-    #: the colour a person set, #6209). On a matched record, ``colour_taken`` says its
-    #: colour, alpha, stops and effect were kept: another record of its names has the
-    #: spools' RGB.
+    #: record of its material, subtype and brand already has its RGB as its colour,
+    #: #6209). On a matched record, ``colour_taken`` says its colour, alpha, stops and
+    #: effect were kept: another record of its names has the spools' RGB.
     reason: Literal["no_colour", "no_price", "too_long", "colour_taken"] | None = None
     #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
