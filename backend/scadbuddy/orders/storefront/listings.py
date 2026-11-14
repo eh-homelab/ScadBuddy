@@ -687,8 +687,11 @@ def _check_bound(parameter: Parameter, bound: ParamBound, colours: Collection[st
         raise outside
 
 
-def _sets_support(name: str, label: str) -> bool:
-    return SUPPORT_PARAM.search(name) is not None or SUPPORT_PARAM.search(label) is not None
+def _sets_support(parameter: Parameter, label: str) -> bool:
+    """Whether ``parameter`` sets support: its name, caption, group or shown ``label`` says
+    so, as the page's and the agent's ``isSupport`` read it (#6152)."""
+    texts = (parameter.name, parameter.caption, parameter.group, label)
+    return any(t is not None and SUPPORT_PARAM.search(t) is not None for t in texts)
 
 
 def checked_fixed(
@@ -725,7 +728,7 @@ def checked_fixed(
                 "listing_param_unknown", f"the template has no parameter {name!r}", name
             )
     for name, bound in body.params.items():
-        if _sets_support(name, shown_label(name, bound.label, by_name[name].caption)):
+        if _sets_support(by_name[name], shown_label(name, bound.label, by_name[name].caption)):
             raise _unprocessable(
                 "listing_support_offered",
                 f"{name!r} sets support, which the shop chooses; lock it instead of offering it",
@@ -751,7 +754,7 @@ def checked_fixed(
     for name, value in fixed.items():
         parameter = by_name[name]
         if parameter.type == "color" and not _sets_support(
-            name, shown_label(name, None, parameter.caption)
+            parameter, shown_label(name, None, parameter.caption)
         ):
             _check_colour(name, value, offered)
     return fixed

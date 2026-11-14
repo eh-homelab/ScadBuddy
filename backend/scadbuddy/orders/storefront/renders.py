@@ -340,7 +340,8 @@ async def checked_choice(
     the page read it), 422 ``input_outside_listing`` (with ``name`` and ``reason``; a pick
     is ``picks.<name>``), 422 ``listing_mixed_material`` (a ``one_material`` listing's
     colours of more than one material), 422 ``pick_colour_clash`` (two picks of one colour
-    that name two filaments, with ``name``)."""
+    that name two filaments, with ``name``), 409 ``render_pending`` (with
+    ``render_colours``, picks but no done render of the visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
         raise problem(

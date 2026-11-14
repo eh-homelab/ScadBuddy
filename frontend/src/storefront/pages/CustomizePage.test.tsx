@@ -466,6 +466,37 @@ describe('CustomizePage', () => {
     expect(screen.queryByText(/a lot of previews/)).toBeNull()
   })
 
+  it('drops a pick note once the latest version of the listing is loaded (#6152)', async () => {
+    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
+    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
+    const choice = { kind: 'choice', group: '', colour: true, choices: ['#C0392B'] }
+    const listing = {
+      ...KEYCHAIN,
+      id: 'l9',
+      params: { body_colour: { ...choice, label: 'Body colour' }, rim_colour: { ...choice, label: 'Rim colour' } },
+      colours: [cheap, dear],
+    }
+    let changed = false
+    server.use(
+      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(changed ? { ...listing, updated_at: '2026-11-08T09:00:00Z' } : listing)),
+      http.post('/api/store/v1/renders', () =>
+        changed
+          ? HttpResponse.json({ type: `${PROBLEMS}listing_changed`, status: 409, detail: 'This listing has changed. Load it again.' }, { status: 409 })
+          : HttpResponse.json(DONE),
+      ),
+    )
+    const { user } = show('l9')
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
+    changed = true
+    await user.click(screen.getByRole('button', { name: /Rim colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
+    const note = 'Body colour uses Dear red PLA too. One colour prints from one filament.'
+    expect(await screen.findByText(note)).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: 'Load the latest version' }))
+    await waitFor(() => expect(screen.queryByText(note)).toBeNull())
+  })
+
   it('loads the latest version of a changed listing and keeps the values it still offers', async () => {
     let republished = false
     server.use(

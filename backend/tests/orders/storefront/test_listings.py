@@ -337,6 +337,7 @@ SUPPORT_SCHEMA = CustomizerSchema.model_validate(
             {"name": "colour", "type": "color", "initial": "#FF0000"},
             {"name": "support_colour", "type": "color", "initial": "#FFFFFF"},
             {"name": "gap", "type": "number", "initial": 1, "caption": "Interface gap"},
+            {"name": "raft", "type": "number", "initial": 1, "group": "Supports"},
         ]
     }
 )
@@ -348,6 +349,8 @@ SUPPORT_SCHEMA = CustomizerSchema.model_validate(
         {"support_colour": {"kind": "choice", "choices": ["#FF0000"]}},
         # The schema's caption names it.
         {"gap": {"kind": "number", "min": 0, "max": 2}},
+        # Only its group names it, as the page's `isSupport` reads it.
+        {"raft": {"kind": "number", "min": 0, "max": 2}},
         # The listing's own label names it.
         {"colour": {"kind": "choice", "choices": ["#FF0000"], "label": "Support colour"}},
     ],

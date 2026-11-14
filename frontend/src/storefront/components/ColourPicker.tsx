@@ -24,7 +24,8 @@ export interface ColourPickerProps {
 /**
  * #6152 — one colour part of a design: a row with the colour on it, which opens a grid of
  * swatches. The material is a filter and a tag, so the same colour in PLA and PETG are
- * two choices; two filaments of one name are told apart by their hex. No support
+ * two choices; two filaments of one name are told apart by their brand, else by their hex
+ * (`filamentLabels`). No support
  * material is ever offered. Styled with the theme's tokens only.
  */
 export function ColourPicker({ label, filaments, value, fallback, onChange }: ColourPickerProps) {

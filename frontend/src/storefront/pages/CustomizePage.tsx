@@ -433,6 +433,9 @@ export function CustomizePage({
       setValues(settled.values)
       setPicks(settled.picks)
       setMaterial(shownMaterial)
+      // The re-read may move a colour: an earlier note no longer tells what is on screen.
+      setPickNote(null)
+      setMaterialNote(null)
       setStale(false)
       setRenderError(null)
       setAddError(null)
