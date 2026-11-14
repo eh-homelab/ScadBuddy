@@ -21,6 +21,7 @@ import {
   presetTagsProblem,
 } from '../lib/presets'
 import { copyText } from '../lib/clipboard'
+import { appUrl } from '../lib/appLinks'
 import { presetPath } from '../lib/deeplink'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
@@ -400,12 +401,12 @@ export function PresetPicker({
   }
 
   /**
-   * #1022 — copies the link that opens this model with the preset applied: under the
-   * configured public URL when the server has one, else this page's own origin.
+   * #1022 — copies the link that opens this model with the preset applied, on the host
+   * the user is on (#6232), never the configured public URL's.
    */
   async function copyLink() {
     if (!selected) return
-    const url = selected.url ?? `${window.location.origin}${presetPath(slug, selected.id)}`
+    const url = appUrl(presetPath(slug, selected.id))
     setCopied({ id: selected.id, url, ok: await copyText(url) })
   }
 

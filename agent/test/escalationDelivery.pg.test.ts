@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
+import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads } from '../src/flows/backendReads.js'
 import { CLAIM_LEASE_S, Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { SessionError } from '../src/sessions/manager.js'
@@ -371,6 +372,46 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const newer = await flowRun()
     expect(await escalations.deliver()).toBe(1)
     expect(sent[0]!.text).toContain(newer)
+  })
+
+  // #5299 D7: the backend lists the parent-hop approvals a page at a time; the agent leaves
+  // out what it delivered and follows the cursor.
+  it('follows the pages of parent-hop approvals past runs already delivered', async () => {
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() + 600_000).toISOString(), hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    for (let i = 0; i < 3; i++) {
+      const old = randomUUID()
+      await db.sql`
+        INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+        VALUES (${old}, 'd1', 1, 'swap', 'waiting', ${`flow-${old}`}, 'wr1',
+                ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+      await db.sql`INSERT INTO ai_escalation_deliveries (request_id, session_id) VALUES (${flowRequestId(old, 'wr1', 'c1')}, ${parent}::uuid)`
+    }
+    const newer = await flowRun()
+    const sql = new SqlFlowRunReads(db.sql)
+    const pages: (string | null)[] = []
+    const onePerPage: FlowRunReads = {
+      starter: (runId, execution) => sql.starter(runId, execution),
+      decisions: (requestId, inputHash) => sql.decisions(requestId, inputHash),
+      grantInForce: (grantId) => sql.grantInForce(grantId),
+      queue: (runId) => sql.queue(runId),
+      waitingRuns: () => sql.waitingRuns(),
+      steps: (runId) => sql.steps(runId),
+      parentHopApprovals: async (after: ParentHopCursor | null) => {
+        pages.push(after?.after_id ?? null)
+        if (pages.length > 10) throw new Error('the pages do not move on')
+        return await sql.parentHopApprovals(after, 1)
+      },
+      stillAtParentHop: (requestIds) => sql.stillAtParentHop(requestIds),
+    }
+    const paged = new Escalations({ sql: db.sql, reads: onePerPage, durable: () => undefined, send })
+    expect(await paged.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(newer)
+    // Three delivered runs, then the newer one; its full page asks once more and finds none.
+    expect(pages).toHaveLength(5)
+    expect(pages[0]).toBeNull()
   })
 
   it("runs whose parent-hop calls timed out do not keep a newer run's call out of the batch (#3411)", async () => {

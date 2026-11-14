@@ -108,6 +108,14 @@ describe('colourProblems (#6131)', () => {
     expect(problems.map((p) => p.name)).toEqual(['text_color'])
   })
 
+  it('checks an offered colour’s listing default, not the template’s (#6144)', () => {
+    // The template's #E8532F has no listing filament, but the listing starts the colour at blue.
+    const offered = draft({ params: { text_color: { kind: 'choice', choices: [], default: '#1B6CA8' } }, fixed: { body_color: '#1b6ca8' }, colours: ['blue'] })
+    expect(colourProblems(offered, keychainSchema, [BLUE, CORAL])).toEqual([])
+    const unlisted = draft({ params: { text_color: { kind: 'choice', choices: [], default: '#E8532F' } }, fixed: { body_color: '#1b6ca8' }, colours: ['blue'] })
+    expect(colourProblems(unlisted, keychainSchema, [BLUE, CORAL])).toEqual([{ name: 'text_color', label: 'Text', colour: '#E8532F' }])
+  })
+
   it('finds nothing once every colour has its filament', () => {
     expect(colourProblems(draft({ ...defaultsFor(keychainSchema, [BLUE, CORAL]) }), keychainSchema, [BLUE, CORAL])).toEqual([])
   })

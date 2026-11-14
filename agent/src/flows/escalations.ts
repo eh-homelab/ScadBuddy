@@ -6,6 +6,7 @@ import { DurableUnavailable, type RespondArgs, type RespondOutcome } from '../ga
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
+import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads } from './backendReads.js'
 import { childReasoning, childStep, FlowQueue, ownStep, type QueueStep } from './queue.js'
 import { SessionError } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -38,6 +39,8 @@ export type EscalationSend = (sessionId: string, owner: Owner, text: string, tie
 
 export type EscalationDeps = {
   sql: Sql
+  /** The backend's flow tables (backendReads.ts, #5299 D7); its SQL on `sql` by default. */
+  reads?: FlowRunReads | undefined
   /** The durable gate, when Temporal is configured. */
   durable: () => EscalationDurable | undefined
   /** How a delivery turn starts; without it nothing is delivered. */
@@ -119,6 +122,9 @@ const DENY_IN_FLIGHT = 'a deny for that call is already in flight: wait for its 
  */
 export const CLAIM_LEASE_S = 300
 
+/** The most runs one delivery pass takes calls from (the oldest moves first). */
+export const DELIVERY_RUNS = 200
+
 type Entry = {
   session_id: string
   hop: 'parent' | 'person' | null
@@ -152,11 +158,13 @@ function step(action: string, actor: string, reason?: string): Record<string, st
 export class Escalations {
   readonly #deps: EscalationDeps
   readonly #queue: FlowQueue
+  readonly #reads: FlowRunReads
   readonly #currentTiers: (owner: Owner) => Promise<readonly Tier[] | undefined>
 
   constructor(deps: EscalationDeps) {
     this.#deps = deps
-    this.#queue = new FlowQueue(deps.sql)
+    this.#reads = deps.reads ?? new SqlFlowRunReads(deps.sql)
+    this.#queue = new FlowQueue(deps.sql, this.#reads)
     this.#currentTiers = deps.currentTiers ?? liveTokenTiers(new PostgresTokenStore(deps.sql))
   }
 
@@ -327,7 +335,7 @@ export class Escalations {
       // A child that is the starter session (spec §4.4) is in its own turn while its
       // call waits, so it is never asked: the call goes to the person now.
       const self = held.filter((e) => e.call.child_session === session).map((e) => e.call)
-      if (self.length) await this.#skip(self)
+      if (self.length) await this.#skip(session, self)
       const rest = held.filter((e) => e.call.child_session !== session)
       if (rest.length === 0) continue
       const owner = await this.#parentOwner(session)
@@ -335,10 +343,10 @@ export class Escalations {
       // session changed hands: it goes to the person, and the owner's own entries are sent.
       const calls = rest.filter((e) => e.principal === owner?.principal).map((e) => e.call)
       const handedOff = rest.filter((e) => e.principal !== owner?.principal).map((e) => e.call)
-      if (handedOff.length) await this.#skip(handedOff)
+      if (handedOff.length) await this.#skip(session, handedOff)
       if (!owner || calls.length === 0) continue
       if (!owner.tiers.includes('write')) {
-        await this.#skip(calls)
+        await this.#skip(session, calls)
         continue
       }
       // The claim and the turn are one transaction: a process that dies before the turn
@@ -382,7 +390,7 @@ export class Escalations {
           failures.push(err)
           continue
         }
-        await this.#skip(claimed)
+        await this.#skip(session, claimed)
       }
     }
     if (failures.length) throw failures[0]
@@ -394,94 +402,72 @@ export class Escalations {
    * `parent` (decided, passed up, or its run gone), so `ai_escalation_deliveries` holds
    * only calls still with a starter session. A record is never removed while its call
    * is still there, so nothing is sent twice.
+   *
+   * The backend says which recorded calls still wait (#5299 D7), and only those it did not
+   * name are removed. A record written after the read is not among them; and a call that
+   * has left hop `parent` never comes back to it (its request id names the execution, and a
+   * hop only moves up), so the answer cannot go stale before the delete.
    */
   async #prune(): Promise<void> {
-    try {
-      await this.#deps.sql`
-        DELETE FROM ai_escalation_deliveries d
-         WHERE NOT EXISTS (
-           SELECT 1 FROM workflow_runs r CROSS JOIN LATERAL jsonb_array_elements(r.waiting_on) w
-            WHERE r.status = 'waiting' AND w ->> 'hop' = 'parent'
-              AND d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w ->> 'call_id'))`
-    } catch (err) {
-      // A deployment without flows has no `workflow_runs`, and so no records either.
-      if ((err as { code?: string }).code === '42P01') return
-      throw err
-    }
+    const held = (await this.#deps.sql<{ request_id: string }[]>`SELECT request_id FROM ai_escalation_deliveries`).map((r) => r.request_id)
+    if (held.length === 0) return
+    const waiting = await this.#reads.stillAtParentHop(held)
+    // A deployment without flows has no `workflow_runs`, and so no records either.
+    if (waiting === undefined) return
+    const gone = held.filter((id) => !waiting.has(id))
+    if (gone.length) await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${gone})`
   }
 
   /** A run's own calls at hop `parent`, from the backend's projection, not yet sent. */
   async #flowOwn(): Promise<{ session: string; principal: string; call: Waiting }[]> {
-    let rows: {
-      id: string
-      workflow_run_id: string
-      started_by: { session?: unknown; principal?: unknown }
-      waiting_on: { call_id: string; kind: string; fn: string; hop?: string | null; hop_until?: string | null; reason?: string | null }[]
-      steps: Parameters<typeof ownStep>[0] | null
-      live: string[]
-    }[]
-    // One predicate for both uses, so they cannot drift (#3494 review): the call's hop
-    // has not timed out by Postgres's clock (#3411), and a malformed hop_until is that
-    // call skipped, never a failed scan of every run.
-    const hopLive = this.#deps.sql`CASE WHEN pg_input_is_valid(w->>'hop_until', 'timestamptz')
-                                   THEN (w->>'hop_until')::timestamptz > now() ELSE false END`
-    // The calls this escalates, written once for the same reason (#3930): parent-hop approvals.
-    const parentApproval = this.#deps.sql`w->>'hop' = 'parent' AND w->>'kind' = 'approval'`
-    try {
-      rows = await this.#deps.sql`
-        SELECT id, workflow_run_id, started_by, waiting_on, steps,
-               -- The parent-hop approvals whose hop is live (parentApproval, hopLive).
-               (SELECT coalesce(jsonb_agg(w->>'call_id'), '[]'::jsonb) FROM jsonb_array_elements(r.waiting_on) w
-                 WHERE ${parentApproval} AND ${hopLive}) AS live
-        FROM workflow_runs r
-        WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
-          -- Before the limit: runs whose calls were all delivered already, still at hop
-          -- parent, never keep a newer run's calls out of the 200.
-          AND EXISTS (
-            SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
-            WHERE ${parentApproval}
-              -- A call whose hop timed out, not moved on yet, yields nothing (#3411).
-              AND ${hopLive}
-              AND NOT EXISTS (
-                SELECT 1 FROM ai_escalation_deliveries d
-                WHERE d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w->>'call_id')))
-        ORDER BY updated_at LIMIT 200`
-    } catch (err) {
-      // A deployment without flows has no `workflow_runs`: nothing of its own waits.
-      if ((err as { code?: string }).code === '42P01') return []
-      throw err
-    }
+    // The backend lists the waiting runs' parent-hop approvals whose hop is live by
+    // Postgres's clock (#3411, a malformed hop_until skipped; backendReads.ts
+    // `parentHopApprovals`), oldest move first, a page at a time; the agent leaves out the
+    // calls it delivered already. Runs whose calls were all delivered, still at hop parent,
+    // never keep a newer run's calls out of the `DELIVERY_RUNS`: they are skipped before
+    // the count.
     const out: { session: string; principal: string; call: Waiting }[] = []
-    for (const run of rows) {
-      const { session, principal } = run.started_by
-      if (typeof session !== 'string' || !isUuid(session) || typeof principal !== 'string') continue
-      for (const w of run.waiting_on) {
-        // `live` is the filter (parentApproval, hopLive): a call in it is a parent-hop
-        // approval with a hop_until; the test of hop_until stays for its type, a string.
-        if (!run.live.includes(w.call_id) || !w.hop_until) continue
-        out.push({
-          session,
-          principal,
-          call: {
-            request_id: `flow:${run.id}:${run.workflow_run_id}:${w.call_id}`,
-            run_id: run.id,
-            call: w.fn,
-            summary: '',
-            reason: w.reason ?? null,
-            waits_until: w.hop_until,
-            step: ownStep(Array.isArray(run.steps) ? run.steps : [], w.call_id),
-          },
-        })
+    let runs = 0
+    let after: ParentHopCursor | null = null
+    do {
+      const page = await this.#reads.parentHopApprovals(after, DELIVERY_RUNS)
+      const ids = page.runs.flatMap((run) => run.calls.map((w) => `flow:${run.id}:${run.workflow_run_id}:${w.call_id}`))
+      const sent = new Set(
+        ids.length === 0
+          ? []
+          : (
+              await this.#deps.sql<{ request_id: string }[]>`
+                SELECT request_id FROM ai_escalation_deliveries WHERE request_id = ANY(${ids})`
+            ).map((r) => r.request_id),
+      )
+      for (const run of page.runs) {
+        const pending = run.calls.filter((w) => !sent.has(`flow:${run.id}:${run.workflow_run_id}:${w.call_id}`))
+        if (pending.length === 0) continue
+        if (++runs > DELIVERY_RUNS) break
+        const { session, principal } = run
+        if (typeof session !== 'string' || !isUuid(session) || typeof principal !== 'string') continue
+        for (const w of pending) {
+          // Every call listed is a live parent-hop approval; the test of hop_until stays
+          // for its type, a string.
+          if (!w.hop_until) continue
+          out.push({
+            session,
+            principal,
+            call: {
+              request_id: `flow:${run.id}:${run.workflow_run_id}:${w.call_id}`,
+              run_id: run.id,
+              call: w.fn,
+              summary: '',
+              reason: w.reason ?? null,
+              waits_until: w.hop_until,
+              step: ownStep(run.steps, w.call_id),
+            },
+          })
+        }
       }
-    }
-    if (out.length === 0) return out
-    const sent = new Set(
-      (
-        await this.#deps.sql<{ request_id: string }[]>`
-          SELECT request_id FROM ai_escalation_deliveries WHERE request_id = ANY(${out.map((o) => o.call.request_id)})`
-      ).map((r) => r.request_id),
-    )
-    return out.filter((o) => !sent.has(o.call.request_id))
+      after = page.next
+    } while (after !== null && runs < DELIVERY_RUNS)
+    return out
   }
 
   /**
@@ -534,9 +520,10 @@ export class Escalations {
   /**
    * The starter session cannot be asked: a child's entries go to the person now. A
    * run's own call is the backend's to move (its own timer does, spec §4.6); it is
-   * marked sent so it is not tried again.
+   * marked sent so it is not tried again, for `session`, the run's starter that `deliver`
+   * grouped it under (a record of a run gone since goes at the next prune).
    */
-  async #skip(calls: Waiting[]): Promise<void> {
+  async #skip(session: string, calls: Waiting[]): Promise<void> {
     const child = calls.filter((c) => c.child_session !== undefined).map((c) => c.request_id)
     if (child.length) {
       await this.#deps.sql`
@@ -547,8 +534,7 @@ export class Escalations {
     }
     for (const c of calls.filter((c) => c.child_session === undefined)) {
       await this.#deps.sql`
-        INSERT INTO ai_escalation_deliveries (request_id, session_id)
-        SELECT ${c.request_id}, (started_by ->> 'session')::uuid FROM workflow_runs WHERE id = ${c.run_id}
+        INSERT INTO ai_escalation_deliveries (request_id, session_id) VALUES (${c.request_id}, ${session}::uuid)
         ON CONFLICT (request_id) DO NOTHING`
     }
   }

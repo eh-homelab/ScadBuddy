@@ -1501,7 +1501,7 @@ export const orderTools: Tool[] = [
       "Start the check of a customer's staged file again after it failed (`check_status` `failed`). A file still " +
       '`checking` is not refused: it is returned as it is and its check is started again (a running check is ' +
       'joined), for a check that stalled. 409 source_not_failed for a file that is ready or refused, ' +
-      'source_not_staged once its staged copy is gone.',
+      'source_not_staged once its staged copy is gone, order_not_submitted on a visitor\'s cart.',
     input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/check'],
@@ -1519,7 +1519,8 @@ export const orderTools: Tool[] = [
     label: "Retry a customer's file import",
     description:
       "Ask the watcher of a customer's file to import it into the library again, when `import_stuck` says the " +
-      'import has not finished an hour after the order was sent. 409 import_not_stuck otherwise.',
+      'import has not finished an hour after the order was sent. 409 import_not_stuck otherwise, ' +
+      "order_not_submitted on a visitor's cart.",
     input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/sources/{source_id}/retry-import'],
