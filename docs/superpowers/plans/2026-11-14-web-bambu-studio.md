@@ -256,11 +256,12 @@ Queue all writes each file's choices and the bed type; the quote dialog writes t
 
 ### Task 22: ORD-2026-2 from end to end (issue #6284)
 
-**Files:** Create `e2e-stack/tests/test_menorah_by_object.py` (real stack, native slicer); Modify `docs/` user guide page for the editor.
+**Files:** Create `frontend/e2e/real-menorah-by-object.spec.ts` (a Playwright spec on the real stack with the native slicer, beside `real-hot-path.spec.ts`); Modify `e2e-stack/run.sh` (run the new spec on each stack after `e2e/real-hot-path.spec.ts`, so `hot-path-e2e.yml` runs it), `e2e-stack/CLAUDE.md` (Commands: name the new spec), the `docs/` user guide page for the editor.
 
 - [ ] **Step 1:** Render the menorah template, Arrange with `goal='by_object'` on the H2C, set `enable_prime_tower: false` and `skirt_loops: 0` through `process_overrides`, give one candle `wall_loops: 4` through `set_settings`, slice every plate.
 - [ ] **Step 2:** Assert: no conflict warning from the slicer; each plate's slice time within 20 % of the owner's hand layout (5.5 h class, #6245); `o*` ids identical between the document and the sliced 3MF's metadata.
-- [ ] **Step 3: Commit** `test(e2e): the menorah prints by object from Arrange to slice (#6284)`.
+- [ ] **Step 3: Run** `e2e-stack/run.sh` and check that its output names `real-menorah-by-object.spec.ts` and that the spec passes.
+- [ ] **Step 4: Commit** `test(e2e): the menorah prints by object from Arrange to slice (#6284)`.
 
 ## Dependency order
 
