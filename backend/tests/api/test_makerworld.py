@@ -6,6 +6,7 @@ maziggy/bambuddy at v1.3.2b1-daily.20261112."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -19,11 +20,15 @@ import respx
 from fastapi.testclient import TestClient
 from httpx import Request, Response
 
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
-from scadbuddy.makerworld.imports import DEFAULT_FOLDER
+from scadbuddy.makerworld.imports import DEFAULT_FOLDER, import_model
+from scadbuddy.makerworld.models import MakerWorldImported, MakerWorldImportRequest
+from scadbuddy.print_library.copy_store import LibraryCopyStore
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from tests.api.test_library_native import _native, _native_settings
@@ -236,6 +241,47 @@ def test_import_on_native_names_each_side_that_made_a_new_file(native_client: Te
 
 
 @respx.mock
+def test_two_imports_at_once_make_one_default_folder(
+    native_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each import reads the tree, then makes `MakerWorld` where it is missing. A slow read
+    # lets both read the tree before either makes the folder: only the folder lock keeps
+    # the second from making a second `MakerWorld`.
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    native = _native(native_client)
+    read_tree = native.folders
+
+    async def slow_folders() -> Any:
+        tree = await read_tree()
+        await asyncio.sleep(0.5)
+        return tree
+
+    monkeypatch.setattr(native, "folders", slow_folders)
+    respx.post(f"{API}/makerworld/import").mock(return_value=Response(200, json=_imported()))
+    _bambuddy_file()
+    settings = state.settings_store.load()
+
+    async def one() -> MakerWorldImported:
+        async with client_for(settings) as client:
+            return await import_model(
+                MakerWorldImportRequest(model_id=123, profile_id=77),
+                client=client,
+                native=native,
+                locks=lambda: LibraryCopyStore(state.settings_store.pool).locks(),
+            )
+
+    async def both() -> list[MakerWorldImported]:
+        return list(await asyncio.gather(one(), one()))
+
+    assert native_client.portal is not None
+    first, second = native_client.portal.call(both)
+    folders = [f for f in native.rows.folders() if f.name == DEFAULT_FOLDER]
+    assert len(folders) == 1, folders
+    assert first.folder_id == second.folder_id == folders[0].id
+    assert first.library_file_id == second.library_file_id
+
+
+@respx.mock
 def test_import_on_native_into_a_named_folder(native_client: TestClient) -> None:
     native = _native(native_client)
     folder = native.rows.create_folder("Boats", None)
@@ -333,6 +379,6 @@ def test_an_import_bambuddy_refuses_names_the_scope(bambuddy_client: TestClient)
     answer = bambuddy_client.post(
         "/api/v1/makerworld/import", json={"model_id": 123}, headers=press()
     )
-    assert answer.status_code >= 400, answer.text
+    assert answer.status_code == 409, answer.text
     assert answer.json()["type"] == SCOPE_PROBLEM
     assert "Manage Library" in answer.json()["detail"]

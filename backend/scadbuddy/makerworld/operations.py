@@ -38,9 +38,9 @@ KIND = "makerworld_import"
 IMPORT_TRIES = 3
 QUICK_FAILURE = 60.0
 #: Bambuddy's download, then the copy into the native library, after two quick failures
-#: and their backoff (1 s, 2 s): 904 s. Temporal runs it once (a lost run is not tried
+#: and their backoff (1 s, 2 s): 903 s. Temporal runs it once (a lost run is not tried
 #: again), so with the run's ``CANCEL_GRACE`` (30 s) and the reconciler's
-#: ``LOST_RUN_INTERVAL`` (300 s, ``main.py``) it ends within 1234 s, under the browser's
+#: ``LOST_RUN_INTERVAL`` (300 s, ``main.py``) it ends within 1233 s, under the browser's
 #: ``operationFollowMs`` (1260 s, frontend ``client.ts``).
 IMPORT_TIMEOUT = (
     timedelta(seconds=MAKERWORLD_IMPORT_TIMEOUT)

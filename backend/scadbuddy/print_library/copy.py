@@ -420,9 +420,20 @@ async def copy_file_to_native(
     """One Bambuddy file into the native library under ``root_id`` and ``path`` (made
     where missing), as a ``bb_to_sb`` copy files it: skipped for a live native file of
     the same SHA-256, under the same locks (#6119, the MakerWorld import). The caller
-    releases and closes ``locks``."""
+    releases and closes ``locks``.
+
+    Two calls with the same ``root_id`` and ``path`` find or make its folders one at a
+    time, under a lock of their own, released once the folders exist: the second reads
+    the tree after the first made them, so the two never make two folders of one name."""
+    target = _NativeTarget(native, root_id)
+    if path:
+        await asyncio.to_thread(locks.acquire, "native_folder", f"{root_id}/{path}")
+        try:
+            await target.folder_for(path)
+        finally:
+            await asyncio.to_thread(locks.release_all)
     row = PlannedFile(source_id=source_id, path=path, name="")
-    return await _copy_bb_to_sb(client, _NativeTarget(native, root_id), row, locks)
+    return await _copy_bb_to_sb(client, target, row, locks)
 
 
 def _media_type(name: str, native_type: str) -> str:

@@ -73,7 +73,7 @@ async def get_makerworld_status(store: SettingsStoreDep) -> MakerWorldStatus:
     description=(
         "The design and its print profiles (`instances`, each `profileId` an import's"
         " `profile_id`) for a MakerWorld link, read by Bambuddy, and the library files an"
-        " earlier import of the model made. Downloads nothing. 400 for a link Bambuddy"
+        " earlier import of the model made. Downloads nothing. 422 for a link Bambuddy"
         " does not take; 409 when no Bambuddy is configured."
     ),
 )

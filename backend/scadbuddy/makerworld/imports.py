@@ -15,7 +15,6 @@ from collections.abc import Callable
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.makerworld.models import MakerWorldImported, MakerWorldImportRequest
 from scadbuddy.print_library.copy import STORE_FULL, copy_file_to_native
@@ -94,4 +93,8 @@ def _copy_failed(bambuddy_id: int, reason: str | None) -> ApiError:
     )
     if reason is not None and reason.startswith(STORE_FULL):
         return ApiError(status.HTTP_507_INSUFFICIENT_STORAGE, detail)
-    return ApiError(status.HTTP_502_BAD_GATEWAY, detail, type_=UNAVAILABLE_PROBLEM)
+    # Not `UNAVAILABLE_PROBLEM`: a copy that ended "failed" (the file gone from Bambuddy,
+    # bytes that do not match its hash) fails the same way again, so the run does not
+    # try it again (`operations._try_again`). A transient Bambuddy failure raises its
+    # own error from the copy instead.
+    return ApiError(status.HTTP_502_BAD_GATEWAY, detail)
