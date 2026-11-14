@@ -77,13 +77,27 @@ function filamentOf(colour: ParamValue | null | undefined, filaments: readonly F
 }
 
 /**
- * #6131 (design 2026-11-13 §3) — a listing's parameters and filaments from the commit's
+ * #6131 — the filaments a listing offers at first: every price-book filament with a
+ * density (one that can be priced by weight) of the design's material, which is the
+ * material of the first filament whose colour one of the colour values is; any material
+ * when none is. Those the colour values name come first, in the schema's order.
+ */
+export function offeredFilaments(colourValues: readonly ParamValue[], filaments: readonly Filament[]): Filament[] {
+  const named = colourValues.flatMap((value) => filamentOf(value, filaments) ?? [])
+  const material = named[0]?.material
+  const pool = filaments.filter((filament) => filament.density_g_cm3 != null && (material === undefined || filament.material === material))
+  const first = named.filter((filament) => pool.includes(filament))
+  return [...new Set([...first, ...pool])]
+}
+
+/**
+ * #6131 (design 2026-11-13 §4) — a listing's parameters and filaments from the commit's
  * schema and the values the person was looking at (none for a blank listing): free text
- * is the customer's, the rest locked at its value. A colour is offered when its value is
- * the template's default and a filament has it: a customer who picks none gets the
- * default (`orders/storefront/inputs.py` `listing_values`), so a colour the person changed
- * stays locked and sells as seen. Every colour's filament joins the listing, since
- * publish refuses a colour that is not a listing filament's.
+ * and every colour are the customer's (the owner: "why can't I specify colors"), the rest
+ * is locked at its value. A colour is locked only by the person, or when the price book has
+ * no filament to offer (`offeredFilaments`). A customer who picks no colour gets the
+ * template's default (`orders/storefront/inputs.py` `listing_values`), which must be a
+ * listing filament's: `colourProblems` names one that is not.
  * `test-fixtures/storefront/sell-draft-vectors.json` pins these rules, so another copy of
  * them (the assistant's tool, design §6) can be checked against the same cases.
  */
@@ -94,24 +108,21 @@ export function defaultsFor(
 ): Pick<ListingDraft, 'params' | 'fixed' | 'colours'> {
   const params: Record<string, ListingBound> = {}
   const fixed: Record<string, ParamValue> = {}
-  const colours: string[] = []
-  for (const param of shownParams(schema)) {
-    const value = values[param.name] ?? param.initial ?? undefined
-    if (param.type === 'string' && !(param.options ?? []).length) {
-      params[param.name] = schemaBound(param)
-      continue
+  const shown = shownParams(schema)
+  const valueOf = (param: Param) => values[param.name] ?? param.initial ?? undefined
+  const offered = offeredFilaments(
+    shown.filter((param) => param.type === 'color').flatMap((param) => valueOf(param) ?? []),
+    filaments,
+  )
+  for (const param of shown) {
+    const value = valueOf(param)
+    if ((param.type === 'string' && !(param.options ?? []).length) || (param.type === 'color' && offered.length > 0)) {
+      params[param.name] = param.type === 'color' ? { kind: 'choice', choices: [] } : schemaBound(param)
+    } else if (value !== undefined) {
+      fixed[param.name] = value
     }
-    if (param.type === 'color') {
-      const filament = filamentOf(value, filaments)
-      if (filament && !colours.includes(filament.id)) colours.push(filament.id)
-      if (filament && sameColour(value, param.initial)) {
-        params[param.name] = { kind: 'choice', choices: [] }
-        continue
-      }
-    }
-    if (value !== undefined) fixed[param.name] = value
   }
-  return { params, fixed, colours }
+  return { params, fixed, colours: offered.map((filament) => filament.id) }
 }
 
 /** A colour of the listing that none of its filaments has: publish would refuse it. */
@@ -169,8 +180,8 @@ function wordPattern(word: string): RegExp {
 /**
  * #6131 — the names of the colours a customer can choose that `title` holds (whole words,
  * case aside). The owner's rule: a colour the customer picks never goes in a listing's
- * title ("Owl Pencil Cup – Navy" was refused). Only while the listing offers a colour; a
- * locked colour is the product's own and may stay.
+ * title ("Owl Pencil Cup – Navy" was refused). Every listing filament's colour is a choice of
+ * each offered colour, so all their names count while the listing offers any colour.
  */
 export function titleColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
   if (!shownParams(schema).some((param) => param.type === 'color' && draft.params[param.name])) return []

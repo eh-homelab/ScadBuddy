@@ -3,7 +3,7 @@ import type { Filament, Job, ModelSummary, ParamValue } from '../../api/types'
 import { defaultsFor, emptyDraft, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
- * #6131 (design 2026-11-13 §2, §3) — "Sell on storefront": the listing the Storefront page
+ * #6131 (design 2026-11-13 §3, §4) — "Sell on storefront": the listing the Storefront page
  * opens for `?sell=job:<id>` (the Customize page's render of the values on screen) or
  * `?sell=output:<id>` (a saved output), filled in from what the person was looking at.
  */

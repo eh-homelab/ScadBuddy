@@ -1,5 +1,5 @@
 import { fireEvent, screen, within } from '@testing-library/react'
-import { useState } from 'react'
+import { useState, type ComponentProps } from 'react'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, Param } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
@@ -18,7 +18,7 @@ function filament(id: string, colour: string, colour_name: string): Filament {
     colour_name,
     colour,
     cost_per_kg: '20',
-    density_g_cm3: null,
+    density_g_cm3: '1.24',
     archived_at: null,
     created_at: '2026-11-01T00:00:00Z',
     updated_at: '2026-11-01T00:00:00Z',
@@ -125,6 +125,18 @@ describe('ListingEditor (#5282, #6131)', () => {
     await user.click(screen.getByRole('button', { name: 'Take it out' }))
     expect(last(seen).title).toBe('Name tag')
     expect(screen.queryByTestId('title-colours')).not.toBeInTheDocument()
+  })
+
+  it('folds the design and version pickers back to one line with Done (#6140 review)', async () => {
+    const versions = [{ commit: COMMIT, short: 'aaaaaaa', author: 'a', date: '2026-11-01T00:00:00Z', message: 'm', files: [], current: true }]
+    const models = [{ slug: 'name-keychain', name: 'Name Keychain' }] as unknown as ComponentProps<typeof ListingEditor>['models']
+    const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }
+    const { user } = renderPage(<ListingEditor draft={draft} onChange={() => undefined} models={models} versions={versions} schema={keychainSchema} filaments={[]} media={[]} />)
+    expect(screen.getByTestId('listing-design')).toHaveTextContent('version aaaaaaa (current)')
+    await user.click(screen.getByRole('button', { name: 'Change' }))
+    expect(screen.getByRole('combobox', { name: 'Version' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.getByTestId('listing-design')).toBeInTheDocument()
   })
 
   it('locks a numeric select at one of its options, as a number', async () => {

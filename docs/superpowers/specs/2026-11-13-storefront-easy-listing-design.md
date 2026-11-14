@@ -93,25 +93,34 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
   in a listing's title (the owner refused "Owl Pencil Cup – Navy"): while the listing offers a
   colour, the names of its filaments' colours are taken out of the title, with the separators
   they leave (`titleColours`, `withoutWords`). A title typed with one gets a warning under it
-  and "Take it out". A locked colour may stay: that product is sold in it.
+  and "Take it out". Every listing filament's colour is a choice of each offered colour, so
+  all their names go while any colour is offered; a colour may stay only in the title of a
+  listing that offers none.
 - Pictures: every model media item that is an image (`kind` `image`, an `image/*` content
   type, not missing). Videos and anything else are left unticked.
 - Parameters (the smart defaults; also used for a blank listing):
   - Free text (`string` with no options): customer may change, at most the schema's
     `max_length` (capped at 200). The shop's typed text is a sample and is not kept.
-  - Colour (`// color`): customer may change when the current value is the template's
-    default and a filament has it; locked at the current value otherwise, so the product
-    sells as seen (§2: an offered colour starts at the default).
+  - Colour (`// color`): customer may change, always (the owner, 2026-11-13: "why can't I
+    specify colors"). Locking one is the person's explicit choice in the editor. It starts
+    locked only when the price book has no filament to offer.
   - Everything else (numbers, selects, switches: the geometry): locked at the current value.
   - Fonts and files are never offered (as today).
-- Colours: each colour value (offered or locked, current or default) is matched to a
-  price-book filament of the same colour, case aside, as publish compares them. Every matched
-  filament is a listing filament. A colour that no listing filament has (`colourProblems`) is
-  named at the top of the editor ("Plate is #1B6CA8"), with a picker of the price book's
-  filaments, nearest colour first, which adds that filament and locks the colour at it
-  (`fixColour`), and a link to add one to the price book (Settings → Printing → Orders).
-  It stays there, live, until every colour has a filament. Publish stays possible, and the
-  server's refusal names the parameter if the person goes on anyway.
+- Colours on offer (`offeredFilaments`): every price-book filament with a density (one priced
+  by weight) of the design's material, which is the material of the first filament whose
+  colour one of the colour values is, compared case aside as publish compares them; every
+  priced filament of any material when no value matches one. The filaments the values name
+  come first.
+- A customer who picks no colour gets the template's default (§2), and publish and the
+  customer's render refuse a colour that no listing filament has. Such a colour, locked or
+  an offered one's default (`colourProblems`), is named at the top of the editor ("Plate is
+  #1B6CA8"), with a picker of the price book's filaments, nearest colour first, and a link to
+  add one to the price book (Settings → Printing → Orders). Choosing a filament adds it and
+  locks the colour at it (`fixColour`): a listing cannot set an offered colour's default yet,
+  so locking is the fix until it can. "The current value as the customer's default" waits
+  for that backend field, filed by the storefront's own work. The note stays, live, until
+  every colour has a filament. Publish stays possible, and the server's refusal names the
+  parameter if the person goes on anyway.
 - Render time: when the job (or the output's job) took more than 100 s, a note: "This design
   took N s to render. The store's preview and price give up after about 100 s" (#6120).
 

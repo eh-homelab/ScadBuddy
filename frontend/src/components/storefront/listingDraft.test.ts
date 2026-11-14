@@ -13,7 +13,7 @@ function filament(id: string, colour: string, colour_name: string): Filament {
     colour_name,
     colour,
     cost_per_kg: '20',
-    density_g_cm3: null,
+    density_g_cm3: '1.24',
     archived_at: null,
     created_at: '2026-11-01T00:00:00Z',
     updated_at: '2026-11-01T00:00:00Z',
@@ -30,8 +30,8 @@ function media(id: string, kind: 'image' | 'video', content_type: string, missin
 }
 
 describe('defaultsFor (#6131): the smart defaults', () => {
-  it('offers free text and colours, and locks the geometry at the values given', () => {
-    const { params, fixed, colours } = defaultsFor(keychainSchema, [BLUE, CORAL, YELLOW], { text_size: 20, keyring_hole: false })
+  it('offers free text and every colour, and locks the geometry at the values given', () => {
+    const { params, fixed, colours } = defaultsFor(keychainSchema, [YELLOW, BLUE, CORAL], { text_size: 20, keyring_hole: false })
     expect(params).toEqual({
       name: { kind: 'text', max_length: 20 },
       body_color: { kind: 'choice', choices: [] },
@@ -47,20 +47,25 @@ describe('defaultsFor (#6131): the smart defaults', () => {
       keyring_hole: false,
       hole_side: 'left',
     })
-    // Each colour's filament, matched case-insensitively, in the schema's order.
-    expect(colours).toEqual(['blue', 'coral'])
+    // Every priced filament of the design's material, those the colours name first.
+    expect(colours).toEqual(['blue', 'coral', 'yellow'])
   })
 
-  it('locks a colour the person changed from the default, so the product sells as seen', () => {
+  it('offers a colour the person changed too: locking one is the person’s choice', () => {
     const { params, fixed, colours } = defaultsFor(keychainSchema, [BLUE, NAVY, CORAL], { body_color: '#1f2a44' })
-    expect(params['body_color']).toBeUndefined()
-    expect(fixed['body_color']).toBe('#1f2a44')
-    expect(params['text_color']).toEqual({ kind: 'choice', choices: [] })
-    expect(colours).toEqual(['navy', 'coral'])
+    expect(params['body_color']).toEqual({ kind: 'choice', choices: [] })
+    expect(fixed['body_color']).toBeUndefined()
+    expect(colours).toEqual(['navy', 'coral', 'blue'])
   })
 
-  it('locks a colour no filament has, at its value', () => {
-    const { params, fixed, colours } = defaultsFor(keychainSchema, [YELLOW])
+  it('offers only the design’s material, and only filaments with a density', () => {
+    const petg = { ...filament('petg', '#FFFFFF', 'White'), material: 'PETG' }
+    const unpriced = { ...filament('unpriced', '#00FF00', 'Green'), density_g_cm3: null }
+    expect(defaultsFor(keychainSchema, [petg, BLUE, unpriced]).colours).toEqual(['blue'])
+  })
+
+  it('locks a colour at its value only when no filament can be offered', () => {
+    const { params, fixed, colours } = defaultsFor(keychainSchema, [])
     expect(params['body_color']).toBeUndefined()
     expect(fixed['body_color']).toBe('#1B6CA8')
     expect(colours).toEqual([])

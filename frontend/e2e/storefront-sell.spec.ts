@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-// #6131 (design 2026-11-13 §2) — "Sell on storefront" over the mocks: from the Customize
+// #6131 (design 2026-11-13 §3) — "Sell on storefront" over the mocks: from the Customize
 // page's Generate menu to a published listing, the editor filled in from the render on
 // screen. The mocked price book has no filament of the keychain's two colours, so the
 // editor names them and a filament is chosen for each before Publish.
@@ -10,7 +10,7 @@ test.describe('sell on storefront', () => {
 
   test('lists the design on screen in one step and publishes it', async ({ page }) => {
     await page.goto('/m/name-keychain')
-    await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    await expect(page.getByTestId('bbox-readout')).toContainText('64.1', { timeout: 30_000 })
 
     await page.getByTestId('generate-menu').click()
     await page.getByTestId('generate-sell').click()

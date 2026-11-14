@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
+import { useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../api/client'
 import { resetMockState } from '../mocks/handlers'
@@ -30,6 +31,16 @@ function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
     }),
   )
   return release
+}
+
+/** A button that moves the router to `to` in the same tree, as an in-app link does. */
+function GoTo({ to }: { to: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate(to)}>
+      Go
+    </button>
+  )
 }
 
 /** Each request the page sends, as `METHOD path`. */
@@ -99,21 +110,23 @@ describe('StorefrontPage (#5282)', () => {
     expect((await api.storefrontListings()).every((l) => !l.published)).toBe(true)
   })
 
-  it('offers a colour parameter only once the listing has filaments', async () => {
+  it('offers every colour, from every priced filament, unless the person locks it (#6131)', async () => {
     const user = userEvent.setup()
     renderPage(<StorefrontPage />)
     await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    await user.click(await screen.findByRole('button', { name: /^Show all/ }))
-    const offer = await screen.findByRole('switch', { name: 'Customer can change Plate' })
-    expect(offer).toBeDisabled()
-    expect(screen.getAllByText('Tick a colour on offer first.').length).toBeGreaterThan(0)
-    await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
-    await user.click(screen.getByRole('switch', { name: 'Customer can change Plate' }))
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    expect(screen.getByRole('switch', { name: 'Customer can change Text' })).toBeChecked()
+    // No filament is the keychain's colours, so every priced one is on offer, of any material.
+    expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'PETG Black' })).toBeChecked()
+    // Locking is the person's choice.
+    await user.click(screen.getByRole('switch', { name: 'Customer can change Text' }))
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     await waitFor(async () => expect(await api.storefrontListings()).toHaveLength(1))
     const [saved] = await api.storefrontListings()
-    expect(saved?.colours).toEqual([FILAMENT_PLA])
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C'] })
+    expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] })
+    expect(saved?.fixed['text_color']).toBe('#E8532F')
   })
 
   it('shows why a publish is refused', async () => {
@@ -208,11 +221,9 @@ describe('StorefrontPage (#5282)', () => {
     const seen = recordRequests()
     renderPage(<StorefrontPage />)
     await user.click(await screen.findByRole('button', { name: 'New listing' }))
-    const pla = await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' })
-    await user.click(pla)
-    await user.click(await screen.findByRole('button', { name: /^Show all/ }))
-    await user.click(screen.getByRole('switch', { name: 'Customer can change Plate' }))
-    await user.click(pla)
+    await screen.findByRole('switch', { name: 'Customer can change Plate' })
+    await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
+    await user.click(screen.getByRole('checkbox', { name: 'PETG Black' }))
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(/body_color.*choose at least one filament/)
     expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
@@ -381,21 +392,28 @@ describe('StorefrontPage (#5282)', () => {
       expect(await screen.findByTestId('listing-design')).toHaveTextContent(`Name Keychainversion ${versionIds.edited.slice(0, 7)}Change`)
       // The slow render is said before publishing (#6120).
       expect(screen.getByRole('note')).toHaveTextContent('took 150 s to render')
-      // The changed colour is locked at its filament; the text colour has none.
+      // Both colours are offered; the plate's yellow is a PLA, so the PLA filaments are on offer.
+      // A customer who picks none gets each template default, which no filament on offer has.
       const problems = await screen.findByTestId('colour-problems')
+      expect(problems).toHaveTextContent('Plate is #1B6CA8')
       expect(problems).toHaveTextContent('Text is #E8532F')
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+      expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
       expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
 
+      // Choosing a filament for each locks it there: the person's choice. (A listing cannot set an
+      // offered colour's default yet, so locking is the one fix today.)
       await user.click(within(problems).getByRole('combobox', { name: 'Filament for Text' }))
       await user.click(await screen.findByRole('option', { name: 'PETG Black' }))
+      await user.click(within(problems).getByRole('combobox', { name: 'Filament for Plate' }))
+      await user.click(await screen.findByRole('option', { name: 'PLA Sunflower Yellow' }))
       await user.click(screen.getByRole('button', { name: 'Publish' }))
       expect(await screen.findByText('Published')).toBeInTheDocument()
 
       const [saved] = await api.storefrontListings()
       expect(saved?.commit).toBe(versionIds.edited)
       expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20 } })
-      expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#f9d72c', text_color: '#1E1E1E', thickness: 5.2 })
+      expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#F9D72C', text_color: '#1E1E1E', thickness: 5.2 })
       expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
       expect(saved?.media_ids).toEqual(['thumbnail'])
     })
@@ -427,6 +445,29 @@ describe('StorefrontPage (#5282)', () => {
       expect(screen.getAllByRole('note')[0]).toHaveTextContent('not in the design')
     })
 
+    it('leaves a listing opened while the fill-in ran alone when the fill-in answers (#6140 review)', async () => {
+      await seed('Mine')
+      serveJob()
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      server.use(
+        http.get('/api/v1/models/:slug/versions', async () => {
+          await gate
+          return undefined
+        }),
+      )
+      const { user } = renderPage(<StorefrontPage />, { route: '/storefront?sell=job:j1' })
+      await screen.findByText('Filling in the listing…')
+      await user.click(await screen.findByRole('button', { name: 'Edit Mine' }))
+      const title = await screen.findByLabelText('Title')
+      await user.type(title, '!')
+      release()
+      await waitFor(() => expect(screen.queryByText('Filling in the listing…')).toBeNull())
+      expect(screen.getByLabelText('Title')).toHaveValue('Mine!')
+    })
+
     it('says why a listing could not be filled in', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', () =>
@@ -441,6 +482,33 @@ describe('StorefrontPage (#5282)', () => {
       const listing = await seed('From the assistant')
       renderPage(<StorefrontPage />, { route: `/storefront?listing=${listing.id}` })
       expect(await screen.findByLabelText('Title')).toHaveValue('From the assistant')
+    })
+
+    it('reads the listings again for one made after they were read (#6140 review)', async () => {
+      server.use(
+        http.get('/api/v1/storefront/listings', () => HttpResponse.json([]), { once: true }),
+      )
+      const listing = await seed('Just made')
+      renderPage(<StorefrontPage />, { route: `/storefront?listing=${listing.id}` })
+      expect(await screen.findByLabelText('Title')).toHaveValue('Just made')
+    })
+
+    it('keeps unsaved edits when the assistant’s link arrives, and says so (#6140 review)', async () => {
+      const listing = await seed('Linked')
+      const { user } = renderPage(
+        <>
+          <StorefrontPage />
+          <GoTo to={`/storefront?listing=${listing.id}`} />
+        </>,
+        { route: '/storefront' },
+      )
+      await user.click(await screen.findByRole('button', { name: 'New listing' }))
+      const title = await screen.findByLabelText('Title')
+      await user.clear(title)
+      await user.type(title, 'Mine')
+      await user.click(screen.getByRole('button', { name: 'Go' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Save the open listing first')
+      expect(screen.getByLabelText('Title')).toHaveValue('Mine')
     })
 
     it('warns that saving a published listing takes it off the store', async () => {

@@ -38,12 +38,21 @@ interface Open {
   notes: string[]
 }
 
-/** A new listing: blank, or the one "Sell on storefront" filled in. */
-function fresh(sold?: SellListing): Open {
-  return { key: Symbol('listing'), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
+/** How many listings were opened on this page: each opening's key is named by its number. */
+let openings = 0
+
+/** A new opening's key; its description names it uniquely, as the editor's React key. */
+function newKey(): symbol {
+  openings += 1
+  return Symbol(`listing-${openings}`)
 }
 
-function opened(listing: StorefrontListing, key: symbol = Symbol('listing')): Open {
+/** A new listing: blank, or the one "Sell on storefront" filled in. */
+function fresh(sold?: SellListing): Open {
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
+}
+
+function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
   return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [] }
 }
@@ -110,7 +119,7 @@ export function StorefrontPage() {
     const current = versions.data.find((v) => v.current) ?? versions.data[0]
     if (current) setOpen({ ...open, draft: { ...open.draft, commit: current.commit } })
   }, [open, versions.data])
-  // #6131 — the smart defaults (design 2026-11-13 §3), once the price book has answered.
+  // #6131 — the smart defaults (design 2026-11-13 §4), once the price book has answered.
   useEffect(() => {
     if (!open || open.filled || !schema.data || !(book.data || book.error)) return
     setOpen({ ...open, filled: true, draft: { ...open.draft, ...defaultsFor(schema.data, filaments), media_ids: sellMedia(media) } })
@@ -124,6 +133,11 @@ export function StorefrontPage() {
   const listingParam = search.get('listing')
   const [selling, setSelling] = useState(false)
   const sold = useRef<string | null>(null)
+  /** The open listing's key now, which a fill-in that answers late compares against. */
+  const openKey = useRef<symbol | null>(null)
+  useEffect(() => {
+    openKey.current = open?.key ?? null
+  }, [open])
   useEffect(() => {
     if (!sell || sold.current === sell || !models.data || !(book.data || book.error)) return
     sold.current = sell
@@ -134,24 +148,45 @@ export function StorefrontPage() {
     }, { replace: true })
     setSelling(true)
     setError(null)
+    // Applied only while the listing open when it started is still the open one: a person
+    // who opened another meanwhile keeps it (#6140 review).
+    const started = openKey.current
     sellListing(sell, book.data?.filaments ?? [], models.data)
       .then((made) => {
+        if (openKey.current !== started) return
         setOpen(fresh(made))
         setValues({})
       })
       .catch((caught: unknown) => setError({ key: PAGE, text: `Could not fill in the listing: ${message(caught)}` }))
       .finally(() => setSelling(false))
   }, [sell, models.data, book.data, book.error, setSearch])
+  /** Whether the open listing holds what a save would write and has not: a new one always does. */
+  const unsaved = open !== null && (open.id === null || open.saved !== savedKey(listingInput(open.draft, schema.data, filaments)))
   useEffect(() => {
     if (!listingParam || !listings.data) return
-    const row = listings.data.find((l) => l.id === listingParam)
+    const id = listingParam
+    const known = listings.data
     setSearch((cur) => {
       const next = new URLSearchParams(cur)
       next.delete('listing')
       return next
     }, { replace: true })
-    if (row) setOpen(opened(row))
-    else setError({ key: PAGE, text: 'That listing is gone.' })
+    if (open?.id === id) return
+    // The open listing's unsaved edits are never dropped for a link (#6140 review).
+    if (unsaved) {
+      setError({ key: PAGE, text: 'Save the open listing first, then open the link again.' })
+      return
+    }
+    // A listing made after the list was read (the assistant's draft) is read again first.
+    const found = known.find((l) => l.id === id)
+    void (found ? Promise.resolve(found) : api.storefrontListings().then((rows) => rows.find((l) => l.id === id)))
+      .then((row) => {
+        if (row) setOpen(opened(row))
+        else setError({ key: PAGE, text: 'That listing is gone.' })
+      })
+      .catch((caught: unknown) => setError({ key: PAGE, text: `Could not read the listings: ${message(caught)}` }))
+    // Only a new link runs this; the open listing and its edits are read as they are then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listingParam, listings.data, setSearch])
 
   // A version without some of the listing's parameters: they go, or the editor could
@@ -426,6 +461,7 @@ export function StorefrontPage() {
                   )}
                 </div>
                 <ListingEditor
+                  key={open.key.description}
                   draft={draft}
                   onChange={changed}
                   models={models.data ?? []}

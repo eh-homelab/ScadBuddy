@@ -11,7 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { colourProblems, emptyDraft, fixColour, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
- * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §4) — one storefront listing in
+ * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
  * the Storefront page's editor, in the order a shop thinks: the design it sells (one line,
  * "Change" opens the template and version), the product (title, description, pictures),
  * what the customer chooses (each offered parameter's bounds and the colours on offer),
@@ -358,6 +358,11 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
           </SelectContent>
         </Select>
       </div>
+      {changing && model && draft.commit && (
+        <Button variant="link" size="sm" className="h-auto justify-self-start p-0" onClick={() => setChanging(false)}>
+          Done
+        </Button>
+      )}
     </div>
   )
 }
