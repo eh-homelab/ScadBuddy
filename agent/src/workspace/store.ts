@@ -369,11 +369,18 @@ export async function dropUnnamedBytes(sql: Sql, shas?: readonly string[]): Prom
   return gone.count
 }
 
-/** Puts `data` in `ai_session_file_bytes`, or locks the row already there so no sweep takes it before the caller's row names it. */
+/**
+ * Puts `data` in `ai_session_file_bytes` unless the row is there, then locks it (`FOR KEY
+ * SHARE`, which dropUnnamedBytes's `FOR UPDATE SKIP LOCKED` skips) so no sweep takes it
+ * before the caller's row names it. A row a sweep deleted between the two is put again. A
+ * row already there is neither rewritten nor hashed again.
+ */
 async function putBytes(tx: TransactionSql, digest: string, data: Buffer): Promise<void> {
-  await tx`
-    INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${data})
-    ON CONFLICT (sha256) DO UPDATE SET created_at = ai_session_file_bytes.created_at`
+  for (;;) {
+    await tx`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${digest}, ${data}) ON CONFLICT (sha256) DO NOTHING`
+    const [held] = await tx`SELECT 1 FROM ai_session_file_bytes WHERE sha256 = ${digest} FOR KEY SHARE`
+    if (held) return
+  }
 }
 
 /** How the bytes leave Postgres: the backend's blob store, and who seals for it (none without the KEK). */
@@ -885,7 +892,8 @@ export class SessionFiles {
    * A fork's copy of its parent's files. No bytes are copied (copy-on-write, #4212): a
    * blob's row names the parent's blob, its file key wrapped again for the child, and a
    * row kept in Postgres names the parent's row of `ai_session_file_bytes`. A parent's row an
-   * older agent kept inline (`data`) moves its bytes there first. All or nothing: every
+   * older agent kept inline (`data`) moves its bytes there first; only one whose bytes do not
+   * match its sha256, which nothing writes, is still copied inline. All or nothing: every
    * file key is wrapped for the child first (what can fail: no KEK here, a forgotten
    * parent), then every row is written in one transaction.
    */
@@ -913,6 +921,9 @@ export class SessionFiles {
       for (const { row } of wrapped) await this.#hold(store, to, row.path, row.blob_key!)
     }
     await this.sql.begin(async (tx) => {
+      // The parent's write lock, so a write to the parent waits for the fork: it locks its file
+      // row before its bytes, the order this transaction would otherwise reverse.
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${from}`}, 0))`
       await tx`
         INSERT INTO ai_session_file_bytes (sha256, data)
         SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
@@ -922,6 +933,13 @@ export class SessionFiles {
       await tx`
         UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
         WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
+      // The bytes the child names stay until it commits: a delete in the parent meanwhile cannot
+      // drop them under the child's foreign key. A row already gone is one no parent file names
+      // any more, so the insert below, reading afresh, leaves that file out.
+      await tx`
+        SELECT 1 FROM ai_session_file_bytes
+        WHERE sha256 IN (SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL)
+        FOR KEY SHARE`
       await tx`
         INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at)
         SELECT ${to}, ${toSession}, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at
