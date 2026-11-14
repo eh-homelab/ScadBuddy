@@ -18,9 +18,11 @@ const INPUT =
   'min-h-12 w-full rounded-[10px] border-[1.5px] border-input bg-background px-3.5 py-2.5 aria-invalid:border-destructive'
 
 /**
- * One parameter a listing offers. The public view has no default to show, so a field the
- * visitor has not touched says the shop's choice stands, and sends nothing (spec §5.4: the
- * CRUD side fills it in). Labels and choices are the shop's text, shown as text. Styled
+ * One parameter a listing offers. A field the visitor has not touched says the shop's
+ * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in); only a text
+ * field shows the design's default, as its placeholder (#6137). Labels are the listing's
+ * own or the template's caption without its extruder note (`shown_label`), and choices
+ * are the shop's values, a switch's as Yes or No (`valueText`); all are shown as text. Styled
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */

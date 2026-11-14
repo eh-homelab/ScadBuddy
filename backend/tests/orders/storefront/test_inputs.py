@@ -275,6 +275,9 @@ def _with_captions(listing: Listing, captions: dict[str, str]) -> Listing:
         ("Width (mm)", "Width (mm)"),
         # A caption that is only the note keeps it, rather than show nothing.
         ("(extruder 1)", "(extruder 1)"),
+        # Only "(extruder N)" is the note; other forms are the template's own words.
+        ("Colour (ext. 1)", "Colour (ext. 1)"),
+        ("Colour (AMS slot 2)", "Colour (AMS slot 2)"),
     ],
 )
 def test_a_public_label_leaves_out_the_extruder_note(
@@ -318,3 +321,23 @@ def test_the_cart_names_a_value_as_the_listing_does(listing: Listing) -> None:
     bounds["label"] = bounds["label"].model_copy(update={"label": "Your name"})
     found = _captions([labelled.model_copy(update={"params": bounds})])
     assert found[("demo", COMMIT)] == {"colour": "Letter colour", "label": "Your name"}
+
+
+def test_the_cart_never_shows_another_listings_label(listing: Listing) -> None:
+    """Two listings at one slug and commit label ``colour`` differently, and the cart
+    item does not say which one it came from: it reads the caption's label, never the
+    other listing's (#6142 review)."""
+    labelled = _with_captions(listing, {"colour": "Letter colour (extruder 2)"})
+
+    def with_label(listing_id: str, label: str | None) -> Listing:
+        bounds = dict(labelled.params)
+        bounds["colour"] = bounds["colour"].model_copy(update={"label": label})
+        return labelled.model_copy(update={"id": listing_id, "params": bounds})
+
+    found = _captions([with_label("a", "Letters"), with_label("b", "Rim colour")])
+    assert found[("demo", COMMIT)]["colour"] == "Letter colour"
+    found = _captions([with_label("a", "Letters"), with_label("b", None)])
+    assert found[("demo", COMMIT)]["colour"] == "Letter colour"
+    # Every listing at the pair agrees, so the cart shows the listings' own label.
+    found = _captions([with_label("a", "Letters"), with_label("b", "Letters")])
+    assert found[("demo", COMMIT)]["colour"] == "Letters"
