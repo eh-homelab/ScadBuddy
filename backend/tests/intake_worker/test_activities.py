@@ -89,7 +89,7 @@ def run(fake: Fake, tmp_path: Path, which: str = "check", beats: list[object] | 
         backoff=0.01,
     )
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.bucket))
-    activities = IntakeActivities(crud, tmp_path, http, sandbox_uid=None)
+    activities = IntakeActivities(crud, tmp_path, http, sandbox_url=None)
     env = ActivityEnvironment()
     if beats is not None:
         env.on_heartbeat = lambda *details: beats.append(details)

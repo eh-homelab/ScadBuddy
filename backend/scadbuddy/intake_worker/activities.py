@@ -97,13 +97,13 @@ class IntakeActivities:
         work_dir: Path,
         http: httpx.AsyncClient | None = None,
         *,
-        sandbox_uid: int | None,
+        sandbox_url: str | None,
     ) -> None:
         self._crud = crud
         self._work_dir = work_dir
-        #: The pod's sandbox container's uid: the check's child runs there (`runner.py`),
-        #: and what it writes back must be its own. None: dev-only local runs.
-        self._sandbox_uid = sandbox_uid
+        #: The sandbox's Service: the check's child runs there (`runner.py`). None:
+        #: dev-only local runs.
+        self._sandbox_url = sandbox_url
         self._http = http or httpx.AsyncClient(timeout=TRANSFER_TIMEOUT)
 
     async def aclose(self) -> None:
@@ -143,7 +143,7 @@ class IntakeActivities:
                 )
             else:
                 verdict = await run_check(
-                    file, read.filename, folder, sandbox_uid=self._sandbox_uid
+                    file, read.filename, folder, sandbox_url=self._sandbox_url
                 )
                 if verdict.preview is None:
                     result = CheckResult(outcome="refused", reason=verdict.reason)

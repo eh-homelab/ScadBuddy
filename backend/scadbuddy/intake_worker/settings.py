@@ -3,7 +3,6 @@ store field: it reaches the CRUD service and Temporal only."""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
@@ -56,14 +55,13 @@ class IntakeSettings(BaseSettings):
     #: file system is read-only.
     intake_work_dir: Path = Path("/tmp")
     #: Required, with no default, so a missing variable never falls back to the weaker
-    #: mode: ``true`` hands each check to the pod's sandbox container over
-    #: `intake_work_dir`, an emptyDir the two share (`runner.py`, `sandbox.py`); the
-    #: deployment sets it. ``unsafe-local`` starts the child in this process's container,
-    #: for development only.
+    #: mode: ``true`` hands each check to the sandbox, a Deployment of its own, over HTTP
+    #: at `intake_sandbox_url` (`runner.py`, `sandbox.py`); the deployment sets it.
+    #: ``unsafe-local`` starts the child in this process's container, for development only.
     intake_sandbox: Literal["true", "unsafe-local"]
-    #: The sandbox container's ``runAsUser``, required with ``true``: everything the
-    #: worker reads back from the spool must be owned by it (`runner.read_output`).
-    intake_sandbox_uid: int | None = None
+    #: The sandbox's Service, required with ``true``: a plain ``http://`` URL with no
+    #: user, path, query or fragment, e.g. ``http://scadbuddy-intake-sandbox:8090``.
+    intake_sandbox_url: str | None = None
     log_level: str = "INFO"
 
     @field_validator("api_internal_url")
@@ -85,15 +83,26 @@ class IntakeSettings(BaseSettings):
         return level
 
     @model_validator(mode="after")
-    def _sandbox_uid(self) -> IntakeSettings:
-        if self.intake_sandbox == "true":
-            if self.intake_sandbox_uid is None:
-                raise ValueError("SCADBUDDY_INTAKE_SANDBOX=true needs SCADBUDDY_INTAKE_SANDBOX_UID")
-            if self.intake_sandbox_uid <= 0 or self.intake_sandbox_uid == os.geteuid():
-                raise ValueError(
-                    "SCADBUDDY_INTAKE_SANDBOX_UID must be another user than the worker's,"
-                    " and not root"
-                )
+    def _sandbox_url(self) -> IntakeSettings:
+        if self.intake_sandbox != "true":
+            return self
+        url = self.intake_sandbox_url
+        if url is None:
+            raise ValueError("SCADBUDDY_INTAKE_SANDBOX=true needs SCADBUDDY_INTAKE_SANDBOX_URL")
+        parts = urlsplit(url)
+        if (
+            parts.scheme != "http"
+            or not parts.hostname
+            or parts.username is not None
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError(
+                "SCADBUDDY_INTAKE_SANDBOX_URL must be a plain http:// URL of the sandbox's"
+                f" Service, not {url!r}"
+            )
+        self.intake_sandbox_url = url.rstrip("/")
         return self
 
     @model_validator(mode="after")

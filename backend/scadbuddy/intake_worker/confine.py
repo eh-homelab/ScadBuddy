@@ -2,7 +2,7 @@
 ``python -I -S confine.py [--strict] [--box-fd N] <hide> -- <program> [args...]``.
 
 Its working directory is the job's box, or, with ``--box-fd``, the directory of that
-inherited descriptor, which it ``fchdir``s to and closes first. The sandbox container
+inherited descriptor, which it ``fchdir``s to and closes first. The sandbox
 hands the box over that way: it is non-dumpable, so its children cannot follow a
 ``/proc/<its pid>/fd/<n>`` link of its own (``proc_fd_access_allowed`` needs
 ``ptrace_may_access``, which refuses a non-dumpable target).
@@ -56,7 +56,7 @@ job, and the parser cannot leave the group (``setsid`` and ``setpgid`` are refus
    <https://man7.org/linux/man-pages/man7/capabilities.7.html>), so the parser runs with
    none. The uid is the caller's own, never 0: ``--strict`` refuses root.
 
-With ``--strict`` (the sandbox container's) any refused step exits 126 without running the
+With ``--strict`` (the sandbox's) any refused step exits 126 without running the
 program: no parse runs unconfined. Without it (``unsafe-local``, development and tests) a
 refused step is passed to the program as ``SCADBUDDY_INTAKE_ISOLATION`` and it runs anyway.
 

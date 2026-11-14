@@ -1473,9 +1473,10 @@ jobs:
       # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces;
       # Ubuntu runners from 24.04 on refuse `unshare` without it:
       # https://github.com/actions/runner-images/issues/10443), and the container runs
-      # unconfined by seccomp and AppArmor as uid 10001, as the pod's sandbox container
-      # does with its own profiles. SCADBUDDY_REQUIRE_CONFINEMENT=1 makes a refusal a
-      # failure, never a skip. Shard 1 only: its test image is already built.
+      # unconfined by seccomp and AppArmor as uid 10001, as the intake sandbox's own
+      # pod runs. It runs test_runner.py and test_sandbox.py (the sandbox's RPC).
+      # SCADBUDDY_REQUIRE_CONFINEMENT=1 makes a refusal a failure, never a skip.
+      # Shard 1 only: its test image is already built.
       - name: Intake sandbox confinement
         if: ${{ matrix.group == 1 }}
         run: |
@@ -1487,7 +1488,7 @@ jobs:
             --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
             -e SCADBUDDY_REQUIRE_CONFINEMENT=1 -e HOME=/tmp -e UV_CACHE_DIR=/tmp/uv \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
-            -p no:cacheprovider -q -rs tests/intake_worker/test_runner.py
+            -p no:cacheprovider -q -rs tests/intake_worker/test_runner.py tests/intake_worker/test_sandbox.py
 
       # Even when pytest failed, so the split check still says what ran.
       # The timings go along only when they are this run's: one entry per test it

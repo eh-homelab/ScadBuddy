@@ -4,7 +4,6 @@ the KEK, needs one proof, and imports no database code."""
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +29,7 @@ def worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("SCADBUDDY_SERVICE_TOKEN_FILE", str(proof))
     monkeypatch.delenv("SCADBUDDY_SERVICE_BOOTSTRAP_FILE", raising=False)
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "true")
-    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_UID", str(os.geteuid() + 1))
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_URL", "http://scadbuddy-intake-sandbox:8090")
     return proof
 
 
@@ -68,18 +67,36 @@ def test_the_settings_need_the_sandbox_named(
     assert IntakeSettings().intake_sandbox == "unsafe-local"  # type: ignore[call-arg]
 
 
-@pytest.mark.parametrize("uid", [None, "0", "same"])
-def test_the_sandbox_needs_a_uid_of_its_own(
-    worker_env: Path, monkeypatch: pytest.MonkeyPatch, uid: str | None
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "",
+        "https://scadbuddy-intake-sandbox:8090",
+        "ftp://scadbuddy-intake-sandbox",
+        "scadbuddy-intake-sandbox:8090",
+        "http://",
+        "http://user:pw@scadbuddy-intake-sandbox:8090",
+        "http://scadbuddy-intake-sandbox:8090/check?x=1",
+    ],
+)
+def test_the_sandbox_needs_an_http_url(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch, url: str | None
 ) -> None:
-    if uid is None:
-        monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX_UID")
+    if url is None:
+        monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX_URL")
     else:
-        monkeypatch.setenv(
-            "SCADBUDDY_INTAKE_SANDBOX_UID", str(os.geteuid()) if uid == "same" else uid
-        )
-    with pytest.raises(ValidationError, match="SANDBOX_UID"):
+        monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_URL", url)
+    with pytest.raises(ValidationError, match="SANDBOX_URL"):
         IntakeSettings()  # type: ignore[call-arg]
+
+
+def test_the_sandbox_url_is_read_without_its_last_slash(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_URL", "http://scadbuddy-intake-sandbox:8090/")
+    settings = IntakeSettings()  # type: ignore[call-arg]
+    assert settings.intake_sandbox_url == "http://scadbuddy-intake-sandbox:8090"
 
 
 def test_the_worker_imports_nothing_that_touches_the_database() -> None:
@@ -106,10 +123,10 @@ def test_healthz_answers_200() -> None:
     assert _get(b"/healthz").startswith(b"HTTP/1.1 200 OK")
 
 
-def test_metrics_count_the_checks_the_sandbox_never_answered() -> None:
+def test_metrics_count_the_failed_sandbox_calls() -> None:
     answer = _get(b"/metrics")
     assert answer.startswith(b"HTTP/1.1 200 OK")
-    assert b"scadbuddy_intake_sandbox_unanswered_total" in answer
+    assert b'scadbuddy_intake_sandbox_failed_total{reason="unreachable"}' in answer
 
 
 def _get(path: bytes) -> bytes:

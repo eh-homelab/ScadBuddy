@@ -6,35 +6,42 @@ timeout, past which (or on cancellation) the whole group is killed, as
 
 Two ways to reach the child:
 
-- the sandbox container (``SCADBUDDY_INTAKE_SANDBOX=true``, the deployment's): the worker
-  only hands the job over a spool directory it shares with a second container of the pod
-  (`sandbox.py`), which runs as another user with no service-account token, no proof and a
-  read-only root, and starts the child there with ``--strict``: a launcher step refused is
-  a failed check, never an unconfined parse. The worker never runs the parse.
+- the sandbox (``SCADBUDDY_INTAKE_SANDBOX=true``, the deployment's): a Deployment of its
+  own (`sandbox.py`), whose pods share no network namespace, no volume and no token with
+  the worker's. The worker hands it each check over HTTP on the pod network
+  (``SCADBUDDY_INTAKE_SANDBOX_URL``, `run_check`). The sandbox starts the child there with
+  ``--strict``: a launcher step refused is a failed check, never an unconfined parse. The
+  worker never runs the parse.
 - local (``SCADBUDDY_INTAKE_SANDBOX=unsafe-local``, development and tests only): the worker
-  starts the child itself, in the job's directory, and a launcher step refused is reported
-  in the verdict's ``isolation``.
+  starts the child itself, in the check's scratch folder, and a launcher step refused is
+  reported in the verdict's ``isolation``.
 
-The spool protocol. The worker builds the job inside the check's scratch folder, which is
-its own and mode 0700, so no other user reaches it: a ``job/`` directory holding
-``upload.bin``, ``request.json`` (checked against `check_request`) and an empty ``out/``.
-Then it hands the job over with one ``rename`` into the spool's ``jobs/`` (mode 0750, the
-worker's own: the sandbox can list it but not add to it), so the sandbox sees a job whole
-or not at all. It holds descriptors of the job's directory and of ``out/`` from before the
-hand-over and reaches every name through them, never by path. The sandbox claims the job by
-making ``taken`` (``O_EXCL``), copies the upload into a ``box/`` of its own (mode 0700),
-runs the child there, copies the child's ``verdict.json`` and ``preview.png`` into ``out/``
-as files it makes itself, removes its box and writes ``done`` (the child's exit, or
-``timeout``). The worker removes the job once it has read the answer.
-The worker waits for ``done`` up to the child's timeout plus `SPOOL_GRACE`; past it, or on
-cancellation, it writes ``cancel``, which the sandbox answers by killing the child's group.
+The RPC. ``POST /check`` with the file's bytes as the body (``Content-Length`` required,
+at most `MAX_MODEL_FILE_BYTES`) and the request as JSON in `REQUEST_HEADER`: the filename,
+the timeout, the address-space cap and a random ``id`` of 16 to 64 lowercase hex digits, at
+most `MAX_REQUEST_BYTES`, checked by `parse_request`. The answer is 200,
+``application/octet-stream``, with `ID_HEADER` that echoes the id and
+`VERDICT_BYTES_HEADER` ``N``: the body's first ``N`` bytes are the verdict's JSON (at most
+`MAX_VERDICT_BYTES`), the rest is the preview PNG (at most `MAX_PREVIEW_BYTES`, empty when
+there is none). The framing is binary: never base64, never bytes inside JSON. Each other
+status carries a small JSON error (``{"error": …, "detail": …}``) and fails the check: 400
+a bad request, 404 or 405 a wrong route, 411 no length, 413 a body past its cap, 431 a head
+past its cap, 500 a child that crashed, did not start or wrote no verdict, 503 busy (the
+sandbox runs one check at a time) or stopping, 504 a check past its timeout. When the
+client goes away, the sandbox kills the child's group.
 
-Whatever comes back is read as untrusted (`read_output`): opened with ``O_NOFOLLOW`` through
-the descriptor of a directory the reader made, so a symlink is refused; ``fstat`` must show a
-regular file with one link (no hardlink to another file), owned by the user that wrote it
-(the sandbox's uid, ``SCADBUDDY_INTAKE_SANDBOX_UID``, or this process's own in local mode),
-and at most its cap; the verdict is then validated, and the preview must be a PNG with a
-valid ``IHDR`` (`check_png`).
+The sandbox holds no secret, so the RPC carries no key: the sandbox's NetworkPolicy admits
+only the worker's pods, and the worker reads every answer as untrusted (`_read_answer`):
+status 200, the echoed id, `VERDICT_BYTES_HEADER` an integer within its cap, no
+``Content-Encoding``, the body counted while it is read and stopped past
+`MAX_ANSWER_BYTES`, the verdict validated (`parse_verdict`) and the preview a PNG with a
+valid ``IHDR`` (`check_png`). Each failed call is counted in `SANDBOX_FAILED` by reason, on
+the worker's ``/metrics``.
+
+In local mode, what the child wrote is read as untrusted too (`read_output`): opened with
+``O_NOFOLLOW`` through the descriptor of the scratch folder, so a symlink is refused;
+``fstat`` must show a regular file with one link, owned by this process's user, of at most
+its cap.
 """
 
 from __future__ import annotations
@@ -44,17 +51,20 @@ import json
 import logging
 import math
 import os
-import shutil
+import re
+import secrets
 import signal
 import stat
 import struct
 import sys
 import zlib
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
+import httpx
 from prometheus_client import Counter
 from pydantic import ValidationError
 
@@ -70,49 +80,73 @@ CHILD_ADDRESS_SPACE: Final = 4 << 30
 CHILD_TIMEOUT: Final = 300.0
 #: The largest verdict a child may write.
 MAX_VERDICT_BYTES: Final = 1 << 20
-#: The largest ``done`` and ``request.json`` read.
-MAX_MARKER_BYTES: Final = 64
+#: The largest answer body the worker reads: a verdict and a preview, each at its cap.
+MAX_ANSWER_BYTES: Final = MAX_VERDICT_BYTES + MAX_PREVIEW_BYTES
+#: The largest request header, and the largest error answer the worker reads.
 MAX_REQUEST_BYTES: Final = 4096
+MAX_ERROR_BYTES: Final = 4096
 #: The longest file name a request carries.
 MAX_FILENAME: Final = 255
 #: The largest preview side: the check renders 512 (`check.PREVIEW_SIZE`).
 MAX_PREVIEW_SIDE: Final = 4096
 #: The variables the child gets: none of the worker's (its proof's path among them).
 _ENV_KEEP: Final = ("PATH", "LANG", "LC_ALL", "TMPDIR")
-#: How long past the child's timeout the worker waits for the sandbox's ``done``.
-SPOOL_GRACE: Final = 30.0
-SPOOL_POLL: Final = 0.2
-#: The spool's modes: the two containers share a group (the pod's ``fsGroup``).
-SPOOL_DIR_MODE: Final = 0o770
-SPOOL_FILE_MODE: Final = 0o640
-BOX_MODE: Final = 0o700
-REQUEST: Final = "request.json"
-#: The spool's hand-over directory, and a job's name inside its scratch folder until then.
-JOBS: Final = "jobs"
-JOBS_MODE: Final = 0o750
-JOB: Final = "job"
-TAKEN: Final = "taken"
-DONE: Final = "done"
-CANCEL: Final = "cancel"
-OUT: Final = "out"
+#: A check's box on the sandbox's spool (mode 0700), and where the confined child sees it.
 BOX: Final = "box"
+BOX_MODE: Final = 0o700
 PNG_MAGIC: Final = b"\x89PNG\r\n\x1a\n"
+
+#: The sandbox's default port (``SCADBUDDY_INTAKE_SANDBOX_PORT``), and the RPC's headers.
+SANDBOX_PORT: Final = 8090
+REQUEST_HEADER: Final = "X-Intake-Request"
+ID_HEADER: Final = "X-Intake-Id"
+VERDICT_BYTES_HEADER: Final = "X-Intake-Verdict-Bytes"
+#: How long past the check's timeout the worker waits for the sandbox's answer.
+SANDBOX_GRACE: Final = 30.0
+#: How long the worker tries again while the sandbox answers 503 busy or cannot be reached
+#: (another worker's check, a roll); then the check fails, and Temporal tries it again.
+BUSY_WAIT: float = 60.0
+BUSY_STEP: Final = 1.0
+_ID: Final = re.compile(r"[0-9a-f]{16,64}")
+_REQUEST_KEYS: Final = frozenset({"filename", "timeout", "address_space", "id"})
+_CHUNK: Final = 1 << 20
 
 _DIR_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 #: Whether a refused namespace isolation was logged yet (once per process).
 _isolation_logged = False
 
-#: Checks the sandbox container never answered: it is down, or refused to start
-#: (`sandbox.main` exits when a check cannot be confined).
-SANDBOX_UNANSWERED: Final = Counter(
-    "scadbuddy_intake_sandbox_unanswered",
-    "Checks handed to the intake sandbox container that it never answered in time.",
+#: Why a call to the sandbox failed: the label values of `SANDBOX_FAILED`.
+SANDBOX_FAILURE_REASONS: Final = (
+    "busy",
+    "unreachable",
+    "timeout",
+    "transport",
+    "check-timeout",
+    "crashed",
+    "status",
+    "bad-answer",
 )
+#: Checks handed to the sandbox that came back with no verdict: it is down or busy, it
+#: refused to start (`sandbox.main` exits when a check cannot be confined), the check
+#: crashed or timed out, or the answer broke its bounds.
+SANDBOX_FAILED: Final = Counter(
+    "scadbuddy_intake_sandbox_failed",
+    "Checks handed to the intake sandbox that came back with no verdict, by reason.",
+    ["reason"],
+)
+for _reason in SANDBOX_FAILURE_REASONS:
+    SANDBOX_FAILED.labels(reason=_reason)
 
 
 class CheckCrashedError(RuntimeError):
     """The child timed out, crashed or wrote no verdict: the check could not finish."""
+
+
+class _SandboxFailedError(CheckCrashedError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -159,7 +193,7 @@ def read_output(dir_fd: int, name: str, cap: int, owner: int | None) -> bytes:
         if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
             raise CheckCrashedError(f"the check's {name} is not a plain file of one link")
         if owner is not None and found.st_uid != owner:
-            raise CheckCrashedError(f"the check's {name} is not the sandbox's own")
+            raise CheckCrashedError(f"the check's {name} is not the expected user's own")
         if found.st_size > cap:
             raise CheckCrashedError(f"the check wrote a {name} past its cap")
         chunks: list[bytes] = []
@@ -194,17 +228,46 @@ def check_png(data: bytes) -> None:
         raise CheckCrashedError("the check's preview is not a PNG")
 
 
-def check_request(filename: str, timeout: float, address_space: int) -> dict[str, Any]:
-    """A job's ``request.json``, its bounds checked: `ValueError` for a name that is empty,
-    too long or holds a NUL or a separator, a timeout that is not finite and in
-    (0, `CHILD_TIMEOUT`], or an address space not in (0, `CHILD_ADDRESS_SPACE`]."""
+def check_request(
+    filename: str, timeout: float, address_space: int, request_id: str
+) -> dict[str, Any]:
+    """A check's request, its bounds checked: `ValueError` for a name that is empty, too
+    long or holds a NUL or a separator, a timeout that is not finite and in
+    (0, `CHILD_TIMEOUT`], an address space not in (0, `CHILD_ADDRESS_SPACE`], or an id that
+    is not 16 to 64 lowercase hex digits."""
     if not 0 < len(filename) <= MAX_FILENAME or "\x00" in filename or "/" in filename:
         raise ValueError("a check's file name is 1 to 255 characters, no NUL or slash")
     if not (math.isfinite(timeout) and 0 < timeout <= CHILD_TIMEOUT):
         raise ValueError("a check's timeout is finite and in (0, CHILD_TIMEOUT]")
     if isinstance(address_space, bool) or not 0 < address_space <= CHILD_ADDRESS_SPACE:
         raise ValueError("a check's address space is in (0, CHILD_ADDRESS_SPACE]")
-    return {"filename": filename, "timeout": timeout, "address_space": address_space}
+    if not _ID.fullmatch(request_id):
+        raise ValueError("a check's id is 16 to 64 lowercase hex digits")
+    return {
+        "filename": filename,
+        "timeout": timeout,
+        "address_space": address_space,
+        "id": request_id,
+    }
+
+
+def parse_request(header: str) -> dict[str, Any]:
+    """`REQUEST_HEADER`'s value read: at most `MAX_REQUEST_BYTES`, a JSON object of exactly
+    the four keys with their types, then `check_request`; `ValueError` otherwise."""
+    if len(header) > MAX_REQUEST_BYTES:
+        raise ValueError("a check's request is at most 4 KiB")
+    request = json.loads(header)
+    if not isinstance(request, dict) or set(request) != _REQUEST_KEYS:
+        raise ValueError("a check's request names its filename, timeout, address_space and id")
+    filename, timeout = request["filename"], request["timeout"]
+    space, request_id = request["address_space"], request["id"]
+    if not isinstance(filename, str) or not isinstance(request_id, str):
+        raise ValueError("a check's filename and id are strings")
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        raise ValueError("a check's timeout is a number")
+    if isinstance(space, bool) or not isinstance(space, int):
+        raise ValueError("a check's address space is an integer")
+    return check_request(filename, float(timeout), space, request_id)
 
 
 async def run_child(
@@ -240,8 +303,8 @@ async def run_child(
         cwd=None if isinstance(box, int) else box,
         start_new_session=True,
         # Only its standard streams (all /dev/null) and the box's descriptor, which the
-        # launcher closes before the parser starts: no worker socket (Temporal, the CRUD
-        # service) is inherited.
+        # launcher closes before the parser starts: no socket (the worker's Temporal and
+        # CRUD connections, the sandbox's client connection) is inherited.
         close_fds=True,
         pass_fds=(box_fd,) if box_fd is not None else (),
     )
@@ -266,11 +329,11 @@ async def run_child(
     return process.returncode if process.returncode is not None else -1
 
 
-def read_verdict(dir_fd: int, owner: int | None) -> Verdict:
-    """The verdict in the directory ``dir_fd``, read as untrusted (`read_output`), then
-    validated; a ready one's preview must be a PNG (`check_png`)."""
+def parse_verdict(raw: bytes, preview: Callable[[], bytes]) -> Verdict:
+    """The child's verdict, read as untrusted: JSON with ``outcome`` ``ready`` and valid
+    `FileFacts`, or ``refused`` and a reason; a ready one's preview (``preview()``) must be
+    a PNG (`check_png`). `CheckCrashedError` otherwise."""
     global _isolation_logged
-    raw = read_output(dir_fd, VERDICT, MAX_VERDICT_BYTES, owner)
     try:
         verdict = json.loads(raw)
         outcome = verdict["outcome"]
@@ -289,112 +352,118 @@ def read_verdict(dir_fd: int, owner: int | None) -> Verdict:
             raise CheckCrashedError("the check wrote a verdict that is not one")
     except (ValidationError, KeyError, TypeError):
         raise CheckCrashedError("the check wrote a verdict that is not one") from None
-    preview = read_output(dir_fd, PREVIEW, MAX_PREVIEW_BYTES, owner)
-    check_png(preview)
-    return Verdict("ready", facts=facts, preview=preview)
+    png = preview()
+    check_png(png)
+    return Verdict("ready", facts=facts, preview=png)
 
 
-def _make(dir_fd: int, name: str, data: bytes, mode: int) -> None:
-    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, mode, dir_fd=dir_fd)
+def read_verdict(dir_fd: int, owner: int | None) -> Verdict:
+    """The verdict and the preview the child wrote in the directory ``dir_fd``, read as
+    untrusted (`read_output`), then `parse_verdict`."""
+    raw = read_output(dir_fd, VERDICT, MAX_VERDICT_BYTES, owner)
+    return parse_verdict(raw, lambda: read_output(dir_fd, PREVIEW, MAX_PREVIEW_BYTES, owner))
+
+
+def _fail(reason: str, message: str) -> NoReturn:
+    raise _SandboxFailedError(reason, message)
+
+
+_STATUS_REASONS: Final = {500: "crashed", 503: "busy", 504: "check-timeout"}
+
+
+async def _read_capped(response: httpx.Response, cap: int) -> bytes:
+    """The body as sent (never decoded), counted while it is read; past ``cap`` the check
+    fails before more is read."""
+    data = bytearray()
+    async for chunk in response.aiter_raw():
+        data += chunk
+        if len(data) > cap:
+            _fail("bad-answer", "the sandbox's answer is past its cap")
+    return bytes(data)
+
+
+async def _read_answer(response: httpx.Response, request_id: str) -> Verdict:
+    """The sandbox's answer, read as untrusted (the module docstring)."""
+    if response.status_code != 200:
+        error = ""
+        with suppress(Exception):
+            body = json.loads(await _read_capped(response, MAX_ERROR_BYTES))
+            error = "".join(ch for ch in str(body["error"])[:32] if ch.isprintable())
+        _fail(
+            _STATUS_REASONS.get(response.status_code, "status"),
+            f"the sandbox answered {response.status_code} ({error or 'no error'})",
+        )
+    if response.headers.get(ID_HEADER) != request_id:
+        _fail("bad-answer", "the sandbox's answer is not for this check")
+    if response.headers.get("content-encoding", "identity") != "identity":
+        _fail("bad-answer", "the sandbox's answer is encoded")
+    declared = response.headers.get(VERDICT_BYTES_HEADER, "")
+    if not (declared.isascii() and declared.isdigit()) or int(declared) > MAX_VERDICT_BYTES:
+        _fail("bad-answer", "the sandbox's verdict length is not an integer within its cap")
+    length = int(declared)
+    body = await _read_capped(response, MAX_ANSWER_BYTES)
+    if len(body) < length:
+        _fail("bad-answer", "the sandbox's answer is shorter than its verdict")
+    preview = body[length:]
+    if len(preview) > MAX_PREVIEW_BYTES:
+        _fail("bad-answer", "the sandbox's preview is past its cap")
     try:
-        os.write(fd, data)
-        os.fchmod(fd, mode)
-    finally:
-        os.close(fd)
+        return parse_verdict(body[:length], lambda: preview)
+    except CheckCrashedError as error:
+        _fail("bad-answer", str(error))
 
 
-def _jobs_dir(work: Path) -> int:
-    """The spool's ``jobs/``, made here (mode 0750), by descriptor; `CheckCrashedError`
-    when a directory of that name is not this process's own."""
-    with suppress(FileExistsError):
-        os.mkdir(work / JOBS, JOBS_MODE)
-    fd = open_dir(work / JOBS)
-    if os.fstat(fd).st_uid != os.geteuid():
-        os.close(fd)
-        raise CheckCrashedError("the spool's jobs/ is not this worker's own")
-    os.fchmod(fd, JOBS_MODE)
-    return fd
+async def _file_chunks(fd: int, size: int) -> AsyncIterator[bytes]:
+    sent = 0
+    while sent < size:
+        chunk = os.pread(fd, min(_CHUNK, size - sent), sent)
+        if not chunk:
+            raise CheckCrashedError("the check's file shrank while it was sent")
+        sent += len(chunk)
+        yield chunk
 
 
-def _remove_answered(jobs_fd: int, keep: str) -> None:
-    """Every earlier job the sandbox has answered, removed: one that timed out could not be
-    removed while the sandbox still held its box, which it removes before it writes
-    ``done``. The worker runs one check at a time, so every other job is an earlier one;
-    one not answered yet is the sandbox's still."""
-    for name in os.listdir(jobs_fd):
-        if name == keep:
-            continue
-        with suppress(OSError):
-            job_fd = open_dir(name, dir_fd=jobs_fd)
-            try:
-                os.stat(DONE, dir_fd=job_fd, follow_symlinks=False)
-            finally:
-                os.close(job_fd)
-            shutil.rmtree(name, dir_fd=jobs_fd)
-
-
-async def _run_spooled(
-    scratch: Path,
-    filename: str,
-    *,
-    timeout: float,
-    address_space: int,
-    sandbox_uid: int,
-) -> Verdict:
-    """The job handed to the sandbox container (the module docstring); its verdict."""
-    request = check_request(filename, timeout, address_space)
-    scratch_fd = open_dir(scratch)
-    jobs_fd: int | None = None
-    job_fd: int | None = None
-    out_fd: int | None = None
-    handed = False
+async def _call_sandbox(file: Path, request: dict[str, Any], sandbox_url: str) -> Verdict:
+    """One ``POST /check``, tried again while the sandbox answers 503 busy or cannot be
+    reached, for at most `BUSY_WAIT`."""
+    header = json.dumps(request, ensure_ascii=True, separators=(",", ":"))
+    timeout = httpx.Timeout(
+        connect=10.0, read=request["timeout"] + SANDBOX_GRACE, write=60.0, pool=10.0
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + BUSY_WAIT
+    fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        jobs_fd = _jobs_dir(scratch.parent)
-        _remove_answered(jobs_fd, scratch.name)
-        os.mkdir(JOB, 0o700, dir_fd=scratch_fd)
-        job_fd = open_dir(JOB, dir_fd=scratch_fd)
-        os.rename(UPLOAD, UPLOAD, src_dir_fd=scratch_fd, dst_dir_fd=job_fd)
-        os.chmod(UPLOAD, SPOOL_FILE_MODE, dir_fd=job_fd)
-        os.mkdir(OUT, SPOOL_DIR_MODE, dir_fd=job_fd)
-        out_fd = open_dir(OUT, dir_fd=job_fd)
-        os.fchmod(out_fd, SPOOL_DIR_MODE)
-        _make(job_fd, REQUEST, json.dumps(request).encode(), SPOOL_FILE_MODE)
-        os.fchmod(job_fd, SPOOL_DIR_MODE)
-        # The hand-over: one rename out of the worker's own scratch folder.
-        os.rename(JOB, scratch.name, src_dir_fd=scratch_fd, dst_dir_fd=jobs_fd)
-        handed = True
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout + SPOOL_GRACE
-        try:
+        size = os.fstat(fd).st_size
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(size),
+            "Accept-Encoding": "identity",
+            REQUEST_HEADER: header,
+        }
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             while True:
                 try:
-                    os.stat(DONE, dir_fd=job_fd, follow_symlinks=False)
-                    break
-                except FileNotFoundError:
-                    pass
-                if loop.time() > deadline:
-                    SANDBOX_UNANSWERED.inc()
-                    raise CheckCrashedError("the sandbox gave no answer in time")
-                await asyncio.sleep(SPOOL_POLL)
-        except BaseException:
-            with suppress(OSError):
-                _make(job_fd, CANCEL, b"", SPOOL_FILE_MODE)
-            raise
-        answer = read_output(job_fd, DONE, MAX_MARKER_BYTES, sandbox_uid).decode(errors="replace")
-        if answer.strip() != "0":
-            raise CheckCrashedError(f"the check exited with {answer.strip()[:32]}")
-        return read_verdict(out_fd, sandbox_uid)
+                    async with client.stream(
+                        "POST",
+                        f"{sandbox_url}/check",
+                        content=_file_chunks(fd, size),
+                        headers=headers,
+                    ) as response:
+                        return await _read_answer(response, request["id"])
+                except _SandboxFailedError as failure:
+                    if failure.reason != "busy" or loop.time() >= deadline:
+                        raise
+                except httpx.ConnectError:
+                    if loop.time() >= deadline:
+                        _fail("unreachable", "the sandbox is unreachable")
+                except httpx.TimeoutException:
+                    _fail("timeout", "the sandbox gave no answer in time")
+                except httpx.HTTPError as error:
+                    _fail("transport", f"the call to the sandbox failed ({type(error).__name__})")
+                await asyncio.sleep(BUSY_STEP)
     finally:
-        for fd in (out_fd, job_fd):
-            if fd is not None:
-                os.close(fd)
-        if handed and jobs_fd is not None:
-            # A box the sandbox still holds is its own to remove.
-            with suppress(OSError):
-                shutil.rmtree(scratch.name, dir_fd=jobs_fd)
-        if jobs_fd is not None:
-            os.close(jobs_fd)
-        os.close(scratch_fd)
+        os.close(fd)
 
 
 async def run_check(
@@ -404,18 +473,21 @@ async def run_check(
     *,
     timeout: float = CHILD_TIMEOUT,
     address_space: int = CHILD_ADDRESS_SPACE,
-    sandbox_uid: int | None = None,
+    sandbox_url: str | None = None,
 ) -> Verdict:
     """The child's verdict on ``file`` (``scratch``'s ``upload.bin``); `CheckCrashedError`
-    when it gave none. With ``sandbox_uid`` the sandbox container, running as that uid,
-    runs it (the module docstring); else this process does, in ``scratch``, with the
-    tmpfs over ``scratch``'s parent (the work directory of every check)."""
+    when it gave none. With ``sandbox_url`` the sandbox runs it (the module docstring);
+    else this process does, in ``scratch``, with the tmpfs over ``scratch``'s parent (the
+    work directory of every check)."""
     if file.parent != scratch or file.name != UPLOAD:
         raise ValueError("a check's file is its scratch folder's upload.bin")
-    if sandbox_uid is not None:
-        return await _run_spooled(
-            scratch, filename, timeout=timeout, address_space=address_space, sandbox_uid=sandbox_uid
-        )
+    if sandbox_url is not None:
+        request = check_request(filename, timeout, address_space, secrets.token_hex(16))
+        try:
+            return await _call_sandbox(file, request, sandbox_url)
+        except _SandboxFailedError as failure:
+            SANDBOX_FAILED.labels(reason=failure.reason).inc()
+            raise
     code = await run_child(
         scratch,
         filename,

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 async def _healthz(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """``GET /metrics`` is answered with the process's metrics
-    (`runner.SANDBOX_UNANSWERED` among them); any other request 200: the process runs and
+    (`runner.SANDBOX_FAILED` among them); any other request 200: the process runs and
     its loop turns."""
     with suppress(Exception):
         line = await asyncio.wait_for(reader.readline(), 5)
@@ -71,7 +71,7 @@ async def run(
     activities = IntakeActivities(
         crud,
         settings.intake_work_dir,
-        sandbox_uid=settings.intake_sandbox_uid if settings.intake_sandbox == "true" else None,
+        sandbox_url=settings.intake_sandbox_url if settings.intake_sandbox == "true" else None,
     )
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)

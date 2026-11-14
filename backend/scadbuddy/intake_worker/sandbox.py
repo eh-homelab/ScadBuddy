@@ -1,27 +1,32 @@
-"""``python -m scadbuddy.intake_worker.sandbox``: the intake pod's sandbox container (#6133,
-spec 2026-11-13 §7). It runs every check's child (`runner.run_child`), so the customer's
-file is parsed in a container that holds no service-account token, no proof, no database
-secret and no KEK, as another user than the worker, on a read-only root. It shares only the
-spool (``SCADBUDDY_INTAKE_WORK_DIR``, an emptyDir) with the worker; the protocol is
-`runner`'s docstring. It refuses to start with a database secret, the KEK or a proof
-(`check_sandbox_environment`), and makes itself non-dumpable (`hardening.forbid_dumping`).
+"""``python -m scadbuddy.intake_worker.sandbox``: the intake sandbox (#6133, spec 2026-11-13
+§7), a Deployment of its own. It runs every check's child (`runner.run_child`), so the
+customer's file is parsed in a pod that holds no service-account token, no proof, no
+database secret and no KEK, and shares no network namespace and no volume with the worker.
+The worker hands it each check over HTTP on the pod network: ``POST /check`` on
+``SCADBUDDY_INTAKE_SANDBOX_PORT`` (default `runner.SANDBOX_PORT`), the wire format in
+`runner`'s docstring; ``GET /healthz`` answers 200 while it serves. It holds no secret, so
+the RPC carries no key: its NetworkPolicy admits only the worker's pods, and the worker
+reads every answer as untrusted. It refuses to start with a database secret, the KEK or a
+proof (`check_sandbox_environment`), and makes itself non-dumpable
+(`hardening.forbid_dumping`).
 
-Each job's child runs in a box of its own (``box/``, mode 0700) through its launcher with
-``--strict`` (`confine.py`): its own user, network and mount namespaces with an empty tmpfs
-over the spool, so it reaches no other job's directory, then no capabilities, no new
-privileges and a seccomp filter. It fails closed: at start the sandbox runs the launcher
-once (`probe_isolation`), and where any step is refused it logs why and exits 3 without
-serving a job, so the pod never parses a file unconfined (the worker counts the checks it
-then hands over unanswered, `runner.SANDBOX_UNANSWERED`). A job is the spool's
-``jobs/<name>``, which the worker moves in whole (`runner`'s docstring).
+Each check's child runs in a box of its own (``box/`` on the sandbox's own spool,
+``SCADBUDDY_INTAKE_WORK_DIR``, an emptyDir; mode 0700, the upload made in it with
+``O_EXCL | O_NOFOLLOW``) through its launcher with ``--strict`` (`confine.py`): its own user,
+network, mount and PID namespaces with an empty tmpfs over the spool, then no capabilities,
+no new privileges and a seccomp filter. The launcher inherits the box's descriptor. The box
+is removed after each check. It fails closed: at start the sandbox runs the launcher once
+(`probe_isolation`), and where any step is refused it logs why and exits 3 without serving a
+check, so the pod never parses a file unconfined (the worker counts the checks that then
+fail, `runner.SANDBOX_FAILED`).
 
 The isolation rule (spec §7): one customer's file per pod at any moment. The sandbox runs
-one check at a time, fixed, and empties every finished job before it claims the next
-(`_wipe`); the worker takes one check at a time too. So while a parse runs, no other
-customer's file or process exists in the pod to reach. Scale with replicas of the
-Deployment, never with checks at once. Before each claim it also makes sure no process of
-an earlier job is alive (`clear_job_processes`): it is the pod's child subreaper, so a
-job's orphans become its own, and it kills what it finds; one that survives makes it exit.
+one check at a time, fixed: a second request while one runs is answered 503, never queued,
+and its body is never stored. Scale with replicas of the Deployment, never with checks at
+once. Before each check it also makes sure no process of an earlier check is alive
+(`clear_job_processes`): it is the pod's child subreaper, so a check's orphans become its
+own, and it kills what it finds; one that survives makes it stop serving and exit 4. When
+the client goes away or the check's timeout passes, the child's group is killed.
 """
 
 from __future__ import annotations
@@ -30,15 +35,15 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.intake_worker import confine
@@ -48,19 +53,14 @@ from scadbuddy.intake_worker.hardening import prctl as hardening_prctl
 from scadbuddy.intake_worker.runner import (
     BOX,
     BOX_MODE,
-    CANCEL,
-    DONE,
-    JOBS,
-    MAX_REQUEST_BYTES,
+    ID_HEADER,
     MAX_VERDICT_BYTES,
-    OUT,
-    REQUEST,
-    SPOOL_FILE_MODE,
-    SPOOL_POLL,
-    TAKEN,
+    REQUEST_HEADER,
+    SANDBOX_PORT,
+    VERDICT_BYTES_HEADER,
     CheckCrashedError,
-    check_request,
     open_dir,
+    parse_request,
     read_output,
     run_child,
 )
@@ -76,6 +76,30 @@ SANDBOX_FORBIDDEN_ENV: Final = (
     "SCADBUDDY_SERVICE_TOKEN_FILE",
     "SCADBUDDY_SERVICE_BOOTSTRAP_FILE",
 )
+#: A request's head (its line and headers): at most this many bytes and headers, read
+#: within `HEAD_TIMEOUT`.
+MAX_HEAD_BYTES: Final = 16 << 10
+MAX_HEADERS: Final = 64
+HEAD_TIMEOUT: Final = 10.0
+#: The longest wait for the next piece of a body.
+BODY_IDLE: Final = 60.0
+#: After an early refusal, how long the sandbox reads and drops the unread body so the
+#: client sees the answer, not a reset.
+LINGER: Final = 0.5
+_CHUNK: Final = 1 << 20
+_TOKEN: Final = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_REASONS: Final = {
+    200: "OK",
+    400: "Bad Request",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    411: "Length Required",
+    413: "Content Too Large",
+    431: "Request Header Fields Too Large",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
 
 
 def check_sandbox_environment(environ: Mapping[str, str]) -> None:
@@ -103,171 +127,22 @@ def probe_isolation(spool: Path) -> str | None:
     return None
 
 
-def _make(dir_fd: int, name: str, data: bytes) -> None:
-    fd = os.open(
-        name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, SPOOL_FILE_MODE, dir_fd=dir_fd
-    )
-    try:
-        os.write(fd, data)
-        os.fchmod(fd, SPOOL_FILE_MODE)
-    finally:
-        os.close(fd)
-
-
-def _answer(job_fd: int, answer: str) -> None:
-    # The worker may have given up and removed the job meanwhile.
-    with suppress(OSError):
-        _make(job_fd, DONE, answer.encode())
-
-
-def _claim(job_fd: int) -> bool:
-    try:
-        _make(job_fd, TAKEN, b"")
-    except OSError:
-        return False
-    return True
-
-
-def _copy_upload(job_fd: int, box_fd: int) -> None:
-    """The worker's upload copied into the box as a file the sandbox makes, read with
-    ``O_NOFOLLOW`` (a symlink is refused) and capped at the largest model file."""
-    source = os.open(
-        UPLOAD, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=job_fd
-    )
-    try:
-        found = os.fstat(source)
-        if not stat.S_ISREG(found.st_mode) or found.st_size > MAX_MODEL_FILE_BYTES:
-            raise CheckCrashedError("the job's upload is not a plain file within its cap")
-        target = os.open(
-            UPLOAD, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=box_fd
-        )
-        try:
-            copied = 0
-            while copied < found.st_size:
-                sent = os.sendfile(target, source, copied, found.st_size - copied)
-                if sent == 0:
-                    break
-                copied += sent
-        finally:
-            os.close(target)
-    finally:
-        os.close(source)
-
-
-def _hand_back(box_fd: int, out_fd: int) -> None:
-    """The child's verdict and preview, read as untrusted from the box, written into the
-    worker's ``out/`` as files the sandbox makes."""
-    own = os.geteuid()
-    with suppress(CheckCrashedError):
-        _make(out_fd, VERDICT, read_output(box_fd, VERDICT, MAX_VERDICT_BYTES, own))
-    with suppress(CheckCrashedError):
-        _make(out_fd, PREVIEW, read_output(box_fd, PREVIEW, MAX_PREVIEW_BYTES, own))
-
-
-async def run_job(job: Path, spool: Path) -> None:
-    """One job (the claim is ``taken``): its child run in a box of its own, then ``done``."""
-    try:
-        job_fd = open_dir(job)
-    except OSError:
-        return
-    try:
-        if not _claim(job_fd):
-            return
-        await _run_claimed(job_fd, spool)
-    finally:
-        os.close(job_fd)
-
-
-async def _run_claimed(job_fd: int, spool: Path) -> None:
-    try:
-        request = json.loads(read_output(job_fd, REQUEST, MAX_REQUEST_BYTES, None))
-        checked = check_request(
-            str(request["filename"]), float(request["timeout"]), int(request["address_space"])
-        )
-    except (CheckCrashedError, ValueError, KeyError, TypeError):
-        _answer(job_fd, "bad-request")
-        return
-    box_fd: int | None = None
-    try:
-        os.mkdir(BOX, BOX_MODE, dir_fd=job_fd)
-        box_fd = open_dir(BOX, dir_fd=job_fd)
-        os.fchmod(box_fd, BOX_MODE)
-        _copy_upload(job_fd, box_fd)
-    except (OSError, CheckCrashedError):
-        if box_fd is not None:
-            os.close(box_fd)
-        with suppress(OSError):
-            shutil.rmtree(BOX, dir_fd=job_fd)
-        _answer(job_fd, "bad-upload")
-        return
-    cancelled = asyncio.Event()
-
-    async def watch_cancel() -> None:
-        while True:
-            try:
-                os.stat(CANCEL, dir_fd=job_fd, follow_symlinks=False)
-                break
-            except FileNotFoundError:
-                await asyncio.sleep(SPOOL_POLL)
-            except OSError:
-                break
-        cancelled.set()
-
-    watcher = asyncio.create_task(watch_cancel())
-    try:
-        # The box by its descriptor, inherited by the launcher, never by a path another
-        # child could have swapped. Not by this process's /proc/<pid>/fd link: it is
-        # non-dumpable, so its children cannot follow one.
-        code = await run_child(
-            box_fd,
-            checked["filename"],
-            hide=str(spool),
-            strict=True,
-            timeout=checked["timeout"],
-            address_space=checked["address_space"],
-            cancelled=cancelled,
-        )
-    except CheckCrashedError:
-        answer = "timeout"
-    except OSError as error:
-        # The launcher never started: the job is answered, never left taken.
-        logger.warning("the intake sandbox could not start a check: %s", error)
-        answer = "spawn-failed"
-    else:
-        answer = str(code)
-        if code == 0:
-            try:
-                out_fd = open_dir(OUT, dir_fd=job_fd)
-            except OSError:
-                answer = "no-out"
-            else:
-                try:
-                    _hand_back(box_fd, out_fd)
-                finally:
-                    os.close(out_fd)
-    finally:
-        watcher.cancel()
-        os.close(box_fd)
-        with suppress(OSError):
-            shutil.rmtree(BOX, dir_fd=job_fd)
-    _answer(job_fd, answer)
-
-
-#: How long the processes of an earlier job may take to die once killed.
+#: How long the processes of an earlier check may take to die once killed.
 JOB_EXIT_GRACE: Final = 5.0
+_JOB_POLL: Final = 0.2
 _PR_SET_CHILD_SUBREAPER: Final = 36
 
 
 class JobOutlivedError(RuntimeError):
-    """A process of an earlier job is still alive: no next job may be claimed."""
+    """A process of an earlier check is still alive: no next check may run."""
 
 
 def job_processes() -> list[int]:
     """This process's descendants in another PID namespace than its own, or whose
-    namespace cannot be read: the processes of a job, since each parse has a PID namespace
-    of its own and its launcher and parser are non-dumpable (`confine.py`). Between jobs no
-    other descendant exists. A zombie does not count, and is reaped when it is this
-    process's child (the sandbox is the pod's child subreaper)."""
+    namespace cannot be read: the processes of a check, since each parse has a PID
+    namespace of its own and its launcher and parser are non-dumpable (`confine.py`).
+    Between checks no other descendant exists. A zombie does not count, and is reaped when
+    it is this process's child (the sandbox is the pod's child subreaper)."""
     own = os.readlink("/proc/self/ns/pid")
     found: list[int] = []
     todo = [os.getpid()]
@@ -309,8 +184,8 @@ def _zombie(pid: int) -> bool:
 
 
 async def clear_job_processes() -> None:
-    """No process of an earlier job left alive: each found is killed, and one still alive
-    after `JOB_EXIT_GRACE` raises `JobOutlivedError`."""
+    """No process of an earlier check left alive: each found is killed, and one still
+    alive after `JOB_EXIT_GRACE` raises `JobOutlivedError`."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + JOB_EXIT_GRACE
     while left := job_processes():
@@ -319,60 +194,319 @@ async def clear_job_processes() -> None:
         for pid in left:
             with suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
-        await asyncio.sleep(SPOOL_POLL)
+        await asyncio.sleep(_JOB_POLL)
 
 
-def _wipe(job: Path) -> None:
-    """Everything in a finished job removed but ``done`` (the job's directory is the
-    worker's, in its ``jobs/``, which only it can remove)."""
-    try:
-        job_fd = open_dir(job)
-    except OSError:
-        return
-    try:
-        for name in os.listdir(job_fd):
-            if name == DONE:
-                continue
-            with suppress(OSError):
-                if stat.S_ISDIR(os.stat(name, dir_fd=job_fd, follow_symlinks=False).st_mode):
-                    shutil.rmtree(name, dir_fd=job_fd)
-                else:
-                    os.unlink(name, dir_fd=job_fd)
-    finally:
-        os.close(job_fd)
+class _BadHeadError(Exception):
+    pass
 
 
-async def serve(spool: Path, stop: asyncio.Event) -> None:
-    """Claims and runs the spool's ready jobs one at a time until ``stop``; before each
-    claim, every finished job is emptied (the isolation rule, the module docstring)."""
-    while not stop.is_set():
-        jobs = sorted((spool / JOBS).glob("*"))
-        ready = [
-            job
-            for job in jobs
-            if not (job / DONE).exists()
-            and not (job / BOX).exists()
-            and not (job / TAKEN).exists()
-            and not (job / TAKEN).is_symlink()
-        ]
-        if ready:
-            for job in jobs:
-                if (job / DONE).exists():
-                    _wipe(job)
+def _parse_head(head: bytes) -> tuple[str, str, dict[str, list[str]]]:
+    """The method, the path and the headers (lowercase names) of a request's head."""
+    lines = head.decode("latin-1").split("\r\n")[:-2]
+    parts = lines[0].split(" ") if lines else []
+    if (
+        len(parts) != 3
+        or parts[2] not in ("HTTP/1.1", "HTTP/1.0")
+        or not _TOKEN.fullmatch(parts[0])
+    ):
+        raise _BadHeadError
+    if len(lines) - 1 > MAX_HEADERS:
+        raise _BadHeadError
+    headers: dict[str, list[str]] = {}
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon or not _TOKEN.fullmatch(name):
+            raise _BadHeadError
+        headers.setdefault(name.lower(), []).append(value.strip(" \t"))
+    return parts[0], parts[1], headers
+
+
+def _error(status: int, error: str, detail: str = "") -> tuple[int, dict[str, str], bytes]:
+    body = json.dumps({"error": error, "detail": detail} if detail else {"error": error})
+    return status, {"Content-Type": "application/json"}, body.encode()
+
+
+class Sandbox:
+    """The server's state: one check at a time (`busy`); `outlived` and `stopped` once a
+    process of an earlier check will not die."""
+
+    def __init__(self, spool: Path) -> None:
+        self.spool = spool
+        self.busy = False
+        self.outlived: JobOutlivedError | None = None
+        self.stopped = asyncio.Event()
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await self._handle(reader, writer)
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        except Exception:
+            logger.exception("the intake sandbox could not answer a request")
+        finally:
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEAD_TIMEOUT)
+        except asyncio.LimitOverrunError:
+            await _send(writer, *_error(431, "head-too-large"), reader=reader, unread=None)
+            return
+        except (asyncio.IncompleteReadError, TimeoutError):
+            return
+        try:
+            method, path, headers = _parse_head(head)
+        except _BadHeadError:
+            await _send(writer, *_error(400, "bad-head"), reader=reader, unread=None)
+            return
+        if path == "/healthz":
+            answer = (200, {"Content-Type": "text/plain"}, b"ok") if method == "GET" else None
+            await _send(writer, *(answer or _error(405, "method")))
+            return
+        if path != "/check":
+            await _send(writer, *_error(404, "not-found"), reader=reader, unread=None)
+            return
+        if method != "POST":
+            await _send(writer, *_error(405, "method"), reader=reader, unread=None)
+            return
+        await self._check(reader, writer, headers)
+
+    async def _check(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        headers: dict[str, list[str]],
+    ) -> None:
+        lengths = headers.get("content-length", [])
+        if "transfer-encoding" in headers or len(lengths) > 1:
+            await _send(writer, *_error(400, "bad-length"), reader=reader, unread=None)
+            return
+        if not lengths:
+            await _send(writer, *_error(411, "no-length"), reader=reader, unread=None)
+            return
+        if not (lengths[0].isascii() and lengths[0].isdigit()) or int(lengths[0]) == 0:
+            await _send(writer, *_error(400, "bad-length"), reader=reader, unread=None)
+            return
+        length = int(lengths[0])
+        if length > MAX_MODEL_FILE_BYTES:
+            await _send(writer, *_error(413, "too-large"), reader=reader, unread=length)
+            return
+        requests = headers.get(REQUEST_HEADER.lower(), [])
+        try:
+            if len(requests) != 1:
+                raise ValueError("one request header")
+            request = parse_request(requests[0])
+        except (ValueError, TypeError) as bad:
+            await _send(
+                writer, *_error(400, "bad-request", str(bad)[:200]), reader=reader, unread=length
+            )
+            return
+        if self.busy or self.stopped.is_set():
+            error = "stopping" if self.stopped.is_set() else "busy"
+            await _send(writer, *_error(503, error), reader=reader, unread=length)
+            return
+        self.busy = True
+        try:
+            answer = await self._job(reader, request, length)
+        finally:
+            self.busy = False
+        if answer is not None:
+            # A 503 here (stopping) came before the body was read.
+            await _send(writer, *answer, reader=reader, unread=length if answer[0] == 503 else 0)
+
+    async def _job(
+        self, reader: asyncio.StreamReader, request: dict[str, Any], length: int
+    ) -> tuple[int, dict[str, str], bytes] | None:
+        """One check in a fresh box; its answer, or None when the client went away."""
+        try:
             await clear_job_processes()
-            await run_job(ready[0], spool)
-            continue
-        with suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), SPOOL_POLL)
+        except JobOutlivedError as error:
+            logger.error("the intake sandbox stops: %s", error)
+            self.outlived = error
+            self.stopped.set()
+            return _error(503, "stopping")
+        spool_fd = open_dir(self.spool)
+        try:
+            with suppress(FileNotFoundError):
+                shutil.rmtree(BOX, dir_fd=spool_fd)
+            os.mkdir(BOX, BOX_MODE, dir_fd=spool_fd)
+            box_fd = open_dir(BOX, dir_fd=spool_fd)
+            try:
+                os.fchmod(box_fd, BOX_MODE)
+                return await self._run(reader, box_fd, request, length)
+            finally:
+                os.close(box_fd)
+                with suppress(OSError):
+                    shutil.rmtree(BOX, dir_fd=spool_fd)
+        finally:
+            os.close(spool_fd)
+
+    async def _run(
+        self, reader: asyncio.StreamReader, box_fd: int, request: dict[str, Any], length: int
+    ) -> tuple[int, dict[str, str], bytes] | None:
+        if not await _receive(reader, box_fd, length):
+            return None
+        cancelled = asyncio.Event()
+
+        async def watch() -> None:
+            # The body is read whole; the next read ends only when the client goes away.
+            with suppress(Exception):
+                await reader.read(1)
+            cancelled.set()
+
+        watcher = asyncio.create_task(watch())
+        try:
+            # The box by its descriptor, inherited by the launcher, never by a path. Not by
+            # this process's /proc/<pid>/fd link: it is non-dumpable, so its children
+            # cannot follow one.
+            code = await run_child(
+                box_fd,
+                request["filename"],
+                hide=str(self.spool),
+                strict=True,
+                timeout=request["timeout"],
+                address_space=request["address_space"],
+                cancelled=cancelled,
+            )
+        except CheckCrashedError:
+            if cancelled.is_set():
+                logger.info("the client went away; the check was stopped")
+                return None
+            return _error(504, "timeout", f"past {request['timeout']:g}s")
+        except OSError as error:
+            logger.warning("the intake sandbox could not start a check: %s", error)
+            return _error(500, "spawn-failed")
+        finally:
+            watcher.cancel()
+        if code != 0:
+            return _error(500, "crashed", f"exit {code}")
+        own = os.geteuid()
+        try:
+            verdict = read_output(box_fd, VERDICT, MAX_VERDICT_BYTES, own)
+        except CheckCrashedError:
+            return _error(500, "no-verdict")
+        try:
+            os.stat(PREVIEW, dir_fd=box_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            preview = b""
+        else:
+            try:
+                preview = read_output(box_fd, PREVIEW, MAX_PREVIEW_BYTES, own)
+            except CheckCrashedError:
+                return _error(500, "bad-output")
+        headers = {
+            "Content-Type": "application/octet-stream",
+            ID_HEADER: request["id"],
+            VERDICT_BYTES_HEADER: str(len(verdict)),
+        }
+        return 200, headers, verdict + preview
 
 
-async def _main(spool: Path) -> None:
+async def _receive(reader: asyncio.StreamReader, box_fd: int, length: int) -> bool:
+    """The body streamed into the box's ``upload.bin`` (made here, ``O_EXCL``, never
+    through a symlink), exactly ``length`` bytes; False when the client went away."""
+    fd = os.open(
+        UPLOAD,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=box_fd,
+    )
+    try:
+        left = length
+        while left:
+            try:
+                chunk = await asyncio.wait_for(reader.read(min(_CHUNK, left)), BODY_IDLE)
+            except (TimeoutError, ConnectionError):
+                return False
+            if not chunk:
+                return False
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(fd, view) :]
+            left -= len(chunk)
+        return True
+    finally:
+        os.close(fd)
+
+
+async def _send(
+    writer: asyncio.StreamWriter,
+    status: int,
+    headers: dict[str, str],
+    body: bytes,
+    *,
+    reader: asyncio.StreamReader | None = None,
+    unread: int | None = 0,
+) -> None:
+    """The answer, then ``Connection: close``. With ``reader``, a body left unread
+    (``unread`` bytes, None: unknown) is read and dropped for at most `LINGER`, so the
+    client reads the answer rather than a reset."""
+    lines = [f"HTTP/1.1 {status} {_REASONS[status]}"]
+    lines += [f"{name}: {value}" for name, value in headers.items()]
+    lines += [f"Content-Length: {len(body)}", "Connection: close"]
+    writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body)
+    await writer.drain()
+    if reader is None or unread == 0:
+        return
+    with suppress(Exception):
+        writer.write_eof()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + LINGER
+    left = unread
+    with suppress(Exception):
+        while left is None or left > 0:
+            wait = deadline - loop.time()
+            if wait <= 0:
+                break
+            chunk = await asyncio.wait_for(
+                reader.read(_CHUNK if left is None else min(_CHUNK, left)), wait
+            )
+            if not chunk:
+                break
+            if left is not None:
+                left -= len(chunk)
+
+
+async def start(sandbox: Sandbox, *, host: str, port: int) -> asyncio.Server:
+    return await asyncio.start_server(sandbox.handle, host, port, limit=MAX_HEAD_BYTES)
+
+
+async def serve(
+    spool: Path, stop: asyncio.Event, *, host: str = "0.0.0.0", port: int = SANDBOX_PORT
+) -> None:
+    """Serves checks one at a time until ``stop``; `JobOutlivedError` once a process of an
+    earlier check will not die."""
+    sandbox = Sandbox(spool)
+    server = await start(sandbox, host=host, port=port)
+    logger.info("intake sandbox serving on %s:%d, one check at a time", host, port)
+    waits = [asyncio.ensure_future(stop.wait()), asyncio.ensure_future(sandbox.stopped.wait())]
+    try:
+        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiting in waits:
+            waiting.cancel()
+        # A check still running is cancelled with the loop's other tasks, which kills its
+        # child's group (`run_child`).
+        server.close()
+    if sandbox.outlived is not None:
+        raise sandbox.outlived
+
+
+async def _main(spool: Path, port: int) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
-    logger.info("intake sandbox serving %s, one check at a time", spool)
-    await serve(spool, stop)
+    await serve(spool, stop, port=port)
+
+
+def _port(value: str) -> int | None:
+    if value.isascii() and value.isdigit() and 0 < int(value) < 65536:
+        return int(value)
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -382,6 +516,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except IntakeRefusal as refusal:
         for reason in refusal.reasons:
             logger.error(reason)
+        return 2
+    port = _port(os.environ.get("SCADBUDDY_INTAKE_SANDBOX_PORT", str(SANDBOX_PORT)))
+    if port is None:
+        logger.error("SCADBUDDY_INTAKE_SANDBOX_PORT must be a port number, 1 to 65535")
         return 2
     forbid_dumping()
     spool = Path(os.environ.get("SCADBUDDY_INTAKE_WORK_DIR", "/tmp"))
@@ -393,12 +531,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             refused[:300],
         )
         return 3
-    # A job's orphans become this process's children, so `job_processes` sees them.
+    # A check's orphans become this process's children, so `job_processes` sees them.
     if hardening_prctl(_PR_SET_CHILD_SUBREAPER, 1) != 0:
         logger.error("the intake sandbox refuses to start: it cannot be the child subreaper")
         return 3
     try:
-        asyncio.run(_main(spool))
+        asyncio.run(_main(spool, port))
     except JobOutlivedError as error:
         logger.error("the intake sandbox stops: %s", error)
         return 4

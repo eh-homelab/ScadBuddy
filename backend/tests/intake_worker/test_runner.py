@@ -1,13 +1,12 @@
 """One check in a child process (#6133, spec 2026-11-13 §7): its verdict, its timeout, its
-address-space cap, its hardening, what the worker reads back, and the hand-over to the
-pod's sandbox container."""
+address-space cap, its hardening, what the worker reads back, and the sandbox's start.
+The sandbox's RPC is `test_sandbox.py`."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import functools
-import inspect
 import json
 import os
 import socket
@@ -163,7 +162,7 @@ def test_a_hardlinked_output_is_refused(tmp_path: Path) -> None:
 
 def test_an_output_of_another_owner_is_refused(tmp_path: Path) -> None:
     (tmp_path / PREVIEW).write_bytes(_png())
-    with pytest.raises(CheckCrashedError, match="sandbox's own"):
+    with pytest.raises(CheckCrashedError, match="expected user's own"):
         _read(tmp_path, PREVIEW, owner=OWN + 1)
 
 
@@ -191,25 +190,29 @@ def test_a_preview_that_is_not_a_png_is_refused(data: bytes) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "timeout", "space"),
+    ("filename", "timeout", "space", "request_id"),
     [
-        ("", 1.0, 1),
-        ("a/b.stl", 1.0, 1),
-        ("a\x00.stl", 1.0, 1),
-        ("x" * 256, 1.0, 1),
-        ("box.stl", float("nan"), 1),
-        ("box.stl", float("inf"), 1),
-        ("box.stl", 0.0, 1),
-        ("box.stl", runner.CHILD_TIMEOUT + 1, 1),
-        ("box.stl", 1.0, 0),
-        ("box.stl", 1.0, runner.CHILD_ADDRESS_SPACE + 1),
+        ("", 1.0, 1, "ab" * 8),
+        ("a/b.stl", 1.0, 1, "ab" * 8),
+        ("a\x00.stl", 1.0, 1, "ab" * 8),
+        ("x" * 256, 1.0, 1, "ab" * 8),
+        ("box.stl", float("nan"), 1, "ab" * 8),
+        ("box.stl", float("inf"), 1, "ab" * 8),
+        ("box.stl", 0.0, 1, "ab" * 8),
+        ("box.stl", runner.CHILD_TIMEOUT + 1, 1, "ab" * 8),
+        ("box.stl", 1.0, 0, "ab" * 8),
+        ("box.stl", 1.0, runner.CHILD_ADDRESS_SPACE + 1, "ab" * 8),
+        ("box.stl", 1.0, 1, "ab" * 7 + "a"),
+        ("box.stl", 1.0, 1, "ab" * 32 + "a"),
+        ("box.stl", 1.0, 1, "AB" * 8),
+        ("box.stl", 1.0, 1, "ab" * 8 + "\n"),
     ],
 )
 def test_a_request_out_of_bounds_is_never_handed_over(
-    filename: str, timeout: float, space: int
+    filename: str, timeout: float, space: int, request_id: str
 ) -> None:
     with pytest.raises(ValueError):
-        runner.check_request(filename, timeout, space)
+        runner.check_request(filename, timeout, space, request_id)
 
 
 # -- the child's hardening ----------------------------------------------------------------
@@ -245,7 +248,7 @@ _REFUSED = sandbox.probe_isolation(Path(tempfile.gettempdir()))
 _REQUIRED = os.environ.get("SCADBUDDY_REQUIRE_CONFINEMENT") == "1"
 
 
-def needs_confinement(test: Callable[..., None]) -> Callable[..., None]:
+def needs_confinement(test: Callable[..., Any]) -> Callable[..., Any]:
     if _REFUSED is None:
         return test
     if _REQUIRED:
@@ -255,7 +258,7 @@ def needs_confinement(test: Callable[..., None]) -> Callable[..., None]:
             pytest.fail(f"confinement refused where it is required: {_REFUSED}")
 
         return refused
-    skip: Callable[..., None] = pytest.mark.skip(reason=f"confinement refused: {_REFUSED}")(test)
+    skip: Callable[..., Any] = pytest.mark.skip(reason=f"confinement refused: {_REFUSED}")(test)
     return skip
 
 
@@ -477,250 +480,15 @@ def test_the_childs_verdict_says_whether_it_was_isolated(tmp_path: Path) -> None
     assert "isolation" in verdict
 
 
-# -- the sandbox container ---------------------------------------------------------------
-
-
-def _spooled(job: Path, **kwargs: Any) -> runner.Verdict:
-    """One check handed over its spool to a sandbox served in this loop."""
-    spool = job.parent
-
-    async def go() -> runner.Verdict:
-        stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, stop))
-        try:
-            return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, **kwargs)
-        finally:
-            stop.set()
-            await serving
-
-    return asyncio.run(go())
-
-
-@needs_confinement
-def test_the_sandbox_container_runs_a_spooled_check(tmp_path: Path) -> None:
-    job = _job(tmp_path, box_stl())
-    verdict = _spooled(job)
-    assert verdict.outcome == "ready" and verdict.facts is not None
-    assert verdict.preview is not None and verdict.preview.startswith(runner.PNG_MAGIC)
-    # The job was moved out of the scratch folder whole, and removed once answered.
-    jobs = job.parent / runner.JOBS
-    assert jobs.stat().st_mode & 0o777 == runner.JOBS_MODE
-    assert list(jobs.iterdir()) == [] and list(job.iterdir()) == []
-
-
-@needs_confinement
-def test_the_sandbox_as_deployed_runs_a_spooled_check(tmp_path: Path) -> None:
-    """``python -m scadbuddy.intake_worker.sandbox`` itself, non-dumpable as it makes itself
-    at start: its child must reach the box without a ``/proc/<pid>/fd`` path of the
-    sandbox's, which a non-dumpable process's children cannot follow."""
-    job = _job(tmp_path, box_stl())
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if name not in sandbox.SANDBOX_FORBIDDEN_ENV
-    }
-    env["SCADBUDDY_INTAKE_WORK_DIR"] = str(job.parent)
-    served = subprocess.Popen(
-        [sys.executable, "-m", "scadbuddy.intake_worker.sandbox"],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        verdict = asyncio.run(
-            run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=60.0)
-        )
-    finally:
-        served.terminate()
-        log = served.communicate(timeout=30)[0].decode(errors="replace")
-    assert verdict.outcome == "ready", log
-    assert served.returncode == 0, log
-
-
-def test_a_job_is_handed_over_whole_by_one_rename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Until the rename the job sits in the worker's own 0700 scratch folder, which no
-    other user reaches; after it, ``jobs/<name>`` holds everything the sandbox reads."""
-    monkeypatch.setattr(runner, "SPOOL_GRACE", 0.5)
-    job = _job(tmp_path, box_stl())
-    assert job.stat().st_mode & 0o777 == 0o700
-    seen: list[list[str]] = []
-
-    async def go() -> None:
-        checking = asyncio.create_task(
-            run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1)
-        )
-        handed = job.parent / runner.JOBS / job.name
-        while not handed.exists():
-            await asyncio.sleep(0.01)
-        seen.append(sorted(p.name for p in handed.iterdir()))
-        with pytest.raises(CheckCrashedError):
-            await checking
-
-    asyncio.run(go())
-    assert seen == [sorted([UPLOAD, runner.REQUEST, runner.OUT])]
-
-
-def test_the_worker_removes_an_earlier_answered_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A check that timed out could not remove its job while the sandbox held its box; once
-    the sandbox answered it, the next check removes it, so ``jobs/`` does not grow. A job
-    not answered yet is left alone."""
-    monkeypatch.setattr(runner, "SPOOL_GRACE", 0.2)
-    jobs = tmp_path / "work" / runner.JOBS
-    answered = jobs / "check-0"
-    (answered / runner.OUT).mkdir(parents=True)
-    (answered / runner.OUT / VERDICT).write_text("{}")
-    (answered / runner.DONE).write_text("timeout")
-    waiting = jobs / "check-w"
-    waiting.mkdir()
-    (waiting / runner.TAKEN).write_text("")
-    job = _job(tmp_path, box_stl())
-    with pytest.raises(CheckCrashedError):
-        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1))
-    assert sorted(p.name for p in jobs.iterdir()) == ["check-w"]
-
-
-def test_a_planted_jobs_symlink_is_never_followed(tmp_path: Path) -> None:
-    job = _job(tmp_path, box_stl())
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (job.parent / runner.JOBS).symlink_to(elsewhere)
-    with pytest.raises(OSError):
-        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN))
-    assert list(elsewhere.iterdir()) == []
-
-
-@needs_confinement
-def test_a_spooled_out_dir_swapped_for_a_symlink_is_refused(tmp_path: Path) -> None:
-    """The worker reads ``out/`` through a descriptor it opened when it made it; a
-    directory swapped in later by name is never the one it reads."""
-    job = _job(tmp_path, box_stl())
-    handed = job.parent / runner.JOBS / job.name
-
-    async def go() -> runner.Verdict:
-        stop = asyncio.Event()
-
-        async def swap_then_serve() -> None:
-            while not handed.exists():
-                await asyncio.sleep(0.01)
-            decoy = tmp_path / "decoy"
-            decoy.mkdir()
-            (decoy / VERDICT).write_text('{"outcome": "refused", "reason": "decoy"}')
-            (handed / runner.OUT).rename(tmp_path / "moved")
-            (handed / runner.OUT).symlink_to(decoy)
-            await sandbox.serve(job.parent, stop)
-
-        serving = asyncio.create_task(swap_then_serve())
-        try:
-            return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN)
-        finally:
-            stop.set()
-            await serving
-
-    # The sandbox finds no out/ of its own to fill (it never follows the symlink), and
-    # the worker's descriptor still names the moved directory, which holds no verdict.
-    with pytest.raises(CheckCrashedError):
-        asyncio.run(go())
-
-
-@needs_confinement
-def test_a_spooled_check_past_its_timeout_is_killed(tmp_path: Path) -> None:
-    with pytest.raises(CheckCrashedError, match="exited with timeout"):
-        _spooled(_job(tmp_path, box_stl()), timeout=0.01)
-
-
-def test_a_spooled_check_no_sandbox_took_is_counted_and_removed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(runner, "SPOOL_GRACE", 0.3)
-    before = runner.SANDBOX_UNANSWERED._value.get()
-    job = _job(tmp_path, box_stl())
-    with pytest.raises(CheckCrashedError, match="no answer"):
-        asyncio.run(run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, timeout=0.1))
-    assert runner.SANDBOX_UNANSWERED._value.get() == before + 1
-    assert list((job.parent / runner.JOBS).iterdir()) == []
-
-
-@needs_confinement
-def test_a_spooled_answer_of_another_owner_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(CheckCrashedError, match="sandbox's own"):
-        _spooled_as(_job(tmp_path, box_stl()), OWN + 1)
-
-
-def _spooled_as(job: Path, uid: int) -> runner.Verdict:
-    async def go() -> runner.Verdict:
-        stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(job.parent, stop))
-        try:
-            return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=uid)
-        finally:
-            stop.set()
-            await serving
-
-    return asyncio.run(go())
-
-
-def test_the_sandbox_answers_a_bad_request_without_running_it(tmp_path: Path) -> None:
-    spool = tmp_path / "work"
-    job = spool / runner.JOBS / "check-1"
-    job.mkdir(parents=True)
-    (job / UPLOAD).write_bytes(box_stl())
-    (job / runner.REQUEST).write_text(
-        json.dumps({"filename": "box.stl", "timeout": "Infinity", "address_space": 1})
-    )
-    (job / runner.OUT).mkdir()
-
-    async def go() -> None:
-        stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, stop))
-        while not (job / runner.DONE).exists():
-            await asyncio.sleep(0.05)
-        stop.set()
-        await serving
-
-    asyncio.run(go())
-    assert (job / runner.DONE).read_text() == "bad-request"
-    assert not (job / runner.BOX).exists()
-
-
-def test_the_sandbox_answers_a_check_it_could_not_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A launcher that never starts is an answer, never a crash that leaves the job taken."""
-
-    async def no_launcher(*args: Any, **kwargs: Any) -> int:
-        raise PermissionError(13, "Permission denied")
-
-    monkeypatch.setattr(sandbox, "run_child", no_launcher)
-    spool = tmp_path / "work"
-    job = spool / runner.JOBS / "check-1"
-    job.mkdir(parents=True)
-    (job / UPLOAD).write_bytes(box_stl())
-    (job / runner.REQUEST).write_text(
-        json.dumps({"filename": "box.stl", "timeout": 5.0, "address_space": 1 << 30})
-    )
-    (job / runner.OUT).mkdir()
-
-    async def go() -> None:
-        stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, stop))
-        while not (job / runner.DONE).exists():
-            await asyncio.sleep(0.05)
-        stop.set()
-        await serving
-
-    asyncio.run(go())
-    assert (job / runner.DONE).read_text() == "spawn-failed"
-    assert not (job / runner.BOX).exists()
+# -- the sandbox's start (its RPC: test_sandbox.py) ---------------------------------------
 
 
 def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """It fails closed: no job is served by a sandbox whose checks would run unconfined."""
+    """It fails closed: no check is served by a sandbox whose checks would run unconfined."""
+    for name in sandbox.SANDBOX_FORBIDDEN_ENV:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "unshare: refused")
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
     served: list[object] = []
@@ -728,40 +496,6 @@ def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
     assert sandbox.main([]) == 3
     assert served == []
     assert "refuses to start" in capsys.readouterr().out
-
-
-def test_the_sandbox_empties_a_finished_job_before_it_claims_the_next(tmp_path: Path) -> None:
-    """One customer's file in the pod at a time: what a finished job left (the worker's
-    upload included) is gone before the next job is claimed."""
-    spool = tmp_path / "work"
-    old = spool / runner.JOBS / "check-0"
-    (old / runner.OUT).mkdir(parents=True)
-    (old / UPLOAD).write_bytes(b"the last customer's file")
-    (old / runner.OUT / VERDICT).write_text("{}")
-    (old / runner.DONE).write_text("0")
-    new = spool / runner.JOBS / "check-1"
-    new.mkdir()
-    (new / UPLOAD).write_bytes(box_stl())
-    (new / runner.REQUEST).write_text(
-        json.dumps({"filename": "box.stl", "timeout": 0, "address_space": 1})
-    )
-    (new / runner.OUT).mkdir()
-
-    async def go() -> None:
-        stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, stop))
-        while not (new / runner.DONE).exists():
-            await asyncio.sleep(0.05)
-        stop.set()
-        await serving
-
-    asyncio.run(go())
-    assert sorted(p.name for p in old.iterdir()) == [runner.DONE]
-    assert (new / runner.DONE).read_text() == "bad-request"
-
-
-def test_the_sandbox_takes_no_concurrency_setting() -> None:
-    assert list(inspect.signature(sandbox.serve).parameters) == ["spool", "stop"]
 
 
 @pytest.mark.parametrize("name", sandbox.SANDBOX_FORBIDDEN_ENV)
