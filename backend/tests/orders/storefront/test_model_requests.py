@@ -378,19 +378,16 @@ def test_the_sweep_expires_a_file_of_a_cart_not_sent(asks: CrudCaller, s3_api: T
     assert (source["check_status"], source["check_reason"]) == ("refused", EXPIRED)
 
 
+def submitted(asks: CrudCaller, order_id: str) -> None:
+    body = {"draft_id": order_id, "name": "Ada", "email": "ada@example.com"}
+    r = asks.post("/draft/submit", json=body, key="submit-1")
+    assert r.status_code == 200, r.text
+
+
 def test_the_sweep_keeps_a_file_of_a_sent_order(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
     [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
     order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
-    with _state(s3_api).projection.pool.connection() as conn:
-        row = conn.execute(
-            "INSERT INTO customers (display_name) VALUES ('A customer') RETURNING id"
-        ).fetchone()
-        assert row is not None
-        conn.execute(
-            "UPDATE orders SET submitted_at = now(), number = 'ORD-2026-9', customer_id = %s"
-            " WHERE id = %s",
-            (row["id"], order_id),
-        )
+    submitted(asks, order_id)
     assert sweep(s3_api, datetime.now(UTC) + timedelta(days=30)) == 0
     assert staged(s3_api, slot_id) == len(STL)
 

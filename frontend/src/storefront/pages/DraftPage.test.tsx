@@ -18,7 +18,7 @@ const DRAFT: Draft = {
     { id: 'pickup', label: 'Pick up at the workshop', amount_minor: 0, ships: false },
   ],
   items: [
-    { id: 'i1', kind: 'request', title: 'Design request', quantity: 1, inputs: null, notes: HOSTILE, attachments: [] },
+    { id: 'i1', kind: 'request', title: 'Design request', quantity: 1, inputs: null, notes: HOSTILE, attachments: [], sources: [], own_model: false },
     {
       id: 'i2',
       kind: 'model',
@@ -28,8 +28,10 @@ const DRAFT: Draft = {
       labels: { name: 'Name', base_colour: 'Base colour', ring: 'Keyring hole' },
       notes: null,
       attachments: [],
+      sources: [],
+      own_model: false,
     },
-    { id: 'i3', kind: 'model', title: 'Luggage tag', quantity: 1, inputs: {}, labels: {}, notes: null, attachments: [] },
+    { id: 'i3', kind: 'model', title: 'Luggage tag', quantity: 1, inputs: {}, labels: {}, notes: null, attachments: [], sources: [], own_model: false },
   ],
 }
 
