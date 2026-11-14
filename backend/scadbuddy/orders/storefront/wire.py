@@ -26,6 +26,9 @@ from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import LISTINGS_MAX_PAGE as LISTINGS_MAX_PAGE
+from scadbuddy.storefront.wire import LISTINGS_MAX_QUERY as LISTINGS_MAX_QUERY
+from scadbuddy.storefront.wire import LISTINGS_QUERY_PATTERN as LISTINGS_QUERY_PATTERN
 from scadbuddy.storefront.wire import (
     MAX_COLOUR_CHOICES,
     MAX_LINK_NOTE,
@@ -198,6 +201,8 @@ class ListingOrder(BaseModel):
 #: How many rows one page of ``GET …/listings`` holds at most, and by default (#6157).
 LISTING_PAGE_MAX = 200
 LISTING_PAGE_DEFAULT = 50
+#: The furthest a page may start: far past any shop, well inside Postgres's bigint.
+LISTING_OFFSET_MAX = 1_000_000
 
 type ListingSort = Literal["position", "title", "slug", "updated"]
 type ListingStatus = Literal["published", "draft"]
@@ -218,7 +223,8 @@ class ListingQuery(BaseModel):
     sort: ListingSort = "position"
     dir: Literal["asc", "desc"] = "asc"
     limit: int = Field(default=LISTING_PAGE_DEFAULT, ge=1, le=LISTING_PAGE_MAX)
-    offset: int = Field(default=0, ge=0)
+    #: Bounded so a huge offset is a 422, never a bigint overflow in Postgres.
+    offset: int = Field(default=0, ge=0, le=LISTING_OFFSET_MAX)
 
 
 class ListingRow(BaseModel):
@@ -322,8 +328,25 @@ class PublicListing(BaseModel):
     updated_at: datetime
 
 
+class PublicListingCard(BaseModel):
+    """One listing in the public list (#6154): what a card shows, and no more. The page
+    reads the whole listing (`PublicListing`) only when the visitor opens it."""
+
+    id: str
+    title: str
+    description: str
+    #: The listing's first picture, as a presigned GET, if it has one.
+    image: PublicMedia | None
+    #: False when a colour the customer must pick has no filament left (`colourGone`).
+    available: bool
+
+
 class PublicListings(BaseModel):
-    listings: list[PublicListing]
+    """One page of the published listings, in the shop's order."""
+
+    listings: list[PublicListingCard]
+    #: The next page's ``cursor``; null on the last page.
+    next_cursor: str | None
     #: Whether "Ask for a design" is on (``storefront_requests_enabled``).
     requests_enabled: bool
 

@@ -267,6 +267,7 @@ def test_the_listing_routes_round_trip(
     drafts = client.get(LISTINGS, params={"status": "draft", "q": "OTH"}).json()
     assert [row["id"] for row in drafts["items"]] == [other["id"]]
     assert client.get(LISTINGS, params={"limit": 201}).status_code == 422
+    assert client.get(LISTINGS, params={"offset": 10**20}).status_code == 422
     # An edit names the time it read the listing, and unpublishes it.
     current = client.get(f"{LISTINGS}/{made['id']}").json()
     assert client.get(f"{LISTINGS}/nope").status_code == 404
