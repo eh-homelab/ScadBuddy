@@ -134,9 +134,31 @@ describe('CustomizePage', () => {
     expect(await screen.findByText('Your colours changed to the nearest PETG colours.')).toBeInTheDocument()
     // Signal orange's nearest PETG colour is Rust.
     await waitFor(() =>
-      expect(sent.at(-1)).toMatchObject({ values: { body_colour: '#C0502A' }, picks: { body_colour: 'f-petg-rust' } }),
+      // The rim the visitor never set moves too: from the first choice, Ocean blue, to Teal.
+      expect(sent.at(-1)).toEqual(
+        expect.objectContaining({
+          values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' },
+          picks: { body_colour: 'f-petg-rust', rim_colour: 'f-petg-teal' },
+        }),
+      ),
     )
     server.events.removeAllListeners()
+  })
+
+  it('sends every colour of a one-material listing in its material from the first render (#6152)', async () => {
+    const sent: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
+    })
+    show(CHARM_ID)
+    await waitFor(() => expect(sent).toHaveLength(1))
+    server.events.removeAllListeners()
+    expect(sent[0]).toEqual(
+      expect.objectContaining({
+        values: { body_colour: '#1B6CA8', rim_colour: '#1B6CA8' },
+        picks: { body_colour: 'f-blue', rim_colour: 'f-blue' },
+      }),
+    )
   })
 
   it('keeps a pick across a reload of the page (#6152)', async () => {

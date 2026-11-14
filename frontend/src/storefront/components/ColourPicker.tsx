@@ -1,7 +1,8 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover'
 import type { Filament } from '../api/client'
-import { customerFilaments, filamentLabels } from '../params'
+import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
+import { customerFilaments, filamentLabels, swatchBackground } from '../params'
 
 /** Past this many colours, the picker offers a search. */
 const SEARCH_FROM = 24
@@ -48,11 +49,13 @@ export function ColourPicker({ label, filaments, value, fallback, onChange }: Co
     const steps: Record<string, number> = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: COLUMNS, ArrowUp: -COLUMNS }
     const step = steps[event.key]
     if (step === undefined) return
-    const swatches = Array.from(grid.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? [])
+    const swatches = Array.from(grid.current?.querySelectorAll<HTMLButtonElement>('[data-slot="toggle-group-item"]') ?? [])
     const at = swatches.indexOf(document.activeElement as HTMLButtonElement)
     const next = swatches[Math.min(swatches.length - 1, Math.max(0, (at < 0 ? 0 : at) + (at < 0 ? 0 : step)))]
     if (next) {
+      // Before the item's own roving focus, which moves one step only.
       event.preventDefault()
+      event.stopPropagation()
       next.focus()
     }
   }
@@ -68,7 +71,7 @@ export function ColourPicker({ label, filaments, value, fallback, onChange }: Co
           aria-labelledby={`${id}-label ${id}-value`}
           className="flex min-h-12 w-full items-center gap-3 rounded-[10px] border-[1.5px] border-input bg-background px-3.5 py-2 text-left"
         >
-          <span className="size-7 flex-none rounded-full border border-foreground/25" style={{ background: shown?.colour ?? 'transparent' }} aria-hidden="true" />
+          <span className="size-7 flex-none rounded-full border border-foreground/25" style={{ background: shown ? swatchBackground(shown) : 'transparent' }} aria-hidden="true" />
           <span id={`${id}-value`} className="min-w-0 flex-1 [overflow-wrap:anywhere]">
             {shown ? labels.get(shown.id) ?? shown.colour : 'Choose a colour'}
           </span>
@@ -100,37 +103,33 @@ export function ColourPicker({ label, filaments, value, fallback, onChange }: Co
               className="min-h-10 w-full rounded-md border border-input bg-background px-3"
             />
           )}
-          <div
+          <ToggleGroup
             ref={grid}
-            role="radiogroup"
+            type="single"
             aria-label={label}
-            onKeyDown={move}
-            className="grid max-h-[50vh] grid-cols-4 gap-2 overflow-y-auto p-0.5"
+            loop={false}
+            onKeyDownCapture={move}
+            value={picked?.id ?? ''}
+            onValueChange={(id) => {
+              onChange(id === '' ? undefined : offered.find((filament) => filament.id === id))
+              setOpen(false)
+            }}
+            className="grid max-h-[50vh] w-full grid-cols-4 gap-2 overflow-y-auto p-0.5"
           >
-            {visible.map((filament) => {
-              const checked = filament.id === picked?.id
-              return (
-                <button
-                  key={filament.id}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked}
-                  aria-label={`${labels.get(filament.id)} ${filament.material}`}
-                  tabIndex={checked || (!picked && filament === visible[0]) ? 0 : -1}
-                  onClick={() => {
-                    onChange(checked ? undefined : filament)
-                    setOpen(false)
-                  }}
-                  className="flex min-w-0 flex-col items-center gap-1 rounded-md p-1 text-center text-xs aria-checked:ring-2 aria-checked:ring-primary"
-                >
-                  <span className="size-10 rounded-full border border-foreground/25" style={{ background: filament.colour }} aria-hidden="true" />
-                  <span className="w-full leading-tight [overflow-wrap:anywhere]">{labels.get(filament.id)}</span>
-                  {materials.length > 1 && <span className="text-[10px] text-muted-foreground">{filament.material}</span>}
-                </button>
-              )
-            })}
+            {visible.map((filament) => (
+              <ToggleGroupItem
+                key={filament.id}
+                value={filament.id}
+                aria-label={`${labels.get(filament.id)} ${filament.material}`}
+                className="flex h-auto min-w-0 flex-col items-center gap-1 rounded-md p-1 text-center text-xs font-normal whitespace-normal data-[state=on]:bg-transparent data-[state=on]:ring-2 data-[state=on]:ring-primary"
+              >
+                <span className="size-10 rounded-full border border-foreground/25" style={{ background: swatchBackground(filament) }} aria-hidden="true" />
+                <span className="w-full leading-tight [overflow-wrap:anywhere]">{labels.get(filament.id)}</span>
+                {materials.length > 1 && <span className="text-[10px] text-muted-foreground">{filament.material}</span>}
+              </ToggleGroupItem>
+            ))}
             {visible.length === 0 && <p className="col-span-4 m-0 text-sm text-muted-foreground">No colour matches.</p>}
-          </div>
+          </ToggleGroup>
           {picked && (
             <button
               type="button"

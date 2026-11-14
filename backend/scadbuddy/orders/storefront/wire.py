@@ -157,9 +157,9 @@ class ListingInput(BaseModel):
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them.
     media_ids: list[str] = Field(default_factory=list)
-    #: Every colour of an order is of one material (#6152): each pick, and the filament
-    #: of each offered colour left at its default, shares one; else 422
-    #: ``listing_mixed_material``.
+    #: Every colour of an order is of one material (#6152): each pick, the filament of
+    #: each offered colour left at its default, and every slot filament share one; else
+    #: 422 ``listing_mixed_material``.
     one_material: bool = False
 
 
@@ -236,6 +236,10 @@ class PublicFilament(BaseModel):
     colour: str
     colour_name: str | None
     material: str
+    #: The finish ("Matte", "Silk", "Translucent") and the maker: what tells two filaments
+    #: of one colour name apart (#6152).
+    subtype: str | None = None
+    brand: str | None = None
 
 
 class PublicMedia(BaseModel):

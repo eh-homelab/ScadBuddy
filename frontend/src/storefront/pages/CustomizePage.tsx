@@ -15,7 +15,7 @@ import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
-import { keepOffered, keepPicks, listingMaterials, listingUnavailable, nearestFilament, paramFilaments, valueProblem } from '../params'
+import { keepOffered, keepPicks, listingMaterials, listingUnavailable, settleMaterial, startMaterial, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
 
 // three.js is most of the viewer: its own chunk, fetched once there is a render to show.
@@ -123,7 +123,7 @@ export function CustomizePage({
   const [values, setValues] = useState<Record<string, ParamValue>>({})
   /** The filament picked for each colour parameter, by id (#6152): the shop prices it and fills the slots from it. */
   const [picks, setPicks] = useState<Record<string, string>>({})
-  /** With `one_material`, the material chosen; null is the listing's first. */
+  /** With `one_material`, the material shown (`startMaterial` until the visitor picks one); else null. */
   const [material, setMaterial] = useState<string | null>(null)
   const [materialNote, setMaterialNote] = useState<string | null>(null)
   /** The latest render while it runs; the viewer shows its progress until one is done. */
@@ -161,13 +161,13 @@ export function CustomizePage({
         if (!live) return
         const saved = loadChoices(id)
         setListing(answer)
-        if (saved) {
-          const kept = keepOffered(answer, saved.values)
-          setValues(kept)
-          setPicks(keepPicks(answer, kept, saved.picks ?? {}))
-          setMaterial(offeredMaterial(answer, saved.material))
-          setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
-        }
+        const kept = saved ? keepOffered(answer, saved.values) : {}
+        const shownMaterial = answer.one_material ? (offeredMaterial(answer, saved?.material) ?? startMaterial(answer)) : null
+        const settled = settleMaterial(answer, kept, saved ? keepPicks(answer, kept, saved.picks ?? {}) : {}, shownMaterial)
+        setValues(settled.values)
+        setPicks(settled.picks)
+        setMaterial(shownMaterial)
+        if (saved) setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
       },
       (caught: unknown) => live && setLoadError(errorText(caught)),
     )
@@ -238,28 +238,13 @@ export function CustomizePage({
   }
 
   /**
-   * #6152: a `one_material` listing's material. Each colour the visitor set moves to the
-   * nearest colour (RGB distance) of the new material, and the page says so.
+   * #6152: a `one_material` listing's material. Every colour moves to the nearest colour
+   * (RGB distance) of the new material (`settleMaterial`), and the page says so when one the
+   * visitor set changed.
    */
   const chooseMaterial = (next: string) => {
-    if (!listing || next === (material ?? listingMaterials(listing)[0])) return
-    const nextValues = { ...values }
-    const nextPicks = { ...picks }
-    let moved = false
-    for (const [name, param] of Object.entries(listing.params)) {
-      const value = values[name]
-      if (!(param.kind === 'choice' && param.colour) || typeof value !== 'string') continue
-      const nearest = nearestFilament(value, paramFilaments(param, listing.colours, next))
-      if (nearest) {
-        moved = moved || nearest.colour.toLowerCase() !== value.toLowerCase() || nearest.id !== picks[name]
-        nextValues[name] = nearest.colour
-        nextPicks[name] = nearest.id
-      } else {
-        delete nextValues[name]
-        delete nextPicks[name]
-        moved = true
-      }
-    }
+    if (!listing || next === material) return
+    const { values: nextValues, picks: nextPicks, moved } = settleMaterial(listing, values, picks, next)
     setMaterial(next)
     setValues(nextValues)
     setPicks(nextPicks)
@@ -396,9 +381,11 @@ export function CustomizePage({
       if (!alive.current) return
       setListing(fresh)
       const kept = keepOffered(fresh, values)
-      setValues(kept)
-      setPicks(keepPicks(fresh, kept, picks))
-      setMaterial(offeredMaterial(fresh, material))
+      const shownMaterial = fresh.one_material ? (offeredMaterial(fresh, material) ?? startMaterial(fresh)) : null
+      const settled = settleMaterial(fresh, kept, keepPicks(fresh, kept, picks), shownMaterial)
+      setValues(settled.values)
+      setPicks(settled.picks)
+      setMaterial(shownMaterial)
       setStale(false)
       setRenderError(null)
       setAddError(null)

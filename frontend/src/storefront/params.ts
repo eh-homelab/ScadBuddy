@@ -127,6 +127,70 @@ export function listingMaterials(listing: Listing): string[] {
   return [...new Set(customerFilaments(listing.colours).map((filament) => filament.material))]
 }
 
+/** The colour an unpicked parameter starts at: the listing's default once it has one (#6144), else its first choice. */
+function startColour(param: PublicParam): string | undefined {
+  const start = (param as { default?: unknown }).default
+  if (typeof start === 'string') return start
+  return param.kind === 'choice' ? param.choices.find((c): c is string => typeof c === 'string') : undefined
+}
+
+/**
+ * #6152 — on a `one_material` listing, the material shown first: the first that has a
+ * filament of every colour parameter's start colour, else the listing's first.
+ */
+export function startMaterial(listing: Listing): string | null {
+  const materials = listingMaterials(listing)
+  const colours = Object.values(listing.params).filter((param) => param.kind === 'choice' && param.colour)
+  return (
+    materials.find((material) =>
+      colours.every((param) => {
+        const start = startColour(param)?.toLowerCase()
+        return paramFilaments(param, listing.colours, material).some((filament) => filament.colour.toLowerCase() === start)
+      }),
+    ) ??
+    materials[0] ??
+    null
+  )
+}
+
+/**
+ * #6152 — on a `one_material` listing, every colour parameter set to a filament of
+ * `material`, so the page never sends a colour of another one (the CRUD side refuses
+ * that, 422 `listing_mixed_material`): a pick of `material` stays; any other colour, set
+ * or not, moves to the nearest (RGB distance) of `material`. `moved` is whether a colour
+ * the visitor set changed. Any other listing is returned as it is.
+ */
+export function settleMaterial(
+  listing: Listing,
+  values: Readonly<Record<string, ParamValue>>,
+  picks: Readonly<Record<string, string>>,
+  material: string | null,
+): { values: Record<string, ParamValue>; picks: Record<string, string>; moved: boolean } {
+  const nextValues = { ...values }
+  const nextPicks = { ...picks }
+  let moved = false
+  if (!listing.one_material || material === null) return { values: nextValues, picks: nextPicks, moved }
+  for (const [name, param] of Object.entries(listing.params)) {
+    if (!(param.kind === 'choice' && param.colour)) continue
+    const offered = paramFilaments(param, listing.colours, material)
+    const set = values[name]
+    const kept = offered.find((filament) => filament.id === picks[name] && typeof set === 'string' && filament.colour.toLowerCase() === set.toLowerCase())
+    if (kept) continue
+    const from = typeof set === 'string' ? set : startColour(param)
+    const nearest = from === undefined ? offered[0] : nearestFilament(from, offered)
+    if (nearest) {
+      nextValues[name] = nearest.colour
+      nextPicks[name] = nearest.id
+      if (typeof set === 'string' && (nearest.colour.toLowerCase() !== set.toLowerCase() || (picks[name] !== undefined && nearest.id !== picks[name]))) moved = true
+    } else {
+      delete nextValues[name]
+      delete nextPicks[name]
+      if (typeof set === 'string') moved = true
+    }
+  }
+  return { values: nextValues, picks: nextPicks, moved }
+}
+
 /** Of `values`, those `listing` still offers and allows: what survives a reload of it. */
 export function keepOffered(listing: Listing, values: Readonly<Record<string, ParamValue>>): Record<string, ParamValue> {
   const kept: Record<string, ParamValue> = {}
@@ -165,22 +229,56 @@ export function customerFilaments(filaments: readonly Filament[]): Filament[] {
   return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
 }
 
+/** A filament's name with its finish: "Blue · Matte"; the hex when it has no name. */
+function finishedName(filament: Filament): string {
+  const name = filament.colour_name?.trim() || filament.colour.toUpperCase()
+  const subtype = filament.subtype?.trim()
+  return subtype && !name.toLowerCase().includes(subtype.toLowerCase()) ? `${name} · ${subtype}` : name
+}
+
 /**
- * What the customer reads for each of `filaments`, by id: its colour's name (else its
- * hex). Two of one name and material are told apart by their hex (#6152).
+ * What the customer reads for each of `filaments`, by id: its colour's name and finish
+ * (else its hex). Two of one such name and material are told apart by their brand, else
+ * by their hex (#6152).
  */
 export function filamentLabels(filaments: readonly Filament[]): Map<string, string> {
-  const name = (filament: Filament) => filament.colour_name?.trim() || filament.colour.toUpperCase()
-  const seen = new Map<string, number>()
-  for (const filament of filaments) {
-    const key = `${name(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}`
-    seen.set(key, (seen.get(key) ?? 0) + 1)
-  }
+  const key = (filament: Filament, extra = '') => `${finishedName(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}\u0000${extra}`
+  const count = (keys: string[]) => keys.reduce((seen, k) => seen.set(k, (seen.get(k) ?? 0) + 1), new Map<string, number>())
+  const byName = count(filaments.map((filament) => key(filament)))
+  const byBrand = count(filaments.map((filament) => key(filament, filament.brand?.trim().toLowerCase() ?? '')))
   return new Map(
     filaments.map((filament) => {
-      const key = `${name(filament).toLowerCase()}\u0000${filament.material.toLowerCase()}`
-      const shared = (seen.get(key) ?? 0) > 1 && filament.colour_name
-      return [filament.id, shared ? `${name(filament)} ${filament.colour.toUpperCase()}` : name(filament)]
+      const name = finishedName(filament)
+      if ((byName.get(key(filament)) ?? 0) < 2 || !filament.colour_name) return [filament.id, name]
+      const brand = filament.brand?.trim()
+      if (brand && (byBrand.get(key(filament, brand.toLowerCase())) ?? 0) < 2) return [filament.id, `${name} (${brand})`]
+      return [filament.id, `${name} ${filament.colour.toUpperCase()}`]
     }),
   )
+}
+
+/** How a filament looks beyond its hex, from its finish and name (#6152). */
+export type Finish = 'translucent' | 'silk' | 'multi' | 'solid'
+
+export function filamentFinish(filament: Filament): Finish {
+  const text = `${filament.subtype ?? ''} ${filament.colour_name ?? ''}`
+  if (/rainbow|tri.?colou?r|dual|multi|gradient/i.test(text)) return 'multi'
+  if (/translucent|transparent|clear/i.test(text)) return 'translucent'
+  if (/silk|metallic|shimmer/i.test(text)) return 'silk'
+  return 'solid'
+}
+
+/** The swatch's CSS background for `filament`: its hex, drawn as its finish looks. */
+export function swatchBackground(filament: Filament): string {
+  const colour = filament.colour
+  switch (filamentFinish(filament)) {
+    case 'translucent':
+      return `linear-gradient(${colour}99, ${colour}99), repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 50% / 10px 10px`
+    case 'silk':
+      return `linear-gradient(135deg, ${colour} 30%, #ffffffb3 50%, ${colour} 70%)`
+    case 'multi':
+      return `conic-gradient(${colour}, #e8532f, #f2c14e, #1c8c8c, #1b6ca8, ${colour})`
+    default:
+      return colour
+  }
 }

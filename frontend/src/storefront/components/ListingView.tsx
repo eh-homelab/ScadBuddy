@@ -1,3 +1,4 @@
+import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import { useId, type ElementType } from 'react'
 import type { Listing, ParamValue } from '../api/client'
 import { listingMaterials, listingUnavailable } from '../params'
@@ -86,20 +87,27 @@ export function ListingView({
               <p className="mb-1.5 block p-0 font-semibold" id={`${id}-material`}>
                 Material
               </p>
-              <div className="flex flex-wrap gap-2" role="radiogroup" aria-labelledby={`${id}-material`}>
+              <ToggleGroup
+                type="single"
+                spacing={2}
+                className="flex-wrap"
+                aria-labelledby={`${id}-material`}
+                value={shownMaterial ?? ''}
+                onValueChange={(each) => {
+                  if (each !== '') onMaterial?.(each)
+                }}
+              >
                 {materials.map((each) => (
-                  <button
+                  <ToggleGroupItem
                     key={each}
-                    type="button"
-                    role="radio"
-                    aria-checked={each === shownMaterial}
-                    onClick={() => onMaterial?.(each)}
-                    className="min-h-11 rounded-full border-[1.5px] border-input px-4 aria-checked:border-primary aria-checked:ring-1 aria-checked:ring-primary"
+                    value={each}
+                    variant="outline"
+                    className="min-h-11 rounded-full px-4 data-[state=on]:border-primary data-[state=on]:ring-1 data-[state=on]:ring-primary"
                   >
                     {each}
-                  </button>
+                  </ToggleGroupItem>
                 ))}
-              </div>
+              </ToggleGroup>
               {materialNote && (
                 <p className="mt-1.5 text-sm text-muted-foreground" role="status">
                   {materialNote}

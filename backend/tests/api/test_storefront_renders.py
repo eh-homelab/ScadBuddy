@@ -1098,6 +1098,17 @@ def test_add_to_order_fills_the_slots_from_the_picks(
     assert stored.colours
 
 
+def test_add_to_order_with_picks_waits_for_the_render(
+    crud: CrudCaller, two_reds: tuple[dict[str, Any], str, str]
+) -> None:
+    """With no done render the slots are unknown, and the picks would be lost: 409
+    ``render_pending`` (#6152)."""
+    listing, _, dear = two_reds
+    added = crud.post("/draft/items", json=_picked(listing, {"colour": dear}), key=uuid.uuid4().hex)
+    assert added.status_code == 409, added.text
+    assert added.json()["type"] == STOREFRONT_PROBLEMS + "render_pending"
+
+
 def test_a_listing_never_offers_support(
     client: TestClient,  # noqa: F811
     crud: CrudCaller,

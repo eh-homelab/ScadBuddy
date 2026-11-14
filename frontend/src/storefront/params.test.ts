@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, valueText } from './params'
+import { CHARM, KEYCHAIN } from '../mocks/features/storefrontPublic'
+import { settleMaterial, startMaterial, filamentFinish, filamentLabels, keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, swatchBackground, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -85,5 +85,73 @@ describe('picks (#6152)', () => {
     const param = KEYCHAIN.params.base_colour!
     expect(paramFilaments(param, [...KEYCHAIN.colours, pva]).map((f) => f.id)).toEqual([blue.id, orange.id])
     expect(paramFilaments(param, KEYCHAIN.colours, 'PETG')).toEqual([])
+  })
+})
+
+describe('filament names and finishes (#6152)', () => {
+  const f = (id: string, colour: string, colour_name: string | null, extra: { material?: string; subtype?: string | null; brand?: string | null } = {}) => ({
+    id,
+    colour,
+    colour_name,
+    material: extra.material ?? 'PLA',
+    subtype: extra.subtype ?? null,
+    brand: extra.brand ?? null,
+  })
+
+  it('names the finish, then the brand, then the hex to tell filaments apart', () => {
+    const labels = filamentLabels([
+      f('a', '#0047BB', 'Blue', { subtype: 'Matte' }),
+      f('b', '#1B6CA8', 'Blue', { subtype: 'Silk' }),
+      f('c', '#0000FF', 'Blue', { brand: 'Inland' }),
+      f('d', '#0011FF', 'Blue', { brand: 'Bambu' }),
+      f('e', '#000000', 'Black'),
+      f('g', '#111111', 'Black'),
+      f('h', '#FFFFFF', 'Translucent Clear', { subtype: 'Translucent', material: 'PETG' }),
+    ])
+    expect([...labels.values()]).toEqual([
+      'Blue · Matte',
+      'Blue · Silk',
+      'Blue (Inland)',
+      'Blue (Bambu)',
+      'Black #000000',
+      'Black #111111',
+      'Translucent Clear',
+    ])
+  })
+
+  it('draws translucent, silk and multi-colour filaments apart from a solid one', () => {
+    expect(filamentFinish(f('a', '#FFFFFF', 'Insignia Clear', { material: 'PETG' }))).toBe('translucent')
+    expect(filamentFinish(f('b', '#C0C0C0', 'Silver', { subtype: 'Silk' }))).toBe('silk')
+    expect(filamentFinish(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).toBe('multi')
+    expect(filamentFinish(f('d', '#000000', 'Velvet Eclipse', { subtype: 'Tri Color' }))).toBe('multi')
+    expect(filamentFinish(f('e', '#FFFFFF', 'Jade White'))).toBe('solid')
+    expect(swatchBackground(f('e', '#FFFFFF', 'Jade White'))).toBe('#FFFFFF')
+    expect(swatchBackground(f('c', '#FFFFFF', 'Fluorescent Rainbow'))).not.toBe('#FFFFFF')
+  })
+})
+
+describe('one material (#6152)', () => {
+  it('starts at the material that has every start colour', () => {
+    expect(startMaterial(CHARM)).toBe('PLA')
+    const tealFirst = {
+      ...CHARM,
+      params: Object.fromEntries(
+        Object.entries(CHARM.params).map(([name, param]) => [name, param.kind === 'choice' ? { ...param, choices: ['#1C8C8C', ...param.choices] } : param]),
+      ),
+    }
+    expect(startMaterial(tealFirst)).toBe('PETG')
+  })
+
+  it('sets every colour, set or not, to a filament of the material', () => {
+    const settled = settleMaterial(CHARM, { body_colour: '#E8532F' }, { body_colour: 'f-orange' }, 'PETG')
+    expect(settled).toEqual({
+      values: { body_colour: '#C0502A', rim_colour: '#1C8C8C' },
+      picks: { body_colour: 'f-petg-rust', rim_colour: 'f-petg-teal' },
+      moved: true,
+    })
+    // A pick already of the material stays, and the unset rim says nothing moved.
+    expect(settleMaterial(CHARM, { body_colour: '#C0502A' }, { body_colour: 'f-petg-rust' }, 'PETG').moved).toBe(false)
+    // Any other listing is left as it is.
+    expect(settleMaterial({ ...CHARM, one_material: false }, {}, {}, 'PETG')).toEqual({ values: {}, picks: {}, moved: false })
   })
 })

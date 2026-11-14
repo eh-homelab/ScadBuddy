@@ -238,12 +238,20 @@ async def checked_choice(
     try:
         values = listing_values(listing, body.values, filaments)
         picked = checked_picks(listing, values, body.picks, filaments)
+        check_one_material(listing, values, picked, filaments)
         resolved = listing_reference(listing, values, body.colours, filaments=filaments)
         if render_colours is not None and picked:
             colours = await render_colours(resolved.reference.render_key)
-            if colours:
-                chosen = slots_from_picks(body.colours, picked, colours)
-                resolved = listing_reference(listing, values, chosen, filaments=filaments)
+            if not colours:
+                # The slots are known only from a done render; without them the order
+                # line would lose what the visitor picked (#6152).
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "render_pending",
+                    "Your preview is still being made. Add it once it shows.",
+                )
+            chosen = slots_from_picks(body.colours, picked, colours)
+            resolved = listing_reference(listing, values, chosen, filaments=filaments)
         # The final slot map counts too: a slot may name a filament no pick does.
         check_one_material(
             listing,

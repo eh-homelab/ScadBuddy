@@ -636,7 +636,9 @@ def checked_fixed(
             fixed[parameter.name] = parameter.initial
     for name, value in fixed.items():
         parameter = by_name[name]
-        if parameter.type == "color" and not _sets_support(name, parameter.caption or ""):
+        if parameter.type == "color" and not _sets_support(
+            name, shown_label(name, None, parameter.caption)
+        ):
             _check_colour(name, value, offered)
     return fixed
 
@@ -887,7 +889,14 @@ async def public_listing(
             name: _public_param(name, b, by_name, colours) for name, b in listing.params.items()
         },
         colours=[
-            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            PublicFilament(
+                id=f.id,
+                colour=f.colour,
+                colour_name=f.colour_name,
+                material=f.material,
+                subtype=f.subtype,
+                brand=f.brand,
+            )
             for f in offered
         ],
         media=media,
