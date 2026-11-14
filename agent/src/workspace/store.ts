@@ -924,16 +924,10 @@ export class SessionFiles {
       // The parent's write lock, so a write to the parent waits for the fork: it locks its file
       // row before its bytes, the order this transaction would otherwise reverse.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${from}`}, 0))`
-      await tx`
-        INSERT INTO ai_session_file_bytes (sha256, data)
-        SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
-        WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')
-        ORDER BY sha256
-        ON CONFLICT (sha256) DO NOTHING`
-      // The bytes the parent's rows name, or are about to, stay until the child commits: a delete
-      // in the parent meanwhile cannot drop them under the child's foreign key. A row already gone
-      // is one no parent file names any more, so the insert below, reading afresh, leaves that
-      // file out.
+      // The bytes the parent's rows name, or are about to, stay until the child commits: locked
+      // first, so a sweep skips them, and a delete in the parent meanwhile cannot drop them under
+      // the child's foreign key. A row a sweep deleted before the lock is one no parent file
+      // names: the insert below, reading afresh, leaves that file out.
       await tx`
         SELECT 1 FROM ai_session_file_bytes
         WHERE sha256 IN (
@@ -941,6 +935,14 @@ export class SessionFiles {
           UNION
           SELECT sha256 FROM ai_session_files WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex'))
         FOR KEY SHARE`
+      // Then the bytes of the parent's inline rows that are not there yet (none was locked
+      // above): a row this transaction puts is no sweep's to see until it commits.
+      await tx`
+        INSERT INTO ai_session_file_bytes (sha256, data)
+        SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
+        WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')
+        ORDER BY sha256
+        ON CONFLICT (sha256) DO NOTHING`
       await tx`
         UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
         WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
