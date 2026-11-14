@@ -30,6 +30,7 @@ import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
 import { storefrontTools } from './storefront.js'
 import { libraryCopyTools } from './libraryCopy.js'
+import { makerworldTools } from './makerworld.js'
 import { templateTools } from './templates.js'
 import { toolCallTools } from './toolCalls.js'
 import { traySpoolTools } from './traySpools.js'
@@ -60,6 +61,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...settingsTools,
   ...storeTools,
   ...libraryCopyTools,
+  ...makerworldTools,
   ...printTools,
   ...printHistoryTools,
   ...printMediaTools,

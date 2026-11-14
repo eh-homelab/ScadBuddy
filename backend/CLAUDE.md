@@ -529,6 +529,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; it refuses to
   start without the KEK or a proof, and ignores `SCADBUDDY_DATABASE_URL` with a warning
   (`core/settings.py` `NoDatabaseSettings`).
+- MakerWorld import (#6119, #1254): `api/makerworld.py` (`/makerworld/status`, `/resolve`,
+  `/import`) calls Bambuddy's own MakerWorld routes with the API's key
+  (`BambuddyClient.makerworld_*`; Bambuddy's 400 for a link it refuses is a 422). The
+  assistant and flows import only through these routes (agent `get_makerworld_status`,
+  `resolve_makerworld_url`, `import_makerworld_model`): the agent worker has no route to
+  Bambuddy and never holds its key. The import is the `makerworld_import` operation on the
+  `library` queue (`makerworld/operations.py`): Bambuddy downloads the 3MF (up to
+  `MAKERWORLD_IMPORT_TIMEOUT`), then on `library_backend` native `makerworld/imports.py`
+  copies it into the native library as a `bb_to_sb` copy does
+  (`print_library/copy.py` `copy_file_to_native`: skipped for bytes it holds), so
+  `library_file_id` is the id the order and print routes take. `folder_id` is a native
+  folder (refused 422 on `bambuddy`); `bambuddy_folder_id` is Bambuddy's, such as a print
+  project's `folder_id`. A resolve on native maps Bambuddy's earlier imports to native
+  files by SHA-256.
 - Import print (#4698): `bambuddy/print_import.py` finds every place an archive's 3MF can
   be (the archive's file and slicer project, Bambuddy library files by name and hash, the
   printer's storage only when asked) and reads the one chosen; `api/print_imports.py`
