@@ -18,7 +18,6 @@ import logging
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import aclosing
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import psycopg
@@ -62,6 +61,7 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.printing import (
+    PRINT_TIMEOUT,
     ItemPrintRequest,
     print_check,
     print_item,
@@ -134,11 +134,6 @@ QUOTE_DETERMINISTIC: tuple[type[Exception], ...] = (
 #: blob swept, while the run read it. The next attempt's ``ensure_output`` renders and
 #: saves the output again, and slices again.
 QUOTE_RETRYABLE: tuple[type[Exception], ...] = (OutputNotFoundError, BlobMissingError)
-#: One ``order_item_print`` run: the print run's accept, which answers within the command
-#: deadline, and the attempt's row. Its slices and queueing are the print run's own. A
-#: start still being accepted is sent again for ``START_FOLLOW_S`` (240 s, #6138), and
-#: the last send (``ACCEPT_BUDGET``, 14 s) and the attach fit in the 60 s left.
-PRINT_TIMEOUT = timedelta(minutes=5)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:

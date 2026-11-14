@@ -65,6 +65,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
+from datetime import timedelta
 from typing import Any
 
 from fastapi import status
@@ -106,6 +107,11 @@ from scadbuddy.orders.quote import (
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.store import BlobStore
+from scadbuddy.workflows.commands import (
+    COMMAND_ANSWER_DEADLINE,
+    CONNECT_MARGIN_SECONDS,
+    DESCRIBE_SECONDS,
+)
 from scadbuddy.workflows.printing import CLIENT_ACCEPTING
 
 logger = logging.getLogger(__name__)
@@ -121,13 +127,31 @@ FOLLOWED_PROBLEMS = frozenset(
         "https://scadbuddy.dev/problems/temporal-unavailable",
     }
 )
+#: One ``order_item_print`` run (the kind's ``run_timeout``): the print run's accept,
+#: sent again while it is still being accepted, and the attempt's row. Its slices and
+#: queueing are the print run's own.
+PRINT_TIMEOUT = timedelta(minutes=5)
+#: One start's own wait: ``api/printing.py``'s ``ACCEPT_BUDGET`` (14 s), spelled from its
+#: parts because the orders package imports nothing of ``api/`` as it loads (a test holds
+#: them equal).
+ACCEPT_BUDGET_S = (
+    COMMAND_ANSWER_DEADLINE.total_seconds() + CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
+)
 #: How long ``print_item`` sends a start again while it answers one of
-#: ``FOLLOWED_PROBLEMS`` (#6138): the print dialog's and the agent's own bound for a start
-#: that is still being accepted (``CLIENT_ACCEPTING``, 240 s). The print run refuses
-#: itself when its check ends past it, so by then a start sent again answers the run or
-#: its refusal, unless Temporal itself stays away. It fits in the kind's
-#: ``PRINT_TIMEOUT`` (``orders/operations.py``).
-START_FOLLOW_S = CLIENT_ACCEPTING.total_seconds()
+#: ``FOLLOWED_PROBLEMS`` (#6138, #6187): ``CLIENT_ACCEPTING`` (240 s) and one
+#: ``ACCEPT_BUDGET_S``, 254 s. The bound starts before the first send, and the
+#: ``print-<key>`` workflow's clock starts within that send, so later than the bound's. The
+#: workflow refuses itself only when its check ends past ``CLIENT_ACCEPTING`` of its own
+#: clock; a check that ends just before still prints, and its row is written within the
+#: extra ``ACCEPT_BUDGET_S``, so a start sent then answers that run.
+START_FOLLOW_S = CLIENT_ACCEPTING.total_seconds() + ACCEPT_BUDGET_S
+#: What the attach and the follow after it may take, kept free at the run's end.
+ATTACH_MARGIN_S = 10.0
+#: How long ``_unsettled`` waits for ``existing`` once the bound ran out (#6187): what is
+#: left of ``PRINT_TIMEOUT`` after the bound, the last send (``ACCEPT_BUDGET_S``) and
+#: ``ATTACH_MARGIN_S``, 22 s. Past it, it cannot tell, as with Temporal away: the claim
+#: is kept and the failure names the attempt, never a bare activity timeout.
+LOOK_TIMEOUT_S = PRINT_TIMEOUT.total_seconds() - START_FOLLOW_S - ACCEPT_BUDGET_S - ATTACH_MARGIN_S
 #: The wait before the first start sent again, doubled after each, at most the second.
 FOLLOW_FIRST_WAIT_S = 1.0
 FOLLOW_MAX_WAIT_S = 30.0
@@ -679,6 +703,7 @@ async def print_item(
     project_id: int | None = None,
     revision_id: str | None = None,
     follow_for: float = START_FOLLOW_S,
+    look_for: float = LOOK_TIMEOUT_S,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> Fulfilment:
@@ -690,9 +715,10 @@ async def print_item(
     claim. A start that answers it may still run (``FOLLOWED_PROBLEMS``: still checking,
     Temporal busy or away, #6138) is sent again with the same request id, so it follows
     the same run, on a backoff, for ``follow_for`` seconds (:func:`send_until_answered`).
-    When that bound runs out, ``existing`` is asked once (:func:`_unsettled`): a run there
-    is attached, none releases the claim, and when it cannot tell, the claim is kept and
-    the failure names the attempt to settle by hand. Any other 5xx (Temporal refused)
+    When that bound runs out, ``existing`` is asked once, for at most ``look_for``
+    seconds (:func:`_unsettled`): a run there is attached, none releases the claim, and
+    when it cannot tell, the claim is kept and the failure names the attempt to settle by
+    hand. Any other 5xx (Temporal refused)
     keeps the claim too. A claim whose run is attached already starts nothing. A retry
     whose claim may no longer print (``ClaimRefusedError``: a hold, a cancel since) asks
     ``existing`` for the run its request made with the claim's ``copies``: one there is
@@ -736,7 +762,7 @@ async def print_item(
         )
     except ApiError as error:
         if may_still_run(error):
-            return await _unsettled(lifecycle, existing, claim, follow_for)
+            return await _unsettled(lifecycle, existing, claim, follow_for, look_for)
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
             # Its project may be one just deleted in Bambuddy (#5276): the next print,
@@ -788,17 +814,20 @@ async def _unsettled(
     existing: Callable[[int], Awaitable[PrintRun | None]],
     claim: Fulfilment,
     follow_for: float,
+    look_for: float,
 ) -> Fulfilment:
     """A claim whose start still said it may run when ``follow_for`` ran out (#6138).
     ``existing`` is asked once for the run the start made. A run is attached. None (no
     row, and no start of this request open in Temporal) means nothing prints for this
     request, so the claim is released and a new print may claim the item. When
-    ``existing`` cannot tell (the start still open, or Temporal away), a run may exist:
-    the claim is kept, so a new print can never print the item a second time, and the
-    failure names the attempt for a person to settle by hand (``PATCH``)."""
+    ``existing`` cannot tell (the start still open, Temporal away, or no answer within
+    ``look_for`` seconds, #6187), a run may exist: the claim is kept, so a new print can
+    never print the item a second time, and the failure names the attempt for a person to
+    settle by hand (``PATCH``)."""
     assert claim.copies is not None
     try:
-        run = await existing(claim.copies)
+        async with asyncio.timeout(look_for):
+            run = await existing(claim.copies)
     except Exception:
         logger.warning("could not tell whether an item's print started", exc_info=True)
     else:

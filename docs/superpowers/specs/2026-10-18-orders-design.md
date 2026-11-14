@@ -702,13 +702,15 @@ the claim (`release_print`, the item back to `approved` or `failed`), and one th
 still start (a 5xx) keeps it. A 5xx that says the start may still run (503
 `command-still-accepting`, or `temporal-unavailable`: Temporal busy or away) is sent again
 inside the run with the same `request_id`, which follows that run, on a backoff (1 s,
-doubled, at most 30 s) for `START_FOLLOW_S` (240 s, the print dialog's and the agent's own
-`CLIENT_ACCEPTING`, past which the print run refuses itself) (#6138). Before that fix the
-operation failed on the first such answer, nothing sent the start again, and the claim
-never got its run. When the bound runs out, the run's key is read once (as a retry reads
-it, below): a run there is attached; neither a run nor an open `print-<key>` workflow
-releases the claim; and when it cannot tell (the workflow still accepting, or Temporal
-away) the claim is kept, since a run may exist and a released claim would let a new print
+doubled, at most 30 s) for `START_FOLLOW_S` (254 s: `CLIENT_ACCEPTING`, 240 s, past which
+the print run refuses itself on its own clock, plus one `ACCEPT_BUDGET`, 14 s, since that
+clock starts within the first send, #6187) (#6138). Before that fix the operation failed
+on the first such answer, nothing sent the start again, and the claim never got its run.
+When the bound runs out, the run's key is read once (as a retry reads it, below), for at
+most `LOOK_TIMEOUT_S` (22 s, what is left of the run's 300 s after the bound, the last
+send and the attach): a run there is attached; neither a run nor an open `print-<key>`
+workflow releases the claim; and when it cannot tell (the workflow still accepting,
+Temporal away, or no answer in time) the claim is kept, since a run may exist and a released claim would let a new print
 print the item twice, and the failure names the attempt to settle by hand. Any other 5xx
 (a start Temporal refused, 500) fails the operation at once with the claim kept. The
 `request_id` is made from the item and the key, and a claim found under it on another item
