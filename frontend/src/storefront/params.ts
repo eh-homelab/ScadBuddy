@@ -92,7 +92,7 @@ export function keepOffered(listing: Listing, values: Readonly<Record<string, Pa
 }
 
 /** A colour's extruder note, "(extruder 2)": the shop's detail, never the customer's. */
-const EXTRUDER_NOTE = /\s*\(\s*extruder\s*\d+\s*\)/gi
+const EXTRUDER_NOTE = /\s*\(\s*extruder\s*[0-9]+\s*\)/gi
 
 /**
  * What the customer reads for parameter `name`: the listing's own `label`, else the

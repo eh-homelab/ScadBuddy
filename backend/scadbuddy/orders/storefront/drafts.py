@@ -174,9 +174,10 @@ def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, st
 
     An item does not record which listing it came from, and several listings may share a
     slug and commit. So a listing's own label is used only when every listing at that
-    pair shows the same one; otherwise the item reads the template's caption without its
-    extruder note, which never names another listing's choice. Like the listing page,
-    this reads each row's live ``params``, so an edited label shows at once."""
+    pair that offers the parameter shows the same one; otherwise the item reads the
+    template's caption without its extruder note, which never names another listing's
+    choice. Like the listing page, this reads each row's live ``params``, so an edited
+    label shows at once."""
     seen: dict[tuple[str, str], dict[str, set[str]]] = {}
     captions: dict[tuple[str, str], dict[str, str | None]] = {}
     for listing in listings:
@@ -184,12 +185,13 @@ def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, st
             continue
         pair = (listing.slug, listing.commit)
         bounds = listing.params
+        names = seen.setdefault(pair, {})
         for p in listing.snapshot.schema_.parameters:
             captions.setdefault(pair, {})[p.name] = p.caption
-            own = bounds[p.name].label if p.name in bounds else None
-            seen.setdefault(pair, {}).setdefault(p.name, set()).add(
-                shown_label(p.name, own, p.caption)
-            )
+            votes = names.setdefault(p.name, set())
+            # Only a listing that offers the parameter has a say in its label.
+            if p.name in bounds:
+                votes.add(shown_label(p.name, bounds[p.name].label, p.caption))
     found: dict[tuple[str, str], dict[str, str]] = {}
     for pair, names in seen.items():
         labels = found.setdefault(pair, {})

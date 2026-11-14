@@ -278,6 +278,9 @@ def _with_captions(listing: Listing, captions: dict[str, str]) -> Listing:
         # Only "(extruder N)" is the note; other forms are the template's own words.
         ("Colour (ext. 1)", "Colour (ext. 1)"),
         ("Colour (AMS slot 2)", "Colour (AMS slot 2)"),
+        # The same rule as the preview's `shownLabel` (params.test.ts has this table).
+        ("Rim(extruder 2)colour", "Rim colour"),
+        ("Colour (extruder \uff12)", "Colour (extruder \uff12)"),
     ],
 )
 def test_a_public_label_leaves_out_the_extruder_note(
@@ -340,4 +343,9 @@ def test_the_cart_never_shows_another_listings_label(listing: Listing) -> None:
     assert found[("demo", COMMIT)]["colour"] == "Letter colour"
     # Every listing at the pair agrees, so the cart shows the listings' own label.
     found = _captions([with_label("a", "Letters"), with_label("b", "Letters")])
+    assert found[("demo", COMMIT)]["colour"] == "Letters"
+    # A listing that does not offer the parameter has no say in its label.
+    bounds = {k: v for k, v in labelled.params.items() if k != "colour"}
+    locked = labelled.model_copy(update={"id": "c", "params": bounds})
+    found = _captions([with_label("a", "Letters"), locked])
     assert found[("demo", COMMIT)]["colour"] == "Letters"

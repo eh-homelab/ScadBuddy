@@ -45,7 +45,8 @@ MAX_TEXT_LENGTH = 200
 MAX_LABEL_LENGTH = 200
 #: A template caption's note of the extruder that prints a colour: the shop's, not the
 #: customer's (#6137).
-EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*\d+\s*\)", re.IGNORECASE)
+#: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
+EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
 
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
@@ -56,7 +57,7 @@ def shown_label(name: str, label: str | None, caption: str | None) -> str:
     if label:
         return label
     if caption:
-        return " ".join(EXTRUDER_NOTE.sub("", caption).split()) or caption
+        return " ".join(EXTRUDER_NOTE.sub(" ", caption).split()) or caption
     return name
 
 

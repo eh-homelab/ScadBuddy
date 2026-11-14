@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { keepOffered, parseNumber, valueText } from './params'
+import { keepOffered, parseNumber, shownLabel, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -38,5 +38,28 @@ describe('valueText', () => {
     expect(valueText(false)).toBe('No')
     expect(valueText(12.5)).toBe('12.5')
     expect(valueText('Ada')).toBe('Ada')
+  })
+})
+
+// The table of backend/tests/orders/storefront/test_inputs.py
+// `test_a_public_label_leaves_out_the_extruder_note`: the preview and the public page agree.
+describe('shownLabel (#6137)', () => {
+  it.each([
+    ['Letter colour (extruder 2)', 'Letter colour'],
+    ['Base and border colour (Extruder 1)', 'Base and border colour'],
+    ['Colour (extruder 1) of the rim', 'Colour of the rim'],
+    ['Width (mm)', 'Width (mm)'],
+    ['(extruder 1)', '(extruder 1)'],
+    ['Colour (ext. 1)', 'Colour (ext. 1)'],
+    ['Colour (AMS slot 2)', 'Colour (AMS slot 2)'],
+    ['Rim(extruder 2)colour', 'Rim colour'],
+    ['Colour (extruder \uff12)', 'Colour (extruder \uff12)'],
+  ])('shows %j as %j', (caption, shown) => {
+    expect(shownLabel('colour', null, caption)).toBe(shown)
+  })
+
+  it('takes the listing’s own label, else the name', () => {
+    expect(shownLabel('colour', 'Letters', 'Letter colour (extruder 2)')).toBe('Letters')
+    expect(shownLabel('colour', null, null)).toBe('colour')
   })
 })
