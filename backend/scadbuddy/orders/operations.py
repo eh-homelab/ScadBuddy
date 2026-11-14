@@ -694,7 +694,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``);
         a test print of the request's ``revision_id`` when it names one."""
-        # The run's one clock (#6193): the project and the claim count against its time.
+        # The run's one clock (#6193), on its first line: the project and the claim
+        # count against its time (`print_item`'s `started`).
         started = time.monotonic()
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
@@ -757,7 +758,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if file_id is not None:
                 # The library print route's own start (#5544): its subject, its slug and
                 # the file's filament slots, read as that route reads them (#2550).
-                started = await start_library_run(
+                library_run = await start_library_run(
                     file_id,
                     print_body(request, copies, projects[0], plan, quoted_settings, setup),
                     runs=core.print_runs,
@@ -770,8 +771,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     # #5602: as the output's run below.
                     api=True if request.get("api") else None,
                 )
-                assert isinstance(started, PrintRun)
-                return started
+                assert isinstance(library_run, PrintRun)
+                return library_run
             run = await accept_run(
                 core.print_runs,
                 Response(),

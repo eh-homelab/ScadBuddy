@@ -41,7 +41,6 @@ from scadbuddy.orders.printing import (
     FOLLOW_MAX_WAIT_S,
     FOLLOWED_PROBLEMS,
     LOOK_MIN_S,
-    LOOK_TIMEOUT_S,
     PRINT_TIMEOUT,
     START_FOLLOW_S,
     print_item,
@@ -152,7 +151,6 @@ def run_print(
     existing: Any,
     *,
     follow_for: float = 60.0,
-    look_for: float = LOOK_TIMEOUT_S,
     clock: Clock | None = None,
 ) -> Fulfilment:
     sleeper = clock or Clock()
@@ -168,7 +166,6 @@ def run_print(
             sliced_sha256=None,
             sliced_blob_key=None,
             follow_for=follow_for,
-            look_for=look_for,
             sleep=sleeper.sleep,
             clock=sleeper,
         )
@@ -192,14 +189,14 @@ def test_the_accept_budget_is_the_apis() -> None:
 
 
 def test_the_bound_the_last_send_the_look_and_the_attach_fit_in_the_runs_timeout() -> None:
-    """#6187: the bound is the print run's own refusal point plus one start's wait, and
-    what is left of the run's timeout after it, the last send and the attach is the look's."""
+    """#6187, #6193: the bound is the print run's own refusal point plus one start's
+    wait, and with nothing slow before the start the last send, the least look and the
+    attach margin still fit after it (22 s of look at least)."""
     assert CLIENT_ACCEPTING.total_seconds() + ACCEPT_BUDGET_S == START_FOLLOW_S
-    assert LOOK_TIMEOUT_S > 0
-    assert (
-        PRINT_TIMEOUT.total_seconds()
-        >= START_FOLLOW_S + ACCEPT_BUDGET_S + LOOK_TIMEOUT_S + ATTACH_MARGIN_S
-    )
+    least_look = PRINT_TIMEOUT.total_seconds() - START_FOLLOW_S - ACCEPT_BUDGET_S
+    least_look -= ATTACH_MARGIN_S
+    assert least_look == 22
+    assert least_look >= LOOK_MIN_S
 
 
 def test_a_run_whose_row_comes_just_past_240_s_is_attached() -> None:
@@ -314,8 +311,8 @@ def test_at_the_bound_a_run_that_may_exist_keeps_the_claim(unknown: Exception) -
 
 def test_at_the_bound_a_look_with_no_answer_in_time_keeps_the_claim() -> None:
     """#6187: with Temporal away, the look could use up the run's timeout and end as a
-    bare activity timeout. Past ``look_for`` it cannot tell: the claim is kept and the
-    failure names the attempt."""
+    bare activity timeout. Past the time left on the run's clock it cannot tell: the claim
+    is kept and the failure names the attempt."""
     lifecycle = FakeLifecycle()
 
     async def never_answers(copies: int) -> PrintRun | None:
@@ -324,12 +321,17 @@ def test_at_the_bound_a_look_with_no_answer_in_time_keeps_the_claim() -> None:
 
     clock = Clock()
 
+    async def slow_down(copies: int) -> PrintRun:
+        # One send that waits out its accept budget, then finds Temporal away.
+        clock.now += ACCEPT_BUDGET_S
+        raise fresh(DOWN)
+
     async def bounded() -> Fulfilment:
         # The outer bound only stops a hang without the fix; one loop, so it cancels.
         return await asyncio.wait_for(
             print_item(
                 cast(Lifecycle, lifecycle),
-                answers(DOWN),
+                slow_down,
                 never_answers,
                 "o1",
                 "i1",
@@ -337,8 +339,8 @@ def test_at_the_bound_a_look_with_no_answer_in_time_keeps_the_claim() -> None:
                 request_id="k",
                 sliced_sha256=None,
                 sliced_blob_key=None,
-                follow_for=10,
-                look_for=0.05,
+                # After the one send, 0.05 s is left before the attach margin.
+                started=-(PRINT_TIMEOUT.total_seconds() - ATTACH_MARGIN_S - ACCEPT_BUDGET_S - 0.05),
                 sleep=clock.sleep,
                 clock=clock,
             ),
@@ -350,6 +352,89 @@ def test_at_the_bound_a_look_with_no_answer_in_time_keeps_the_claim() -> None:
     assert caught.value.status == 503
     assert lifecycle.released == []
     assert "Attempt 3 stays queued" in caught.value.detail
+
+
+def test_the_look_at_the_bound_takes_all_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6193: the look is not capped at the 22 s it has at least. When the last send
+    answers at once, it gets all the time left before the attach margin: here the follow
+    ends at 254 s, so 300 - 254 - 10 = 36 s."""
+    given: list[float] = []
+    real_timeout = asyncio.timeout
+
+    def recorded(delay: float | None) -> asyncio.Timeout:
+        assert delay is not None
+        given.append(delay)
+        return real_timeout(delay)
+
+    # `print_item` reads `asyncio.timeout` from the module when it looks.
+    monkeypatch.setattr(asyncio, "timeout", recorded)
+    lifecycle = FakeLifecycle()
+    clock = Clock()
+    with pytest.raises(ApiError):
+        asyncio.run(
+            print_item(
+                cast(Lifecycle, lifecycle),
+                answers(STILL_CHECKING),
+                no_run,
+                "o1",
+                "i1",
+                BY,
+                request_id="k",
+                sliced_sha256=None,
+                sliced_blob_key=None,
+                started=0.0,
+                sleep=clock.sleep,
+                clock=clock,
+            )
+        )
+    assert clock.now == START_FOLLOW_S
+    assert given == [PRINT_TIMEOUT.total_seconds() - START_FOLLOW_S - ATTACH_MARGIN_S]
+
+
+def test_a_follow_cut_below_nothing_names_the_runs_time() -> None:
+    """#6197: slow work before the start can cut the follow below zero. One send is still
+    made, the look gets what is left, and the release names the run's own elapsed time,
+    never "within 0s"."""
+    clock = Clock()
+
+    async def slow_send(copies: int) -> PrintRun:
+        clock.now += ACCEPT_BUDGET_S
+        raise fresh(STILL_CHECKING)
+
+    looked: list[float] = []
+
+    async def looks(copies: int) -> PrintRun | None:
+        looked.append(clock.now)
+        return None
+
+    lifecycle = FakeLifecycle()
+    # 16 s left before the attach margin: the follow is 16 - 14 - 5 = -3 s.
+    started = -(PRINT_TIMEOUT.total_seconds() - ATTACH_MARGIN_S - 16)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(
+            print_item(
+                cast(Lifecycle, lifecycle),
+                slow_send,
+                looks,
+                "o1",
+                "i1",
+                BY,
+                request_id="k",
+                sliced_sha256=None,
+                sliced_blob_key=None,
+                started=started,
+                sleep=clock.sleep,
+                clock=clock,
+            )
+        )
+    # One send, then the look with the 2 s left.
+    assert looked == [ACCEPT_BUDGET_S]
+    elapsed = ACCEPT_BUDGET_S - started
+    assert f"in the {elapsed:.0f}s since its run began" in caught.value.detail
+    assert "within 0s" not in caught.value.detail
+    assert lifecycle.released == [
+        caught.value.detail.removesuffix(". The item is released: print it again.")
+    ]
 
 
 def test_a_library_file_start_still_accepting_is_sent_again(

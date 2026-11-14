@@ -149,12 +149,11 @@ START_FOLLOW_S = CLIENT_ACCEPTING.total_seconds() + ACCEPT_BUDGET_S
 ATTACH_MARGIN_S = 10.0
 #: The least time the follow leaves for the look at its end (#6193): a run whose work
 #: before the start was slow follows for less, never into the look's or the attach's time.
+#: The look itself takes all the time left on the run's clock before ``ATTACH_MARGIN_S``,
+#: with no cap: a longer look can only find the run more often. With nothing slow before
+#: the start, at least 22 s is left for it (300 - 254 - 14 - 10); when the last send
+#: answers at once, more.
 LOOK_MIN_S = 5.0
-#: How long the look at the run takes when nothing before it was slow (#6187): what is
-#: left of ``PRINT_TIMEOUT`` after the bound, the last send (``ACCEPT_BUDGET_S``) and
-#: ``ATTACH_MARGIN_S``, 22 s. Every look is given the time left on the run's one clock
-#: (``print_item`` ``started``, #6193), so this is its most, not a fixed wait.
-LOOK_TIMEOUT_S = PRINT_TIMEOUT.total_seconds() - START_FOLLOW_S - ACCEPT_BUDGET_S - ATTACH_MARGIN_S
 #: The wait before the first start sent again, doubled after each, at most the second.
 FOLLOW_FIRST_WAIT_S = 1.0
 FOLLOW_MAX_WAIT_S = 30.0
@@ -706,9 +705,7 @@ async def print_item(
     project_id: int | None = None,
     revision_id: str | None = None,
     started: float | None = None,
-    budget: float = PRINT_TIMEOUT.total_seconds(),
     follow_for: float = START_FOLLOW_S,
-    look_for: float | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> Fulfilment:
@@ -731,18 +728,23 @@ async def print_item(
     ``revision_id`` the claim is a test print of that revision
     (``Lifecycle.claim_print``).
 
-    Time (#6193): one clock, ``started`` (on ``clock``; the run's start, so the work its
-    caller did first counts, else now), against ``budget`` (the kind's ``PRINT_TIMEOUT``)
-    less ``ATTACH_MARGIN_S``. The follow is cut so that ``ACCEPT_BUDGET_S`` and
-    ``LOOK_MIN_S`` stay after it, and each look at ``existing`` is given the time left, at
-    most ``look_for`` when set. So the whole run, slow work before the start included,
-    ends inside the activity's timeout with the failure that names the attempt."""
+    Time (#6193): one clock, ``started`` (on ``clock``), against ``PRINT_TIMEOUT`` less
+    ``ATTACH_MARGIN_S``. ``item_print_run`` takes it on its first line, so it covers the
+    kind's whole run: the item's project, the claim, the sends and the looks. It does not
+    cover the activity's own setup before the run is called (``operation_activities.py``:
+    the author context and the heartbeat task, no I/O). Without ``started`` the clock
+    starts here. The follow is cut so that ``ACCEPT_BUDGET_S`` and ``LOOK_MIN_S`` stay
+    after it, and each look at ``existing`` takes all the time left before the attach
+    margin. So the whole run, slow work before the start included, ends inside the
+    activity's timeout with the failure that names the attempt."""
     began = clock() if started is None else started
-    deadline = began + budget - ATTACH_MARGIN_S
+    deadline = began + PRINT_TIMEOUT.total_seconds() - ATTACH_MARGIN_S
 
     def look_left() -> float:
-        left = max(0.0, deadline - clock())
-        return left if look_for is None else min(left, look_for)
+        return max(0.0, deadline - clock())
+
+    def elapsed() -> float:
+        return clock() - began
 
     try:
         claim = await to_thread_to_end(
@@ -792,7 +794,7 @@ async def print_item(
         )
     except ApiError as error:
         if may_still_run(error):
-            return await _unsettled(lifecycle, existing, claim, follow, look_left())
+            return await _unsettled(lifecycle, existing, claim, elapsed(), look_left())
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
             # Its project may be one just deleted in Bambuddy (#5276): the next print,
@@ -843,10 +845,12 @@ async def _unsettled(
     lifecycle: Lifecycle,
     existing: Callable[[int], Awaitable[PrintRun | None]],
     claim: Fulfilment,
-    follow_for: float,
+    elapsed: float,
     look_for: float,
 ) -> Fulfilment:
-    """A claim whose start still said it may run when ``follow_for`` ran out (#6138).
+    """A claim whose start still said it may run when its follow ran out (#6138),
+    ``elapsed`` seconds into its run (#6197: the run's clock, not the follow's, which slow
+    work before the start can cut to nothing).
     ``existing`` is asked once for the run the start made. A run is attached. None (no
     row, and no start of this request open in Temporal) means nothing prints for this
     request, so the claim is released and a new print may claim the item. When
@@ -864,13 +868,16 @@ async def _unsettled(
         if run is not None:
             return await _attached(lifecycle, claim, run)
         reason = (
-            f"the print did not start within {max(follow_for, 0):.0f}s, and no print run was made"
+            f"the print did not start in the {elapsed:.0f}s since its run began,"
+            " and no print run was made"
         )
         await asyncio.to_thread(lifecycle.release_print, claim, reason)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"{reason}. The item is released: print it again."
         )
-    raise _run_unknown(claim, f"the print was still being accepted after {max(follow_for, 0):.0f}s")
+    raise _run_unknown(
+        claim, f"the print was still being accepted {elapsed:.0f}s after its run began"
+    )
 
 
 def _run_unknown(claim: Fulfilment, why: str) -> ApiError:

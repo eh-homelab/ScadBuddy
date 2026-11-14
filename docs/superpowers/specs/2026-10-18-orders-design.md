@@ -707,10 +707,11 @@ the print run refuses itself on its own clock, plus one `ACCEPT_BUDGET`, 14 s, s
 clock starts within the first send, #6187) (#6138). Before that fix the operation failed
 on the first such answer, nothing sent the start again, and the claim never got its run.
 When the bound runs out, the run's key is read once (as a retry reads it, below), for the
-time left on the run's one clock (#6193: taken when the run starts, before the item's
-project and the claim, against the run's 300 s less a 10 s attach margin; the follow is
-cut so that the last send and at least 5 s of look stay, so with nothing slow before the
-start the look has 22 s): a run there is attached; neither a run nor an open `print-<key>`
+time left on the run's one clock, with no cap of its own (#6193: taken on the run's first
+line, before the item's project and the claim, against the run's 300 s less a 10 s attach
+margin; the follow is cut so that the last send and at least 5 s of look stay; with
+nothing slow before the start the look has at least 22 s, and more when the last send
+answers at once): a run there is attached; neither a run nor an open `print-<key>`
 workflow releases the claim; and when it cannot tell (the workflow still accepting,
 Temporal away, or no answer in time) the claim is kept, since a run may exist and a released claim would let a new print
 print the item twice, and the failure names the attempt to settle by hand. Any other 5xx
