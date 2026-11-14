@@ -1405,8 +1405,10 @@ each row by its id and the values it must still have, so the file is a no-op els
   (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
   never decides: a record linked to a group whose RGB its spools had, then a record linked
   to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
-  over a colour. The matched groups are written first, then the new ones; a group whose
-  RGB is another record's colour is skipped `colour_taken`). The migration sets no link
+  over a colour. `_write_order` writes the matched groups first, each time one whose RGB
+  no other record holds now, so a record that moves to a colour another record is leaving
+  waits for it; then the new groups. A group whose RGB is another record's colour is
+  skipped `colour_taken`). The migration sets no link
   (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two prod
   stand-ins for clear spools (ids and colours pinned in it) get `colour_source` `manual` and
   `spool_colour` `#000000`, so the import finds them by their spools' `#000000`. The next

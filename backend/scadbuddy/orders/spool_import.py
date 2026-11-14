@@ -19,7 +19,7 @@ takes :func:`density_for`'s; a record no spool of the inventory matches has no s
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -88,11 +88,19 @@ def _same_names(
 
 
 def _linked(
-    group: SpoolGroup, records: list[ImportRecord], claimed: set[str]
+    group: SpoolGroup,
+    records: list[ImportRecord],
+    claimed: set[str],
+    spool_colour: str | None = None,
 ) -> ImportRecord | None:
-    """The record of ``group``'s names linked to most of its spools (#6209)."""
+    """The record of ``group``'s names linked to most of its spools (#6209); with
+    ``spool_colour``, only among the records whose spools had that RGB."""
     ids = {spool_id for spool_id, _ in group.spools}
-    linked = [r for r in _same_names(group, records, claimed) if ids & set(r.spool_ids)]
+    linked = [
+        r
+        for r in _same_names(group, records, claimed)
+        if ids & set(r.spool_ids) and spool_colour in (None, r.spool_colour)
+    ]
     return max(linked, key=lambda r: len(ids & set(r.spool_ids))) if linked else None
 
 
@@ -140,14 +148,41 @@ def _matches(groups: list[SpoolGroup], records: list[ImportRecord]) -> dict[int,
                 matched[index] = record
                 claimed.add(record.id)
 
-    def kept(group: SpoolGroup, colour: str) -> ImportRecord | None:
-        record = _linked(group, records, claimed)
-        return record if record is not None and record.spool_colour == colour else None
-
-    take(kept)
+    take(lambda group, colour: _linked(group, records, claimed, colour))
     take(lambda group, _colour: _linked(group, records, claimed))
     take(lambda group, colour: _by_colour(group, colour, records, claimed))
     return matched
+
+
+def _write_order(
+    groups: list[SpoolGroup], matched: dict[int, ImportRecord], records: list[ImportRecord]
+) -> Iterator[int]:
+    """The order :func:`import_spools` writes the groups in (#6211 review): the matched
+    groups first, each time one whose RGB no other record of its names holds now, so a
+    record that moves to a colour another record is leaving waits for it; then the new
+    groups, which check ``colour_taken`` against the colours the run gave. ``records`` is
+    read live: the import updates it as it writes. Only a true swap of two records'
+    colours is left: the first written keeps its look until the next import. The rows
+    keep the groups' order."""
+    pending = [i for i in range(len(groups)) if i in matched]
+    while pending:
+        free = next(
+            (
+                i
+                for i in pending
+                if not any(
+                    r.id != matched[i].id
+                    and _names(r.material, r.subtype, r.brand)
+                    == _names(groups[i].material, groups[i].subtype, groups[i].brand)
+                    and r.colour.upper() == groups[i].colour
+                    for r in records
+                )
+            ),
+            pending[0],
+        )
+        pending.remove(free)
+        yield free
+    yield from (i for i in range(len(groups)) if i not in matched)
 
 
 def _look(group: SpoolGroup, colour: str) -> dict[str, object]:
@@ -172,9 +207,7 @@ def import_spools(
     with store.transaction() as conn:
         records = store.import_records(conn)
         matched = _matches(groups, records)
-        # The matched groups first, so a new group checks `taken` against the colours
-        # its run gave the matched records; the rows keep the groups' order.
-        for index in sorted(range(len(groups)), key=lambda i: i not in matched):
+        for index in _write_order(groups, matched, records):
             group = groups[index]
             spool_ids = [spool_id for spool_id, _ in group.spools]
             priced = [(i, p) for i, raw in group.spools if (p := _price(raw)) is not None]
@@ -201,8 +234,9 @@ def import_spools(
             price = max(priced)[1]
             record = matched.get(index)
             # The colour the group would take is a colour another record of its names
-            # holds (one a person set): a second record, or the change, would break the
-            # identity index. A matched record has the group's names (`_same_names`).
+            # holds now (set by a person or by the import): a second record, or the
+            # change, would break the identity index. A matched record has the group's
+            # names (`_same_names`).
             group_names = _names(group.material, group.subtype, group.brand)
             taken = any(
                 r.id != (None if record is None else record.id)

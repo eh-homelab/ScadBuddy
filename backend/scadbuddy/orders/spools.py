@@ -3,7 +3,7 @@
 
 A quote names a price-book filament per colour slot (§3.3), never a spool, so the print
 fills ``filament_plan.slots`` when it starts, on the printer it runs on. A spool is of a
-filament as the spool import matches them (#6209, ``orders/spool_import.py`` ``_match``):
+filament as the spool import matches them (#6209, ``orders/spool_import.py`` ``_matches``):
 the same material, subtype and brand, upper-cased, and the record's link to it (its
 ``spool_ids``), else the spools' ``#RRGGBB`` at the last import (``spool_colour``), else,
 for a record the import never linked, its own ``colour``. So a colour a person set never

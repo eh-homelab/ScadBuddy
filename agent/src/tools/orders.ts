@@ -2837,7 +2837,8 @@ export const orderTools: Tool[] = [
       "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
       'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
       "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
-      'A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
+      'A filament known only by its colour name, with no priced spool, or whose colour another record of its ' +
+      'material, subtype and brand already has (`colour_taken`), is `skipped` with its `reason`. ' +
       "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
     input: z.object({}),
     risk: 'write',

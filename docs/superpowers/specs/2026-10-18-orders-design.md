@@ -658,7 +658,9 @@ any print.
 `filament_plan.slots` (F7) when it starts, on the printer it runs on:
 
 - With Bambuddy configured, a slot's spool is the one loaded on that printer whose
-  `_filament_key` is the slot's filament's (§5.1); with none loaded, the unarchived
+  `_filament_key` is the slot's filament's (§5.1; as built, #6209: by the record's link
+  to its spools first, then the spools' colour at the last import, then the record's own
+  colour, see "As built, the spools"); with none loaded, the unarchived
   spool of that filament on the shelf with the most grams left, as the print dialog's
   spool-first choice makes it (`bambuddy/filaments.py` `_display_order`). A spool
   loaded in another printer is never taken: using it means unloading it there, which
@@ -1238,7 +1240,8 @@ Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
 
 The price book's filament records can be **imported from spools**: `POST
 /orders/price-book/import-spools` reads the inventory (`inventory_view`), groups by
-`_filament_key`, and makes or updates one filament record per group with the spools'
+`_filament_key`, and makes or updates one filament record per group (as built, #6209: a
+group finds its record by the link to its spools first, see below) with the spools'
 `cost_per_kg` (the most recent spool's, with the spread shown when they differ) and
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.

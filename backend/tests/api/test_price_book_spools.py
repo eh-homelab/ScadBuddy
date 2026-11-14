@@ -357,3 +357,49 @@ def test_a_spool_link_wins_over_a_colour_in_any_group_order(client: TestClient) 
     book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
     assert book[made["filament_id"]]["colour"] == "#FF0000"
     assert book[blue_row["filament_id"]]["colour"] == "#0000FF"
+
+
+@respx.mock
+def test_a_record_moves_to_a_colour_another_record_leaves_in_one_import(
+    client: TestClient,
+) -> None:
+    """#6211 review: A's spool takes B's colour while B's spool takes a new one. B moves
+    first, so A takes its colour in the same import, though A's group sorts first."""
+    configure(client)
+    no_density_sources()
+    red = {"rgba": "FF0000FF", "color_name": "Red"}
+    blue = {"rgba": "0000FFFF", "color_name": "Blue"}
+    green = {"rgba": "00FF00FF", "color_name": "Green"}
+    _inventory(spool(1, **red, cost_per_kg=20), spool(2, **blue, cost_per_kg=20))
+    made = {r["colour"]: r["filament_id"] for r in client.post(IMPORT).json()["rows"]}
+
+    _inventory(spool(1, **blue, cost_per_kg=20), spool(2, **green, cost_per_kg=20))
+    rows = client.post(IMPORT).json()["rows"]
+
+    assert [(r["colour"], r["action"], r["reason"]) for r in rows] == [
+        ("#0000FF", "updated", None),
+        ("#00FF00", "updated", None),
+    ]
+    book = {f["id"]: f["colour"] for f in client.get(BOOK).json()["filaments"]}
+    assert book == {made["#FF0000"]: "#0000FF", made["#0000FF"]: "#00FF00"}
+
+
+@respx.mock
+def test_a_group_keeps_the_linked_record_of_its_colour(client: TestClient) -> None:
+    """#6211 review: a group linked to two records goes to the one whose spools had its
+    RGB, though the other is linked to more of its spools."""
+    configure(client)
+    no_density_sources()
+    red = {"rgba": "FF0000FF", "color_name": "Red"}
+    blue = {"rgba": "0000FFFF", "color_name": "Blue"}
+    _inventory(
+        spool(1, **red, cost_per_kg=20),
+        spool(2, **red, cost_per_kg=20),
+        spool(3, **blue, cost_per_kg=20),
+    )
+    made = {r["colour"]: r["filament_id"] for r in client.post(IMPORT).json()["rows"]}
+
+    _inventory(*(spool(i, **blue, cost_per_kg=30) for i in (1, 2, 3)))
+    [row] = client.post(IMPORT).json()["rows"]
+
+    assert (row["filament_id"], row["spool_ids"]) == (made["#0000FF"], [1, 2, 3])
