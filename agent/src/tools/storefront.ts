@@ -40,9 +40,12 @@ export const storefrontTools: Tool[] = [
       'Draft a public storefront listing (#6131), unpublished, as the Storefront page\'s "Sell on storefront" fills one ' +
       'in: from a saved output (`output_id`: its design version, values and name) or from a model (`slug`, with ' +
       '`values` for the parameters to set; the template defaults otherwise, at its current version). Free text is ' +
-      "the customer's to type; a colour is offered when it is the template's default and a price-book filament has " +
-      'it, else locked; everything else is locked at its value. Each colour\'s filament joins the listing; the ' +
-      "model's images are its pictures. A colour the customer can choose never goes in the title: it is taken out. " +
+      "the customer's to type and every colour is the customer's to choose, from the price book's filaments of the " +
+      "design's material (any material when no colour matches one); everything else is locked at its value. `lock` " +
+      'locks named parameters at their value, colours included, only when the person asked for that. Support ' +
+      'settings (a parameter that names support or interface) are never offered, and a support colour is never a ' +
+      "colour on offer. The model's " +
+      'images are its pictures. A colour the customer can choose never goes in the title: it is taken out. ' +
       'Answers the listing id, `colour_problems` (colours no filament has: publish refuses them until the person ' +
       'picks a filament on the page or adds one to the price book), `notes` (a version taken instead, a slow ' +
       'render) and `page`, the link that opens it in the editor. Nothing is on the store until ' +
@@ -52,6 +55,11 @@ export const storefrontTools: Tool[] = [
       slug: slug.optional().describe('The model to sell, when there is no saved output'),
       values: z.record(z.string(), value).optional().describe("With `slug`: parameter values to set; the rest take the template's defaults"),
       title: z.string().min(1).max(200).optional().describe("The product's title; the output's name, else the model's, by default"),
+      lock: z
+        .array(z.string().min(1).max(200))
+        .max(200)
+        .optional()
+        .describe('Parameters the customer may not change, locked at their value: only those the person asked to lock'),
     }),
     risk: 'write',
     routes: [
@@ -64,7 +72,7 @@ export const storefrontTools: Tool[] = [
       'POST /api/v1/storefront/listings',
     ],
     summarize: ({ output_id, slug: model }) => `Draft a storefront listing of ${output_id ? `output ${output_id}` : `model ${model ?? '?'}`}`,
-    handler: async ({ output_id, slug: model, values, title }, ctx) => {
+    handler: async ({ output_id, slug: model, values, title, lock }, ctx) => {
       const { backend } = ctx
       if ((output_id === undefined) === (model === undefined)) throw new ToolError('name exactly one of output_id and slug')
       if (output_id !== undefined && values !== undefined) throw new ToolError('values go with slug; an output brings its own')
@@ -85,7 +93,15 @@ export const storefrontTools: Tool[] = [
       )
       const book = await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')
       const filaments = book.filaments
-      const listing = defaultsFor(schema, filaments, (output?.params ?? values ?? {}) as Record<string, Value>)
+      const given = (output?.params ?? values ?? {}) as Record<string, Value>
+      const listing = defaultsFor(schema, filaments, given)
+      for (const name of lock ?? []) {
+        const param = (schema.parameters ?? []).find((p) => p.name === name)
+        if (!param) throw new ToolError(`${name} is not a parameter of ${record.name}`)
+        const locked = given[name] ?? param.initial
+        delete listing.params[name]
+        if (locked !== undefined && locked !== null) listing.fixed[name] = locked
+      }
       const took = renderSeconds(job)
       if (took !== null && took > SLOW_RENDER_SECONDS) {
         notes.push(`This design took ${Math.round(took)} s to render; the store's preview and price give up after about ${SLOW_RENDER_SECONDS} s (#6120).`)
@@ -102,8 +118,7 @@ export const storefrontTools: Tool[] = [
             commit,
             title: shownTitle,
             description: '',
-            params: withColourChoices(listing, schema, filaments),
-            fixed: listing.fixed,
+            ...withColourChoices(listing, schema, filaments),
             colours: listing.colours,
             media_ids: sellMedia(record.media ?? []),
           },

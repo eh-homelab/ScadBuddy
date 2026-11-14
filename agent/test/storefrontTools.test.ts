@@ -6,7 +6,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import type { components } from '../src/api/schema.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
-import { defaultsFor, titleColours, withoutWords } from '../src/tools/storefrontDraft.js'
+import { defaultsFor, titleColours, withColourChoices, withoutWords } from '../src/tools/storefrontDraft.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #6131 (design 2026-11-13 §6) — the assistant's storefront tools: a draft (`write`) built
@@ -50,6 +50,38 @@ const owl = vectors[0] as Vector
 const OUTPUT = 'a'.repeat(32)
 const COMMIT = 'c'.repeat(40)
 const LISTING = 'l1'
+/** The owl's colours on offer: its priced PLA filaments, the one its body is first. */
+const ALL_COLOURS = ['#1F2A44', '#000000', '#ffffff']
+
+/** The owl's output, model, schema and price book; `onPost` gets the listing a draft posts. */
+function serveOwl(onPost: (body: unknown) => void): void {
+  server.use(
+    http.get(`${BACKEND}/api/v1/outputs/${OUTPUT}`, () =>
+      HttpResponse.json({ id: OUTPUT, slug: 'owl', model_version: COMMIT, name: 'Hoot owl – Black', job_id: 'j1', params: owl.values }),
+    ),
+    http.get(`${BACKEND}/api/v1/jobs/j1`, () =>
+      HttpResponse.json({ id: 'j1', slug: 'owl', status: 'done', started_at: '2026-11-13T10:00:00Z', finished_at: '2026-11-13T10:02:00Z' }),
+    ),
+    http.get(`${BACKEND}/api/v1/models/owl`, () =>
+      HttpResponse.json({
+        slug: 'owl',
+        name: 'Owl',
+        media: [
+          { id: 'cover', file: 'cover.png', kind: 'image', caption: '', missing: false, content_type: 'image/png' },
+          { id: 'clip', file: 'clip.mp4', kind: 'video', caption: '', missing: false, content_type: 'video/mp4' },
+        ],
+      }),
+    ),
+    http.get(`${BACKEND}/api/v1/models/owl/versions`, () => HttpResponse.json([{ commit: COMMIT, short: 'ccccccc', current: true }])),
+    http.get(`${BACKEND}/api/v1/models/owl/versions/${COMMIT}/schema`, () => HttpResponse.json(owl.schema)),
+    http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json({ filaments: owl.filaments })),
+    http.post(`${BACKEND}/api/v1/storefront/listings`, async ({ request }) => {
+      const body = (await request.json()) as { title: string; params: Record<string, unknown> }
+      onPost(body)
+      return HttpResponse.json({ id: LISTING, ...body, published: false }, { status: 201 })
+    }),
+  )
+}
 
 describe('storefront tools (#6131)', () => {
   it('drafts at write and publishes at outward', () => {
@@ -69,41 +101,34 @@ describe('storefront tools (#6131)', () => {
     expect(withoutWords('Owl Pencil Cup – Navy', ['Navy'])).toBe('Owl Pencil Cup')
   })
 
+  it('never offers a support setting, nor a colour only a support setting uses', () => {
+    const support = vectors.find((vector) => vector.name.startsWith('support settings')) as Vector
+    const listing = defaultsFor(support.schema, support.filaments, {})
+    // The PVA filament joins the listing for the locked support colour (the page's fixColour),
+    // and an old listing offers the supports switch.
+    const saved = withColourChoices(
+      { ...listing, params: { ...listing.params, supports: { kind: 'choice', choices: [true, false] } }, colours: [...listing.colours, 'f-pva'] },
+      support.schema,
+      support.filaments,
+    )
+    expect(saved.params).toEqual({ body: { kind: 'choice', choices: ['#ffffff'] } })
+    expect(saved.fixed).toMatchObject({ supports: true, support_colour: '#F5F5DC' })
+  })
+
   it('drafts an owl from its output, unpublished, with the colour on offer out of its title', async () => {
     let posted: unknown
-    server.use(
-      http.get(`${BACKEND}/api/v1/outputs/${OUTPUT}`, () =>
-        HttpResponse.json({ id: OUTPUT, slug: 'owl', model_version: COMMIT, name: 'Hoot owl – Black', job_id: 'j1', params: owl.values }),
-      ),
-      http.get(`${BACKEND}/api/v1/jobs/j1`, () =>
-        HttpResponse.json({ id: 'j1', slug: 'owl', status: 'done', started_at: '2026-11-13T10:00:00Z', finished_at: '2026-11-13T10:02:00Z' }),
-      ),
-      http.get(`${BACKEND}/api/v1/models/owl`, () =>
-        HttpResponse.json({
-          slug: 'owl',
-          name: 'Owl',
-          media: [
-            { id: 'cover', file: 'cover.png', kind: 'image', caption: '', missing: false, content_type: 'image/png' },
-            { id: 'clip', file: 'clip.mp4', kind: 'video', caption: '', missing: false, content_type: 'video/mp4' },
-          ],
-        }),
-      ),
-      http.get(`${BACKEND}/api/v1/models/owl/versions`, () => HttpResponse.json([{ commit: COMMIT, short: 'ccccccc', current: true }])),
-      http.get(`${BACKEND}/api/v1/models/owl/versions/${COMMIT}/schema`, () => HttpResponse.json(owl.schema)),
-      http.get(`${BACKEND}/api/v1/orders/price-book`, () => HttpResponse.json({ filaments: owl.filaments })),
-      http.post(`${BACKEND}/api/v1/storefront/listings`, async ({ request }) => {
-        posted = await request.json()
-        const body = posted as { title: string; params: Record<string, unknown> }
-        return HttpResponse.json({ id: LISTING, ...body, published: false }, { status: 201 })
-      }),
-    )
+    serveOwl((body) => (posted = body))
     const result = firstText(await tool('storefront_listing_draft').execute({ output_id: OUTPUT }, ctx())) as Record<string, unknown>
     expect(posted).toEqual({
       slug: 'owl',
       commit: COMMIT,
       title: 'Hoot owl',
       description: '',
-      params: { label: { kind: 'text', max_length: 200 }, eyes: { kind: 'choice', choices: ['#1F2A44', '#000000'] } },
+      params: {
+        label: { kind: 'text', max_length: 200 },
+        body: { kind: 'choice', choices: ALL_COLOURS },
+        eyes: { kind: 'choice', choices: ALL_COLOURS },
+      },
       fixed: owl.expected.fixed,
       colours: owl.expected.colours,
       media_ids: ['cover'],
@@ -115,6 +140,15 @@ describe('storefront tools (#6131)', () => {
       page: `/storefront?listing=${LISTING}`,
     })
     expect(result['notes']).toEqual(['This design took 120 s to render; the store\'s preview and price give up after about 100 s (#6120).', 'Took Black out of the title: the customer chooses the colour.'])
+  })
+
+  it('locks only what it is told to lock, a colour at its value', async () => {
+    let posted: { params: Record<string, unknown>; fixed: Record<string, unknown> } | undefined
+    serveOwl((body) => (posted = body as typeof posted))
+    await tool('storefront_listing_draft').execute({ output_id: OUTPUT, lock: ['body'] }, ctx())
+    expect(Object.keys(posted?.params ?? {})).toEqual(['label', 'eyes'])
+    expect(posted?.fixed).toEqual({ ...(owl.expected.fixed as Record<string, unknown>), body: '#1f2a44' })
+    await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, lock: ['nope'] }, ctx())).rejects.toThrow('nope is not a parameter')
   })
 
   it('names exactly one source', async () => {
