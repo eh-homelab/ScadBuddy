@@ -416,6 +416,18 @@ describe('flow runs in tool activities', () => {
     expect(exportedText(spans)).not.toContain('needs an approval')
   })
 
+  // #6295 review: a call whose run is gone has no tier, as on the `turn:` path.
+  it('gives a flow call whose run is gone the outcome error and no tier', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const h = harness({ flows: { ...flowRuns(), startedBy: async () => undefined } })
+    await failure(env(FLOW, 'tool-call_1').run(h.activities.whoami!, {}))
+    await flushTracing()
+    const span = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/whoami')
+    expect(span?.attributes['scadbuddy.outcome']).toBe('error')
+    expect(span?.attributes).not.toHaveProperty('scadbuddy.tier')
+  })
+
   // #6126 review: a call that throws before it names an outcome (its run gone, an unknown
   // server) still reads one; a refusal keeps its own.
   it('gives a call that throws before naming an outcome the outcome error', async () => {
@@ -573,6 +585,17 @@ describe('flow runs in tool activities', () => {
     expect([...flowBlobs.rows.keys()]).toEqual([`${FLOW}/${PNG_NAME}`])
     expect(JSON.stringify(out)).not.toContain(PNG)
     expect(JSON.stringify(out)).not.toContain(PNG.slice(0, 16))
+  })
+
+  // #6295 review: `ok` is set only once the result is built.
+  it('gives a flow call whose images cannot be kept the outcome error, not ok', async () => {
+    const spans = testTracing()
+    await resetTracing()
+    const flowBlobs = { ...memoryFlowBlobs(), put: async () => Promise.reject(new Error('store away')) }
+    await expect(env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns(), flowBlobs }, [pic]).activities.pic!, {})).rejects.toThrow('store away')
+    await flushTracing()
+    const span = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/pic')
+    expect(span?.attributes['scadbuddy.outcome']).toBe('error')
   })
 
   it("says so, with no pointer, for an image past the run's cap (#2578)", async () => {
