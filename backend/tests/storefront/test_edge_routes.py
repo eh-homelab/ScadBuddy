@@ -202,7 +202,7 @@ class _Down:
 
     async def aclose(self) -> None: ...
 
-    async def listings(self, **_kwargs: Any) -> Any:
+    async def listings(self, *_args: Any, **_kwargs: Any) -> Any:
         raise CrudUnavailableError("the API did not answer", "unreached")
 
 
@@ -1817,6 +1817,84 @@ def test_a_model_request_is_forwarded_as_sent_with_a_key(
     sent = route.calls.last.request
     assert json.loads(sent.content) == body
     assert len(sent.headers["idempotency-key"]) == 64
+
+
+LINKS_ONLY = {"links": [{"url": "https://makerworld.com/en/models/1"}]}
+
+
+def test_a_model_request_naming_uploads_takes_no_second_bot_check(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+
+    async def check(_request: Request, action: str) -> None:
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    body = {"uploads": ["a" * 32], **LINKS_ONLY}
+    assert edge.post("/api/store/v1/draft/models", json=body, headers=_keyed()).status_code == 200
+    assert checks == []
+
+
+def test_a_links_only_model_request_takes_the_bot_check(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+    route = crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+
+    async def check(_request: Request, action: str) -> None:
+        assert route.call_count == 0
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    r = edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed())
+    assert r.status_code == 200 and checks == ["model"]
+
+
+def test_a_links_only_model_request_failing_the_bot_check_is_not_forwarded(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check(_request: Request, _action: str) -> None:
+        raise bot_check_failed()
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(MODELS)
+    for _ in range(REQUEST_UPLOADS + 1):
+        r = edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed())
+        assert r.status_code == 403  # a failed check spends no allowance
+    assert route.call_count == 0
+
+
+def test_links_only_model_requests_spend_the_design_requests_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    codes = [
+        edge.post("/api/store/v1/draft/models", json=LINKS_ONLY, headers=_keyed()).status_code
+        for _ in range(REQUEST_UPLOADS + 1)
+    ]
+    assert codes == [200] * REQUEST_UPLOADS + [429]
+
+
+def test_a_model_request_is_refused_while_requests_are_off(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    route = crud_mock.post(MODELS)
+    for body in (LINKS_ONLY, {"uploads": ["a" * 32]}):
+        r = edge.post("/api/store/v1/draft/models", json=body, headers=_keyed())
+        assert r.status_code == 404
+        assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert route.call_count == 0
 
 
 def test_a_model_request_refusal_passes_through(

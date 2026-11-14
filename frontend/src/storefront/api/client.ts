@@ -19,6 +19,7 @@ import type { components, paths } from './schema'
 type Schemas = components['schemas']
 export type Listing = Schemas['PublicListing']
 export type Listings = Schemas['PublicListings']
+export type ListingCard = Schemas['PublicListingCard']
 export type PublicParam = Listing['params'][string]
 export type Filament = Schemas['PublicFilament']
 export type StoreRender = Schemas['StoreRender']
@@ -144,7 +145,14 @@ export interface RenderInput {
 export type SubmitInput = paths['/api/store/v1/draft/submit']['post']['requestBody']['content']['application/json']
 
 export const store = {
-  listings: () => call<Listings>('/listings'),
+  /** One page of the published listings: after `cursor`, and with `q` in the title when given. */
+  listings: ({ cursor, q }: { cursor?: string | null; q?: string } = {}) => {
+    const query = new URLSearchParams()
+    if (cursor) query.set('cursor', cursor)
+    if (q) query.set('q', q)
+    const text = query.toString()
+    return call<Listings>(text ? `/listings?${text}` : '/listings')
+  },
   listing: (id: string) => call<Listing>(`/listings/${encodeURIComponent(id)}`),
   startRender: (input: RenderInput, key: string) => call<StoreRender>('/renders', { method: 'POST', json: input, key }),
   render: (jobId: string) => call<StoreRender>(`/renders/${encodeURIComponent(jobId)}`),

@@ -794,7 +794,7 @@ def test_the_customers_cancel_wakes_the_staged_files_watchers(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6164: the files' watchers move to the ended-order grace at once."""
-    from scadbuddy.orders.storefront import order_page
+    from scadbuddy.orders.storefront import staged_files
 
     told: list[tuple[list[str], str]] = []
 
@@ -808,11 +808,27 @@ def test_the_customers_cancel_wakes_the_staged_files_watchers(
         asked.append(order_id)
         return ["u1"]
 
-    monkeypatch.setattr(order_page, "poke", poke)
-    monkeypatch.setattr(order_page, "uploads_of", uploads_of)
+    monkeypatch.setattr(staged_files, "poke", poke)
+    monkeypatch.setattr(staged_files, "uploads_of", uploads_of)
     assert made.reader.cancel(key="k1").status_code == 200
     assert asked == [made.order.id]
     assert told == [(["u1"], "closed")]
+
+
+def test_the_customers_cancel_answers_when_its_staged_files_cannot_be_read(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6164: the cancel is committed first; a failed read is logged, never raised."""
+    from scadbuddy.orders.storefront import staged_files
+
+    def broken(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise RuntimeError("the database went away")
+
+    made = make_order(api, crud)
+    monkeypatch.setattr(staged_files, "uploads_of", broken)
+    r = made.reader.cancel(key="k1")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == ORDER_WORDS["cancelled"]
 
 
 def test_cancel_is_refused_after_an_approval(api: TestClient, crud: CrudCaller) -> None:

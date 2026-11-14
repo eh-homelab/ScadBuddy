@@ -149,7 +149,7 @@ describe('storefront tools (#6131)', () => {
       listing_id: LISTING,
       published: false,
       colour_problems: [],
-      page: `/storefront?listing=${LISTING}`,
+      page: `/storefront/listings/${LISTING}`,
     })
     expect(result['notes']).toEqual(['This design took 120 s to render; the store\'s preview and price give up after about 100 s (#6120).', 'Took Black out of the title: the customer chooses the colour.'])
   })

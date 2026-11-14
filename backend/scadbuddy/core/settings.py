@@ -560,6 +560,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER: where the `scadbuddy-slicer` worker serves
     # `slice_plate` (spec 2026-10-16 §5.2); `SliceWorkflow` runs it there.
     temporal_task_queue_slicer: str = "slicer"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES: where the intake worker
+    # (`python -m scadbuddy.intake_worker`, #6133) checks a customer's staged files; the
+    # API starts `CustomerFileCheck` on it.
+    temporal_task_queue_customer_files: str = "customer-files"
     # SCADBUDDY_TEMPORAL_SDK_METRICS_PORT: the loopback port where a worker's Temporal
     # SDK exports its own metrics, which the worker's /metrics appends (#3788); 0 turns
     # it off.
@@ -644,6 +648,7 @@ class Settings(BaseSettings):
         "temporal_task_queue_projects",
         "temporal_task_queue_agent_tools",
         "temporal_task_queue_slicer",
+        "temporal_task_queue_customer_files",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -919,6 +924,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_slicer": (
             "Paired with the Temporal address: the API starts slices on it, and the"
             " scadbuddy-slicer worker must name the same queue."
+        ),
+        "temporal_task_queue_customer_files": (
+            "Paired with the Temporal address: the API starts customer file checks on it,"
+            " and the intake worker must name the same queue."
         ),
         "agent_internal_url": (
             "Where the API reaches the agent sidecar in its own pod, which the deployment lays out."

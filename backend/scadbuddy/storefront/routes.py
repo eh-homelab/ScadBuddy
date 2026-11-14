@@ -28,6 +28,7 @@ cookie's session on. The POSTs are checked by `CrossSiteGate`, as every write is
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 import time
@@ -60,6 +61,9 @@ from scadbuddy.storefront.wire import (
     ITEM_ID,
     JOB_ID,
     LISTING_ID,
+    LISTINGS_MAX_PAGE,
+    LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     ORDER_VIEW_FIELDS,
     PAY_CHECKOUT_FIELDS,
     QUOTE_ID,
@@ -117,8 +121,22 @@ async def turnstile(request: Request, crud: Crud) -> Any:
 
 
 @visitor_router.get("/listings")
-async def listings(crud: Crud, visitor_id: Visitor, client: Client) -> Any:
-    return await crud.listings(visitor_id=visitor_id, client=client)
+async def listings(
+    crud: Crud,
+    visitor_id: Visitor,
+    client: Client,
+    cursor: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int | None, Query(ge=1, le=LISTINGS_MAX_PAGE)] = None,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
+) -> Any:
+    """One page of the published listings (#6154): the edge checks the query's bounds
+    and sends on only these three."""
+    query = {"cursor": cursor, "limit": limit, "q": q}
+    return await crud.listings(
+        {k: v for k, v in query.items() if v is not None}, visitor_id=visitor_id, client=client
+    )
 
 
 @visitor_router.get("/listings/{listing_id}")
@@ -232,11 +250,44 @@ async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client
 @visitor_router.post("/draft/models")
 async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the
-    browser filled and the links, as the visitor sent them. The bot check and the
-    allowance were the slots' (``POST /uploads``)."""
+    browser filled and the links, as the visitor sent them. 404 ``requests_disabled`` while
+    "Ask for a design" is off, as ``POST /uploads``. A request that names an upload had its
+    bot check and allowance at that upload's slots (the CRUD side claims each slot once).
+    One that names none (links only) takes them here, as ``POST /uploads`` does: 429
+    ``request_limited``, then the bot check (action ``model``); a passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
     key = _request_key(request, visitor_id)
     body = await _body(request, "draft_body_invalid")
+    if not _names_uploads(body):
+        allowance: UploadAllowance = state.upload_allowance
+        held = allowance.start(client)
+        if isinstance(held, int):
+            raise ApiError(
+                429,
+                "You have sent a lot of requests, or one is still sending. Try again later.",
+                type_=REQUEST_LIMITED,
+                headers={"Retry-After": str(held)},
+                retry_after=held,
+            )
+        try:
+            await require_turnstile(request, "model")
+            allowance.spend(held)
+        finally:
+            allowance.finish(held)
     return await crud.add_models(body, key=key, visitor_id=visitor_id, client=client)
+
+
+def _names_uploads(body: bytes) -> bool:
+    """Whether the body is a JSON object with a non-empty ``uploads`` list. Anything else
+    takes the gates; the CRUD side judges the body's shape."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    uploads = parsed.get("uploads") if isinstance(parsed, dict) else None
+    return isinstance(uploads, list) and len(uploads) > 0
 
 
 @visitor_router.delete("/draft/items/{item_id}")

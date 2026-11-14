@@ -78,7 +78,7 @@ from scadbuddy.orders.storefront.accounts import account_owns_order, attach_orde
 from scadbuddy.orders.storefront.customers import customer_actor
 from scadbuddy.orders.storefront.links import link_by_token, mark_opened, token_sha256
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
-from scadbuddy.orders.storefront.staged_files import poke, uploads_of
+from scadbuddy.orders.storefront.staged_files import poke_order
 from scadbuddy.orders.storefront.wire import (
     CancelBody,
     CustomerColour,
@@ -853,6 +853,5 @@ async def cancel(
 
     view = await _write(state, reader, access, key, CANCEL_ROUTE, {"reason": reason}, act)
     # The staged files are kept `ENDED_GRACE` for a reopen; wake their watchers (#6164).
-    uploads = await asyncio.to_thread(uploads_of, state, order_id=access.order_id)
-    await poke(state, uploads, "closed")
+    await poke_order(state, access.order_id, "closed")
     return view

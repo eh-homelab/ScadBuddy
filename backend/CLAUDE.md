@@ -1395,13 +1395,19 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
   `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
   signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
-  uploads (each the visitor's, unclaimed, and a `HEAD` of exactly its declared size; no byte
-  read) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  uploads (each the visitor's and unclaimed, frozen by a server-side copy with a SHA-256
+  checksum to `<prefix>/staging/<id>.<nonce>.frozen`, a nonce per claim attempt, which no
+  presigned URL names, whose `HEAD` must be exactly its declared size; its key, ETag and
+  SHA-256 kept in `storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`; a losing
+  or refused attempt deletes its copies, `_drop_losers`; the writable original
+  deleted after the commit; no byte read; the check and the import read only the copy) and adds a `request` item, its `order_item_model_requests` row (the colours asked
   for) and its `order_item_sources` (files `checking`; links as text only, typed by
   `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
   `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
   print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
-  requests' `UploadAllowance` and Turnstile action `model`; the page's CSP names the bucket
+  requests' `UploadAllowance` and Turnstile action `model`, and so does the edge's
+  `…/draft/models` when it names no upload (links only); both are 404 `requests_disabled`
+  while requests are off; the page's CSP names the bucket
   in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
   `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
   Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
@@ -1422,8 +1428,63 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   so a lost signal costs time, never a file; the step retries with no limit.
   `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
-  running gets one started again, each counted in `scadbuddy_staged_files_repaired`. A pass
-  checks at most 1000 rows (`SWEEP_PASS_BATCHES`) and the next goes on from there.
+  running gets one started again, and a file source still `checking` past `CHECK_STALE`
+  (1 h) whose check is not running gets its check started again, each counted in
+  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows and 1000 waiting sources (`SWEEP_PASS_BATCHES`)
+  and the next goes on from there.
+  The check (#6133 PR 2, spec §7) runs in the intake worker, `python -m
+  scadbuddy.intake_worker` (`intake_worker/`), which holds no database secret or KEK and
+  refuses to start with one (`settings.py` `FORBIDDEN_ENV`); its worker process imports no
+  database code (`tests/intake_worker/test_worker.py`). The claim starts one
+  `CustomerFileCheck` per file source on `temporal_task_queue_customer_files`
+  (`orders/storefront/intake.py` `start_checks`, best effort; the backstop above). Its
+  activity reads the staged file through the CRUD routes of caller `intake` (area
+  `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
+  verdict; the GET is of the frozen copy, `If-Match` its ETag), checks it in a child process
+  (`child.py`: `RLIMIT_AS`, non-dumpable, started by its launcher `confine.py`: non-dumpable,
+  new user, network, mount and PID namespaces (the parser forked as PID 1 with
+  `PR_SET_PDEATHSIG`, `/proc` under a tmpfs), the spool under a tmpfs with the box bind-mounted inside it,
+  `PR_SET_NO_NEW_PRIVS`, a seccomp filter, then `execv` as a non-root uid, which clears every
+  capability; a timeout, its own process group; `check.py`: the kind by content, the zip's
+  directory, the read within the read budget) and posts `ready`, `refused` or, once its
+  attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
+  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
+  sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
+  no ServiceAccount token, proof or secret but the RPC token, its own `emptyDir`, nothing
+  shared with the worker's pod; it exits 2 with any file under `/var/run/secrets/`,
+  `SECRETS_DIR`),
+  never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
+  its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
+  worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,
+  default 8090; the body the file, the request JSON in `X-Intake-Request`; the answer
+  binary-framed: `X-Intake-Verdict-Bytes` bytes of verdict JSON, then the preview PNG; the
+  wire format and every cap in `runner.py`'s docstring). Each check carries the RPC token,
+  `Authorization: Bearer <token>`: both processes read it from
+  `SCADBUDDY_INTAKE_SANDBOX_TOKEN_FILE` (`runner.read_token`; the Secret
+  `scadbuddy-intake-sandbox-rpc`, mounted outside `/var/run/secrets/`) and refuse to start
+  without a file, with an empty one or a token under 32 bytes. It authorizes calls to the
+  sandbox only, so it is the one secret the sandbox may hold. The sandbox compares it with
+  `hmac.compare_digest` and answers 401 before it reads the body, then closes. A request's
+  head and whole body arrive within `sandbox.REQUEST_DEADLINE` (60 s) or the sandbox drops
+  it and frees the slot. Its NetworkPolicy admits only the worker's pods, and the worker
+  reads every answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
+  its cap, the verdict validated by `parse_verdict`, the PNG signature and `IHDR` checked).
+  The sandbox fails closed: it runs the launcher with `--strict` (a refused step is exit
+  126, no parse) and exits 3 at start when its probe is refused (`probe_isolation`); the
+  worker counts failed calls, `scadbuddy_intake_sandbox_failed_total` by `reason`, on its
+  `/metrics`. One tenant per pod: the worker and the sandbox each run one check at a time,
+  fixed (a second request is 503, which the worker tries again for up to `BUSY_WAIT`), and
+  the sandbox kills any process of an earlier check before the next (it is the child
+  subreaper; one that survives makes it exit 4); scale with replicas. Each check gets a
+  fresh `box/` (0700, the upload made `O_EXCL | O_NOFOLLOW`), removed after it; a client
+  that goes away, or the timeout, kills the child's group. The RPC tests are
+  `tests/intake_worker/test_sandbox.py`. The
+  API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
+  (never the worker's reported hash), held by the source
+  (`blob_refs` holder `order_item_source`; the trigger of
+  `20261114T0603Z_intake_worker.sql` drops it with the source). The worker is not
+  versioned: a change to `intake_worker/workflow.py`'s commands goes behind
+  `workflow.patched`.
   `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
   Purchases, the handling fee and the gate (#6133 PR 3, spec §10; migration
   `20261114T1156Z_order_purchase_charges.sql`): `ChargeKind` gains `purchase` and
