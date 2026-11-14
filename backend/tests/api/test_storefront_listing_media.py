@@ -14,6 +14,7 @@ from scadbuddy.orders.storefront.listings import HOLDER
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.api.test_media import PNG
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
+    BOOK,
     LISTINGS,
     client,
     create,
@@ -114,3 +115,27 @@ def test_a_stale_read_and_a_missing_listing_are_refused(
     assert stale.json()["type"] == STOREFRONT_PROBLEMS + "listing_changed"
     gone = _set(client, {**listing, "id": "00000000-0000-0000-0000-000000000000"}, [])
     assert gone.status_code == 404, gone.text
+
+
+def test_a_republish_the_stored_listing_fails_is_refused_and_the_last_publish_stays_live(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    # The media PUT republishes through `publish`, with POST …/publish's checks over the
+    # stored row: here its one filament was archived after it went live.
+    listing = publish(client, create(client, listing_body(template, pla_red))["id"])
+    archived = client.post(f"{BOOK}/filaments/{pla_red}/archive")
+    assert archived.status_code == 200, archived.text
+    second = _second_image(client, template["slug"])
+
+    answer = _set(client, listing, [second])
+    assert answer.status_code == 422, answer.text
+    assert answer.json()["type"] == STOREFRONT_PROBLEMS + "listing_colour_unknown"
+
+    after = client.get(f"{LISTINGS}/{listing['id']}").json()
+    # The new pictures are kept; the public site still shows the last publish.
+    assert after["media_ids"] == [second]
+    assert after["published"] is True
+    assert after["snapshot"] == listing["snapshot"]
+    assert after["media"] == listing["media"]
+    assert holders(client, listing["snapshot"]["snapshot_key"]) == [(HOLDER, listing["id"])]
+    assert holders(client, listing["media"][0]["blob_key"]) == [(HOLDER, listing["id"])]
