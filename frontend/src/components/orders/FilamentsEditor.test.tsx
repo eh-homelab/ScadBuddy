@@ -86,9 +86,13 @@ describe('FilamentsEditor (#4250)', () => {
     expect((await api.priceBook()).filaments.find((f) => f.colour_name === 'Hot Pink')?.colour).toBe('#F5547C')
   })
 
-  // #6136 — each density says where it came from, and the empty ones are filled from Bambuddy.
+  // #6136 — each density says where it came from; a filament added by hand takes its
+  // spools', and "Fill densities" fills the ones born empty, row by row.
   it('shows where each density comes from and fills the empty ones', async () => {
+    const linked = mockSettings()
+    setMockSettings({ ...linked, bambuddy_url: null })
     const pink = await api.createFilament({ material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Hot Pink', colour: '#F5547C', cost_per_kg: '20', density_g_cm3: null })
+    setMockSettings(linked)
     const none = await api.createFilament({ material: 'PLA', subtype: 'Tri Color', brand: 'Bambu Lab', colour_name: 'Neon City', colour: '#0047BB', cost_per_kg: '25', density_g_cm3: null })
     const { user } = renderPage(<FilamentsEditor />)
     expect(await within(await screen.findByTestId(`filament-${pink.id}`)).findByText('Not set: no estimate')).toBeInTheDocument()
@@ -96,10 +100,15 @@ describe('FilamentsEditor (#4250)', () => {
 
     await user.click(screen.getByRole('button', { name: 'Fill densities' }))
     const status = await screen.findByRole('status', { name: 'Density fill' })
-    expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: 1.26 g/cm³ from Bambu PLA Basic @base (spool preset GFA00)')
-    expect(status).toHaveTextContent('Neon City: Bambuddy links no preset or density to it; enter its density')
+    expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: filled, 1.26 g/cm³ from Bambu PLA Basic @base (spool preset GFA00)')
+    expect(status).toHaveTextContent('Neon City: no source (Bambuddy links no preset or density to it); enter its density')
     await within(screen.getByTestId(`filament-${pink.id}`)).findByText('1.26 g/cm³, from Bambu PLA Basic @base (spool preset GFA00)')
     expect(within(screen.getByTestId(`filament-${none.id}`)).getByText('Not set: no estimate')).toBeInTheDocument()
+  })
+
+  it('fills a filament added by hand from its spools', async () => {
+    const made = await api.createFilament({ material: 'PLA', subtype: 'Basic', brand: 'Bambu Lab', colour_name: 'Mistletoe Green', colour: '#3F8E43', cost_per_kg: '20', density_g_cm3: null })
+    expect([made.density_g_cm3, made.density_profile]).toEqual(['1.26', 'Bambu PLA Basic @base (spool preset GFA00)'])
   })
 
   it('offers no import without Bambuddy', async () => {

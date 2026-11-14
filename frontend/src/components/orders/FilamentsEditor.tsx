@@ -85,7 +85,7 @@ function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile'>): { 
 
 function fillLine(row: DensityFillRow): string {
   const name = filamentLabel(row) || row.material
-  return row.density_g_cm3 ? `${name}: ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: Bambuddy links no preset or density to it; enter its density`
+  return row.density_g_cm3 ? `${name}: filled, ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: no source (Bambuddy links no preset or density to it); enter its density`
 }
 
 /**

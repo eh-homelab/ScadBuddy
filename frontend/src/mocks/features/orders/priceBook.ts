@@ -56,6 +56,11 @@ export function mockDensity(f: { material: string; subtype?: string | null; bran
   return presetId && preset ? { density_g_cm3: preset.density_g_cm3, profile: `${preset.name} (spool preset ${presetId})` } : null
 }
 
+function added(body: FilamentInput): Pick<Filament, 'density_g_cm3' | 'density_profile'> {
+  const found = mockSettings().bambuddy_url ? mockDensity({ ...body, colour: body.colour.toUpperCase() }) : null
+  return { density_g_cm3: found?.density_g_cm3 ?? null, density_profile: found?.profile ?? null }
+}
+
 function book(includeArchived = false): PriceBook {
   const currency = mockSettings().orders_currency
   return {
@@ -287,7 +292,8 @@ export const handlers = [
       colour_name: body.colour_name ?? null,
       colour: body.colour,
       cost_per_kg: body.cost_per_kg,
-      density_g_cm3: body.density_g_cm3 ?? null,
+      // #6136: added with no density while Bambuddy is linked, it takes its spools'.
+      ...(body.density_g_cm3 ? { density_g_cm3: body.density_g_cm3, density_profile: null } : added(body)),
       archived_at: null,
       created_at: now(),
       updated_at: now(),

@@ -56,14 +56,15 @@ def bambuddy(spools: list[dict[str, Any]], **reads: Any) -> dict[str, respx.Rout
     }
 
 
-def tri_color(client: TestClient, colour: str = "#00FF00", **fields: Any) -> dict[str, Any]:
+def tri_color(
+    client: TestClient, colour: str = "#00FF00", density_g_cm3_override: str | None = None
+) -> dict[str, Any]:
     return add_filament(
         client,
         brand="Bambu Lab",
         subtype="Tri Color",
         colour=colour,
-        density_g_cm3=None,
-        **fields,
+        density_g_cm3=density_g_cm3_override,
     )
 
 
@@ -75,10 +76,11 @@ def test_fill_needs_bambuddy(client: TestClient) -> None:
 
 @respx.mock
 def test_fill_densities_writes_the_empty_ones_only(client: TestClient) -> None:
-    configure(client)
+    # Added before Bambuddy is linked, so born empty.
     empty = tri_color(client)
     own = add_filament(client, colour="#000000", density_g_cm3="1.3")
     alone = tri_color(client, colour="#0000FF")
+    configure(client)
     bambuddy(
         [
             # A Tri Color spool names Bambu PLA Silk: its subtype is never read.
@@ -230,6 +232,25 @@ def test_no_local_or_tray_read_when_every_spool_names_a_bambu_preset(client: Tes
     routes = bambuddy([spool(1, cost_per_kg=20, slicer_filament="GFA00")])
     assert client.post(IMPORT).status_code == 200
     assert (routes["local"].call_count, routes["assignments"].call_count) == (0, 0)
+
+
+@respx.mock
+def test_a_filament_added_by_hand_takes_its_spools_density(client: TestClient) -> None:
+    configure(client)
+    routes = bambuddy(
+        [spool(1, brand="Bambu Lab", subtype="Tri Color", rgba="00FF00FF", slicer_filament="GFA05")]
+    )
+    made = tri_color(client)
+    assert (made["density_g_cm3"], made["density_profile"]) == ("1.32", SILK)
+    # A density sent is the person's; no read.
+    calls = routes["spools"].call_count
+    own = tri_color(client, colour="#0000FF", density_g_cm3_override="1.3")
+    assert (own["density_g_cm3"], own["density_profile"]) == ("1.3", None)
+    assert routes["spools"].call_count == calls
+    # Bambuddy not answering never stops the add: born empty.
+    routes["spools"].mock(return_value=httpx.Response(503))
+    empty = tri_color(client, colour="#FF0000")
+    assert empty["density_g_cm3"] is None
 
 
 def test_the_estimate_says_which_density_it_used(

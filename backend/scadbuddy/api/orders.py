@@ -146,6 +146,7 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
+from scadbuddy.orders.spool_import import density_for
 from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import (
@@ -853,9 +854,26 @@ async def put_price_book(
 )
 async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
     """409 ``filament_exists`` naming the record of the same material, subtype, brand
-    and colour (in any case)."""
+    and colour (in any case). Sent with no density while a Bambuddy is linked, it takes
+    the one Bambuddy's spools of its identity give (#6136, `orders/density.py`), with
+    ``density_profile`` saying where from; none when no source gives one, or when
+    Bambuddy does not answer (the add never waits on it to succeed)."""
+    profile = None
+    if body.density_g_cm3 is None and orders.integrations.linked:
+        try:
+            groups = await orders.integrations.spool_groups()
+        except ApiError as error:
+            logger.warning("a filament was added with no density: %s", error.detail)
+            groups = []
+        densities = await asyncio.to_thread(orders.densities)
+        found = density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
+        if found is not None:
+            body = body.model_copy(update={"density_g_cm3": found.density_g_cm3})
+            profile = found.profile
     try:
-        return await asyncio.to_thread(orders.store.insert_filament, body)
+        return await asyncio.to_thread(
+            lambda: orders.store.insert_filament(body, density_profile=profile)
+        )
     except FilamentExistsError as error:
         raise _filament_exists(error) from None
 
