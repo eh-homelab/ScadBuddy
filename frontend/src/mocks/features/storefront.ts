@@ -53,9 +53,9 @@ function stamp(): string {
   return new Date(Date.now() + ticks).toISOString()
 }
 
-function refused(status: number, slug: string, detail: string) {
+function refused(status: number, slug: string, detail: string, extensions: Record<string, unknown> = {}) {
   const title = status === 404 ? 'Not Found' : status === 422 ? 'Unprocessable Content' : 'Conflict'
-  return problem(status, title, detail, { type: PROBLEMS + slug })
+  return problem(status, title, detail, { type: PROBLEMS + slug, ...extensions })
 }
 
 /** The backend's 422 `listing_choice_empty` (`orders/storefront/listings.py` `_check_choices`), or null. */
@@ -242,7 +242,7 @@ export const handlers = [
     const media = mockModels().find((m) => m.slug === found.slug)?.media ?? []
     for (const mediaId of media_ids) {
       const item = media.find((m) => m.id === mediaId && !m.missing)
-      if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`)
+      if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`, { name: mediaId })
       if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`)
     }
     const at = stamp()

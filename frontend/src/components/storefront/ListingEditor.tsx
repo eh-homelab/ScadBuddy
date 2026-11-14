@@ -31,8 +31,11 @@ export interface ListingEditorProps {
   media: readonly MediaView[]
   /** #6213 — the pictures the public site shows now (`LivePictures`). */
   live?: LivePictures
-  /** #6213 — the template as a picture uploaded in the editor left it. */
-  onMediaUploaded?: (model: ModelSummary) => void
+  /**
+   * #6213 — a picture uploaded in the editor: the template as it left it and the new
+   * image's id, which the page adds to the listing as it is when the upload ends.
+   */
+  onPictureUploaded?: (model: ModelSummary, id: string) => void
 }
 
 /** Where the price book's filaments are added (Settings → Printing → Orders). */
@@ -375,7 +378,7 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, onMediaUploaded }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, onPictureUploaded }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offered = params.filter((param) => draft.params[param.name])
@@ -413,7 +416,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
           chosen={draft.media_ids}
           live={live}
           onChange={(media_ids) => onChange({ ...draft, media_ids })}
-          onUploaded={(model) => onMediaUploaded?.(model)}
+          onUploaded={(model, id) => onPictureUploaded?.(model, id)}
         />
       </section>
 

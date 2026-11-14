@@ -256,6 +256,20 @@ export function StorefrontListingPage() {
     setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug })
   }
 
+  /**
+   * #6213 — a picture uploaded in the editor of `key`'s opening: added to that listing as
+   * it is now (edits, saves and publishes may have landed while it uploaded), and the
+   * templates read again so the editor shows it.
+   */
+  function pictureUploaded(key: symbol, id: string) {
+    models.refresh()
+    whileOpen(key, (cur) => {
+      if (cur.draft.media_ids.includes(id)) return cur
+      edited.current = true
+      return { ...cur, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, id] } }
+    })
+  }
+
   async function act(run: () => Promise<void>) {
     setBusy(true)
     setError(null)
@@ -427,9 +441,7 @@ export function StorefrontListingPage() {
                 filaments={filaments}
                 media={media}
                 live={open.live}
-                onMediaUploaded={(model) => {
-                  if (models.data) models.setData(models.data.map((m) => (m.slug === model.slug ? model : m)), { supersede: true })
-                }}
+                onPictureUploaded={(_model, id) => pictureUploaded(open.key, id)}
               />
             </section>
 

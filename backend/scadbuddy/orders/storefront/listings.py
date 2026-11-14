@@ -893,7 +893,7 @@ def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
             view, _path = core.catalogue.media_item(slug, media_id)
         except (MediaNotFoundError, ModelNotFoundError):
             raise _unprocessable(
-                "listing_media_unknown", f"the template has no media {media_id!r}"
+                "listing_media_unknown", f"the template has no media {media_id!r}", name=media_id
             ) from None
         if view.kind != "image":
             raise _unprocessable(

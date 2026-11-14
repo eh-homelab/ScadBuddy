@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { MediaView, StorefrontListingInput } from '../../api/types'
 import { GALLERY_SLUG } from '../../mocks/fixtures'
@@ -27,6 +27,8 @@ async function open(item: MediaView) {
 }
 
 describe('StorefrontPicture (#6213)', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   it('adds the image to each chosen listing; a published one is published again', async () => {
     const live = await api.createStorefrontListing(body('Coaster', ['a1b2c3d4e5f6']))
     await api.publishStorefrontListing(live.id)
@@ -107,6 +109,24 @@ describe('StorefrontPicture (#6213)', () => {
     await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
     expect(await within(dialog).findByText(/Not saved: .*not an image/)).toBeInTheDocument()
+  })
+
+  it('names an older picture the design no longer has when it refuses the set', async () => {
+    const item = await image()
+    await api.createStorefrontListing(body('Coaster', ['0123456789ab']))
+    const { user, dialog } = await open(item)
+    await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByText(/still names a picture the design no longer has \(0123456789ab\)/)).toBeInTheDocument()
+  })
+
+  it('says when the design has more listings than the dialog shows', async () => {
+    const listing = await api.createStorefrontListing(body('Coaster'))
+    const real = api.storefrontListings
+    vi.spyOn(api, 'storefrontListings').mockImplementation(async (query) => ({ ...(await real(query)), total: 250 }))
+    const { dialog } = await open(await image())
+    expect(await within(dialog).findByText('Showing the first 1 of 250 listings of this design. Change the others on their own pages.')).toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: `Show on ${listing.title}` })).toBeInTheDocument()
   })
 
   it('says when no listing sells the design', async () => {

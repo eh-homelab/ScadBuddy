@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { StoreIcon } from 'lucide-react'
 import { api, ApiError } from '../../api/client'
@@ -28,7 +28,7 @@ function same(a: readonly string[], b: readonly string[]): boolean {
  * the pictures before it publishes a published listing again, so a refusal may come after
  * the write: the pictures are saved, and the store shows the last publish.
  */
-async function afterRefusal(listing: Row, sent: readonly string[], caught: unknown): Promise<{ row: Row | null; said: string }> {
+async function afterRefusal(listing: Row, sent: readonly string[], picture: string, caught: unknown): Promise<{ row: Row | null; said: string }> {
   const reason = message(caught)
   let fresh: Row
   try {
@@ -43,6 +43,11 @@ async function afterRefusal(listing: Row, sent: readonly string[], caught: unkno
         ? `Pictures saved, but not published again: ${reason}. The store shows the last published pictures until the listing is published again from its page.`
         : `Pictures saved: ${reason}.`,
     }
+  }
+  // A picture the listing named before, deleted from the design since, refuses the whole set.
+  const stale = caught instanceof ApiError && caught.problem.type?.endsWith('/listing_media_unknown') ? (caught.problem as { name?: unknown }).name : undefined
+  if (typeof stale === 'string' && stale !== picture) {
+    return { row: fresh, said: `Not saved: the listing still names a picture the design no longer has (${stale}). Remove it in the listing's editor, then try again.` }
   }
   if (caught instanceof ApiError && caught.status === 409) {
     return { row: fresh, said: 'Changed elsewhere since it was read; read again. Save to try again.' }
@@ -66,17 +71,26 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
   const [wanted, setWanted] = useState<Record<string, boolean>>({})
   const [results, setResults] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
+  /** How many listings match in all, when the list holds fewer (`MAX_LISTINGS`). */
+  const [more, setMore] = useState<number | null>(null)
+  /** Each read's number: only the newest one's answer is applied (the dialog closed and opened again). */
+  const reads = useRef(0)
   const name = item.caption || item.file
 
   async function load() {
+    const read = ++reads.current
     setListings(null)
     setLoadError(null)
     setResults({})
+    setMore(null)
     try {
       const page = await api.storefrontListings(new URLSearchParams({ slug, limit: String(MAX_LISTINGS) }))
+      if (read !== reads.current) return
       setListings(page.items)
+      setMore(page.total > page.items.length ? page.total : null)
       setWanted(Object.fromEntries(page.items.map((listing) => [listing.id, listing.media_ids.includes(item.id)])))
     } catch (caught) {
+      if (read !== reads.current) return
       setLoadError(`Could not read the listings: ${message(caught)}`)
     }
   }
@@ -98,7 +112,7 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
         replace(saved)
         said[listing.id] = show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.'
       } catch (caught) {
-        const told = await afterRefusal(listing, ids, caught)
+        const told = await afterRefusal(listing, ids, item.id, caught)
         if (told.row) replace(told.row)
         said[listing.id] = told.said
       }
@@ -140,6 +154,11 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
                 Open the storefront
               </Link>
               .
+            </p>
+          )}
+          {more !== null && (
+            <p className="text-xs text-muted-foreground">
+              Showing the first {listings?.length ?? 0} of {more} listings of this design. Change the others on their own pages.
             </p>
           )}
           {listings && listings.length > 0 && (

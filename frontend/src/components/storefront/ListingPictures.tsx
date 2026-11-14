@@ -25,8 +25,12 @@ export interface ListingPicturesProps {
   chosen: readonly string[]
   live: LivePictures
   onChange: (ids: string[]) => void
-  /** The template as an upload left it, with the new image last. */
-  onUploaded: (model: ModelSummary) => void
+  /**
+   * An upload finished: the template as it left it, and the new image's id. The owner adds
+   * the id to the listing as it is when the upload ends (other edits may have landed
+   * meanwhile), never to the pictures this component held when it started.
+   */
+  onUploaded: (model: ModelSummary, id: string) => void
 }
 
 /**
@@ -70,9 +74,10 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
     try {
       const before = new Set(media.map((item) => item.id))
       const model = await api.uploadMedia(slug, file)
-      onUploaded(model)
-      const added = (model.media ?? []).find((item) => !before.has(item.id))
-      if (added) onChange([...shown, added.id])
+      // The server adds an upload as the template's last item.
+      const added = model.media?.at(-1)
+      if (added && !before.has(added.id)) onUploaded(model, added.id)
+      else setError(`${file.name} added no new picture to the design; add one of its pictures above instead.`)
     } catch (caught) {
       setError(`${file.name} was not added: ${failure(caught)}`)
     } finally {

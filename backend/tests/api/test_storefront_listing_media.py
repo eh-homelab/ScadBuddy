@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.orders.storefront.listings import HOLDER
+from scadbuddy.orders.storefront.wire import LISTING_MEDIA_MAX
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from tests.api.test_media import MP4, PNG
 from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
@@ -105,6 +106,18 @@ def test_pictures_the_template_does_not_back_are_refused(
     answer = _set(client, listing, [i.format(first=template["media_id"]) for i in ids])
     assert answer.status_code == 422, answer.text
     assert answer.json()["type"] == STOREFRONT_PROBLEMS + problem
+    assert client.get(f"{LISTINGS}/{listing['id']}").json()["media_ids"] == listing["media_ids"]
+
+
+def test_an_unknown_picture_is_named_and_too_many_are_refused(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    listing = create(client, listing_body(template, pla_red))
+    unknown = _set(client, listing, [template["media_id"], "0123456789ab"])
+    assert unknown.status_code == 422, unknown.text
+    assert unknown.json()["name"] == "0123456789ab"
+    too_many = _set(client, listing, [f"{n:012x}" for n in range(LISTING_MEDIA_MAX + 1)])
+    assert too_many.status_code == 422, too_many.text
     assert client.get(f"{LISTINGS}/{listing['id']}").json()["media_ids"] == listing["media_ids"]
 
 

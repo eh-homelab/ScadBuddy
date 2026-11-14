@@ -9,7 +9,7 @@ import { ListingPictures, type LivePictures } from './ListingPictures'
 
 const PNG = Uint8Array.from(atob(MEDIA_PNG_BASE64), (c) => c.charCodeAt(0))
 
-function Harness({ media, start, live, seen, uploaded }: { media: MediaView[]; start: string[]; live: LivePictures; seen: string[][]; uploaded?: (model: ModelSummary) => void }) {
+function Harness({ media, start, live, seen, uploaded }: { media: MediaView[]; start: string[]; live: LivePictures; seen: string[][]; uploaded?: (model: ModelSummary, id: string) => void }) {
   const [chosen, setChosen] = useState(start)
   const [items, setItems] = useState(media)
   return (
@@ -22,9 +22,15 @@ function Harness({ media, start, live, seen, uploaded }: { media: MediaView[]; s
         seen.push(ids)
         setChosen(ids)
       }}
-      onUploaded={(model) => {
+      // As the page does: the id goes onto the pictures as they are when the upload ends.
+      onUploaded={(model, id) => {
         setItems(model.media ?? [])
-        uploaded?.(model)
+        setChosen((cur) => {
+          const next = [...cur, id]
+          seen.push(next)
+          return next
+        })
+        uploaded?.(model, id)
       }}
     />
   )
@@ -93,8 +99,18 @@ describe('ListingPictures (#6213)', () => {
 
     await waitFor(() => expect(seen.at(-1)).toEqual(['a1b2c3d4e5f6', 'f6a1b2c3d4e5']))
     expect(upload).toHaveBeenCalledWith(GALLERY_SLUG, photo)
-    expect(uploaded).toHaveBeenCalledWith(expect.objectContaining({ media: expect.arrayContaining([added]) }))
+    expect(uploaded).toHaveBeenCalledWith(expect.objectContaining({ media: expect.arrayContaining([added]) }), 'f6a1b2c3d4e5')
     expect(shownNames()).toEqual(['Printed in blue and orange', 'f6a1b2c3d4e5.png'])
+  })
+
+  it('says so when an upload adds no new picture', async () => {
+    const media = (await api.getModel(GALLERY_SLUG)).media ?? []
+    vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug) => api.getModel(slug))
+    const uploaded = vi.fn()
+    const { user } = renderPage(<Harness media={media} start={[]} live={null} seen={[]} uploaded={uploaded} />)
+    await user.upload(screen.getByLabelText('Upload a picture'), new File([PNG], 'same.png', { type: 'image/png' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('same.png added no new picture to the design')
+    expect(uploaded).not.toHaveBeenCalled()
   })
 
   it('refuses a video before sending it', async () => {
