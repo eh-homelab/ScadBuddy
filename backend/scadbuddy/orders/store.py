@@ -45,6 +45,7 @@ from scadbuddy.orders.models import (
     CostEntryInput,
     Customer,
     Filament,
+    FilamentEffect,
     FilamentInput,
     FilamentPatch,
     Fulfilment,
@@ -430,8 +431,8 @@ class ImportRecord:
     colour: str
     alpha: int
     extra_colours: list[str]
-    effect: str | None
-    colour_source: str
+    effect: FilamentEffect | None
+    colour_source: ColourSource
     #: The spools' ``#RRGGBB`` and ids at the last import; ``None`` and empty before one.
     spool_colour: str | None
     spool_ids: list[int]
@@ -907,7 +908,14 @@ class OrderStore:
             "spool_colour": spool_colour,
             "spool_ids": list(spool_ids),
         }
-        _update(conn, "filaments", filament_id, fields, "id", stamp=bool(look))
+        try:
+            _update(conn, "filaments", filament_id, fields, "id", stamp=bool(look))
+        except errors.UniqueViolation:
+            # The import checks first (`colour_taken`); a collision past it is a 409.
+            current = self.filament(filament_id)
+            assert current is not None
+            colour = str(look.get("colour", current.colour))
+            self._raise_exists(current.material, current.subtype, current.brand, colour)
 
     def archive_filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
         """Hidden from the book from now on; a quote priced with it keeps its lines."""

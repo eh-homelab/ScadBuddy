@@ -239,3 +239,26 @@ def test_the_import_fills_the_look_of_an_imported_record(client: TestClient) -> 
         "translucent",
     )
     assert client.post(IMPORT).json()["rows"][0]["action"] == "unchanged"
+
+
+@respx.mock
+def test_a_spool_with_a_corrected_material_is_another_filaments(client: TestClient) -> None:
+    """#6211 review: the spool link matches only a record of the group's material, subtype
+    and brand, so a spool whose material was corrected never takes over its old record."""
+    configure(client)
+    no_density_sources()
+    red = {"rgba": "FF0000FF", "color_name": "Red"}
+    _inventory(spool(1, **red, cost_per_kg=20), spool(2, **red, cost_per_kg=21))
+    made = client.post(IMPORT).json()["rows"][0]
+    assert (made["action"], made["spool_ids"]) == ("created", [1, 2])
+
+    _inventory(spool(1, **red, cost_per_kg=20), spool(2, **red, material="PETG", cost_per_kg=30))
+    rows = {tuple(r["spool_ids"]): r for r in client.post(IMPORT).json()["rows"]}
+
+    assert (rows[(1,)]["action"], rows[(1,)]["filament_id"]) == ("updated", made["filament_id"])
+    assert rows[(1,)]["cost_per_kg"] == "20"
+    assert rows[(2,)]["action"] == "created"
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    old = book[made["filament_id"]]
+    assert (old["material"], old["cost_per_kg"]) == ("PLA", "20")
+    assert book[rows[(2,)]["filament_id"]]["material"] == "PETG"

@@ -1392,10 +1392,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
   `colour_source` is `import` or `manual`: a look sent by a person that differs from the
   record's makes it `manual`, and the import never sets a `manual` record's look;
-  `colour_source: "import"` in a PATCH hands it back. The import matches a record by its
-  link to the group's spools (`spool_ids`), else by material, subtype, brand and the spools'
-  RGB (`spool_colour`, then `colour`), never by a colour a person set, so it makes no
-  duplicate (`spool_import.py` `_match`; a group whose RGB is another record's hand-set
+  `colour_source: "import"` in a PATCH hands it back. The import matches only a record of
+  the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
+  else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
+  it makes no duplicate, and a spool whose material was corrected is another filament's (`spool_import.py` `_match`; a group whose RGB is another record's hand-set
   colour is skipped `colour_taken`).
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
