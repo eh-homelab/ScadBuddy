@@ -162,7 +162,7 @@ CREATE UNIQUE INDEX filament_locations_name ON filament_locations (coalesce(pare
     WHERE archived_at IS NULL;
 
 CREATE UNIQUE INDEX filament_locations_tray ON filament_locations (printer_id, ams_id, tray_id)
-    WHERE printer_id IS NOT NULL;
+    WHERE printer_id IS NOT NULL AND archived_at IS NULL;
 
 -- Seeds: the starting set. A person edits them.
 INSERT INTO filament_materials

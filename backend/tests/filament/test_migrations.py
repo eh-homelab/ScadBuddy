@@ -30,7 +30,7 @@ def test_the_filament_tables_and_seeds_exist(pg_pool: PgPool) -> None:
 
         conn.execute(_TYPE, ("#FF0000FF",))
         with pytest.raises(errors.CheckViolation), conn.transaction():
-            conn.execute(_TYPE.replace("'T1'", "'T2'"), ("#ff0000",))
+            conn.execute(_TYPE.replace("'T1'", "'T2'"), ("#ff0000ff",))
 
         with pytest.raises(errors.CheckViolation), conn.transaction():
             conn.execute("INSERT INTO filament_spools (note) VALUES ('x')")
@@ -53,3 +53,24 @@ def test_the_filament_tables_and_seeds_exist(pg_pool: PgPool) -> None:
         conn.execute(event, (spool["id"],))
         with pytest.raises(errors.UniqueViolation), conn.transaction():
             conn.execute(event, (spool["id"],))
+
+        with pytest.raises(errors.CheckViolation), conn.transaction():
+            conn.execute(
+                "INSERT INTO filament_spool_events (spool_id, kind, ref_id) "
+                "VALUES (%s, 'print_ended', 'r2')",
+                (spool["id"],),
+            )
+
+        tag2 = conn.execute(
+            "INSERT INTO filament_tags (kind, tag_uid) VALUES ('other', 'BB') RETURNING id"
+        ).fetchone()
+        assert tag2 is not None
+        with pytest.raises(errors.UniqueViolation), conn.transaction():
+            conn.execute(bind, (tag2["id"], spool["id"]))
+
+        brand = "INSERT INTO filament_brands (name) VALUES ('Acme')"
+        conn.execute(brand)
+        with pytest.raises(errors.UniqueViolation), conn.transaction():
+            conn.execute(brand.replace("Acme", "ACME"))
+        conn.execute("UPDATE filament_brands SET archived_at = now() WHERE name = 'Acme'")
+        conn.execute(brand.replace("Acme", "ACME"))

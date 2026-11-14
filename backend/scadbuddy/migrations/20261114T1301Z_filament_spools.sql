@@ -180,7 +180,8 @@ CREATE TABLE filament_spool_events (
     ref_kind text,
     ref_id text,
     actor text,
-    data jsonb NOT NULL DEFAULT '{}'
+    data jsonb NOT NULL DEFAULT '{}',
+    CHECK (ref_id IS NULL OR ref_kind IS NOT NULL)
 );
 CREATE INDEX filament_spool_events_spool_at ON filament_spool_events (spool_id, at);
 CREATE UNIQUE INDEX filament_spool_events_once
