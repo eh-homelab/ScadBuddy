@@ -42,3 +42,71 @@ def test_a_bad_body_is_422(client: TestClient) -> None:
     assert client.post(f"{URL}/brands", json={"name": "x", "bogus": 1}).status_code == 422
     bad_ref = client.post(f"{URL}/subtypes", json={"name": "S", "material_id": MISSING})
     assert bad_ref.status_code == 422, bad_ref.text
+
+
+TYPES = "/api/v1/filament/types"
+
+
+def _material_id(client: TestClient) -> str:
+    rows = client.get(f"{URL}/materials").json()
+    return next(row["id"] for row in rows if row["name"] == "PLA")
+
+
+def _type(client: TestClient, **over: object) -> dict[str, object]:
+    body = {
+        "code": "PLA-RED",
+        "material_id": _material_id(client),
+        "rgba": "#ff0000",
+        "label_weight_g": 1000,
+    } | over
+    made = client.post(TYPES, json=body)
+    assert made.status_code == 201, made.text
+    return made.json()
+
+
+def test_a_type_is_made_read_changed_and_archived(client: TestClient) -> None:
+    made = _type(client, cost_per_kg="20")
+    assert made["rgba"] == "#FF0000FF"
+    assert made["filament_id"] is not None
+    assert client.get(TYPES).json() == [made]
+    one = client.get(f"{TYPES}/{made['id']}").json()
+    assert one["presets"] == []
+    assert one["k_values"] == []
+    patched = client.patch(f"{TYPES}/{made['id']}", json={"colour_name": "Red"})
+    assert patched.json()["colour_name"] == "Red"
+    archived = client.patch(f"{TYPES}/{made['id']}", json={"archived": True})
+    assert archived.json()["archived_at"] is not None
+    assert client.get(TYPES).json() == []
+    assert len(client.get(TYPES, params={"include_archived": True}).json()) == 1
+
+
+def test_a_type_code_clash_is_409_and_a_backwards_range_is_422(client: TestClient) -> None:
+    _type(client)
+    base = {"material_id": _material_id(client), "rgba": "#00ff00", "label_weight_g": 1000}
+    taken = client.post(TYPES, json={"code": "pla-red", **base})
+    assert taken.status_code == 409, taken.text
+    backwards = client.post(
+        TYPES, json={"code": "X", "nozzle_temp_min": 300, "nozzle_temp_max": 200, **base}
+    )
+    assert backwards.status_code == 422, backwards.text
+
+
+def test_a_missing_type_is_404(client: TestClient) -> None:
+    assert client.get(f"{TYPES}/{MISSING}").status_code == 404
+    assert client.patch(f"{TYPES}/{MISSING}", json={"note": "x"}).status_code == 404
+    assert client.put(f"{TYPES}/{MISSING}/presets", json=[]).status_code == 404
+    assert client.put(f"{TYPES}/{MISSING}/k-values", json=[]).status_code == 404
+
+
+def test_presets_and_k_values_are_replaced(client: TestClient) -> None:
+    made = _type(client)
+    rows = [{"printer_model": "H2C", "nozzle_diameter": "0.4", "slicer_filament": "GFA00"}]
+    saved = client.put(f"{TYPES}/{made['id']}/presets", json=rows)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()[0]["slicer_filament"] == "GFA00"
+    assert client.get(f"{TYPES}/{made['id']}").json()["presets"] == saved.json()
+    twice = client.put(f"{TYPES}/{made['id']}/presets", json=[rows[0], rows[0]])
+    assert twice.status_code == 422, twice.text
+    k = {"printer_id": MISSING, "extruder": 0, "nozzle_diameter": "0.4", "k_value": "0.02"}
+    unknown = client.put(f"{TYPES}/{made['id']}/k-values", json=[k])
+    assert unknown.status_code == 422, unknown.text

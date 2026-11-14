@@ -477,6 +477,13 @@ class TypeKValue(BaseModel):
     setting_id: str | None
 
 
+class SpoolTypeDetail(SpoolType):
+    """A type with its slicer presets and pressure-advance values."""
+
+    presets: list[TypePreset]
+    k_values: list[TypeKValue]
+
+
 class SpoolPresetCreate(TypePresetCreate): ...
 
 

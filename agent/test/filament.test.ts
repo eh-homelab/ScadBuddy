@@ -91,3 +91,76 @@ describe('filament catalog tools', () => {
     expect(result.isError).toBe(true)
   })
 })
+
+const TYPES = `${BACKEND}/api/v1/filament/types`
+const TYPE = `${TYPES}/${ROW}`
+
+describe('filament type tools', () => {
+  it.each([
+    ['filament_type_list', 'read'],
+    ['filament_type_get', 'read'],
+    ['filament_type_upsert', 'write'],
+    ['filament_type_set_presets', 'write'],
+    ['filament_type_set_k_values', 'write'],
+  ])('%s is %s tier, never gated', (name, risk) => {
+    expect(tool(name).risk).toBe(risk)
+    expect(tool(name).gated).toBe(false)
+  })
+
+  it('lists types, archived ones on request, and reads one', async () => {
+    server.use(
+      http.get(TYPES, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('include_archived')).toBe('true')
+        return HttpResponse.json([{ id: ROW }])
+      }),
+      http.get(TYPE, () => HttpResponse.json({ id: ROW, presets: [], k_values: [] })),
+    )
+    const listed = await runTool(tool('filament_type_list'), { include_archived: true }, ctx())
+    expect(firstText(listed)).toEqual([{ id: ROW }])
+    const one = await runTool(tool('filament_type_get'), { type_id: ROW }, ctx())
+    expect(firstText(one)).toEqual({ id: ROW, presets: [], k_values: [] })
+  })
+
+  it('adds a type, then edits and archives it', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(TYPES, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW }, { status: 201 })
+      }),
+      http.patch(TYPE, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW })
+      }),
+    )
+    const fields = { code: 'PLA-RED', rgba: '#FF0000' }
+    expect((await runTool(tool('filament_type_upsert'), { fields }, ctx())).isError).toBeFalsy()
+    const edited = await runTool(
+      tool('filament_type_upsert'),
+      { type_id: ROW, fields: { note: null }, archived: true },
+      ctx(),
+    )
+    expect(edited.isError).toBeFalsy()
+    expect(bodies).toEqual([fields, { note: null, archived: true }])
+    expect((await runTool(tool('filament_type_upsert'), { archived: true }, ctx())).isError).toBe(true)
+  })
+
+  it('replaces the presets and the K values', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(`${TYPE}/presets`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([])
+      }),
+      http.put(`${TYPE}/k-values`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([])
+      }),
+    )
+    const presets = [{ printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'GFA00' }]
+    const k_values = [{ printer_id: ROW, extruder: 0, nozzle_diameter: '0.4', k_value: '0.02' }]
+    expect((await runTool(tool('filament_type_set_presets'), { type_id: ROW, presets }, ctx())).isError).toBeFalsy()
+    expect((await runTool(tool('filament_type_set_k_values'), { type_id: ROW, k_values }, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([presets, k_values])
+  })
+})

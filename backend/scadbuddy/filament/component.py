@@ -10,18 +10,21 @@ from typing import Annotated
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.filament.catalog import CatalogStore
+from scadbuddy.filament.types import SpoolTypeStore
 
 
 @dataclass
 class Filament:
     catalog: CatalogStore
+    types: SpoolTypeStore
 
 
 FILAMENT: Key[Filament] = Key("filament")
 
 
 def _build(core: Core, components: Components) -> Filament:
-    return Filament(catalog=CatalogStore(core.settings_store.pool))
+    pool = core.settings_store.pool
+    return Filament(catalog=CatalogStore(pool), types=SpoolTypeStore(pool))
 
 
 COMPONENT = Component(FILAMENT, build=_build)
