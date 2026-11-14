@@ -19,6 +19,7 @@ out or crashed, the download failed) raises, so Temporal tries it again; `failed
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import tempfile
 from pathlib import Path
@@ -51,6 +52,11 @@ class _SizeMismatchError(Exception):
     pass
 
 
+class FrozenCopyChangedError(RuntimeError):
+    """The download does not hash to the SHA-256 S3 computed on the frozen copy at the
+    claim: the attempt fails, never a verdict."""
+
+
 async def _download(http: httpx.AsyncClient, read: SourceRead, to: Path) -> str:
     """The frozen copy into ``to``, at most its size in bytes; its SHA-256. ``If-Match``
     names its ETag: S3 answers 412 for any other object, and the attempt fails."""
@@ -68,6 +74,8 @@ async def _download(http: httpx.AsyncClient, read: SourceRead, to: Path) -> str:
                 out.write(chunk)
     if taken != size:
         raise _SizeMismatchError
+    if read.sha256 is not None and base64.b64encode(digest.digest()).decode() != read.sha256:
+        raise FrozenCopyChangedError("the frozen copy does not hash to its SHA-256")
     return digest.hexdigest()
 
 
@@ -78,12 +86,13 @@ class IntakeActivities:
         work_dir: Path,
         http: httpx.AsyncClient | None = None,
         *,
-        sandbox: bool,
+        sandbox_uid: int | None,
     ) -> None:
         self._crud = crud
         self._work_dir = work_dir
-        #: The check's child runs in the pod's sandbox container (`runner.py`).
-        self._sandbox = sandbox
+        #: The pod's sandbox container's uid: the check's child runs there (`runner.py`),
+        #: and what it writes back must be its own. None: dev-only local runs.
+        self._sandbox_uid = sandbox_uid
         self._http = http or httpx.AsyncClient(timeout=TRANSFER_TIMEOUT)
 
     async def aclose(self) -> None:
@@ -118,11 +127,13 @@ class IntakeActivities:
                     outcome="refused", reason="The file is not the size it was sent as."
                 )
             else:
-                verdict = await run_check(file, read.filename, folder, sandbox=self._sandbox)
+                verdict = await run_check(
+                    file, read.filename, folder, sandbox_uid=self._sandbox_uid
+                )
                 if verdict.preview is None:
                     result = CheckResult(outcome="refused", reason=verdict.reason)
                 else:
-                    png = verdict.preview.read_bytes()
+                    png = verdict.preview
                     asked = await self._crud.request(
                         "POST",
                         f"{BASE}/{source_id}/preview",

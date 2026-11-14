@@ -47,6 +47,9 @@ class SourceRead(BaseModel):
     url: str
     #: The frozen copy's ETag: sent as ``If-Match``, which the URL signs.
     etag: str
+    #: The frozen copy's SHA-256 as S3 computed it at the claim (base64), or None where the
+    #: endpoint gave none; the download must hash to it.
+    sha256: str | None = None
 
 
 class PreviewAsk(BaseModel):

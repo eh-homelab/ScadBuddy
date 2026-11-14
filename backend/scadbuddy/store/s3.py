@@ -14,6 +14,7 @@ import logging
 import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, BinaryIO, Final, get_args
 
@@ -50,7 +51,7 @@ def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
 #: The storefront's staging area (#6133, spec 2026-11-13 §6): an upload slot's object, and
 #: its preview beside it. Nothing here is content-addressed, so `sweep_unrecorded` (which
 #: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it.
-_STAGED = re.compile(r"staging/[0-9a-f]{32}(?:\.png|\.frozen)?")
+_STAGED = re.compile(r"(staging/[0-9a-f]{32})(?:\.png|\.[0-9a-f]{16}\.frozen)?")
 
 
 #: The canned ACL every staging object is written with, signed into its presigned PUT.
@@ -59,12 +60,35 @@ STAGED_ACL: Final = "private"
 STAGED_PUT_HEADERS: Final = {"x-amz-acl": STAGED_ACL}
 
 
-def staging_key(prefix: str, upload_id: str, *, preview: bool = False, frozen: bool = False) -> str:
-    """The staging object of the upload slot ``upload_id``, its preview, or its frozen
-    copy: the claim's server-side copy, which no presigned URL names, so the customer
-    cannot change it after the claim (#6133)."""
-    suffix = ".png" if preview else ".frozen" if frozen else ""
-    return f"{prefix}/staging/{upload_id}{suffix}"
+def staging_key(
+    prefix: str, upload_id: str, *, preview: bool = False, frozen: str | None = None
+) -> str:
+    """The staging object of the upload slot ``upload_id``, its preview, or one of its
+    frozen copies: a claim attempt's server-side copy, named by that attempt's nonce
+    (``frozen``, 16 hex characters), which no presigned URL names, so the customer cannot
+    change it after the claim and two attempts at once never write one key (#6133)."""
+    if frozen is not None:
+        if re.fullmatch(r"[0-9a-f]{16}", frozen) is None:
+            raise ValueError(f"not a frozen copy's nonce: {frozen!r}")
+        return f"{prefix}/staging/{upload_id}.{frozen}.frozen"
+    return f"{prefix}/staging/{upload_id}{'.png' if preview else ''}"
+
+
+def staged_upload(prefix: str, key: str) -> str | None:
+    """The upload's own staging key that a staging object (the upload, its preview or a
+    frozen copy) belongs to; None for a key that is not a staging object."""
+    found = _STAGED.fullmatch(key.removeprefix(f"{prefix}/")) if key.startswith(prefix) else None
+    return None if found is None else f"{prefix}/{found.group(1)}"
+
+
+@dataclass(frozen=True)
+class Frozen:
+    """A frozen copy (`S3ContentBackend.freeze_staged`): its size, ETag, and SHA-256 as
+    S3 computed it on the copy (base64), or None where the endpoint gave none."""
+
+    size: int
+    etag: str
+    sha256: str | None
 
 
 def _missing(error: ClientError) -> bool:
@@ -317,25 +341,30 @@ class S3ContentBackend:
             raise
         return int(head["ContentLength"])
 
-    async def freeze_staged(self, key: str, frozen: str) -> tuple[int, str] | None:
+    async def freeze_staged(self, key: str, frozen: str) -> Frozen | None:
         """The staging object copied, server side, to ``frozen`` (a key no presigned URL
-        names), and the copy's size and ETag from a ``HEAD`` of it; None when there is no
-        object to copy. No byte passes through this process."""
+        names, unique to the claim attempt), with S3 computing the copy's SHA-256
+        (``x-amz-checksum-algorithm``, which the Spaces API reference lists for
+        CopyObject: https://docs.digitalocean.com/reference/api/spaces/); the copy's size
+        and ETag from a ``HEAD`` of it. None when there is no object to copy. No byte
+        passes through this process."""
         source, target = self._staged(key), self._staged(frozen)
         client = await self._s3()
         try:
-            await client.copy_object(
+            copied = await client.copy_object(
                 Bucket=self.settings.bucket,
                 Key=target,
                 CopySource={"Bucket": self.settings.bucket, "Key": source},
                 ACL=STAGED_ACL,
+                ChecksumAlgorithm="SHA256",
             )
         except ClientError as error:
             if _missing(error):
                 return None
             raise
         head = await client.head_object(Bucket=self.settings.bucket, Key=target)
-        return int(head["ContentLength"]), str(head["ETag"])
+        sha256 = copied.get("CopyObjectResult", {}).get("ChecksumSHA256")
+        return Frozen(int(head["ContentLength"]), str(head["ETag"]), sha256 or None)
 
     async def read_staged(self, key: str, max_bytes: int) -> bytes | None:
         """The staging object's bytes, as opaque bytes (its caller stores them, never opens
@@ -362,6 +391,21 @@ class S3ContentBackend:
         checked = self._staged(key)
         client = await self._s3()
         await client.delete_object(Bucket=self.settings.bucket, Key=checked)
+
+    async def remove_staged_of(self, key: str) -> None:
+        """Every staging object of the upload ``key`` deleted: the upload, its preview and
+        each frozen copy, a losing claim attempt's included."""
+        checked = self._staged(key)
+        if staged_upload(self.settings.prefix, checked) != checked:
+            raise ValueError(f"not an upload's own staging key: {key!r}")
+        client = await self._s3()
+        pages = client.get_paginator("list_objects_v2").paginate(
+            Bucket=self.settings.bucket, Prefix=checked
+        )
+        async for page in pages:
+            for item in page.get("Contents", []):
+                if staged_upload(self.settings.prefix, item["Key"]) == checked:
+                    await client.delete_object(Bucket=self.settings.bucket, Key=item["Key"])
 
     async def staged_objects(self) -> AsyncGenerator[tuple[str, datetime]]:
         """Every staging object's key and its last write."""

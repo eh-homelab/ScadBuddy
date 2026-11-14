@@ -57,7 +57,7 @@ from scadbuddy.orders.storefront.model_requests import (
     SWEEP_PASS_BATCHES,
     UNCLAIMED_GRACE,
 )
-from scadbuddy.store.s3 import S3ContentBackend, staging_key
+from scadbuddy.store.s3 import S3ContentBackend, staged_upload, staging_key
 from scadbuddy.workflows.commands import execution_gone
 from scadbuddy.workflows.staged_file import (
     STAGED_FILE_WORKFLOW,
@@ -252,9 +252,8 @@ async def step(state: AppState, upload_id: str, *, now: datetime | None = None) 
     if found.phase != "ended":
         return found
     prefix = backend.settings.prefix
-    await backend.remove_staged(staging_key(prefix, upload_id))
-    await backend.remove_staged(staging_key(prefix, upload_id, frozen=True))
-    await backend.remove_staged(staging_key(prefix, upload_id, preview=True))
+    # The upload, its preview and every frozen copy, a losing claim attempt's included.
+    await backend.remove_staged_of(staging_key(prefix, upload_id))
     if order is not None:
         emit(
             state.events,
@@ -321,7 +320,7 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
         if written < now - ORPHAN_AGE:
             old.append(object_key)
     if old:
-        uploads = [key.removesuffix(".png").removesuffix(".frozen") for key in old]
+        uploads = [staged_upload(backend.settings.prefix, key) or key for key in old]
         named = await asyncio.to_thread(_named, state, uploads)
         for object_key, upload in zip(old, uploads, strict=True):
             if upload not in named:

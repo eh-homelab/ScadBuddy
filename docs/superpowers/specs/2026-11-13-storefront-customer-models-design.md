@@ -74,7 +74,7 @@ run in a pod that holds a database secret (root `CLAUDE.md`, "Database access";
 | --- | --- | --- | --- |
 | Presign | storefront edge, then CRUD | edge none; CRUD yes | text fields only: names, sizes, types. No bytes. |
 | Upload | the browser, straight to the bucket | n/a | the bytes go to a staging key; no ScadBuddy process sees them |
-| Claim | CRUD | yes | a server-side `CopyObject` of each staging object to its frozen key, and a `HEAD` of the copy for its size and ETag. No bytes read. |
+| Claim | CRUD | yes | a server-side `CopyObject` of each staging object to a frozen key of its own attempt, and a `HEAD` of the copy for its size and ETag. No bytes read. |
 | Check and preview | intake worker (new, §7) | none | the full check, the plates, the preview, the SHA-256 |
 | Import | CRUD's `library` queue, through a flow (§8) | yes | copies the bytes to the native library; reads no structure (the worker's plates are passed in, §8.3) |
 | MakerWorld link | Bambuddy, through #6128's API | n/a | Bambuddy downloads; the native copy is #6128's |
@@ -254,13 +254,22 @@ action `model`, a passed check spending one (found in review of #6147: a links-o
 skipped every gate). CRUD route
 `POST /api/v1/crud/storefront/draft/models` (area `models`): each upload must be the
 visitor's, unclaimed and not cleaned up. Each is then frozen: a server-side `CopyObject` of
-`<prefix>/staging/<id>` to `<prefix>/staging/<id>.frozen`, a key no presigned URL names, and a
+`<prefix>/staging/<id>` to `<prefix>/staging/<id>.<nonce>.frozen` (a nonce of 16 hex digits
+per claim attempt, so two claims at once never write one key), a key no presigned URL names, and a
 `HEAD` of the copy, which must answer exactly the declared size (else 422 `upload_missing` or
 `upload_size`, naming the file; a copy of the wrong size is deleted). The customer's PUT URL
 stays valid up to 15 minutes after the claim, so nothing after the claim reads the original:
 the check and the import read only the frozen copy. Then one transaction adds the request
 item, its sources and a `checking` state per file, claims the uploads and keeps each copy's
-ETag (`storefront_uploads.frozen_etag`). After commit it deletes the writable originals (best
+key, ETag and SHA-256 (`storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`). The
+claim's `UPDATE` takes only unclaimed rows, so one attempt wins; a losing or refused attempt
+deletes the copies it made, and the winner's are the only ones a row names. The copy asks S3
+for a SHA-256 checksum (`x-amz-checksum-algorithm: SHA256`; DigitalOcean's Spaces API reference
+lists that header and `x-amz-copy-source-if-match` for `CopyObject`, and `If-Match` for
+`GetObject`: <https://docs.digitalocean.com/reference/api/spaces/>; its S3-compatibility page
+says nothing about additional checksums,
+<https://docs.digitalocean.com/products/spaces/reference/s3-compatibility/>, so a store that
+returns none leaves `frozen_sha256` null and the ETag alone pins the copy). After commit it deletes the writable originals (best
 effort; the watcher deletes every staging key of the file when it ends, §6.5), signals each
 file's watcher `claimed` (§6.5) and starts one `CustomerFileCheck` per file (§7). A retry with the same idempotency
 key answers its first reply, as `add_request` does. The CRUD service never reads the bytes.
@@ -366,7 +375,8 @@ a claim, `orders/storefront/intake.py` `start_checks`, workflow id
    `not_checking` for a source that no longer waits, which ends the run) and downloads it
    to its disk, counting bytes (at most the declared size; any other size is refused). The
    GET is of the frozen copy (§6.3) and signs `If-Match` of its ETag, which the worker
-   sends, so S3 answers 412 for any other object at that key and the attempt fails. The
+   sends, so S3 answers 412 for any other object at that key and the attempt fails; where the
+   claim kept a SHA-256, the worker also compares the downloaded bytes with it. The
    import (§8, PR 5) copies the same key with `CopySourceIfMatch` and checks the SHA-256
    the worker reported;
 2. checks it by content, never by name or declared type:
@@ -430,9 +440,29 @@ credential (`intake_worker/hardening.py`, `runner.py`, `sandbox.py`):
   The variable has no default: the worker refuses to start without it, so a missing value
   never falls back to the weaker mode; `unsafe-local` (development only) starts the child
   in the worker's own container.
-  The sandbox refuses to start with a database secret, the KEK or a proof. The worker reads
-  what comes back as untrusted: the verdict capped at 1 MiB and validated, the preview capped
-  at 4 MiB. With `unsafe-local` (development, tests) the worker starts the child itself. The
+  The worker also needs `SCADBUDDY_INTAKE_SANDBOX_UID`, the sandbox container's `runAsUser`
+  (not root, not the worker's own). The sandbox refuses to start with a database secret, the
+  KEK or a proof.
+- The spool protocol never follows a name it did not make. The worker makes each job's
+  directory, `upload.bin`, `request.json` (the filename, the timeout and the address-space
+  cap, each checked finite, positive and within its cap on both sides) and an empty `out/`,
+  and keeps descriptors of the job and `out/`. The sandbox claims the job (`taken`, made
+  `O_EXCL`), makes a `box/` (0700, its own), copies the upload into it with `O_NOFOLLOW`, and
+  runs the child with the box as its working directory, named by the sandbox's own descriptor
+  (`/proc/<pid>/fd/<n>`). The child also moves into a new mount namespace and puts an empty
+  tmpfs over the spool, so it reaches only its box, not another job's directory
+  ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
+  The sandbox reads the box's outputs and writes fresh files into `out/`; the worker reads
+  them by its `out/` descriptor. Every read of an output opens it with
+  `O_NOFOLLOW | O_NONBLOCK` relative to a directory descriptor, then checks with `fstat` that
+  it is a regular file with one link, owned by the user that should have written it (the
+  sandbox's), and reads at most the cap: the verdict 1 MiB and validated, the preview 4 MiB,
+  which must start with the PNG signature and an `IHDR` chunk of sides 1 to 4096
+  ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)). A symlink, a hard link, a FIFO or a
+  file of another owner fails the check. Where the runtime refuses the child's namespaces,
+  the sandbox (which probes once at start) runs one check at a time, so no two jobs are open
+  at once; a child that escaped its process group could still reach a later job's directory
+  then. With `unsafe-local` (development, tests) the worker starts the child itself. The
   two containers share the pod's network namespace, so where the runtime refuses the child's
   own namespace, the pod's NetworkPolicy (DNS, the CRUD port, Temporal and the bucket host
   only) bounds what an exploited parse can reach; it holds no credential for the CRUD port.

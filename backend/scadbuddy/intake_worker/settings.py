@@ -3,6 +3,7 @@ store field: it reaches the CRUD service and Temporal only."""
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
@@ -60,6 +61,9 @@ class IntakeSettings(BaseSettings):
     #: deployment sets it. ``unsafe-local`` starts the child in this process's container,
     #: for development only.
     intake_sandbox: Literal["true", "unsafe-local"]
+    #: The sandbox container's ``runAsUser``, required with ``true``: everything the
+    #: worker reads back from the spool must be owned by it (`runner.read_output`).
+    intake_sandbox_uid: int | None = None
     #: Checks at once; each holds a download and a child process.
     intake_concurrency: int = 2
     log_level: str = "INFO"
@@ -88,6 +92,18 @@ class IntakeSettings(BaseSettings):
                 f"SCADBUDDY_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, not {value!r}"
             )
         return level
+
+    @model_validator(mode="after")
+    def _sandbox_uid(self) -> IntakeSettings:
+        if self.intake_sandbox == "true":
+            if self.intake_sandbox_uid is None:
+                raise ValueError("SCADBUDDY_INTAKE_SANDBOX=true needs SCADBUDDY_INTAKE_SANDBOX_UID")
+            if self.intake_sandbox_uid <= 0 or self.intake_sandbox_uid == os.geteuid():
+                raise ValueError(
+                    "SCADBUDDY_INTAKE_SANDBOX_UID must be another user than the worker's,"
+                    " and not root"
+                )
+        return self
 
     @model_validator(mode="after")
     def _one_proof(self) -> IntakeSettings:

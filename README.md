@@ -2354,8 +2354,10 @@ holds the manifest (spec §12).
   minutes, so size the sandbox container's memory limit for `SCADBUDDY_INTAKE_CONCURRENCY`
   such children, and the work volume for as many 256 MiB downloads.
 - **Two containers (spec §7, "The child's sandbox").** The worker container runs
-  `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true`; it never parses a
-  file. The variable is required: the worker refuses to start without it, and only the
+  `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true` and
+  `SCADBUDDY_INTAKE_SANDBOX_UID` set to the sandbox container's `runAsUser` (required with
+  `true`; not 0 and not the worker's own uid: the worker accepts only spool files that user
+  owns); it never parses a file. The variable is required: the worker refuses to start without it, and only the
   dev-only value `unsafe-local` starts the child in the worker's own container. The `sandbox` container runs `python -m scadbuddy.intake_worker.sandbox`, which runs
   each check's child: another `runAsUser` than the worker's, no ServiceAccount token and no
   proof volume (it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,

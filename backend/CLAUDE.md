@@ -1385,9 +1385,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
   `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
   signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
-  uploads (each the visitor's and unclaimed, frozen by a server-side copy to
-  `<prefix>/staging/<id>.frozen`, which no presigned URL names, whose `HEAD` must be exactly
-  its declared size; its ETag kept in `storefront_uploads.frozen_etag`; the writable original
+  uploads (each the visitor's and unclaimed, frozen by a server-side copy with a SHA-256
+  checksum to `<prefix>/staging/<id>.<nonce>.frozen`, a nonce per claim attempt, which no
+  presigned URL names, whose `HEAD` must be exactly its declared size; its key, ETag and
+  SHA-256 kept in `storefront_uploads.frozen_key`, `frozen_etag`, `frozen_sha256`; a losing
+  or refused attempt deletes its copies, `_drop_losers`; the writable original
   deleted after the commit; no byte read; the check and the import read only the copy) and adds a `request` item, its `order_item_model_requests` row (the colours asked
   for) and its `order_item_sources` (files `checking`; links as text only, typed by
   `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
@@ -1432,7 +1434,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
   `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the pod's
   `sandbox` container (`sandbox.py`, the spool protocol in `runner.py`), never in the
-  worker's; only the dev-only `unsafe-local` runs it in the worker's container. The
+  worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_UID` (the sandbox's uid); only the dev-only
+  `unsafe-local` runs it in the worker's container. Each child gets a `box/` of its own and,
+  where allowed, a mount namespace with a tmpfs over the spool; every spool output is read by
+  `runner.read_output` (`O_NOFOLLOW` by a directory descriptor, a regular file with one link
+  and the expected owner, capped; the preview's PNG signature and `IHDR` checked); with the
+  namespaces refused the sandbox runs one check at a time. The
   API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
   (never the worker's reported hash), held by the source
   (`blob_refs` holder `order_item_source`; the trigger of

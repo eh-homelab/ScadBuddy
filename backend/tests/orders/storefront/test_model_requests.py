@@ -263,6 +263,46 @@ def test_another_visitors_file_is_not_found(asks: CrudCaller) -> None:  # noqa: 
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_missing"
 
 
+def test_two_claims_at_once_never_share_a_frozen_copy(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    """Each claim attempt copies to a key of its own; the committed claim keeps its copy,
+    and the losing attempt's copy is dropped, never written over the winner's."""
+    from scadbuddy.orders.storefront import model_requests
+
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    state, store = _state(s3_api), backend(s3_api)
+    # A second attempt that froze the file before the first committed its claim.
+    loser = on_app(s3_api, lambda: model_requests._claimable(state, store, TOKEN_A, [slot_id]))
+    assert ask(asks, {"uploads": [slot_id]}).status_code == 200
+    [row] = rows(s3_api, "SELECT frozen_key, frozen_sha256 FROM storefront_uploads")
+    assert loser[0].frozen_key != row["frozen_key"]
+    assert sorted(frozen_keys(s3_api, slot_id)) == sorted([loser[0].frozen_key, row["frozen_key"]])
+    on_app(s3_api, lambda: model_requests._drop_losers(state, store, loser))
+    assert frozen_keys(s3_api, slot_id) == [row["frozen_key"]]
+
+
+def test_a_refused_claim_drops_the_copies_it_made(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    [good] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    [short] = slots(asks, [("cube.stl", STL, "model/stl")], key="u2").json()["uploads"]
+    store = backend(s3_api)
+
+    async def plant() -> None:
+        client = await store.client()
+        key = staging_key(store.settings.prefix, short["id"])
+        await client.put_object(Bucket=store.settings.bucket, Key=key, Body=STL[:-1])
+
+    on_app(s3_api, plant)
+    r = ask(asks, {"uploads": [good, short["id"]]})
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_size"
+    assert frozen_keys(s3_api, good) == frozen_keys(s3_api, short["id"]) == []
+    assert staged(s3_api, good) == len(STL)  # the original stays for another try
+
+
 def test_a_file_is_claimed_once(asks: CrudCaller) -> None:  # noqa: F811
     ids = uploaded(asks, [("cube.stl", STL, "model/stl")])
     assert ask(asks, {"uploads": ids}).status_code == 200
@@ -401,11 +441,25 @@ def staged(app: TestClient, slot_id: str) -> int | None:
     return on_app(app, store.staged_size, staging_key(store.settings.prefix, slot_id))
 
 
-def frozen(app: TestClient, slot_id: str) -> int | None:
-    """The size of the claim's frozen copy of ``slot_id``, or None."""
+def frozen_keys(app: TestClient, slot_id: str) -> list[str]:
+    """Every frozen copy of ``slot_id`` in the staging area."""
     store = backend(app)
-    key = staging_key(store.settings.prefix, slot_id, frozen=True)
-    return on_app(app, store.staged_size, key)
+
+    async def listed() -> list[str]:
+        return [
+            key
+            async for key, _ in store.staged_objects()
+            if key.endswith(".frozen") and f"/staging/{slot_id}." in key
+        ]
+
+    return on_app(app, listed)
+
+
+def frozen(app: TestClient, slot_id: str) -> int | None:
+    """The size of the slot's one frozen copy, or None when it has none."""
+    keys = frozen_keys(app, slot_id)
+    assert len(keys) <= 1, keys
+    return on_app(app, backend(app).staged_size, keys[0]) if keys else None
 
 
 def step(app: TestClient, slot_id: str, now: datetime) -> StagedFileState:
@@ -571,14 +625,16 @@ def test_the_backstop_takes_an_old_object_no_row_names(
     async def plant() -> None:
         client = await store.client()
         await client.put_object(Bucket=store.settings.bucket, Key=stray, Body=b"x")
-        await client.put_object(Bucket=store.settings.bucket, Key=f"{stray}.frozen", Body=b"x")
+        await client.put_object(
+            Bucket=store.settings.bucket, Key=f"{stray}.0123456789abcdef.frozen", Body=b"x"
+        )
 
     on_app(s3_api, plant)
     assert sweep(s3_api, datetime.now(UTC) + timedelta(minutes=10)) == 0
     assert on_app(s3_api, store.staged_size, stray) == 1
     assert sweep(s3_api, datetime.now(UTC) + timedelta(days=2)) == 2
     assert on_app(s3_api, store.staged_size, stray) is None
-    assert on_app(s3_api, store.staged_size, f"{stray}.frozen") is None
+    assert on_app(s3_api, store.staged_size, f"{stray}.0123456789abcdef.frozen") is None
     # A named object only goes with its row, by its watcher.
     assert staged(s3_api, kept) == len(STL)
 

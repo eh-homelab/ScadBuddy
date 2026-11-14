@@ -5,6 +5,8 @@ verdict's post."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.crud.client import CrudClient
-from scadbuddy.intake_worker.activities import BASE, IntakeActivities
+from scadbuddy.intake_worker.activities import BASE, FrozenCopyChangedError, IntakeActivities
 from tests.crud.test_client import Source
 from tests.intake_worker.test_check import box_stl
 
@@ -38,6 +40,8 @@ class Fake:
         self.preview_headers: dict[str, str] = {}
         #: The ETag the bucket holds at the frozen key (another one: the object changed).
         self.etag = ETAG
+        #: The SHA-256 the CRUD service reports for the frozen copy (None: none).
+        self.sha256: str | None = None
 
     def crud(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -52,6 +56,7 @@ class Fake:
                 "media_type": "model/stl",
                 "url": GET_URL,
                 "etag": ETAG,
+                "sha256": self.sha256,
             }
             return httpx.Response(200, json=body, headers=HEADER)
         if path == f"{BASE}/{SOURCE}/preview":
@@ -84,7 +89,7 @@ def run(fake: Fake, tmp_path: Path, which: str = "check") -> str:
         backoff=0.01,
     )
     http = httpx.AsyncClient(transport=httpx.MockTransport(fake.bucket))
-    activities = IntakeActivities(crud, tmp_path, http, sandbox=False)
+    activities = IntakeActivities(crud, tmp_path, http, sandbox_uid=None)
     env = ActivityEnvironment()
 
     async def go() -> str:
@@ -129,6 +134,19 @@ def test_a_frozen_copy_of_another_etag_fails_the_attempt(tmp_path: Path) -> None
     with pytest.raises(httpx.HTTPStatusError, match="412"):
         run(fake, tmp_path)
     assert fake.posted == [] and fake.preview is None
+
+
+def test_a_download_that_is_not_the_frozen_copys_sha256_fails_the_attempt(
+    tmp_path: Path,
+) -> None:
+    fake = Fake(box_stl())
+    fake.sha256 = base64.b64encode(hashlib.sha256(b"other bytes").digest()).decode()
+    with pytest.raises(FrozenCopyChangedError):
+        run(fake, tmp_path)
+    assert fake.posted == [] and fake.preview is None
+    fake = Fake(box_stl())
+    fake.sha256 = base64.b64encode(hashlib.sha256(box_stl()).digest()).decode()
+    assert run(fake, tmp_path) == "ready"
 
 
 def test_a_file_that_is_not_a_model_is_refused(tmp_path: Path) -> None:

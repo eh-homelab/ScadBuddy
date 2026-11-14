@@ -141,14 +141,14 @@ def _waiting(conn: Any, source_id: str, *, lock: bool = False) -> Any:
     longer waits (checked, or its staged file gone)."""
     row = conn.execute(
         "SELECT s.id, s.order_id, s.upload_id, s.filename, s.size, s.media_type,"
-        " s.check_status, u.frozen_etag"
+        " s.check_status, u.frozen_key, u.frozen_etag, u.frozen_sha256"
         " FROM order_item_sources s LEFT JOIN storefront_uploads u ON u.id = s.upload_id"
         " WHERE s.id = %s AND s.kind = 'file'" + (" FOR UPDATE OF s" if lock else ""),
         (source_id,),
     ).fetchone()
     if row is None:
         raise problem(status.HTTP_404_NOT_FOUND, SOURCE_NOT_FOUND, "No such file.")
-    if row["check_status"] != "checking" or row["upload_id"] is None or row["frozen_etag"] is None:
+    if row["check_status"] != "checking" or row["upload_id"] is None or row["frozen_key"] is None:
         raise problem(
             status.HTTP_409_CONFLICT, NOT_CHECKING, "This file no longer waits for a check."
         )
@@ -167,8 +167,7 @@ async def read_source(state: AppState, source_id: str) -> SourceRead:
     object at that key."""
     backend = _backend(state)
     row = await asyncio.to_thread(_read, state, source_id)
-    key = staging_key(backend.settings.prefix, row["upload_id"], frozen=True)
-    url = await backend.presign_staged_get(key, URL_TTL, if_match=row["frozen_etag"])
+    url = await backend.presign_staged_get(row["frozen_key"], URL_TTL, if_match=row["frozen_etag"])
     return SourceRead(
         source_id=row["id"],
         filename=row["filename"],
@@ -176,6 +175,7 @@ async def read_source(state: AppState, source_id: str) -> SourceRead:
         media_type=row["media_type"],
         url=url,
         etag=row["frozen_etag"],
+        sha256=row["frozen_sha256"],
     )
 
 

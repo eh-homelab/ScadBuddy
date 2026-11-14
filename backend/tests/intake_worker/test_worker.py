@@ -4,6 +4,7 @@ the KEK, needs one proof, and imports no database code."""
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ def worker_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("SCADBUDDY_SERVICE_TOKEN_FILE", str(proof))
     monkeypatch.delenv("SCADBUDDY_SERVICE_BOOTSTRAP_FILE", raising=False)
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "true")
+    monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_UID", str(os.geteuid() + 1))
     return proof
 
 
@@ -64,6 +66,20 @@ def test_the_settings_need_the_sandbox_named(
         IntakeSettings()  # type: ignore[call-arg]
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX", "unsafe-local")
     assert IntakeSettings().intake_sandbox == "unsafe-local"  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("uid", [None, "0", "same"])
+def test_the_sandbox_needs_a_uid_of_its_own(
+    worker_env: Path, monkeypatch: pytest.MonkeyPatch, uid: str | None
+) -> None:
+    if uid is None:
+        monkeypatch.delenv("SCADBUDDY_INTAKE_SANDBOX_UID")
+    else:
+        monkeypatch.setenv(
+            "SCADBUDDY_INTAKE_SANDBOX_UID", str(os.geteuid()) if uid == "same" else uid
+        )
+    with pytest.raises(ValidationError, match="SANDBOX_UID"):
+        IntakeSettings()  # type: ignore[call-arg]
 
 
 def test_the_worker_imports_nothing_that_touches_the_database() -> None:

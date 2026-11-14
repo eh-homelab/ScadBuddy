@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import os
@@ -19,7 +20,13 @@ from botocore.exceptions import EndpointConnectionError
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
-from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, object_key, staging_key
+from scadbuddy.store.s3 import (
+    STAGED_PUT_HEADERS,
+    S3ContentBackend,
+    object_key,
+    staged_upload,
+    staging_key,
+)
 
 SCOPE = BlobScope(slug="demo", title="Demo")
 MISSING = "t/asset/" + "0" * 64
@@ -359,17 +366,45 @@ def test_a_preview_key_sits_beside_its_upload() -> None:
 
 async def test_a_frozen_copy_keeps_the_bytes_of_the_moment_it_was_made(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3)
-    source, frozen = staging_key("t", STAGED), staging_key("t", STAGED, frozen=True)
-    assert frozen == f"t/staging/{STAGED}.frozen"
+    source = staging_key("t", STAGED)
+    frozen = staging_key("t", STAGED, frozen="0123456789abcdef")
+    assert frozen == f"t/staging/{STAGED}.0123456789abcdef.frozen"
+    assert staged_upload("t", frozen) == staged_upload("t", f"{source}.png") == source
+    with pytest.raises(ValueError):
+        staging_key("t", STAGED, frozen="../x")
     try:
         assert await backend.freeze_staged(source, frozen) is None  # nothing to copy
         client = await backend._s3()
         await client.put_object(Bucket=s3.bucket, Key=source, Body=b"first")
-        size, etag = await backend.freeze_staged(source, frozen) or (0, "")
-        assert size == 5 and etag.startswith('"')
+        copy = await backend.freeze_staged(source, frozen)
+        assert copy is not None and copy.size == 5 and copy.etag.startswith('"')
+        if copy.sha256 is not None:  # S3 computed it on the copy
+            assert copy.sha256 == base64.b64encode(hashlib.sha256(b"first").digest()).decode()
         await client.put_object(Bucket=s3.bucket, Key=source, Body=b"later")
-        held = await client.get_object(Bucket=s3.bucket, Key=frozen, IfMatch=etag)
+        held = await client.get_object(Bucket=s3.bucket, Key=frozen, IfMatch=copy.etag)
         assert await held["Body"].read() == b"first"
+    finally:
+        await backend.aclose()
+
+
+async def test_an_uploads_staging_objects_go_together(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    other = "f" * 32
+    keys = [
+        staging_key("t", STAGED),
+        staging_key("t", STAGED, preview=True),
+        staging_key("t", STAGED, frozen="0123456789abcdef"),
+        staging_key("t", STAGED, frozen="fedcba9876543210"),
+        staging_key("t", other),
+    ]
+    try:
+        client = await backend._s3()
+        for key in keys:
+            await client.put_object(Bucket=s3.bucket, Key=key, Body=b"x")
+        await backend.remove_staged_of(staging_key("t", STAGED))
+        assert [key async for key, _ in backend.staged_objects()] == [staging_key("t", other)]
+        with pytest.raises(ValueError):
+            await backend.remove_staged_of(staging_key("t", STAGED, preview=True))
     finally:
         await backend.aclose()
 

@@ -49,12 +49,15 @@ async def run(
     stop = stop or asyncio.Event()
     auth = ServiceAuth(exchange_source("intake", settings))
     crud = CrudClient(settings.api_internal_url, "intake", auth)
-    sandbox = settings.intake_sandbox == "true"
-    if not sandbox:
+    if settings.intake_sandbox != "true":
         logger.warning(
             "SCADBUDDY_INTAKE_SANDBOX=unsafe-local: checks run in this container; dev only"
         )
-    activities = IntakeActivities(crud, settings.intake_work_dir, sandbox=sandbox)
+    activities = IntakeActivities(
+        crud,
+        settings.intake_work_dir,
+        sandbox_uid=settings.intake_sandbox_uid if settings.intake_sandbox == "true" else None,
+    )
     health = (
         await asyncio.start_server(_healthz, "0.0.0.0", health_port)
         if health_port is not None
