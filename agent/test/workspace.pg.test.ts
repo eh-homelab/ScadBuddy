@@ -14,6 +14,7 @@ import { canonicalJson } from '../src/approvals/service.js'
 import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
+import { forgetSubject } from '../src/sessions/forget.js'
 import { humanSize, SessionFiles, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -112,6 +113,85 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       await db.sql`DELETE FROM ai_sessions WHERE id = ${sessionId}`
       expect(await files.list(ws)).toEqual([])
       expect(await files.list(other)).toHaveLength(1)
+    })
+
+    it('shares a fork\'s bytes, never copies them, and drops bytes once no file names them (#4212)', async () => {
+      const bytesRows = async () => (await db.sql<{ sha256: string }[]>`SELECT sha256 FROM ai_session_file_bytes ORDER BY sha256`).map((r) => r.sha256)
+      const child = (await m.start(browser, { origin: 'chat' })).session
+      const childWs: WorkspaceRef = { kind: 'session', sessionId: child.id }
+      await files.write(ws, 'a.txt', Buffer.from('shared'))
+      await files.copy(sessionId, child.id)
+      const rows = await db.sql<{ workspace: string; data: Buffer | null; bytes_sha256: string | null }[]>`
+        SELECT workspace, data, bytes_sha256 FROM ai_session_files ORDER BY workspace`
+      expect(rows.map((r) => [r.data, r.bytes_sha256])).toEqual([
+        [null, sha256(Buffer.from('shared'))],
+        [null, sha256(Buffer.from('shared'))],
+      ])
+      expect(await bytesRows()).toEqual([sha256(Buffer.from('shared'))])
+      // A write in the fork never reaches the parent's file.
+      await files.write(childWs, 'a.txt', Buffer.from('mine'))
+      expect((await files.read(ws, 'a.txt'))?.bytes.toString()).toBe('shared')
+      expect((await files.read(childWs, 'a.txt'))?.bytes.toString()).toBe('mine')
+      expect(await bytesRows()).toHaveLength(2)
+      // The same bytes in two files are one row, kept while either names it.
+      await files.write(childWs, 'b.txt', Buffer.from('shared'))
+      await files.delete(ws, 'a.txt')
+      expect(await bytesRows()).toEqual([sha256(Buffer.from('mine')), sha256(Buffer.from('shared'))].sort())
+      await files.delete(childWs, 'b.txt')
+      expect(await bytesRows()).toEqual([sha256(Buffer.from('mine'))])
+      // A session's cascade leaves its bytes to the sweep.
+      await db.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+      expect(await bytesRows()).toHaveLength(1)
+      await files.sweep()
+      expect(await bytesRows()).toEqual([])
+    })
+
+    it("moves a parent's file an older agent kept inline into the shared bytes at a fork", async () => {
+      await db.sql`
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size)
+        VALUES (${`session:${sessionId}`}, ${sessionId}, 'old.txt', 'text/plain', ${Buffer.from('inline')}, ${sha256(Buffer.from('inline'))}, 6)`
+      expect((await files.read(ws, 'old.txt'))?.bytes.toString()).toBe('inline')
+      const child = (await m.start(browser, { origin: 'chat' })).session
+      await files.copy(sessionId, child.id)
+      const rows = await db.sql<{ data: Buffer | null; bytes_sha256: string | null }[]>`SELECT data, bytes_sha256 FROM ai_session_files`
+      expect(rows).toEqual([
+        { data: null, bytes_sha256: sha256(Buffer.from('inline')) },
+        { data: null, bytes_sha256: sha256(Buffer.from('inline')) },
+      ])
+      expect((await files.read({ kind: 'session', sessionId: child.id }, 'old.txt'))?.bytes.toString()).toBe('inline')
+      const parts: Buffer[] = []
+      for await (const part of files.chunks(ws, 'old.txt', sha256(Buffer.from('inline')), 4)) parts.push(part)
+      expect(Buffer.concat(parts).toString()).toBe('inline')
+    })
+
+    it('copies, inline, a parent row whose bytes do not match its sha256, and shares none of it', async () => {
+      await db.sql`
+        INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, sha256, size)
+        VALUES (${`session:${sessionId}`}, ${sessionId}, 'odd.txt', 'text/plain', ${Buffer.from('odd')}, ${'f'.repeat(64)}, 3)`
+      const child = (await m.start(browser, { origin: 'chat' })).session
+      await files.copy(sessionId, child.id)
+      const rows = await db.sql<{ data: Buffer | null; bytes_sha256: string | null }[]>`SELECT data, bytes_sha256 FROM ai_session_files`
+      expect(rows.map((r) => [r.data?.toString(), r.bytes_sha256])).toEqual([
+        ['odd', null],
+        ['odd', null],
+      ])
+      expect(await db.sql`SELECT 1 FROM ai_session_file_bytes`).toHaveLength(0)
+      expect((await files.read({ kind: 'session', sessionId: child.id }, 'odd.txt'))?.bytes.toString()).toBe('odd')
+    })
+
+    it('forgets a session with its unshared bytes, and keeps the bytes a fork names', async () => {
+      const child = (await m.start(browser, { origin: 'chat' })).session
+      await files.write(ws, 'a.txt', Buffer.from('kept by the fork'))
+      await files.copy(sessionId, child.id)
+      await files.write(ws, 'b.txt', Buffer.from('only the parent'))
+      await forgetSubject({ sql: db.sql }, `session-${sessionId}`)
+      const left = await db.sql<{ sha256: string }[]>`SELECT sha256 FROM ai_session_file_bytes`
+      expect(left.map((r) => r.sha256)).toEqual([sha256(Buffer.from('kept by the fork'))])
+      expect((await files.read({ kind: 'session', sessionId: child.id }, 'a.txt'))?.bytes.toString()).toBe('kept by the fork')
+    })
+
+    it('never names bytes under a sha256 that is not theirs', async () => {
+      await expect(db.sql`INSERT INTO ai_session_file_bytes (sha256, data) VALUES (${'0'.repeat(64)}, ${Buffer.from('x')})`).rejects.toThrow(/check/)
     })
 
     it("sweeps a principal's files a day after their last write, never a session's", async () => {
