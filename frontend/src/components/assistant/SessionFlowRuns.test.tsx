@@ -51,6 +51,9 @@ describe('SessionFlowRuns', () => {
       renderPage(<SessionFlowRuns sessionId="sess-escalated" />)
       const waiting = await screen.findByRole('list', { name: 'Waiting in runs started here' })
       expect(waiting).toHaveTextContent('print_output (in a session it talks to)')
+      // #6287: the list is in the DOM before React runs the effect that follows the
+      // stream; a tick sent before that effect reaches no one. Wait for the stream.
+      await waitFor(() => expect(stream.open()).toHaveLength(1))
       setFlowRunChildren('run-escalated', [])
       await stream.changed()
       await waitFor(() => expect(screen.getByRole('list', { name: 'Waiting in runs started here' })).not.toHaveTextContent('print_output'))
