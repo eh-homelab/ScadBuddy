@@ -1,5 +1,5 @@
-"""#5298 Task 11: `revoke_role` takes back everything the API granted a caller's role
-(`auth/revoke.py`), so the deployment can then drop the role."""
+"""#5298 Tasks 11 and 35: `revoke_role` takes back everything the API granted a caller's
+role (`auth/revoke.py`), so the deployment can then drop the role."""
 
 from __future__ import annotations
 
@@ -212,7 +212,7 @@ def _schema(conn: Conn) -> str:
 def test_the_api_start_revokes_the_retired_roles(
     conn: Conn, role: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert RETIRED_ROLES == ("scadbuddy_projects",)
+    assert RETIRED_ROLES == ("scadbuddy_projects", "scadbuddy_print")
     _grant_like_the_api(conn, role)
     monkeypatch.setattr("scadbuddy.auth.revoke.RETIRED_ROLES", (role, f"absent_{role}"))
     assert revoke_retired(conn) == [role]
@@ -246,3 +246,90 @@ def test_a_role_whose_name_extends_this_one_keeps_its_policies(
         with psycopg.connect(pg_conninfo, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(longer)))
             admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(longer)))
+
+
+#: Every table the print worker's role was ever granted (#5210), each now behind a CRUD
+#: route (#5298 Tasks 23 to 31), and the migrations ledger it waited on.
+PRINT_HELD = (
+    "scadbuddy_migrations",
+    "settings",
+    "model_print_choices",
+    "operations",
+    "print_runs",
+    "print_outcomes",
+    "events",
+    "output_bambuddy_uploads",
+    "output_bambuddy_slices",
+    "print_slice_starts",
+    "print_preview_slices",
+    "folderless_projects",
+    "destination_touches",
+    "project_print_targets",
+    "print_links",
+    "print_sends",
+    "output_last_prints",
+    "printers",
+    "printer_reports",
+    "printer_bed_types",
+    "activity",
+    "rack_nozzle_seen",
+    "rack_nozzle_picks",
+    "rack_nozzle_pick_spools",
+    "rack_nozzle_prints",
+    "physical_spools",
+    "spool_provider_records",
+    "spool_record_links",
+    "spool_provider_refreshes",
+    "tray_spool_links",
+    "native_spools",
+    "native_spool_uses",
+    "held_local_presets",
+    "native_slices",
+)
+
+
+def test_the_start_takes_back_the_print_workers_role(
+    conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5298 Task 35: the print worker holds no pool and no KEK (Tasks 31 and 33), so the
+    API's start takes back everything `scadbuddy_print` held as an older API left it (the
+    34 tables, the sequence it inserted with, its credential view, the schema and a row
+    policy), a second start does nothing, and the role can then be dropped. A role of
+    its own stands in for it: the `scadbuddy_*` roles are cluster-wide, and a test
+    cluster has none (`tests/auth/test_caller_grants.py`)."""
+    assert "scadbuddy_print" in RETIRED_ROLES
+    stand_in = f"print_{uuid.uuid4().hex[:12]}"
+    conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(stand_in)))
+    try:
+        assert grant_role(
+            conn,
+            stand_in,
+            {table: ("SELECT", "INSERT") for table in PRINT_HELD},
+            rows={"activity": "id LIKE 'print:%'"},
+            sequences=("native_slices_id_seq",),
+        )
+        conn.execute(
+            sql.SQL("GRANT SELECT ON service_credentials_print TO {}").format(
+                sql.Identifier(stand_in)
+            )
+        )
+        held = _held(conn, stand_in)
+        assert held["relations"] == {
+            *PRINT_HELD,
+            "native_slices_id_seq",
+            "service_credentials_print",
+        }
+        assert held["schema"] and held["policies"]
+        monkeypatch.setattr(
+            "scadbuddy.auth.revoke.RETIRED_ROLES",
+            tuple(stand_in if r == "scadbuddy_print" else r for r in RETIRED_ROLES),
+        )
+
+        assert revoke_retired(conn) == [stand_in]
+        assert _held(conn, stand_in) == {"relations": set(), "schema": set(), "policies": set()}
+        assert revoke_retired(conn) == []
+        conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(stand_in)))
+    finally:
+        if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (stand_in,)).fetchone():
+            conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(stand_in)))
+            conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(stand_in)))

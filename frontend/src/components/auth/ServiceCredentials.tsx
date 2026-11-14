@@ -8,9 +8,9 @@ import { useAsync } from '../../lib/useAsync'
 
 // #4975 phase 4 — Settings → System → Service credentials (spec 2026-11-01 §7.2): the bearer
 // credentials the API issues each service. Never a secret: created, expires, last used, with
-// revoke. The agent and the print worker read a sealed one, rotated on its own and by
-// "Rotate now"; the projects and render workers and the storefront get none of those
-// (#5298, #5282): they exchange a proof for each, listed here to be revoked.
+// revoke. The agent reads a sealed one, rotated on its own and by "Rotate now"; the print,
+// projects and render workers and the storefront get none of those (#5298, #5282): they
+// exchange a proof for each, listed here to be revoked.
 
 type Section =
   | { caller: LegacyCaller; label: string; sealed: true }
@@ -18,7 +18,7 @@ type Section =
 
 const CALLERS: Section[] = [
   { caller: 'agent', label: 'Agent', sealed: true },
-  { caller: 'print', label: 'Print worker', sealed: true },
+  { caller: 'print', label: 'Print worker', sealed: false },
   { caller: 'projects', label: 'Projects worker', sealed: false },
   { caller: 'render', label: 'Render worker', sealed: false },
   { caller: 'storefront', label: 'Storefront', sealed: false },
@@ -56,8 +56,8 @@ export function ServiceCredentials() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
-        Issued and rotated by ScadBuddy. The agent's and the print worker's each last 30 days and the next is issued a
-        week before, so a rotation never cuts a service off; revoking the last live one issues a replacement at once.
+        Issued and rotated by ScadBuddy. The agent's each last 30 days and the next is issued a week before, so a
+        rotation never cuts it off; revoking the last live one issues a replacement at once.
         The other services exchange a proof for each credential, which lasts 15 minutes; a revoked one is replaced at
         the service's next exchange.
       </p>

@@ -12,9 +12,9 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
 `auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
-Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
-empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
-holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+Task 31): every store it uses goes through CRUD routes, it has no grant list, and the API
+revokes what its old role `scadbuddy_print` held at every start (`auth/revoke.py`, #5298
+Task 35). It holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
 view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
 warning; the API opens every sealed value it needs (area `access-codes`: whether the API
 opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client

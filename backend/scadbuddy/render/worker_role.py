@@ -116,8 +116,8 @@ def grant_role(
 def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
     """Hold ``role`` to ``rows`` of ``table``. Enabling row security takes effect because
     the API's role owns the table (it migrates) and so bypasses it; `everyone`, the
-    permissive policy, keeps every other non-owner role (a separately credentialed print
-    worker) unrestricted, since with row security on and no policy a role
+    permissive policy, keeps every other non-owner role (the agent's) unrestricted, since
+    with row security on and no policy a role
     sees no row. The role's policy is named by its predicate, so a changed predicate
     replaces the old one rather than leaving it in force (and so does af75581's
     unsuffixed ``only_<role>``)."""
