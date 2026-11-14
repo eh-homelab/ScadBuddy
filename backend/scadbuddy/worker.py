@@ -996,10 +996,10 @@ def _own_volume(paths: DataPaths) -> bool:
 def _housekeep(deps: WorkerDeps) -> None:
     """One pass of the worker's sweep (final review I2): its piece cache down to
     SCADBUDDY_WORKER_CACHE_MAX_BYTES, then, on its own volume, the revision exports
-    it materialized (by last use, on the API's `SCADBUDDY_JOB_TTL`) and the uploads it
-    fetched (by last use, `_upload_grace`). Library checkouts stay: a checkout is a
-    pinned library, and nothing prunes those. Each step is best effort; the next
-    pass retries."""
+    it materialized (by last use, on `Config.sweep_grace`: the API's `SCADBUDDY_JOB_TTL`,
+    or a day while it is 0) and the uploads it fetched (by last use, `_upload_grace`).
+    Library checkouts stay: a checkout is a pinned library, and nothing prunes those.
+    Each step is best effort; the next pass retries."""
     if isinstance(deps.blobs, CachedBlobStore):
         try:
             evicted = deps.blobs.evict()
