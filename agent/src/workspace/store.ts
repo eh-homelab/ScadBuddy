@@ -924,28 +924,36 @@ export class SessionFiles {
       // The parent's write lock, so a write to the parent waits for the fork: it locks its file
       // row before its bytes, the order this transaction would otherwise reverse.
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`scadbuddy:ai_session_files:${from}`}, 0))`
-      // The bytes the parent's rows name, or are about to, stay until the child commits: locked
-      // first, so a sweep skips them, and a delete in the parent meanwhile cannot drop them under
-      // the child's foreign key. A row a sweep deleted before the lock is one no parent file
-      // names: the insert below, reading afresh, leaves that file out.
-      await tx`
-        SELECT 1 FROM ai_session_file_bytes
-        WHERE sha256 IN (
-          SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL
-          UNION
-          SELECT sha256 FROM ai_session_files WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex'))
-        FOR KEY SHARE`
-      // Then the bytes of the parent's inline rows that are not there yet (none was locked
-      // above): a row this transaction puts is no sweep's to see until it commits.
-      await tx`
-        INSERT INTO ai_session_file_bytes (sha256, data)
-        SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
-        WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')
-        ORDER BY sha256
-        ON CONFLICT (sha256) DO NOTHING`
+      // Every bytes row the child will name is locked FOR KEY SHARE until it commits, so no sweep
+      // or delete in the parent drops it under the child's foreign key; as putBytes does: lock what
+      // is there, put the bytes of the parent's inline rows (an older agent's, whose bytes match
+      // their sha256) that are not, and lock again until all are held. Each pass reads the inline
+      // rows afresh, so one the parent deletes meanwhile drops out; in the usual single pass each
+      // is hashed once. A row named through `bytes_sha256` a sweep deleted before the lock is one
+      // no parent file names any more: the insert below, reading afresh, leaves that file out.
+      let inline: { path: string; sha256: string }[]
+      for (;;) {
+        inline = await tx<{ path: string; sha256: string }[]>`
+          SELECT path, sha256 FROM ai_session_files
+          WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
+        const held = await tx<{ sha256: string }[]>`
+          SELECT sha256 FROM ai_session_file_bytes
+          WHERE sha256 IN (SELECT bytes_sha256 FROM ai_session_files WHERE workspace = ${from} AND bytes_sha256 IS NOT NULL)
+             OR sha256 = ANY(${[...new Set(inline.map((row) => row.sha256))]}::text[])
+          FOR KEY SHARE`
+        const have = new Set(held.map((row) => row.sha256))
+        const missing = inline.filter((row) => !have.has(row.sha256)).map((row) => row.path)
+        if (missing.length === 0) break
+        await tx`
+          INSERT INTO ai_session_file_bytes (sha256, data)
+          SELECT DISTINCT ON (sha256) sha256, data FROM ai_session_files
+          WHERE workspace = ${from} AND path = ANY(${missing}::text[]) AND data IS NOT NULL
+          ORDER BY sha256
+          ON CONFLICT (sha256) DO NOTHING`
+      }
       await tx`
         UPDATE ai_session_files SET bytes_sha256 = sha256, data = NULL
-        WHERE workspace = ${from} AND data IS NOT NULL AND sha256 = encode(sha256(data), 'hex')`
+        WHERE workspace = ${from} AND path = ANY(${inline.map((row) => row.path)}::text[]) AND data IS NOT NULL`
       await tx`
         INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at)
         SELECT ${to}, ${toSession}, path, media_type, data, bytes_sha256, sha256, size, source, created_at, updated_at
