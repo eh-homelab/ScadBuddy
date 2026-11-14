@@ -378,6 +378,73 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(within(colours).queryByRole('checkbox')).toBeNull()
   })
 
+  describe('says what the price book holds once it has answered, whatever the defaults do (#6292 review)', () => {
+    const PRICE_BOOK = '/api/v1/orders/price-book'
+    const SCHEMA = '/api/v1/models/:slug/versions/:commit/schema'
+    async function emptyBook() {
+      const book = await api.priceBook()
+      server.use(http.get(PRICE_BOOK, () => HttpResponse.json({ ...book, filaments: [] })))
+    }
+    const colours = () => screen.getByRole('group', { name: 'Colours on offer' })
+
+    it('when the design’s settings fail', async () => {
+      await emptyBook()
+      server.use(http.get(SCHEMA, () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront()
+      expect(await screen.findByText(/^The design’s settings could not be read\./)).toBeInTheDocument()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book has no filaments yet.'))
+      expect(within(colours()).getByRole('link', { name: 'Add one' })).toBeInTheDocument()
+      expect(screen.queryByText('Loading the design’s settings…')).toBeNull()
+    })
+
+    it('when there is no design to choose', async () => {
+      await emptyBook()
+      server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+      renderStorefront()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book has no filaments yet.'))
+    })
+
+    it('while a design change waits for its settings', async () => {
+      await emptyBook()
+      const { user } = renderStorefront()
+      expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+      await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+      release = hold('get', SCHEMA)
+      await user.click(screen.getByRole('button', { name: 'Change' }))
+      await user.click(screen.getByRole('combobox', { name: 'Design' }))
+      await user.click(await screen.findByRole('option', { name: /Coaster/ }))
+      // The new design's defaults wait on its settings, which are held.
+      expect(screen.getByRole('combobox', { name: 'Design' })).toHaveTextContent(/Coaster/)
+      expect(colours()).toHaveTextContent('The price book has no filaments yet.')
+      expect(colours()).not.toHaveTextContent('Reading the price book')
+    })
+
+    it('when the price book fails', async () => {
+      server.use(http.get(PRICE_BOOK, () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront()
+      await waitFor(() => expect(colours()).toHaveTextContent('The price book could not be read'))
+      expect(colours()).not.toHaveTextContent('Reading the price book')
+    })
+
+    let release: () => void = () => undefined
+    afterEach(() => release())
+  })
+
+  it('keeps the ticked filaments across a design change (#6292 review)', async () => {
+    const { user } = renderStorefront()
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    const group = () => screen.getByRole('group', { name: 'Colours on offer' })
+    await user.click(within(group()).getByRole('button', { name: /^Show all/ }))
+    // Only PLA Sunflower Yellow ticked, by hand.
+    await user.click(within(group()).getByRole('checkbox', { name: 'PETG Black' }))
+    await user.click(screen.getByRole('button', { name: 'Change' }))
+    await user.click(screen.getByRole('combobox', { name: 'Design' }))
+    await user.click(await screen.findByRole('option', { name: /Coaster/ }))
+    await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+    expect(within(group()).getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
+    expect(within(group()).getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
+  })
+
   it('says nothing is unsaved when a saved listing opens (#6290)', async () => {
     // Stored with an offered colour, an offered number and an offered text: each bound's
     // unset label and default come back null, as the backend answers them.

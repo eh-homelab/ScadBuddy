@@ -42,6 +42,10 @@ export interface ListingEditorProps {
    * defaults are in. "Colours on offer" decides then whether it starts open. Default true.
    */
   coloursSettled?: boolean
+  /** While `schema` is undefined: whether its read is still running or failed. Default loading. */
+  schemaState?: 'loading' | 'failed'
+  /** The price book's read, alone (#6292 review): what "Colours on offer" says while it has no filaments. Default ready. */
+  bookState?: 'loading' | 'failed' | 'ready'
 }
 
 /** Where the price book's filaments are added (Settings → Printing → Orders). */
@@ -346,7 +350,7 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="flex flex-col gap-1">
         <Label htmlFor={`${id}-model`}>Design</Label>
-        <Select value={draft.slug || undefined} onValueChange={(slug) => onChange({ ...emptyDraft(slug), title: draft.title, description: draft.description })}>
+        <Select value={draft.slug || undefined} onValueChange={(slug) => onChange({ ...emptyDraft(slug), title: draft.title, description: draft.description, colours: draft.colours })}>
           <SelectTrigger id={`${id}-model`} className="w-full">
             <SelectValue placeholder="Choose a design" />
           </SelectTrigger>
@@ -400,6 +404,7 @@ function ColoursOnOffer({
   filaments,
   offersColour,
   settled,
+  bookState,
   onChange,
 }: {
   draft: ListingDraft
@@ -407,6 +412,7 @@ function ColoursOnOffer({
   filaments: readonly Filament[]
   offersColour: boolean
   settled: boolean
+  bookState: 'loading' | 'failed' | 'ready'
   onChange: (draft: ListingDraft) => void
 }) {
   const id = useId()
@@ -427,10 +433,12 @@ function ColoursOnOffer({
       </div>
       <p className="text-xs text-muted-foreground">
         {offersColour ? 'The filaments a customer can pick from' : 'The filaments this product is printed in'}
-        {open ? '.' : ticked.length === 0 ? ': none ticked yet.' : `: ${ticked.length} ticked (${ticked.map(filamentName).join(', ')}).`}
+        {open ? '.' : ticked.length === 0 ? ': none ticked yet.' : `: ${ticked.length} ticked (${ticked.map((filament) => (offersColour && isSupportOnly(filament, draft, schema, filaments) ? `${filamentName(filament)}, for supports only` : filamentName(filament))).join('; ')}).`}
       </p>
-      {filaments.length === 0 && !settled ? (
+      {filaments.length === 0 && bookState === 'loading' ? (
         <p className="text-xs text-muted-foreground">Reading the price book…</p>
+      ) : filaments.length === 0 && bookState === 'failed' ? (
+        <p className="text-xs text-warn">The price book could not be read, so no filament can be ticked. Reload the page to try again.</p>
       ) : filaments.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           The price book has no filaments yet.{' '}
@@ -471,7 +479,7 @@ function ColoursOnOffer({
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true, bookState = 'ready', schemaState = 'loading' }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offersColour = params.some((param) => param.type === 'color' && draft.params[param.name])
@@ -512,7 +520,10 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
 
       <section className="flex flex-col gap-2" aria-label="Settings">
         <h3 className="text-sm font-semibold">Settings</h3>
-        {!schema && draft.commit && <p className="text-xs text-muted-foreground">Loading the design’s settings…</p>}
+        {!schema && draft.commit && schemaState === 'loading' && <p className="text-xs text-muted-foreground">Loading the design’s settings…</p>}
+        {!schema && draft.commit && schemaState === 'failed' && (
+          <p className="text-xs text-warn">The design’s settings could not be read. Choose another version, or reload the page to try again.</p>
+        )}
         {schema && params.length === 0 && <p className="text-xs text-muted-foreground">This design has no settings: it is sold as it is.</p>}
         {params.length > 0 && (
           <p className="text-xs text-muted-foreground">
@@ -527,7 +538,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         </ul>
       </section>
 
-      <ColoursOnOffer draft={draft} schema={schema} filaments={filaments} offersColour={offersColour} settled={coloursSettled} onChange={onChange} />
+      <ColoursOnOffer draft={draft} schema={schema} filaments={filaments} offersColour={offersColour} settled={coloursSettled} bookState={bookState} onChange={onChange} />
     </div>
   )
 }

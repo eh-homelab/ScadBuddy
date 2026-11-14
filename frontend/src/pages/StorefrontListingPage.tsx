@@ -58,11 +58,12 @@ type Field = 'title' | 'params' | 'colours' | 'media_ids'
  * `colours` or `media_ids` only for an edit of it, and keeps the others as they were.
  */
 function touchedBy(touched: readonly Field[], cur: ListingDraft, next: ListingDraft): Field[] {
-  const kept = next.slug === cur.slug ? touched : touched.filter((field) => field === 'title')
+  // The title and the ticked filaments outlive a design change (the price book does not change with the design).
+  const kept = next.slug === cur.slug ? touched : touched.filter((field) => field === 'title' || field === 'colours')
   const changed: Field[] = []
   if (next.title !== cur.title) changed.push('title')
   if (next.slug === cur.slug && (next.params !== cur.params || next.fixed !== cur.fixed)) changed.push('params')
-  if (next.slug === cur.slug && next.colours !== cur.colours) changed.push('colours')
+  if (next.colours !== cur.colours) changed.push('colours')
   if (next.slug === cur.slug && next.media_ids !== cur.media_ids) changed.push('media_ids')
   return [...new Set([...kept, ...changed])]
 }
@@ -150,6 +151,16 @@ export function StorefrontListingPage() {
    */
   const loaded = (schema.data !== undefined || schema.error !== undefined) && (book.data !== undefined || book.error !== undefined)
   const media = useMemo(() => models.data?.find((model) => model.slug === slug)?.media ?? [], [models.data, slug])
+  /**
+   * #6292 review — the listing has loaded, for "Colours on offer"'s one open-or-folded
+   * decision: the price book has answered, and the colours are as they will start: a saved or
+   * sold listing's at once, a new one's once its smart defaults are in, or once nothing will
+   * fill them (the design's settings failed, or there is no design to choose: the templates
+   * failed or there are none). A later design change does not undo it; the decision is made.
+   */
+  const coloursSettled =
+    Boolean(book.data || book.error) &&
+    (open?.filled === true || schema.error !== undefined || models.error !== undefined || models.data?.length === 0)
 
   /** The open listing's key now, which an answer that comes late compares against. */
   const openKey = useRef<symbol | null>(open?.key ?? null)
@@ -483,12 +494,14 @@ export function StorefrontListingPage() {
                 models={models.data ?? []}
                 versions={versions.data}
                 schema={schema.data}
+                schemaState={schema.error ? 'failed' : 'loading'}
                 filaments={filaments}
                 media={media}
                 live={open.live}
                 mediaState={models.error ? 'failed' : models.data ? 'ready' : 'loading'}
                 onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
-                coloursSettled={open.filled && Boolean(book.data || book.error)}
+                coloursSettled={coloursSettled}
+                bookState={book.error ? 'failed' : book.data ? 'ready' : 'loading'}
               />
             </section>
 

@@ -120,7 +120,7 @@ describe('ListingEditor (#5282, #6131)', () => {
     const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }
     const props = { onChange: () => undefined, models: [], versions: [], schema: keychainSchema, media: [] }
     // Loading: no filaments yet, so it says so rather than "no filaments".
-    const { rerender } = renderPage(<ListingEditor {...props} draft={draft} filaments={[]} coloursSettled={false} />)
+    const { rerender } = renderPage(<ListingEditor {...props} draft={draft} filaments={[]} coloursSettled={false} bookState="loading" />)
     expect(screen.getByRole('group', { name: 'Colours on offer' })).toHaveTextContent('Reading the price book…')
     // The book and the defaults land: ticked, so it folds.
     rerender(<ListingEditor {...props} draft={{ ...draft, colours: ['f1'] }} filaments={[RED, BLUE]} coloursSettled={true} />)
@@ -177,6 +177,16 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
     expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
     expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+  })
+
+  it('marks a support-only filament in the folded names too (#6292 review)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#F5F5DC' }],
+    }
+    const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
+    renderPage(<Harness seen={[]} schema={schema} filaments={[RED, BLUE, CORAL, pva]} />)
+    expect(screen.getByRole('group', { name: 'Colours on offer' })).toHaveTextContent('PVA Natural, for supports only')
   })
 
   it('does not offer a colour while the only ticked filament is for supports only (#6140 review)', async () => {
