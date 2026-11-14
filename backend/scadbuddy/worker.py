@@ -1010,7 +1010,7 @@ def _housekeep(deps: WorkerDeps) -> None:
     if not _own_volume(deps.paths):
         return
     try:
-        pruned = prune_revision_exports(deps.paths, deps.config.job_ttl)
+        pruned = prune_revision_exports(deps.paths, deps.config.sweep_grace)
         if pruned:
             logger.info("pruned revision exports", extra={"count": len(pruned)})
     except Exception:
