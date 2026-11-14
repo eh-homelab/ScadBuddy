@@ -13,8 +13,9 @@ never a file. The step answers the phase and when the next deadline falls:
 
 - ``unclaimed``: due `UNCLAIMED_GRACE` after the URL's expiry;
 - ``claimed`` on a cart not submitted: due `STAGING_TTL` after the claim;
-- ``submitted``: no deadline; the run re-reads every `SUBMITTED_RECHECK` and waits for the
-  import (a later PR) or a person's decline;
+- ``submitted``: no deadline while the order is live; the run re-reads every
+  `SUBMITTED_RECHECK` and waits for the import (a later PR) or a person's decline; once the
+  order is cancelled or closed, due `ENDED_GRACE` after its end (a reopen clears it, #6164);
 - ``ended``: cleaned up, imported, or gone; the run ends.
 
 The workflow sleeps until that deadline or a signal, whichever comes first, then steps

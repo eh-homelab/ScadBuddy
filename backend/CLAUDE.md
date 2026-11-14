@@ -1403,9 +1403,12 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   under the order's lock and cleans it up when due, in the same transaction, then deletes
   the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
   expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
-  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file. A
-  submitted order's file has no deadline. The routes signal it after their commits
-  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`), but the database is the truth,
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file, and a
+  file of a submitted order cancelled or closed `ENDED_GRACE` (30 days) before (#6164; its
+  source reads `declined`, `ENDED`; a reopen within the grace clears `cancelled_at` and
+  `closed_at`, so the file waits again). A live submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`; an order's cancel and close
+  `closed`, its reopen `retry`), but the database is the truth,
   so a lost signal costs time, never a file; the step retries with no limit.
   `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not

@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
+    AppState,
     CatalogueDep,
     ConfigDep,
     FetcherDep,
@@ -156,6 +157,7 @@ from scadbuddy.orders.store import (
 from scadbuddy.orders.storefront.addresses import EmailInvalidError
 from scadbuddy.orders.storefront.links import LinkState
 from scadbuddy.orders.storefront.mail import ORDER_MAIL_MAX, OrderMail
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.totals import OrderTotals, order_totals
 from scadbuddy.payments.component import PaymentsComponent, PaymentsDep
 from scadbuddy.payments.credentials import KekMissingError
@@ -1349,19 +1351,32 @@ def _ensured(task: asyncio.Task[Any], number: str) -> None:
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
 async def cancel_order(
-    order_id: str, orders: OrdersDep, service: PaymentsDep, body: CancelBody | None = None
+    order_id: str,
+    orders: OrdersDep,
+    service: PaymentsDep,
+    state: StateDep,
+    body: CancelBody | None = None,
 ) -> Order:
     """The open and failed payment requests end with the order (a pending one refuses the
-    cancel, `payment_in_flight`); their pages close after the commit."""
+    cancel, `payment_in_flight`); their pages close after the commit. A customer's staged
+    files are kept `ENDED_GRACE` (30 days) for a reopen (#6164)."""
     check_path(order_id)
     by = current_actor()
     reason = body.reason if body else None
     try:
-        return await service.service.cancel_order(
+        order = await service.service.cancel_order(
             order_id, lambda: orders.lifecycle.cancel_order(order_id, by, reason)
         )
     except LifecycleError as error:
         raise refused(error) from None
+    await _tell_staged(state, order_id, "closed")
+    return order
+
+
+async def _tell_staged(state: AppState, order_id: str, signal: str) -> None:
+    """Wake the watchers of the order's staged files after an end or a reopen; each reads
+    the order again, so a lost signal costs time, never a file (#6164)."""
+    await poke(state, await asyncio.to_thread(uploads_of, state, order_id=order_id), signal)
 
 
 @router.post("/{order_id}/hold", response_model=Order, summary="Put an order on hold")
@@ -1379,12 +1394,15 @@ async def release_order(order_id: str, orders: OrdersDep) -> Order:
 
 
 @router.post("/{order_id}/close", response_model=Order, summary="Close an order")
-async def close_order(order_id: str, orders: OrdersDep) -> Order:
+async def close_order(order_id: str, orders: OrdersDep, state: StateDep) -> Order:
     """§3.5's close rule: refused with ``order_not_closable`` naming every item still
-    open and every fulfilled item no shipment covers."""
+    open and every fulfilled item no shipment covers. A customer's staged files are kept
+    `ENDED_GRACE` (30 days) for a reopen (#6164)."""
     check_path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.close_order(order_id, by))
+    order = await _run(lambda: orders.lifecycle.close_order(order_id, by))
+    await _tell_staged(state, order_id, "closed")
+    return order
 
 
 @router.post(
@@ -1401,10 +1419,16 @@ async def close_order(order_id: str, orders: OrdersDep) -> Order:
         "(#5281). 409 `order_not_ended` for an order neither closed nor cancelled."
     ),
 )
-async def reopen_order(order_id: str, orders: OrdersDep, service: PaymentsDep) -> Order:
+async def reopen_order(
+    order_id: str, orders: OrdersDep, service: PaymentsDep, state: StateDep
+) -> Order:
     check_path(order_id)
     by = current_actor()
-    return await _run_linked(lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service)
+    order = await _run_linked(
+        lambda: orders.lifecycle.reopen_order(order_id, by), order_id, service
+    )
+    await _tell_staged(state, order_id, "retry")
+    return order
 
 
 # -- the customer link (#5283, storefront spec §5.2) ---------------------------------------

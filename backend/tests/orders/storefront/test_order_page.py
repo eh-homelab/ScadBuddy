@@ -767,6 +767,31 @@ def test_the_customer_cancels_before_anything_is_approved(
     assert event.by.kind == "customer" and event.detail["reason"] == "Changed my mind"
 
 
+def test_the_customers_cancel_wakes_the_staged_files_watchers(
+    api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6164: the files' watchers move to the ended-order grace at once."""
+    from scadbuddy.orders.storefront import order_page
+
+    told: list[tuple[list[str], str]] = []
+
+    async def poke(_state: Any, uploads: list[str], signal: str) -> None:
+        told.append((uploads, signal))
+
+    made = make_order(api, crud)
+    asked: list[str | None] = []
+
+    def uploads_of(_state: Any, *, order_id: str | None = None) -> list[str]:
+        asked.append(order_id)
+        return ["u1"]
+
+    monkeypatch.setattr(order_page, "poke", poke)
+    monkeypatch.setattr(order_page, "uploads_of", uploads_of)
+    assert made.reader.cancel(key="k1").status_code == 200
+    assert asked == [made.order.id]
+    assert told == [(["u1"], "closed")]
+
+
 def test_cancel_is_refused_after_an_approval(api: TestClient, crud: CrudCaller) -> None:
     made = make_order(api, crud, count=2)
     a, _b = items_of(api, made)
