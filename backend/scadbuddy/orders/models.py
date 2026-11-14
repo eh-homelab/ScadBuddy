@@ -64,7 +64,10 @@ ItemStatus = Literal[
 ContactKind = Literal[
     "phone", "email", "instagram", "facebook", "tiktok", "etsy", "website", "other"
 ]
-ChargeKind = Literal["shipping", "discount", "fee", "tax"]
+#: ``purchase`` and ``handling`` (#6133, spec 2026-11-13 §5.5) are the lifecycle's own: a
+#: thing the shop bought for the customer, and the shop's fee for buying. A body that
+#: sends either kind has it ignored (``Lifecycle._typed``).
+ChargeKind = Literal["shipping", "discount", "fee", "tax", "purchase", "handling"]
 #: A ``slice`` quote is priced from the item's slice; ``manual`` is typed; ``archive``
 #: (#4777) is priced from what a past print used, with no re-slice.
 QuoteSource = Literal["slice", "manual", "archive"]
@@ -262,6 +265,8 @@ class Charge(ChargeInput):
     #: The tax ScadBuddy computes from ``orders_tax_percent`` (#5281): no body writes it,
     #: and a save of the charges keeps it.
     auto: bool = False
+    #: The purchase link a ``purchase`` charge is for (#6133); None on every other kind.
+    purchase_link_id: str | None = None
 
 
 class Payment(BaseModel):
@@ -748,6 +753,68 @@ class CostEntry(CostEntryInput):
     order_id: str
     created_by: Actor
     created_at: datetime
+
+
+# -- purchases (#6133, spec 2026-11-13 §10) ---------------------------------------------
+
+#: What a recorded purchase cost the shop: parts (``material``) or a paid model file
+#: (``other``).
+PurchaseCostKind = Literal["material", "other"]
+#: A purchase link's state: not priced yet, recorded with its cost and charge, or not
+#: needed.
+PurchaseStatus = Literal["pending", "recorded", "not_needed"]
+#: The longest shop note on a purchase, which the customer reads.
+MAX_SHOP_NOTE = 500
+#: A cost entry's ``source`` that a recorded purchase wrote: ``purchase:<source id>``.
+PURCHASE_SOURCE_PREFIX = "purchase:"
+
+
+class PurchaseRecordInput(BaseModel):
+    """What the shop paid for one purchase link, in the order's currency. The same amount
+    becomes the customer's ``purchase`` charge. ``note`` is the cost entry's (the shop's
+    own); the customer never reads it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money = Field(ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind = "material"
+    note: str = Field(default="", max_length=1000)
+
+
+class PurchaseUpdateInput(BaseModel):
+    """A recorded purchase changed: each field given replaces its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_minor: Money | None = Field(default=None, ge=1, le=MAX_ENTRY_MINOR)
+    cost_kind: PurchaseCostKind | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class PurchaseDeclineInput(BaseModel):
+    """A purchase link the shop does not buy, with a note the customer reads."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_note: str = Field(default="", max_length=MAX_SHOP_NOTE)
+
+
+class PurchaseSource(BaseModel):
+    """A purchase link of a request item, as the back office reads it. ``url`` is text
+    only: nothing fetches it (spec §9.3). ``amount_minor`` and ``cost_kind`` are a recorded
+    purchase's, else None."""
+
+    id: str
+    order_id: str
+    item_id: str
+    url: str
+    note: str
+    status: PurchaseStatus
+    amount_minor: Money | None = None
+    cost_kind: PurchaseCostKind | None = None
+    cost_entry_id: str | None = None
+    charge_id: str | None = None
+    shop_note: str = ""
 
 
 # -- attachments (§6.2, #4251) ----------------------------------------------------------

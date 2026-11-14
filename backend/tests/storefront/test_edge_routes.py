@@ -864,6 +864,41 @@ def test_a_request_is_streamed_on_with_a_key(
     assert b'filename="a.png"' in sent.content and PNG in sent.content
 
 
+def test_a_request_forwards_its_things_to_buy(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    """#6133: the edge checks the purchase links' shape and sends on what it read."""
+    route = crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    links = '[{"url": "https://parts.example.com/x", "note": "hooks"}]'
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 200, r.text
+    sent = route.calls.last.request.content
+    assert b'name="purchase_links"' in sent
+    assert b'"url":"https://parts.example.com/x"' in sent and b'"note":"hooks"' in sent
+
+
+def test_the_edge_refuses_six_things_to_buy_before_the_crud_call(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    links = "[" + ",".join('{"url": "https://parts.example.com/x"}' for _ in range(6)) + "]"
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}too_many_links"
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
 def test_the_edge_refuses_an_oversized_file_before_the_crud_call(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

@@ -540,6 +540,13 @@ async def requests_enabled(
                         "required": ["text"],
                         "properties": {
                             "text": {"type": "string"},
+                            "purchase_links": {
+                                "type": "string",
+                                "description": (
+                                    "The things to buy (#6133): a JSON list of at most 5"
+                                    ' {"url", "note"} objects.'
+                                ),
+                            },
                             "files": {
                                 "type": "array",
                                 "items": {"type": "string", "format": "binary"},
@@ -565,7 +572,14 @@ async def draft_request(
         raise requests_disabled()
     upload = await read_request(request)
     try:
-        return await add_request(state, visitor, key, text=upload.text, files=upload.files)
+        return await add_request(
+            state,
+            visitor,
+            key,
+            text=upload.text,
+            files=upload.files,
+            purchase_links=upload.purchase_links,
+        )
     finally:
         await upload.close()
 

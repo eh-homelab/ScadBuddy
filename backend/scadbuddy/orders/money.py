@@ -3,7 +3,8 @@
 float. A computed amount is rounded once, half up, as ``pricing.py`` rounds a line.
 
 The shop's rules are settings (``core/settings.py`` ``orders_tax_percent`` and
-``orders_tax_shipping``; ``library/settings_store.py`` ``orders_deposit_policy`` and
+``orders_tax_shipping``, ``orders_purchase_fee_flat_minor`` and
+``orders_purchase_fee_percent``; ``library/settings_store.py`` ``orders_deposit_policy`` and
 ``storefront_shipping_options``). :class:`OrderRules` is one read of them, which the
 lifecycle takes from ``OrdersComponent.rules``.
 """
@@ -71,6 +72,10 @@ class OrderRules:
     tax_shipping: bool
     deposit_policy: tuple[DepositRule, ...]
     shipping_options: tuple[ShippingOption, ...]
+    #: The handling fee for bought items (#6133, spec 2026-11-13 §10.3): a flat amount per
+    #: recorded purchase, in the shop's currency, and a percent of their sum.
+    purchase_fee_flat_minor: Money = 0
+    purchase_fee_percent: Decimal = Decimal(0)
 
 
 #: No tax, no deposit, no shipping options: a lifecycle built without settings.
@@ -80,6 +85,15 @@ NO_RULES = OrderRules("USD", Decimal(0), False, (), ())
 def _percent_of(base_minor: Money, percent: Decimal) -> Money:
     """``base * percent / 100`` in minor units, rounded half up once."""
     return int((Decimal(base_minor) * percent / 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def handling_minor(amounts: Sequence[Money], *, flat_minor: Money, percent: Decimal) -> Money:
+    """The handling fee for bought items (#6133, spec 2026-11-13 §10.3): ``flat_minor``
+    for each of ``amounts`` (the recorded purchases' charges), plus ``percent`` of their
+    sum, rounded half up once. The caller passes 0 as ``flat_minor`` for an order not in
+    the shop's currency."""
+    total = Decimal(flat_minor * len(amounts)) + Decimal(sum(amounts)) * percent / 100
+    return int(total.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def tax_minor(base_minor: Money, percent: Decimal) -> Money:

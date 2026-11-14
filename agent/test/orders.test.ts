@@ -256,6 +256,55 @@ describe('order tools (#4249)', () => {
     expect(removals).toContain('DELETE /api/v1/orders/{order_id}/cost-entries/{entry_id}')
   })
 
+  it('lists, records, changes and declines purchases through their routes (#6133)', async () => {
+    const SOURCE = '5d6e7f80-1111-4222-8333-944455556666'
+    const sent: { method: string; path: string; body?: unknown }[] = []
+    const base = `${BACKEND}/api/v1/orders/${ORDER}/purchases`
+    const view = { id: SOURCE, order_id: ORDER, item_id: ITEM, url: 'https://parts.example.com/x', note: '', status: 'recorded' }
+    server.use(
+      http.get(base, () => HttpResponse.json([view])),
+      http.post(`${base}/${SOURCE}/record`, async ({ request }) => {
+        sent.push({ method: 'POST', path: 'record', body: await request.json() })
+        return HttpResponse.json({ ...view, amount_minor: 899 }, { status: 201 })
+      }),
+      http.patch(`${base}/${SOURCE}`, async ({ request }) => {
+        sent.push({ method: 'PATCH', path: 'update', body: await request.json() })
+        return HttpResponse.json({ ...view, amount_minor: 950 })
+      }),
+      http.post(`${base}/${SOURCE}/decline`, async ({ request }) => {
+        sent.push({ method: 'POST', path: 'decline', body: await request.json() })
+        return HttpResponse.json({ ...view, status: 'not_needed' })
+      }),
+    )
+    expect(
+      ['order_purchases', 'order_purchase_record', 'order_purchase_update', 'order_purchase_decline'].map((n) => tool(n).risk),
+    ).toEqual(['read', 'write', 'write', 'write'])
+
+    const listed = await tool('order_purchases').execute({ order_id: ORDER }, ctx())
+    const recorded = await tool('order_purchase_record').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 899 }, ctx())
+    const updated = await tool('order_purchase_update').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 950 }, ctx())
+    const declined = await tool('order_purchase_decline').execute(
+      { order_id: ORDER, source_id: SOURCE, shop_note: 'We had them in stock.' },
+      ctx(),
+    )
+
+    expect(firstText(listed)).toEqual([view])
+    expect(firstText(recorded)).toEqual({ ...view, amount_minor: 899 })
+    expect(firstText(updated)).toEqual({ ...view, amount_minor: 950 })
+    expect(firstText(declined)).toEqual({ ...view, status: 'not_needed' })
+    expect(sent).toEqual([
+      { method: 'POST', path: 'record', body: { amount_minor: 899, cost_kind: 'material', note: '' } },
+      { method: 'PATCH', path: 'update', body: { amount_minor: 950 } },
+      { method: 'POST', path: 'decline', body: { shop_note: 'We had them in stock.' } },
+    ])
+    expect(() => tool('order_purchase_record').execute({ order_id: ORDER, source_id: SOURCE, amount_minor: 0 }, ctx())).toThrow(
+      'amount_minor',
+    )
+    expect(() =>
+      tool('order_purchase_decline').execute({ order_id: ORDER, source_id: SOURCE, shop_note: 'x'.repeat(501) }, ctx()),
+    ).toThrow('shop_note')
+  })
+
   it('lists parts, adds stock and sets an item\'s parts through their routes (#5543)', async () => {
     const sent: { path: string; body?: unknown; query?: string }[] = []
     server.use(

@@ -748,6 +748,29 @@ def test_a_design_first_price_is_the_customers_to_accept(api: TestClient, crud: 
     assert r.json()["status"] == ORDER_WORDS["accepted"]
 
 
+def test_a_pending_purchase_offers_no_accept(api: TestClient, crud: CrudCaller) -> None:
+    """#6133 (spec 2026-11-13 §10.4): while the shop prices a thing to buy, the page does
+    not offer an accept, and the lifecycle refuses one (`purchase_pending`)."""
+    made = make_order(api, crud, approval="design_first")
+    [item] = items_of(api, made)
+    view = made.reader.answer(newest(api, item).id, "accepted", key="k1").json()
+    assert view["items"][0]["quote"]["can_accept"] is True
+    [source] = rows(
+        api,
+        "INSERT INTO order_item_sources (order_id, item_id, position, kind, purpose, url,"
+        " link_type, status) VALUES (%s, %s, 0, 'link', 'purchase',"
+        " 'https://parts.example.com/x', 'manual', 'pending') RETURNING id",
+        made.order.id,
+        item.id,
+    )
+    assert made.reader.view().json()["items"][0]["quote"]["can_accept"] is False
+    [quote] = _orders(api).store.quotes(item.id)
+    refused = made.reader.accept(quote.id, key="k2")
+    assert refused.status_code == 409 and slug(refused) == "purchase_pending"
+    _orders(api).lifecycle.decline_purchase(made.order.id, source["id"], "", BY)
+    assert made.reader.view().json()["items"][0]["quote"]["can_accept"] is True
+
+
 # -- cancel ------------------------------------------------------------------------------
 
 

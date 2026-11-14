@@ -31,6 +31,14 @@ MAX_MODEL_REQUEST_BYTES: Final = 1024 * 1024 * 1024
 #: The longest file name of an upload slot, and of a link's note, in characters.
 MAX_UPLOAD_NAME: Final = 200
 MAX_LINK_NOTE: Final = 500
+#: The longest link a customer gives, in characters (`orders/customer_links.py`).
+MAX_LINK_CHARS: Final = 2048
+#: A design request's things to buy (#6133, spec 2026-11-13 §10.1): the multipart text
+#: part that holds them, a JSON list of ``{"url", "note"}``, at most
+#: `MAX_PURCHASE_LINKS`, and that part's most bytes (each character of a link and a note
+#: JSON-escaped as six bytes at worst, and room for the framing).
+PURCHASE_LINKS_FIELD: Final = "purchase_links"
+MAX_PURCHASE_LINKS_BYTES: Final = MAX_PURCHASE_LINKS * (MAX_LINK_CHARS + MAX_LINK_NOTE) * 6 + 1024
 #: The most colours a customer may ask for (the price book's filaments, by id).
 MAX_COLOUR_CHOICES: Final = 8
 #: An upload slot's id (``uuid4().hex``). Both sides refuse any other before a lookup.

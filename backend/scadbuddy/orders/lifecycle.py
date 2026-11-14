@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
@@ -39,6 +40,7 @@ from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.core.secrets import Kek
 from scadbuddy.orders.models import (
     OPEN_FOR_EDITS,
+    PURCHASE_SOURCE_PREFIX,
     REVISION_ROLES,
     SHOWN_IMAGES,
     TAKES_ITEMS,
@@ -66,6 +68,9 @@ from scadbuddy.orders.models import (
     OrderStatus,
     Outcome,
     Payment,
+    PurchaseRecordInput,
+    PurchaseSource,
+    PurchaseUpdateInput,
     Quote,
     QuoteLine,
     Reference,
@@ -80,6 +85,7 @@ from scadbuddy.orders.money import (
     NO_RULES,
     OrderRules,
     deposit_for,
+    handling_minor,
     skipped_for_currency,
     tax_base,
     tax_minor,
@@ -96,6 +102,7 @@ from scadbuddy.orders.pricing import Plate, Priced, to_minor
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
+    LIFECYCLE_CHARGES,
     MAIL_QUEUED,
     UNSET,
     Conn,
@@ -182,7 +189,7 @@ FEE_RETRY_WINDOW = timedelta(hours=24)
 
 class LifecycleError(Exception):
     """A transition the record refuses: ``slug`` names why (the problem type's last
-    segment), ``items`` and ``shipments`` the rows in the way."""
+    segment), ``items``, ``shipments`` and ``sources`` the rows in the way."""
 
     def __init__(
         self,
@@ -191,6 +198,7 @@ class LifecycleError(Exception):
         *,
         items: Sequence[str] = (),
         shipments: Sequence[str] = (),
+        sources: Sequence[str] = (),
         not_found: bool = False,
         unprocessable: bool = False,
     ) -> None:
@@ -198,6 +206,8 @@ class LifecycleError(Exception):
         self.slug = slug
         self.items = list(items)
         self.shipments = list(shipments)
+        #: The request items' sources in the way (#6133: the purchases still pending).
+        self.sources = list(sources)
         #: The row the call names is not there: a 404 rather than a 409.
         self.not_found = not_found
         #: The body names something that cannot be (a slot the item lacks, a filament
@@ -477,6 +487,18 @@ def derive(
 def _charge_line(charge: ChargeInput) -> dict[str, Any]:
     """A charge as an audit row holds it: its kind, label and signed amount."""
     return {"kind": charge.kind, "label": charge.label, "amount_minor": charge.amount_minor}
+
+
+#: The longest `purchase` charge label (``ChargeInput.label``).
+_LABEL_CHARS = 200
+
+
+def purchase_label(source: PurchaseSource) -> str:
+    """A `purchase` charge's label (#6133, spec 2026-11-13 §10.2): "Bought for your
+    project: " and the customer's note, or the link's host without one, cut to 200
+    characters."""
+    named = " ".join(source.note.split()) or (urlsplit(source.url).hostname or source.url)
+    return f"Bought for your project: {named}"[:_LABEL_CHARS]
 
 
 def item_open(order: Order, quotes: Iterable[Quote]) -> bool:
@@ -1221,10 +1243,13 @@ class Lifecycle:
         was read, marked by ``auto`` or its ``id`` (whatever its amount: a read from
         before the items changed is stale), which the order keeps and ``_retax``
         recomputes. Any other `tax` charge, whatever its label, is typed and replaces the
-        auto row."""
+        auto row. A `purchase` or `handling` charge (#6133) is the lifecycle's own: the
+        order keeps its rows and the body's are dropped."""
         auto = next((c for c in self.store.charges(order.id, conn=conn) if c.auto), None)
 
         def is_auto(charge: ChargeInput) -> bool:
+            if charge.kind in LIFECYCLE_CHARGES:
+                return True
             if charge.auto:
                 return True
             if auto is None:
@@ -1479,11 +1504,15 @@ class Lifecycle:
         """A request for ``amount_minor`` (the balance now when None), through
         ``provider`` (the default provider when unset and still offered; None collects by
         hand). A named provider that is not connected is refused as 422 ``provider``. A
-        cart (#5282) takes no money: ``order_not_submitted``, before any provider."""
+        cart (#5282) takes no money: ``order_not_submitted``, before any provider. A
+        ``balance`` request waits for every purchase to be priced (`purchase_pending`,
+        #6133); a ``deposit`` request does not."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
             self._not_ended(order)
+            if kind == "balance":
+                self._no_pending_purchase(conn, order)
             amount = (
                 totals_of(self.store, conn, order.id).balance_minor
                 if amount_minor is None
@@ -2343,7 +2372,13 @@ class Lifecycle:
     ) -> tuple[CostEntry, bool]:
         """Money spent, and whether this call wrote it: a second write of one ``source``
         returns the first entry and writes nothing, not even an audit row.
-        ``order_not_submitted`` on a cart."""
+        ``order_not_submitted`` on a cart. A ``purchase:`` source is a recorded
+        purchase's alone (`purchase_cost_linked`, #6133): use ``record_purchase``."""
+        if body.source is not None and body.source.startswith(PURCHASE_SOURCE_PREFIX):
+            raise LifecycleError(
+                "purchase_cost_linked",
+                "a purchase: cost entry is written only by recording the purchase",
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             check_submitted(order)
@@ -2424,6 +2459,9 @@ class Lifecycle:
         return entry, True
 
     def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        """An entry removed. A recorded purchase's entry (``purchase:<source>``, #6133) is
+        refused (`purchase_cost_linked`): its charge goes with it, through
+        ``decline_purchase``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             entry = self.store.delete_cost_entry(conn, order.id, entry_id)
@@ -2432,6 +2470,13 @@ class Lifecycle:
                     "cost_entry_not_found",
                     f"no cost entry {entry_id} of order {order.label}",
                     not_found=True,
+                )
+            if entry.source is not None and entry.source.startswith(PURCHASE_SOURCE_PREFIX):
+                # The delete rolls back with the refusal.
+                raise LifecycleError(
+                    "purchase_cost_linked",
+                    f"cost entry {entry_id} is a recorded purchase's: change it or mark the"
+                    " purchase not needed instead",
                 )
             self._event(
                 conn,
@@ -2445,6 +2490,215 @@ class Lifecycle:
             )
             items = self._entry_item(conn, order, entry.order_item_id)
         self._told(_Change(order, [(item, None) for item in items]))
+
+    # -- purchases (#6133, spec 2026-11-13 §10) -----------------------------------------
+
+    def _purchase_source(self, conn: Conn, order: Order, source_id: str) -> PurchaseSource:
+        source = self.store.lock_purchase_source(conn, order.id, source_id)
+        if source is None:
+            raise LifecycleError(
+                "source_not_found",
+                f"no purchase link {source_id} of order {order.label}",
+                not_found=True,
+            )
+        return source
+
+    @staticmethod
+    def _purchase_open(order: Order) -> None:
+        """A purchase changes only while the order is `draft` or `quoted`
+        (`purchase_locked`): past acceptance a later price change is its own charge on the
+        after-acceptance route (#5351)."""
+        if order.status not in OPEN_FOR_EDITS:
+            raise LifecycleError(
+                "purchase_locked",
+                f"order {order.label} is {order.status}: its purchases are fixed; change what"
+                f" it charges with PUT /orders/{order.id}/charges/after-acceptance",
+            )
+
+    def _purchase_items(
+        self, conn: Conn, source: PurchaseSource
+    ) -> list[tuple[OrderItem, int | None]]:
+        item = self.store.item(source.item_id, conn=conn)
+        return [] if item is None else [(item, None)]
+
+    def _rehandle(self, conn: Conn, order: Order, rules: OrderRules) -> None:
+        """The order's `handling` charge as its recorded purchases now say
+        (`money.handling_minor`); none at 0. An order not in the shop's currency takes the
+        percent only: the flat amount is in the shop's currency."""
+        charges = self.store.charges(order.id, conn=conn)
+        amounts = [charge.amount_minor for charge in charges if charge.kind == "purchase"]
+        flat = rules.purchase_fee_flat_minor if order.currency == rules.shop_currency else 0
+        amount = handling_minor(amounts, flat_minor=flat, percent=rules.purchase_fee_percent)
+        self.store.set_handling(conn, order.id, amount or None)
+
+    def _repriced(self, conn: Conn, order: Order, by: Actor) -> Order:
+        """The handling fee and the auto tax recomputed after a purchase changed, on one
+        read of the rules."""
+        rules = self.rules()
+        self._rehandle(conn, order, rules)
+        self._retax(conn, order, by, rules)
+        return self.store.order(order.id, conn=conn) or order
+
+    def record_purchase(
+        self, order_id: str, source_id: str, body: PurchaseRecordInput, by: Actor
+    ) -> tuple[PurchaseSource, bool]:
+        """What the shop paid for the purchase link ``source_id`` (spec §10.2), in one
+        transaction under the order's lock: a cost entry on the link's item (kind
+        ``body.cost_kind``, source ``purchase:<source id>``), a `purchase` charge of the
+        same amount that names the link, labelled by `purchase_label`, the link `recorded`
+        with both ids, the handling fee and the auto tax recomputed, and the audit row
+        ``purchase.recorded``. Returns the link, and whether this call wrote it: a second
+        record of a recorded link returns it as it is and writes nothing. Refusals:
+        `source_not_found` (404), `order_not_submitted` on a cart,
+        `order_cancelled`/`order_closed`, `purchase_locked` past `quoted`,
+        `purchase_not_pending` for a link marked not needed."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            if source.status == "recorded":
+                return source, False
+            self._purchase_open(order)
+            if source.status != "pending":
+                raise LifecycleError(
+                    "purchase_not_pending",
+                    f"purchase link {source.id} is marked not needed; nothing is bought for it",
+                )
+            entry, _ = self.store.insert_cost_entry(
+                conn,
+                order.id,
+                CostEntryInput(
+                    order_item_id=source.item_id,
+                    kind=body.cost_kind,
+                    amount_minor=body.amount_minor,
+                    note=body.note,
+                    source=f"{PURCHASE_SOURCE_PREFIX}{source.id}",
+                ),
+                created_by=by,
+            )
+            charge = self.store.insert_purchase_charge(
+                conn,
+                order.id,
+                source.id,
+                label=purchase_label(source),
+                amount_minor=body.amount_minor,
+            )
+            self.store.set_purchase(
+                conn, source.id, status="recorded", cost_entry_id=entry.id, charge_id=charge.id
+            )
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.recorded",
+                source_id=source.id,
+                item_id=source.item_id,
+                amount_minor=body.amount_minor,
+                cost_kind=body.cost_kind,
+                entry_id=entry.id,
+                charge_id=charge.id,
+            )
+            recorded = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return recorded, True
+
+    def update_purchase(
+        self, order_id: str, source_id: str, body: PurchaseUpdateInput, by: Actor
+    ) -> PurchaseSource:
+        """A recorded purchase changed (spec §10.2): its cost entry and its charge
+        together (each field given replaces its value; the amount is both), then the
+        handling fee and the auto tax, and the audit row ``purchase.updated`` with the
+        amount before. Refusals as ``record_purchase``'s, and `purchase_not_recorded` for a
+        link that is not recorded."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            self._purchase_open(order)
+            if source.status != "recorded":
+                raise LifecycleError(
+                    "purchase_not_recorded",
+                    f"purchase link {source.id} is {source.status}: record it first",
+                )
+            assert source.cost_entry_id is not None and source.charge_id is not None
+            assert source.amount_minor is not None and source.cost_kind is not None
+            entries = self.store.cost_entries(order.id, conn=conn)
+            [entry] = [e for e in entries if e.id == source.cost_entry_id]
+            amount = source.amount_minor if body.amount_minor is None else body.amount_minor
+            kind = source.cost_kind if body.cost_kind is None else body.cost_kind
+            self.store.update_cost_entry(
+                conn,
+                entry.id,
+                amount_minor=amount,
+                kind=kind,
+                note=entry.note if body.note is None else body.note,
+            )
+            self.store.set_charge_amount(conn, source.charge_id, amount)
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.updated",
+                source_id=source.id,
+                item_id=source.item_id,
+                before_minor=source.amount_minor,
+                amount_minor=amount,
+                cost_kind=kind,
+            )
+            updated = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return updated
+
+    def decline_purchase(
+        self, order_id: str, source_id: str, shop_note: str, by: Actor
+    ) -> PurchaseSource:
+        """A purchase link the shop does not buy (spec §10.2): a recorded one loses its
+        cost entry and its charge, the link is `not_needed` with ``shop_note`` (trimmed;
+        the customer reads it), the handling fee and the auto tax are recomputed, and the
+        audit row is ``purchase.declined``. A link already not needed is returned as it
+        is, and nothing is written. Refusals as ``record_purchase``'s."""
+        shop_note = shop_note.strip()
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            check_submitted(order)
+            self._not_ended(order)
+            source = self._purchase_source(conn, order, source_id)
+            if source.status == "not_needed":
+                return source
+            self._purchase_open(order)
+            self.store.set_purchase(
+                conn,
+                source.id,
+                status="not_needed",
+                cost_entry_id=None,
+                charge_id=None,
+                shop_note=shop_note,
+            )
+            if source.charge_id is not None:
+                self.store.delete_charge(conn, source.charge_id)
+            if source.cost_entry_id is not None:
+                self.store.delete_cost_entry(conn, order.id, source.cost_entry_id)
+            order = self._repriced(conn, order, by)
+            self._event(
+                conn,
+                order,
+                by,
+                "purchase.declined",
+                source_id=source.id,
+                item_id=source.item_id,
+                was=source.status,
+                amount_minor=source.amount_minor,
+            )
+            declined = self._purchase_source(conn, order, source.id)
+            items = self._purchase_items(conn, source)
+        self._told(_Change(order, items))
+        return declined
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)
@@ -2477,6 +2731,7 @@ class Lifecycle:
         if order.status not in OPEN_FOR_EDITS:
             raise LifecycleError("order_not_acceptable", f"order {order.label} is {order.status}")
         self._not_on_hold(order)
+        self._no_pending_purchase(conn, order)
         self._no_payment_in_flight(conn, order)
         items = self.store.items(order.id, conn=conn)
         open_items = [item for item in items if item.status != "cancelled"]
@@ -2508,6 +2763,21 @@ class Lifecycle:
         self._event(conn, order, by, "order.status", from_status=order.status, to="accepted")
         self._open_balance(conn, order, by)
         return accepted
+
+    def _no_pending_purchase(self, conn: Conn, order: Order) -> None:
+        """Refuses (`purchase_pending`, #6133, spec 2026-11-13 §10.4) while a purchase link
+        of the order is still ``pending``: the price the customer accepts or pays must
+        hold what the shop buys for them. The refusal names the sources and their items."""
+        pending = self.store.pending_purchases(conn, order.id)
+        if not pending:
+            return
+        raise LifecycleError(
+            "purchase_pending",
+            f"order {order.label} has {len(pending)} thing(s) to buy that the shop has not"
+            " priced: record or decline each purchase first",
+            items=list(dict.fromkeys(item_id for _, item_id in pending)),
+            sources=[source_id for source_id, _ in pending],
+        )
 
     def _no_payment_in_flight(self, conn: Conn, order: Order, *, kind: str | None = None) -> None:
         """A pending request (of ``kind``, when given) is money on its way: what would end
@@ -4266,9 +4536,11 @@ class Lifecycle:
     ) -> tuple[Order, OrderItem, list[str]]:
         """Accepting ``quote`` once the caller has checked the order and the item: the
         refusals, the row, the audit line, the order rederived and §3.4's release of
-        every other quote's sliced file."""
+        every other quote's sliced file. A purchase still pending refuses it
+        (`purchase_pending`, #6133)."""
         if item.status in SETTLED:
             raise LifecycleError("item_not_open", f"item {item.id} is {item.status}")
+        self._no_pending_purchase(conn, order)
         if quote.quantity != item.quantity:
             raise LifecycleError(
                 "quote_stale",

@@ -1021,7 +1021,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   sent back as read (marked by `auto` or its `id`, whatever the amount) is dropped and
   the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
   whatever its label, is typed, and a charge's `shipping_option_id` is kept when
-  sent. `OrdersComponent.rules` reads only its five settings (`SettingsStore.read`, one
+  sent. A charges replace also keeps the `purchase` and `handling` rows and drops a body's
+  (#6133, `store.py` `LIFECYCLE_CHARGES`). `OrdersComponent.rules` reads only its seven
+  settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
   for none) writes the order's one `shipping` charge from Settings → Orders'
@@ -1484,6 +1486,43 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   versioned: a change to `intake_worker/workflow.py`'s commands goes behind
   `workflow.patched`.
   `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
+  Purchases, the handling fee and the gate (#6133 PR 3, spec §10; migration
+  `20261114T1156Z_order_purchase_charges.sql`): `ChargeKind` gains `purchase` and
+  `handling`; `order_charges.purchase_link_id` (UNIQUE, FK to `order_item_sources`) is
+  set exactly on a `purchase` row (`order_charges_purchase_link`), and an order has at
+  most one `handling` row (`order_charges_handling`). Only the lifecycle writes them:
+  `Lifecycle.record_purchase` (one transaction under the order's lock: a cost entry on
+  the link's item, kind `material` or `other`, source `purchase:<source id>`; a
+  `purchase` charge of the same amount labelled `purchase_label`; the source
+  `recorded` with both ids; `_rehandle` and `_retax`; the audit row `purchase.recorded`;
+  a second record of a recorded link writes nothing), `update_purchase` (the entry and
+  the charge together, `purchase.updated`) and `decline_purchase` (both removed, the
+  source `not_needed` with `shop_note`, `purchase.declined`; a second decline writes
+  nothing). All three work only while `draft` or `quoted` (`purchase_locked`), never on
+  a cart; record refuses a `not_needed` link (`purchase_not_pending`), update one not
+  recorded (`purchase_not_recorded`). A cost entry with a `purchase:` source is neither
+  removed nor added by hand (`purchase_cost_linked`). The handling fee is
+  `money.handling_minor`: Settings → Orders' `orders_purchase_fee_flat_minor` per
+  recorded purchase (only for an order in `orders_currency`) plus
+  `orders_purchase_fee_percent` (0 to 100, two decimals) of their sum, rounded half up
+  once, the row removed at 0; both settings are env-seeded and live, and neither the
+  purchases nor the fee are in the auto tax's base. The gate `_no_pending_purchase`
+  (`purchase_pending`, 409, the problem's `sources` and `items` name the pending links)
+  refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
+  writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
+  is not gated. The customer's order view offers no accept while one is pending
+  (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
+  /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
+  `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, each under
+  `_run_linked`; no `Idempotency-Key` (the `purchase:` source and the link's state make
+  a repeat safe). Agent `order_purchases` (read), `order_purchase_record`,
+  `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
+  to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
+  list of `{url, note}` that both sides read with `storefront/uploads.py`
+  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`,
+  `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
+  as a `pending` `manual` purchase source (`model_requests.checked_purchase_links`,
+  `insert_links`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

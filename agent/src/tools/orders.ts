@@ -1351,6 +1351,114 @@ export const orderTools: Tool[] = [
         ),
       ),
   }),
+  // Purchases (#6133, spec 2026-11-13 §10, §11): the things a storefront customer asked the
+  // shop to buy for their project. Each link is text only; no tool fetches it.
+  defineTool({
+    name: 'order_purchases',
+    label: "List an order's things to buy",
+    description:
+      "The things a storefront customer asked the shop to buy for their project, by item: each purchase link's `id` " +
+      '(the `source_id` the purchase tools take), the link as text (never fetch it), the customer\'s note, its ' +
+      '`status` (`pending`, `recorded`, `not_needed`), a recorded one\'s `amount_minor` and `cost_kind`, and the ' +
+      "shop's note to the customer. While one is `pending`, the order cannot be accepted and no balance request " +
+      'opens (409 purchase_pending).',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/purchases'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/purchases', { params: { path: { order_id } } }),
+          `list the purchases of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_record',
+    label: 'Record what the shop paid for a thing to buy',
+    description:
+      "Record what the shop paid for one purchase link, in the order's minor units: one cost entry on the link's " +
+      'item (`material` for parts, `other` for a paid model file) and a `purchase` charge of the same amount that ' +
+      "the customer pays, labelled \"Bought for your project: …\". The handling fee (Settings → Orders) and the " +
+      'auto tax are recomputed. A second call for a recorded link returns it as it is and writes nothing. Only ' +
+      'while the order is `draft` or `quoted` (409 purchase_locked after); 409 purchase_not_pending for a link ' +
+      'marked not needed.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1),
+      cost_kind: z.enum(['material', 'other']).default('material'),
+      note: z.string().max(1000).default('').describe("The cost entry's note, the shop's own; the customer never reads it"),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/record'],
+    title: ({ order_id, amount_minor }) => `Record a purchase of ${amount_minor} on order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/record', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `record purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_update',
+    label: 'Change a recorded purchase',
+    description:
+      'Change a recorded purchase: its cost entry and its charge change together (each field given replaces its ' +
+      'value; the amount is both). The handling fee and the auto tax are recomputed. 409 purchase_not_recorded ' +
+      'for a link not recorded; 409 purchase_locked once the order is accepted (then change the charges with ' +
+      'order_charges_update_after_acceptance).',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      amount_minor: money.min(1).optional(),
+      cost_kind: z.enum(['material', 'other']).optional(),
+      note: z.string().max(1000).optional(),
+    }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/orders/{order_id}/purchases/{source_id}'],
+    title: ({ order_id, source_id }) => `Change purchase ${source_id} of order ${order_id}`,
+    handler: async ({ order_id, source_id, ...body }, { backend }) =>
+      json(
+        await ok(
+          backend.PATCH('/api/v1/orders/{order_id}/purchases/{source_id}', {
+            params: { path: { order_id, source_id } },
+            body,
+          }),
+          `change purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_purchase_decline',
+    label: 'Mark a thing to buy not needed',
+    description:
+      'Mark a purchase link not needed: a recorded one loses its cost entry and its charge, and the link keeps ' +
+      '`shop_note`, which the customer reads. The handling fee and the auto tax are recomputed. A link already ' +
+      'not needed is returned as it is. 409 purchase_locked once the order is accepted.',
+    input: z.object({
+      order_id: orderId,
+      source_id: ID.describe('A purchase link id, as order_purchases lists them'),
+      shop_note: z.string().max(500).default('').describe('Why it is not needed, in words the customer reads'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/purchases/{source_id}/decline'],
+    title: ({ order_id, source_id }) => `Mark purchase ${source_id} of order ${order_id} not needed`,
+    handler: async ({ order_id, source_id, shop_note }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/purchases/{source_id}/decline', {
+            params: { path: { order_id, source_id } },
+            body: { shop_note },
+          }),
+          `decline purchase ${source_id} of order ${order_id}`,
+        ),
+      ),
+  }),
   // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
   // beside its filament. Making a part, editing it, correcting a count, its stock line and
   // a model's rule are the Parts page's (coverage.ts).
