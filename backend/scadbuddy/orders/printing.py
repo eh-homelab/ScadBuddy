@@ -137,9 +137,10 @@ PRINT_TIMEOUT = timedelta(minutes=5)
 ACCEPT_BUDGET_S = (
     COMMAND_ANSWER_DEADLINE.total_seconds() + CONNECT_MARGIN_SECONDS + DESCRIBE_SECONDS
 )
-#: How long ``print_item`` sends a start again while it answers one of
+#: The most time ``print_item`` sends a start again while it answers one of
 #: ``FOLLOWED_PROBLEMS`` (#6138, #6187): ``CLIENT_ACCEPTING`` (240 s) and one
-#: ``ACCEPT_BUDGET_S``, 254 s. The bound starts before the first send, and the
+#: ``ACCEPT_BUDGET_S``, 254 s. Slow work before the start cuts it (#6193, ``LOOK_MIN_S``).
+#: The bound starts before the first send, and the
 #: ``print-<key>`` workflow's clock starts within that send, so later than the bound's. The
 #: workflow refuses itself only when its check ends past ``CLIENT_ACCEPTING`` of its own
 #: clock; a check that ends just before still prints, and its row is written within the
