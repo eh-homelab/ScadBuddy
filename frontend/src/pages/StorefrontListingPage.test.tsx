@@ -26,7 +26,7 @@ async function stored(): Promise<StorefrontListing[]> {
 }
 
 /** Requests of `method` to `path` wait until the returned function is called, then fall through. */
-function hold(method: 'post' | 'put' | 'delete', path: string): () => void {
+function hold(method: 'get' | 'post' | 'put' | 'delete', path: string): () => void {
   let release: () => void = () => undefined
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -88,7 +88,6 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const preview = await screen.findByTestId('listing-preview')
     expect(await within(preview).findByLabelText('Name on the tag')).toBeInTheDocument()
     expect(within(preview).queryByLabelText('Text size')).toBeNull()
-    await user.click(screen.getByRole('button', { name: /^Show all/ }))
     await user.click(screen.getByRole('switch', { name: 'Customer can change Text size' }))
     expect(await within(preview).findByLabelText('Text size')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Publish' }))
@@ -96,8 +95,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
 
     const [saved] = await stored()
     expect(saved?.published).toBe(true)
-    expect(saved?.params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5 })
-    expect(saved?.params['name']).toEqual({ kind: 'text', max_length: 20 })
+    expect(saved?.params['text_size']).toEqual({ kind: 'number', min: 6, max: 28, step: 0.5, label: null, default: null })
+    expect(saved?.params['name']).toEqual({ kind: 'text', max_length: 20, label: null, default: null })
     expect(saved?.fixed['thickness']).toBe(5.2)
     expect(saved?.title).toBe('Name Keychain')
     // The template's picture is shown.
@@ -173,7 +172,8 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await waitFor(async () => expect(await stored()).toHaveLength(1))
     const [saved] = await stored()
     expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
-    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] })
+    // Stored as the backend stores it: an unset label and default are null.
+    expect(saved?.params['body_color']).toEqual({ kind: 'choice', choices: ['#F9D72C', '#1E1E1E'], label: null, default: null })
     expect(saved?.fixed['text_color']).toBe('#E8532F')
   })
 
@@ -295,7 +295,6 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(await screen.findByRole('button', { name: 'Change' }))
     await user.click(await screen.findByRole('combobox', { name: 'Version' }))
     await user.click(await screen.findByRole('option', { name: /Update name-keychain metadata/ }))
-    await user.click(await screen.findByRole('button', { name: /^Show all/ }))
     await waitFor(() => expect(screen.queryByRole('group', { name: /Text size/ })).toBeNull())
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     await waitFor(async () => expect((await stored())[0]?.commit).toBe(older))
@@ -308,6 +307,9 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const listing = await seed('Linked')
     const { user } = renderStorefront('/storefront/listings/new', <GoTo to={`/storefront/listings/${listing.id}`} />)
     const title = await screen.findByLabelText('Title')
+    // The design's name fills the untouched title first; clearing an empty field is no
+    // edit, so without this wait the name could land between the clear and the typing.
+    await waitFor(() => expect(title).toHaveValue('Name Keychain'))
     await user.clear(title)
     await user.type(title, 'Mine')
     await user.click(screen.getByRole('button', { name: 'Go' }))
@@ -319,6 +321,49 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(screen.getByRole('button', { name: 'Go' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Leave without saving' }))
     await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
+  })
+
+  it('keeps a title typed before the templates answer (#6290)', async () => {
+    const release = hold('get', '/api/v1/models')
+    const { user } = renderStorefront()
+    const title = await screen.findByLabelText('Title')
+    await user.type(title, 'Mine')
+    release()
+    // The first template is chosen once the list answers; the typed title stays.
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    expect(screen.getByLabelText('Title')).toHaveValue('Mine')
+  })
+
+  it('keeps a title cleared before the templates answer (#6290)', async () => {
+    const release = hold('get', '/api/v1/models')
+    const { user } = renderStorefront()
+    const title = await screen.findByLabelText('Title')
+    await user.type(title, 'x')
+    await user.clear(title)
+    release()
+    expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
+    expect(screen.getByLabelText('Title')).toHaveValue('')
+  })
+
+  it('says nothing is unsaved when a saved listing opens (#6290)', async () => {
+    // Stored with an offered colour, an offered number and an offered text: each bound's
+    // unset label and default come back null, as the backend answers them.
+    const listing = await api.createStorefrontListing({
+      slug: KEYCHAIN,
+      commit: COMMIT,
+      title: 'Tag',
+      colours: [FILAMENT_PLA, FILAMENT_PETG],
+      params: { body_color: { kind: 'choice', choices: ['#F9D72C', '#1E1E1E'] }, text_size: { kind: 'number', min: 6, max: 28 }, name: { kind: 'text', max_length: 20 } },
+      fixed: { text_color: '#E8532F' },
+    })
+    expect((await api.storefrontListing(listing.id)).params['text_size']).toMatchObject({ label: null, default: null, step: null })
+    renderStorefront(`/storefront/listings/${listing.id}`)
+    expect(await screen.findByLabelText('Title')).toHaveValue('Tag')
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    await waitFor(() => expect(screen.queryByText('Loading the design’s settings…')).toBeNull())
+    expect(screen.queryByText('Unsaved changes')).toBeNull()
   })
 
   it('keeps an edited saved listing when its design’s settings fail to load (#6140 review)', async () => {
@@ -403,6 +448,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       const problems = await screen.findByTestId('colour-problems')
       expect(problems).toHaveTextContent('Plate is #1B6CA8')
       expect(problems).toHaveTextContent('Text is #E8532F')
+      await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
       expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
       expect(screen.getByRole('checkbox', { name: 'PETG Black' })).not.toBeChecked()
       expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
@@ -418,7 +464,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
 
       const [saved] = await stored()
       expect(saved?.commit).toBe(versionIds.edited)
-      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20 } })
+      expect(saved?.params).toEqual({ name: { kind: 'text', max_length: 20, label: null, default: null } })
       expect(saved?.fixed).toMatchObject({ text_size: 20, body_color: '#F9D72C', text_color: '#1E1E1E', thickness: 5.2 })
       expect(saved?.colours).toEqual([FILAMENT_PLA, FILAMENT_PETG])
       expect(saved?.media_ids).toEqual(['thumbnail'])

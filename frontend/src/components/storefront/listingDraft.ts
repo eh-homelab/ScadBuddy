@@ -315,11 +315,20 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
   return { ...draft, params, fixed }
 }
 
-/** `value` as JSON with every object's keys sorted, so two equal bodies compare equal whatever order the server wrote their keys in. */
+/**
+ * `value` as JSON with every object's keys sorted and its null fields left out, so two equal
+ * bodies compare equal whatever order the server wrote their keys in. A null field is an
+ * absent one (#6290): the backend stores and answers each bound's unset `label`, `default`
+ * and `step` as null, while `listingInput` leaves an unset one out.
+ */
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, item: unknown) =>
     item !== null && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      ? Object.fromEntries(
+          Object.entries(item as Record<string, unknown>)
+            .filter(([, field]) => field !== null)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
       : item,
   )
 }

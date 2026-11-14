@@ -289,10 +289,10 @@ class ListingStore:
     def set_media(
         self, listing_id: str, media_ids: Sequence[str], *, expected_updated_at: datetime
     ) -> Listing:
-        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a
-        published listing stays published with what it last published until it is
-        published again. 409 ``listing_changed`` when it changed after
-        ``expected_updated_at`` was read, 404 when it is gone."""
+        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a published
+        listing stays published with what it last published until it is published again. 409
+        ``listing_changed`` when it changed after ``expected_updated_at`` was read, 404 when it
+        is gone."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE storefront_listings SET media_ids = %s, updated_at = clock_timestamp()"
@@ -919,10 +919,15 @@ async def _publish(
         raise
 
 
-def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
+def _check_pictures(
+    core: Core, slug: str, media_ids: Sequence[str], kept: Collection[str] = ()
+) -> None:
     """422 ``listing_media_duplicate`` for an id named twice, ``listing_media_unknown``
     for one the template does not have (or whose file is missing), and
-    ``listing_media_not_image`` for a video: the storefront shows images only (#6131)."""
+    ``listing_media_not_image`` for a video not in ``kept``. The store shows a listing's
+    video (publish takes one, as Save draft does), but this route adds images only; a
+    video the listing already shows is ``kept`` and stays, so a listing with one can
+    still have its pictures changed here (#6290)."""
     seen: set[str] = set()
     for media_id in media_ids:
         if media_id in seen:
@@ -934,7 +939,7 @@ def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
             raise _unprocessable(
                 "listing_media_unknown", f"the template has no media {media_id!r}", name=media_id
             ) from None
-        if view.kind != "image":
+        if view.kind != "image" and media_id not in kept:
             raise _unprocessable(
                 "listing_media_not_image",
                 f"media {media_id!r} is a {view.kind}, not an image",
@@ -951,22 +956,25 @@ async def change_media(
     expected_updated_at: datetime,
 ) -> Listing:
     """The listing's pictures set to ``media_ids`` (#6213), each an image of its
-    template, in the order to show them. A draft stays a draft. A published listing is
-    published again at once, so it stays on the public site and shows the new pictures;
-    when that publish is refused, the pictures are kept and the public site shows what
-    was last published (the listing's ``media``, each with its ``media_id``) until the
-    next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
-    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
-    were written says so with the extension ``pictures_saved: true`` (any failure of the
-    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
-    client never has to guess whether its change landed."""
+    template or a video the listing already shows (#6290), in the order to show them. A
+    draft stays a draft. A published listing is published again at once, so it stays on
+    the public site and shows the new pictures; when that publish is refused, the
+    pictures are kept and the public site shows what was last published (the listing's
+    ``media``, each with its ``media_id``) until the next publish. Refusals: 404
+    ``listing_not_found``, 409 ``listing_changed``, the 422s of `_check_pictures`, and
+    those of `publish`. A refusal that comes after the pictures were written says so with
+    the extension ``pictures_saved: true`` (any failure of the republish that is not a
+    refusal is 500 ``listing_republish_failed`` with it), so a client never has to guess
+    whether its change landed."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
     # The cheap check first: a stale read is refused before any media is read.
     if listing.updated_at != expected_updated_at:
         raise _changed(listing_id)
-    await asyncio.to_thread(_check_pictures, core, listing.slug, media_ids)
+    await asyncio.to_thread(
+        _check_pictures, core, listing.slug, media_ids, frozenset(listing.media_ids)
+    )
     changed = await asyncio.to_thread(
         store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
     )

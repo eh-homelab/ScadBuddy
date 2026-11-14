@@ -49,13 +49,10 @@ async function afterRefusal(listing: Row, sent: readonly string[], picture: stri
     if (caught.status === 409) {
       return { row: fresh, said: fresh ? 'Not saved: changed elsewhere since it was read. It is read again; Save to try again.' : 'Not saved: changed elsewhere since it was read. Open this dialog again.' }
     }
-    // A picture the listing named before (deleted from the design since, or a video) refuses the whole set.
+    // A picture the listing named before and the design no longer has refuses the whole set.
     const named = typeof problem.name === 'string' && problem.name !== picture ? problem.name : null
     if (named && problem.type?.endsWith('/listing_media_unknown')) {
       return { row: fresh, said: `Not saved: the listing still names a picture the design no longer has (${named}). Remove it in the listing's editor, then try again.` }
-    }
-    if (named && problem.type?.endsWith('/listing_media_not_image')) {
-      return { row: fresh, said: `Not saved: the listing also shows a video (${named}), and this dialog sets pictures only on a listing of images. Remove the video in the listing's editor, then try again.` }
     }
     return { row: fresh, said: `Not saved: ${reason}` }
   }
@@ -119,20 +116,25 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
     const read = reads.current
     setBusy(true)
     const said: Record<string, string> = {}
+    // Each listing says it is saving as its turn comes: a published one republishes, so a long "Choose all" shows where it is.
+    const progress = (id: string, text: string) => {
+      said[id] = text
+      if (read === reads.current) setResults({ ...said })
+    }
     for (const listing of changes) {
+      progress(listing.id, wanted[listing.id] ? 'Adding…' : 'Taking off…')
       const show = wanted[listing.id] ?? false
       const ids = show ? [...listing.media_ids, item.id] : listing.media_ids.filter((id) => id !== item.id)
       try {
         const saved = await api.setStorefrontListingMedia(listing.id, ids, listing.updated_at)
         replace(read, saved)
-        said[listing.id] = show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.'
+        progress(listing.id, show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.')
       } catch (caught) {
         const told = await afterRefusal(listing, ids, item.id, caught)
         if (told.row) replace(read, told.row)
-        said[listing.id] = told.said
+        progress(listing.id, told.said)
       }
     }
-    if (read === reads.current) setResults(said)
     setBusy(false)
   }
 

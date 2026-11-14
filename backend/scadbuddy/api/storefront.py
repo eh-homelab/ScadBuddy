@@ -145,8 +145,9 @@ async def update_listing(listing_id: str, body: ListingUpdate, orders: OrdersDep
 async def set_listing_media(
     listing_id: str, body: ListingMediaUpdate, orders: OrdersDep, state: StateDep
 ) -> Listing:
-    """The listing's pictures (#6213): ``media_ids``, images of its template in the order
-    to show them, and nothing else changed. A draft stays a draft; a published listing
+    """The listing's pictures (#6213): ``media_ids``, images of its template (and any
+    video the listing already shows, #6290) in the order to show them, and nothing else
+    changed. A draft stays a draft; a published listing
     is published again at once and stays live. 409 ``listing_changed`` unless
     ``updated_at`` is the listing's; 422 ``listing_media_unknown``,
     ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a

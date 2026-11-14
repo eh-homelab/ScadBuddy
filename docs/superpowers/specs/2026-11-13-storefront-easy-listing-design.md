@@ -148,14 +148,16 @@ test and the assistant's tool test (§6) both read it.
   1. A "Design" line at the top ("Name Keychain version c3d4e5f (current)"), with "Change"
      opening the design and version pickers.
   2. "Product": title, description, pictures.
-  3. "What the customer chooses": the offered parameters, each with its bounds ("From", "To",
-     "Step"; "Most characters"), and "Colours on offer".
-  4. "Set by you": folded to one line that lists each locked value ("Text size 14, …"), with
-     "Show all N" to open the rows. Most products need none of them changed.
+  3. "Settings": every parameter, once, in the design's order (#6290). An offered one shows
+     its bounds ("From", "To", "Step"; "Most characters"); a locked one shows its value. A
+     switch never moves a row: the first build split them into "What the customer chooses"
+     and a folded "Set by you", and turning a switch off moved the row out of sight.
+  4. "Colours on offer": folded to the count and names of the ticked filaments, with
+     "Show all N filaments" to open the list (open while none is ticked).
 - No variable names beside the captions (the name stays in the row's tooltip).
 - Each parameter row has one switch, "Customer can change", instead of two radio buttons. A
   switch that cannot be turned on says why ("A customer cannot choose a typeface.", "Tick a
-  colour on offer first.").
+  colour on offer below first.").
 - "Publish" (saves and publishes) and "Save draft" sit at the top of the listing, above the
   editor. While a published listing has unsaved changes the page says "Saving a draft takes
   this listing off the store until you publish it again."

@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import type { CustomizerSchema, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
+import type { CustomizerSchema, ListingBound, StorefrontListing, StorefrontListingInput, StorefrontListingPage } from '../../api/types'
 import { mockModels, problem } from '../handlers'
 import * as orders from './orders/state'
 
@@ -74,13 +74,26 @@ function sorted(): StorefrontListing[] {
   return [...listings].sort((a, b) => a.position - b.position)
 }
 
+/**
+ * #6290 — each bound as the backend stores and answers it (`model_dump`): an unset `label`
+ * and `default`, and a number's unset `step`, are null, never absent.
+ */
+function storedBounds(params: Record<string, ListingBound>): Record<string, ListingBound> {
+  return Object.fromEntries(
+    Object.entries(params).map(([name, bound]) => [
+      name,
+      { ...bound, label: bound.label ?? null, default: bound.default ?? null, ...(bound.kind === 'number' ? { step: bound.step ?? null } : {}) },
+    ]),
+  )
+}
+
 function fields(body: StorefrontListingInput) {
   return {
     slug: body.slug,
     commit: body.commit,
     title: body.title,
     description: body.description ?? '',
-    params: body.params ?? {},
+    params: storedBounds(body.params ?? {}),
     fixed: body.fixed ?? {},
     colours: body.colours ?? [],
     media_ids: body.media_ids ?? [],
@@ -238,12 +251,12 @@ export const handlers = [
     if (!found) return refused(404, 'listing_not_found', `no listing '${id}'`)
     if (found.updated_at !== updated_at) return refused(409, 'listing_changed', `listing '${id}' changed since it was read`)
     if (new Set(media_ids).size !== media_ids.length) return refused(422, 'listing_media_duplicate', 'a picture is named twice')
-    // As `_check_pictures`: each id one of the template's images.
+    // As `_check_pictures`: each id one of the template's images, or a video the listing already shows (#6290).
     const media = mockModels().find((m) => m.slug === found.slug)?.media ?? []
     for (const mediaId of media_ids) {
       const item = media.find((m) => m.id === mediaId && !m.missing)
       if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`, { name: mediaId })
-      if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`, { name: mediaId })
+      if (item.kind !== 'image' && !found.media_ids.includes(mediaId)) return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`, { name: mediaId })
     }
     const at = stamp()
     const next: StorefrontListing = { ...found, media_ids, updated_at: at }

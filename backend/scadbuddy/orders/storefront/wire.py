@@ -20,7 +20,7 @@ from typing import Annotated, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
-from scadbuddy.library.media import MediaKind
+from scadbuddy.library.media import MEDIA_ID_PATTERN, MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
 from scadbuddy.orders.models import ChargeKind, ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
@@ -203,11 +203,14 @@ LISTING_MEDIA_MAX = 50
 
 class ListingMediaUpdate(BaseModel):
     """``PUT …/listings/{id}/media`` (#6213): the listing's pictures, ids of its
-    template's images in the order to show them, and the ``updated_at`` that was read."""
+    template's images (and any video the listing already shows, #6290) in the order to
+    show them, and the ``updated_at`` that was read."""
 
     model_config = ConfigDict(extra="forbid")
 
-    media_ids: list[str] = Field(max_length=LISTING_MEDIA_MAX)
+    media_ids: list[Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]] = Field(
+        max_length=LISTING_MEDIA_MAX
+    )
     updated_at: datetime
 
 

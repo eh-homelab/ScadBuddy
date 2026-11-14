@@ -118,6 +118,9 @@ def test_an_unknown_picture_is_named_and_too_many_are_refused(
     assert unknown.json()["name"] == "0123456789ab"
     too_many = _set(client, listing, [f"{n:012x}" for n in range(LISTING_MEDIA_MAX + 1)])
     assert too_many.status_code == 422, too_many.text
+    # Each id is a media id (#6290): junk is refused before the catalogue is read.
+    junk = _set(client, listing, ["../model.json"])
+    assert junk.status_code == 422, junk.text
     assert client.get(f"{LISTINGS}/{listing['id']}").json()["media_ids"] == listing["media_ids"]
 
 
@@ -135,6 +138,22 @@ def test_a_video_is_refused_the_storefront_shows_images_only(
     assert answer.json()["type"] == STOREFRONT_PROBLEMS + "listing_media_not_image"
     assert answer.json()["name"] == video["id"]
     assert "pictures_saved" not in answer.json()
+
+
+def test_a_video_the_listing_already_shows_is_kept(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    """#6290: Save draft and publish take a video, so a listing that shows one can still
+    have its pictures changed here; only a new video is refused."""
+    files = {"file": ("clip.mp4", MP4, "application/octet-stream")}
+    added = client.post(f"/api/v1/models/{template['slug']}/media", files=files, headers=press())
+    assert added.status_code == 200, added.text
+    video = added.json()["media"][-1]["id"]
+    listing = create(client, {**listing_body(template, pla_red), "media_ids": [video]})
+    assert listing["media_ids"] == [video]
+    answer = _set(client, listing, [video, template["media_id"]])
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["media_ids"] == [video, template["media_id"]]
 
 
 def test_a_stale_read_and_a_missing_listing_are_refused(
