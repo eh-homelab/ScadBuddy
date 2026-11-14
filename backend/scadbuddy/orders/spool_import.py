@@ -2,7 +2,7 @@
 
 One record per filament the inventory holds (``integrations.SpoolGroup``), matched to
 the book by its link to the group's spools, else by material, subtype, brand and the
-spools' RGB (#6209, :func:`_match`; the colour alone would make a second record of one a
+spools' RGB (#6209, :func:`_matches`; the colour alone would make a second record of one a
 person recoloured): a new record when the book has none, else its ``cost_per_kg`` set to
 the most recent priced spool's (the highest id). A record takes the spools' colour,
 alpha, stops and effect unless a person set them (``colour_source`` ``manual``).
@@ -19,6 +19,7 @@ takes :func:`density_for`'s; a record no spool of the inventory matches has no s
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -73,24 +74,34 @@ def _names(material: str, subtype: str | None, brand: str | None) -> tuple[str, 
     return _identity(material, subtype, brand, None)[:3]
 
 
-def _match(
-    group: SpoolGroup, colour: str, records: list[ImportRecord], claimed: set[str]
-) -> ImportRecord | None:
-    """The record of ``group`` (#6209), always one of its material, subtype and brand: the
-    one linked to any of its spools, else the one whose spools had its RGB at the last
-    import, else one with no other spools' RGB whose colour is its RGB. A spool whose
-    material was corrected in Bambuddy is another filament's, never its old record's. A
-    record already taken by another group of this import is never matched again."""
+def _same_names(
+    group: SpoolGroup, records: list[ImportRecord], claimed: set[str]
+) -> list[ImportRecord]:
+    """The records not yet taken that have ``group``'s material, subtype and brand. A spool
+    whose material was corrected in Bambuddy is another filament's, never its old record's."""
     names = _names(group.material, group.subtype, group.brand)
-    same = [
+    return [
         r
         for r in records
         if r.id not in claimed and _names(r.material, r.subtype, r.brand) == names
     ]
+
+
+def _linked(
+    group: SpoolGroup, records: list[ImportRecord], claimed: set[str]
+) -> ImportRecord | None:
+    """The record of ``group``'s names linked to most of its spools (#6209)."""
     ids = {spool_id for spool_id, _ in group.spools}
-    linked = [r for r in same if ids & set(r.spool_ids)]
-    if linked:
-        return max(linked, key=lambda r: len(ids & set(r.spool_ids)))
+    linked = [r for r in _same_names(group, records, claimed) if ids & set(r.spool_ids)]
+    return max(linked, key=lambda r: len(ids & set(r.spool_ids))) if linked else None
+
+
+def _by_colour(
+    group: SpoolGroup, colour: str, records: list[ImportRecord], claimed: set[str]
+) -> ImportRecord | None:
+    """The record of ``group``'s names whose spools had its RGB at the last import, else
+    one with no other spools' RGB whose colour is its RGB (#6209)."""
+    same = _same_names(group, records, claimed)
     return next((r for r in same if r.spool_colour == colour), None) or next(
         (r for r in same if r.colour.upper() == colour and r.spool_colour in (None, colour)),
         None,
@@ -110,39 +121,32 @@ def _skip_reason(group: SpoolGroup) -> SkipReason | None:
 
 
 def _matches(groups: list[SpoolGroup], records: list[ImportRecord]) -> dict[int, ImportRecord]:
-    """Each group's record, by the group's place in ``groups`` (#6209, #6211 review). A
-    record linked to several groups (its spools split, as when one spool's colour was
-    corrected) goes first to the group whose RGB its spools had (``spool_colour``), so the
-    order of the groups never decides which keeps it; then every other group is matched
-    by :func:`_match`."""
+    """Each group's record, by the group's place in ``groups`` (#6209, #6211 review), so
+    the order of the groups never decides a match. First a record linked to a group whose
+    RGB its spools had (``spool_colour``), as when one spool of a record was recoloured;
+    then any record linked to a group's spools, as when all of them were; only then a
+    record by colour (:func:`_by_colour`). A spool link always wins over a colour."""
     matched: dict[int, ImportRecord] = {}
     claimed: set[str] = set()
     eligible = [(i, g) for i, g in enumerate(groups) if _skip_reason(g) is None]
-    for index, group in eligible:
-        assert group.colour is not None
-        names = _names(group.material, group.subtype, group.brand)
-        ids = {spool_id for spool_id, _ in group.spools}
-        kept = next(
-            (
-                r
-                for r in records
-                if r.id not in claimed
-                and _names(r.material, r.subtype, r.brand) == names
-                and ids & set(r.spool_ids)
-                and r.spool_colour == group.colour
-            ),
-            None,
-        )
-        if kept is not None:
-            matched[index] = kept
-            claimed.add(kept.id)
-    for index, group in eligible:
-        assert group.colour is not None
-        if index not in matched:
-            record = _match(group, group.colour, records, claimed)
+
+    def take(pick: Callable[[SpoolGroup, str], ImportRecord | None]) -> None:
+        for index, group in eligible:
+            assert group.colour is not None
+            if index in matched:
+                continue
+            record = pick(group, group.colour)
             if record is not None:
                 matched[index] = record
                 claimed.add(record.id)
+
+    def kept(group: SpoolGroup, colour: str) -> ImportRecord | None:
+        record = _linked(group, records, claimed)
+        return record if record is not None and record.spool_colour == colour else None
+
+    take(kept)
+    take(lambda group, _colour: _linked(group, records, claimed))
+    take(lambda group, colour: _by_colour(group, colour, records, claimed))
     return matched
 
 
@@ -160,15 +164,18 @@ def import_spools(
 ) -> SpoolImport:
     """Make or update one record per group, in one transaction, filling an empty
     density by :func:`~scadbuddy.orders.density.resolve` (``densities`` is the image's
-    vendor presets, ``None`` without them). A record is matched by :func:`_match`, so a
+    vendor presets, ``None`` without them). A record is matched by :func:`_matches`, so a
     colour a person changed makes no second record; it takes the group's colour, alpha,
     stops and effect unless a person set them (``colour_source`` ``manual``, #6209), and
     keeps the link to the group's spools. Blocking: call it in a thread."""
-    rows: list[SpoolImportRow] = []
+    rows: dict[int, SpoolImportRow] = {}
     with store.transaction() as conn:
         records = store.import_records(conn)
         matched = _matches(groups, records)
-        for index, group in enumerate(groups):
+        # The matched groups first, so a new group checks `taken` against the colours
+        # its run gave the matched records; the rows keep the groups' order.
+        for index in sorted(range(len(groups)), key=lambda i: i not in matched):
+            group = groups[index]
             spool_ids = [spool_id for spool_id, _ in group.spools]
             priced = [(i, p) for i, raw in group.spools if (p := _price(raw)) is not None]
             prices = {p for _, p in priced}
@@ -188,14 +195,14 @@ def import_spools(
             )
             skip = _skip_reason(group)
             if skip is not None or group.colour is None:
-                rows.append(row.model_copy(update={"reason": skip}))
+                rows[index] = row.model_copy(update={"reason": skip})
                 continue
             colour = group.colour
             price = max(priced)[1]
             record = matched.get(index)
             # The colour the group would take is a colour another record of its names
             # holds (one a person set): a second record, or the change, would break the
-            # identity index. A matched record has the group's names (`_match`).
+            # identity index. A matched record has the group's names (`_same_names`).
             group_names = _names(group.material, group.subtype, group.brand)
             taken = any(
                 r.id != (None if record is None else record.id)
@@ -205,7 +212,7 @@ def import_spools(
             )
             if record is None:
                 if taken:
-                    rows.append(row.model_copy(update={"reason": "colour_taken"}))
+                    rows[index] = row.model_copy(update={"reason": "colour_taken"})
                     continue
                 found = resolve(group, densities)
                 made = store.insert_filament(
@@ -227,17 +234,15 @@ def import_spools(
                     spool_colour=colour,
                     spool_ids=spool_ids,
                 )
-                rows.append(
-                    row.model_copy(
-                        update={
-                            "action": "created",
-                            "filament_id": made.id,
-                            "colour_source": "import",
-                            "cost_per_kg": made.cost_per_kg,
-                            "density_g_cm3": made.density_g_cm3,
-                            "density_profile": made.density_profile,
-                        }
-                    )
+                rows[index] = row.model_copy(
+                    update={
+                        "action": "created",
+                        "filament_id": made.id,
+                        "colour_source": "import",
+                        "cost_per_kg": made.cost_per_kg,
+                        "density_g_cm3": made.density_g_cm3,
+                        "density_profile": made.density_profile,
+                    }
                 )
                 continue
             current = store.filament(record.id, conn=conn)
@@ -294,7 +299,7 @@ def import_spools(
             if keep_look and current.colour_source == "import":
                 update["reason"] = "colour_taken"
             if not patch and not look:
-                rows.append(row.model_copy(update={**update, "action": "unchanged"}))
+                rows[index] = row.model_copy(update={**update, "action": "unchanged"})
                 continue
             if patch:
                 store.update_filament(
@@ -303,8 +308,8 @@ def import_spools(
                     conn=conn,
                     density_profile=None if found is None else found.profile,
                 )
-            rows.append(row.model_copy(update={**update, "action": "updated"}))
-    return SpoolImport(rows=rows)
+            rows[index] = row.model_copy(update={**update, "action": "updated"})
+    return SpoolImport(rows=[rows[i] for i in sorted(rows)])
 
 
 def density_for(

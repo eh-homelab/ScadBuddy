@@ -932,13 +932,19 @@ class OrderStore:
             "spool_ids": list(spool_ids),
         }
         try:
-            _update(conn, "filaments", filament_id, fields, "id", stamp=bool(look))
+            # A savepoint, so the import's transaction can still read which record holds
+            # the colour, a record this run made included.
+            with conn.transaction():
+                _update(conn, "filaments", filament_id, fields, "id", stamp=bool(look))
         except errors.UniqueViolation:
             # The import checks first (`colour_taken`); a collision past it is a 409.
-            current = self.filament(filament_id)
+            current = self.filament(filament_id, conn=conn)
             assert current is not None
             colour = str(look.get("colour", current.colour))
-            self._raise_exists(current.material, current.subtype, current.brand, colour)
+            existing = self.existing_filament(
+                conn, current.material, current.subtype, current.brand, colour
+            )
+            raise FilamentExistsError(existing or "") from None
 
     def archive_filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
         """Hidden from the book from now on; a quote priced with it keeps its lines."""

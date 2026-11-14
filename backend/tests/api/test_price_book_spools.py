@@ -333,3 +333,27 @@ def test_a_record_from_before_the_link_follows_a_colour_fix(
     assert rows[(2,)]["action"] == "created"
     book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
     assert (book[made["id"]]["colour"], book[made["id"]]["cost_per_kg"]) == ("#0000FF", "25")
+
+
+@respx.mock
+def test_a_spool_link_wins_over_a_colour_in_any_group_order(client: TestClient) -> None:
+    """#6211 review: a record's one spool recoloured, and a new spool of its old colour.
+    The record follows its spool (the link), whichever group sorts first; the new spool
+    is a new record."""
+    configure(client)
+    no_density_sources()
+    blue = {"rgba": "0000FFFF", "color_name": "Blue"}
+    red = {"rgba": "FF0000FF", "color_name": "Red"}
+    _inventory(spool(1, **blue, cost_per_kg=20))
+    made = client.post(IMPORT).json()["rows"][0]
+
+    _inventory(spool(1, **red, cost_per_kg=20), spool(2, **blue, cost_per_kg=25))
+    rows = client.post(IMPORT).json()["rows"]
+
+    assert [r["colour"] for r in rows] == ["#0000FF", "#FF0000"]
+    blue_row, red_row = rows
+    assert (red_row["action"], red_row["filament_id"]) == ("updated", made["filament_id"])
+    assert (blue_row["action"], blue_row["spool_ids"]) == ("created", [2])
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    assert book[made["filament_id"]]["colour"] == "#FF0000"
+    assert book[blue_row["filament_id"]]["colour"] == "#0000FF"

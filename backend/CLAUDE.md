@@ -133,7 +133,10 @@ would be joined by the next test that renders it. The dev server's store is a SQ
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
-`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
+`20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
+no route can make it and the new code would act wrongly on those rows before it ran; guard
+each row by its id and the values it must still have, so the file is a no-op elsewhere
+(`20261114T1607Z_filaments_alpha_effect.sql`, #6209). Otherwise make it through the API. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 
@@ -1395,9 +1398,16 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `colour_source: "import"` in a PATCH hands it back. The import matches only a record of
   the group's material, subtype and brand: by its link to the group's spools (`spool_ids`),
   else by the spools' RGB (`spool_colour`, then `colour`), never by a colour a person set, so
-  it makes no duplicate, and a spool whose material was corrected is another filament's (`spool_import.py` `_matches`, `_match`: a record linked to several groups goes
-  first to the group with its spools' RGB, never to whichever group sorts first; a group
-  whose RGB is another record's colour is skipped `colour_taken`; the migration links no existing record, so the next import links each by its own `colour`). An item
+  it makes no duplicate, and a spool whose material was corrected is another filament's
+  (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
+  never decides: a record linked to a group whose RGB its spools had, then a record linked
+  to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
+  over a colour. The matched groups are written first, then the new ones; a group whose
+  RGB is another record's colour is skipped `colour_taken`). The migration sets no link
+  (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two prod
+  stand-ins for clear spools (ids and colours pinned in it) get `colour_source` `manual` and
+  `spool_colour` `#000000`, so the import finds them by their spools' `#000000`. The next
+  import links every other record by its own `colour`. An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
 - A customer's own models (#6133, spec 2026-11-13; migration

@@ -1258,8 +1258,9 @@ spool's `rgba`, `extra_colors` and `effect_type`. `colour_source` says who set t
 import sets them again only while it is `import`; a person's change makes it `manual`. The
 import matches only a record of the group's material, subtype and brand: by its link to
 the group's spools (`spool_ids`, a record linked to several groups going to the group with
-its spools' RGB), else by the spools' `#RRGGBB` at the last import (`spool_colour`), else by
-its own `colour`, so a colour a person set makes no second record. An item print's spools
+its spools' RGB; a link always wins over a colour, whatever the groups' order), else by the
+spools' `#RRGGBB` at the last import (`spool_colour`), else by its own `colour`, so a colour
+a person set makes no second record. An item print's spools
 are matched the same way (`orders/spools.py`).
 
 ### 8.4 Printers
