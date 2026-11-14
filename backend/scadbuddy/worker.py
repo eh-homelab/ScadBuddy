@@ -34,9 +34,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.auth.service_credentials import (
     ServiceAuth,
-    ServiceCredentialConfigError,
     exchange_source,
-    token_source,
 )
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -58,7 +56,6 @@ from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.loop_watch import LoopWatch
 from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.secrets import Kek
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.crud.client import CrudClient, wait_for_areas
@@ -1202,7 +1199,7 @@ async def run_inprocess_worker(
 @dataclass
 class PrintWorkerDeps:
     """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): the API's internal
-    URL, and no Postgres pool. It mounts no data volume and runs no template code. Every
+    URL, and no Postgres pool and no KEK. It mounts no data volume and runs no template code. Every
     store it reads or writes goes through the API's CRUD routes (#5298), and it does not
     LISTEN."""
 
@@ -1223,11 +1220,10 @@ class PrintWorkerDeps:
     #: Native library files, read through the API's internal routes (#3827).
     library: LibraryReads | None = None
     #: The printer registry (#3823): each LAN printer's watch, on the follow queue. The
-    #: registry, the reports and the access code come from the API's CRUD routes (#5298
-    #: Task 29); the KEK unseals a virtual printer's request.
+    #: registry, the reports and the access codes come from the API's CRUD routes (#5298
+    #: Task 29); the API also opens a virtual printer's sealed code (Task 33). No KEK.
     printers: PrinterStore | None = None
     reports: PrinterReportStore | None = None
-    kek: Kek | None = None
     printer_watch: Callable[..., Any] | None = None
 
     async def aclose(self) -> None:
@@ -1254,41 +1250,24 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     slices, project records, print links, sends, outputs' last prints, printer rows, LAN
     reports, access codes, the rack hotends' usage, the spools, ScadBuddy's own spools,
     the kept presets, a native slice's start and a LAN print's read URL of its sliced file
-    go through its CRUD routes. ``crud``, the
-    client of those routes, defaults to one with the worker's credential. With a proof
-    (`SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`) it is exchanged
-    for that proof alone (`exchange_source`, no view fallback), whether or not
-    `SCADBUDDY_DATABASE_URL` is set: the worker waits for CRUD areas that only an API with
-    the exchange route serves. Only with no proof and a URL set is it read from its view
-    (`token_source`, until #5298 Task 34), one short connection per read, never a pool.
-    With neither, the worker refuses to start."""
+    go through its CRUD routes. So do whether the API can open access codes and a virtual
+    printer's sealed code, which the API opens (#5298 Task 33): the worker holds no KEK
+    and reads no key file. ``crud``, the client of those routes, defaults to one with
+    the worker's credential, exchanged for its proof (`SCADBUDDY_SERVICE_TOKEN_FILE` or
+    `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`) alone (`exchange_source`, no view fallback).
+    Without a proof the worker refuses to start; `SCADBUDDY_DATABASE_URL` is ignored
+    (`run_print_worker` warns)."""
     if settings.api_internal_url is None:
         raise ApiUrlMissingError(
             "SCADBUDDY_API_INTERNAL_URL is required for --queue bambuddy: the print worker"
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    has_proof = (
-        settings.service_token_file is not None or settings.service_bootstrap_file is not None
-    )
-    if not has_proof and not settings.database_url:
-        raise ServiceCredentialConfigError(
-            "SCADBUDDY_SERVICE_TOKEN_FILE (or SCADBUDDY_SERVICE_BOOTSTRAP_FILE outside"
-            " Kubernetes) is required for --queue bambuddy: it exchanges that proof for its"
-            " service credential; without one, SCADBUDDY_DATABASE_URL names its credential's"
-            " view (#5298)"
-        )
+    # #4975 phase 4: the print worker's service credential on the internal routes,
+    # exchanged for its proof only (#5494): no view, no KEK to unseal one (#5298 Task 33).
+    # Every store below goes through the API's CRUD routes, so it holds no pool (#5298).
+    credential = ServiceAuth(exchange_source("print", settings))
     metrics = worker_metrics(settings, "print")
-    # #4975 phase 4: the print worker's service credential on the internal routes. With a
-    # proof it is exchanged for that proof only (#5494): no view fallback, URL or not. With
-    # no proof it is read from its own view and unsealed with the KEK, until #5298 Task 34.
-    # The view is the only SQL it may read: every store below goes through the API's CRUD
-    # routes, so it holds no pool (#5298).
-    credential = ServiceAuth(
-        exchange_source("print", settings)
-        if has_proof
-        else token_source("print", settings, settings_kek(settings.secret_key_file))
-    )
     crud = crud or CrudClient(settings.api_internal_url, "print", credential, metrics=metrics)
     # Called from threads (`asyncio.to_thread`), so blocking. The settings store closes it.
     blocking = crud.blocking()
@@ -1333,16 +1312,12 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # activity rows, and counts each operation it ends (#2295).
     print_runs = RemotePrintRunStore(crud)
     operations = RemoteOperationStore(crud, "print")
-    # The worker's KEK opens no access code (the API does, plan D8) and signs no transfer
-    # token (the API mints the URL, #5298 Task 32): it still unseals a virtual printer's
-    # request (`bambuddy/virtual_printers.py`).
-    kek = settings_kek(settings.secret_key_file)
     # The registry and the LAN reports through the API (#5298 Task 29): a run's first
     # check makes or merges a row there (#4625), whose merge writes tables this worker's
-    # role is never granted, and a printer's access code is the API's to open.
-    printers = RemotePrinterStore(
-        blocking, kek, previous_kek=settings_kek(settings.secret_key_previous_file)
-    )
+    # role is never granted. The worker holds no KEK (Task 33): a printer's access code
+    # and a virtual printer's sealed one are the API's to open, and the LAN path's gate
+    # asks the API whether it can.
+    printers = RemotePrinterStore(blocking)
     reports = RemoteReports(blocking)
     # A LAN print's progress is its printer's report (plan 2026-10-16 Task 9). The
     # worker hears no ``print.run`` (#5298), so it keeps no run (`RecentRuns`): each read
@@ -1475,7 +1450,6 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
         library=library,
         printers=printers,
         reports=reports,
-        kek=kek,
         printer_watch=WatchActivities(
             printers,
             reports,
@@ -1513,6 +1487,7 @@ PRINT_CRUD_AREAS = frozenset(
         "rack",
         "spools",
         "transfer-urls",
+        "access-codes",
     }
 )
 
@@ -1532,6 +1507,10 @@ async def run_print_worker(
     ``crud``, the client of the API's CRUD routes, defaults to `build_print_deps`'s; the
     worker closes it when it ends."""
     stop = stop or asyncio.Event()
+    if settings.database_url:
+        logger.warning(
+            "ignoring SCADBUDDY_DATABASE_URL: the print worker holds no database (#5298)"
+        )
     deps = await asyncio.to_thread(build_print_deps, settings, crud)
     warming: asyncio.Task[None] | None = None
     try:

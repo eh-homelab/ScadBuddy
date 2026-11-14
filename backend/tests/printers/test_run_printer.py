@@ -448,9 +448,7 @@ async def test_native_run_refused_without_kek(
         await prepare(printers_with_kek, reports, run_request(printer=pid))
 
     assert refused.value.status == 503
-    assert (
-        refused.value.detail == "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the print worker"
-    )
+    assert refused.value.detail == "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the API"
     assert not status.called
 
 
@@ -459,7 +457,8 @@ async def test_an_auto_printer_prints_through_bambuddy_without_kek(
     printers_with_kek: PrinterStore, reports: PrinterReportStore, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Task 8 queues a linked row through Bambuddy and never opens the access code, so a
-    worker without the key takes Bambuddy's path for an ``auto`` row, not the 503."""
+    store that cannot open access codes (no KEK on the API) takes Bambuddy's path for an
+    ``auto`` row, not the 503."""
     status = bambuddy_routes()
     pid = lan_linked(printers_with_kek, reports)
     printers_with_kek.kek = None

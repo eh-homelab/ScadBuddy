@@ -577,6 +577,7 @@ def static_print_crud(current: PrintSettings | None = None) -> CrudClient:
         "rack",
         "spools",
         "transfer-urls",
+        "access-codes",
     ]
 
     def answer(request: httpx.Request) -> httpx.Response:

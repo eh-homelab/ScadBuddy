@@ -123,6 +123,17 @@ only; the CRUD client retries it as it retries any 5xx but ``not_configured``. A
 that mints, so natural: it takes no ``Idempotency-Key``. Its answer carries a bearer
 token (``no-store``, as every CRUD answer): never logged.
 
+The print worker holds no KEK (#5298 Task 33), so the API answers the two questions its
+key once did (area ``access-codes``): ``GET /access-codes`` says whether this API can
+open an access code at all (the LAN path's gate, `bambuddy/print_run.py`
+`_registry_path`), and ``POST /access-codes/virtual-printer`` opens a virtual printer's
+sealed code (`bambuddy/virtual_printers.py` `access_code_request`, which the API sealed
+when it recorded the request) for the worker's run to send to Bambuddy. The seal's key is
+derived from the KEK for that use alone, so the route opens no other secret. The answer
+is the code in plaintext to ``crud.print`` only (``no-store``), and the log names the
+credential, never the code. With no KEK it is 503 ``not_configured``; a value that does
+not open is 409 ``access-code-unreadable``. Both are reads, so natural.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -1873,3 +1884,66 @@ async def transfer_url(body: TransferUrlAsk, slicing: SlicingDep) -> TransferUrl
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, str(error), reason=NOT_CONFIGURED
         ) from None
+
+
+# -- whether the API opens access codes, and a virtual printer's sealed one (area
+# ``access-codes``, #5298 Task 33) ------------------------------------------------------
+
+
+#: Bounds on a sealed virtual printer's code: an 8-character code sealed is far shorter,
+#: and a context is `seal_context`'s, whose create form carries an Idempotency-Key.
+VP_SEALED_MAX = 1024
+VP_CONTEXT_PATTERN = r"^vp-access-code:(vp:\d+|new:.+)$"
+VP_CONTEXT_MAX = 512
+
+
+class AccessCodes(BaseModel):
+    #: Whether this API pod holds the KEK, so it can open an access code.
+    opens: bool
+
+
+class SealedVirtualCode(BaseModel):
+    """A virtual printer's sealed access code (`bambuddy/virtual_printers.py`
+    `access_code_request`) and the context its seal is bound to (`seal_context`)."""
+
+    sealed: str = Field(max_length=VP_SEALED_MAX)
+    context: str = Field(pattern=VP_CONTEXT_PATTERN, max_length=VP_CONTEXT_MAX)
+
+
+@router.get("/access-codes", name="crud_print_access_codes")
+async def access_codes(printers: PrintersDep) -> AccessCodes:
+    """Whether this API can open an access code: the LAN path's gate on the print
+    worker (`bambuddy/print_run.py` `_registry_path`), which holds no KEK."""
+    return AccessCodes(opens=printers.store.opens_access_codes())
+
+
+@router.post("/access-codes/virtual-printer", name="crud_print_open_virtual_code")
+async def open_virtual_code(
+    body: SealedVirtualCode, request: Request, printers: PrintersDep
+) -> AccessCode:
+    """A virtual printer's access code in plaintext, to ``crud.print`` only: the print
+    worker's run sends it to Bambuddy. The API sealed it when it recorded the request,
+    under a key derived for this use alone, so this route opens no other secret. The
+    answer is ``no-store`` (the CRUD router's headers), and the log names the credential,
+    never the code."""
+    principal = caller_of(request.scope)
+    assert isinstance(principal, Service)
+    try:
+        code = printers.store.open_virtual_access_code(body.sealed, body.context)
+    except KekMissingError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "The API has no SCADBUDDY_SECRET_KEY_FILE, so it cannot open an access code.",
+            reason=NOT_CONFIGURED,
+        ) from None
+    except (SealError, ValueError):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This access code was sealed under another key; send it again as a new request.",
+            reason=ACCESS_CODE_UNREADABLE,
+        ) from None
+    logger.info(
+        "released a virtual printer's access code to service credential %s",
+        principal.credential_id,
+    )
+    return AccessCode(code=code)

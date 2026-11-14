@@ -66,7 +66,7 @@ def test_the_area_is_served_and_awaited() -> None:
     assert "rack" in PRINT_CRUD_AREAS
     # Appended, so an older API's list is a prefix of a newer one's; Task 31's ``spools``
     # came after it.
-    assert CRUD_AREAS["print"][-3:] == ["rack", "spools", "transfer-urls"]
+    assert CRUD_AREAS["print"][-4:] == ["rack", "spools", "transfer-urls", "access-codes"]
 
 
 def test_every_rack_method_is_remote_refused_or_named() -> None:

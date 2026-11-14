@@ -1,14 +1,16 @@
-"""The print worker holds no Postgres pool (#5298 Task 31): every store it reads or writes
-goes through the API's CRUD routes, and it builds its stores with every way to open
-Postgres refused. With a proof it exchanges that proof alone (`exchange_source`, no view
-fallback), whether or not ``SCADBUDDY_DATABASE_URL`` is set. Only with no proof and a URL
-set does it read its sealed credential from its view (`token_source`, until #5298 Task
-34). With neither it refuses to start."""
+"""The print worker holds no Postgres pool (#5298 Task 31) and no KEK (Task 33): every
+store it reads or writes goes through the API's CRUD routes, and it builds its stores with
+every way to open Postgres refused and never reads a key file. It exchanges its proof
+alone (`exchange_source`, no view fallback) and ignores ``SCADBUDDY_DATABASE_URL`` with a
+warning; with no proof it refuses to start. The API opens a virtual printer's sealed code
+and says whether it can open access codes at all (area ``access-codes``,
+`tests/crud/test_crud_access_codes.py` runs both through the routes)."""
 
 from __future__ import annotations
 
 import asyncio
 import faulthandler
+import logging
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -19,7 +21,6 @@ import pytest
 
 from scadbuddy import worker as worker_module
 from scadbuddy.auth.service_auth import ExchangeReader, ServiceCredentialConfigError
-from scadbuddy.auth.service_credentials import TokenReader
 from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy.output_reader import RemoteBlobs
 from scadbuddy.core.settings import NoDatabaseSettings, Settings
@@ -27,11 +28,13 @@ from scadbuddy.crud.print import (
     RemoteHeldPresets,
     RemoteNativeSlices,
     RemoteNativeSpools,
+    RemotePrinterStore,
     RemoteSpoolStore,
 )
 from scadbuddy.spools.spool_providers import native_provider
 from scadbuddy.worker import PrintWorkerDeps, build_print_deps
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+from tests.crud.crud_support import static_print_crud
 from tests.slicing.conftest import PROFILES
 
 
@@ -165,21 +168,58 @@ async def test_with_a_proof_and_a_url_it_only_exchanges(
         await deps.aclose()
 
 
-async def test_with_a_url_and_no_proof_it_reads_its_view_and_opens_no_pool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deployment with no proof yet: the credential's view is the URL's one use, read
-    when the first call needs a token, never at build."""
+async def test_it_never_reads_a_key_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both key files set, as an old Deployment may still mount them: the worker reads
+    neither. Its store asks the API whether it opens access codes and opens none itself."""
     _no_database(monkeypatch)
-    deps = await asyncio.to_thread(
-        build_print_deps, _settings(tmp_path, database_url=UNUSED_DATABASE_URL)
+    key_files = {tmp_path / "kek", tmp_path / "kek-previous"}
+    for path in key_files:
+        path.write_text("a" * 44)
+    read: list[Path] = []
+    read_bytes = Path.read_bytes
+
+    def refused(self: Path) -> bytes:
+        if self in key_files:
+            read.append(self)
+            raise AssertionError("the print worker read a key file")
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", refused)
+    settings = _settings(
+        tmp_path,
+        service_bootstrap_file=_proof(tmp_path),
+        secret_key_file=tmp_path / "kek",
+        secret_key_previous_file=tmp_path / "kek-previous",
     )
+    deps = await asyncio.to_thread(build_print_deps, settings)
     try:
-        assert isinstance(deps.crud._auth._reader, TokenReader)
+        assert "kek" not in PrintWorkerDeps.__dataclass_fields__
+        assert isinstance(deps.printers, RemotePrinterStore)
+        assert not hasattr(deps.printers, "kek")
+        assert not hasattr(deps.printers, "previous_kek")
     finally:
         await deps.aclose()
+    assert read == []
 
 
-def test_with_neither_a_proof_nor_a_url_it_refuses_to_start(tmp_path: Path) -> None:
+async def test_it_ignores_a_database_url_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _no_database(monkeypatch)
+    settings = _settings(
+        tmp_path, service_bootstrap_file=_proof(tmp_path), database_url=UNUSED_DATABASE_URL
+    )
+    stop = asyncio.Event()
+    stop.set()
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.worker"):
+        await worker_module.run_print_worker(
+            settings, stop=stop, health_port=None, crud=static_print_crud()
+        )
+    assert "ignoring SCADBUDDY_DATABASE_URL" in caplog.text
+
+
+@pytest.mark.parametrize("database_url", ["", UNUSED_DATABASE_URL])
+def test_with_no_proof_it_refuses_to_start(tmp_path: Path, database_url: str) -> None:
+    """No view to fall back to: a database URL does not stand in for a proof."""
     with pytest.raises(ServiceCredentialConfigError, match="SCADBUDDY_SERVICE_TOKEN_FILE"):
-        build_print_deps(_settings(tmp_path))
+        build_print_deps(_settings(tmp_path, database_url=database_url))

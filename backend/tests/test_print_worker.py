@@ -28,6 +28,7 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.bambuddy import print_run as print_run_module
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.secrets import load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.operations import RemoteOperationStore
 from scadbuddy.crud.print import (
@@ -72,12 +73,17 @@ WARM = "native-catalogue-warm"
 
 
 def print_settings(pg_conninfo: str, tmp_path: Path, **fields: Any) -> Settings:
+    """The API's settings (it holds the URL), as the print worker's too: the worker ignores
+    the URL and needs a proof to exchange (#5298 Task 33)."""
+    proof = tmp_path / "bootstrap"
+    proof.write_text("p" * 40)
     return Settings(
         database_url=pg_conninfo,
         temporal_address=UNUSED_TEMPORAL_ADDRESS,
         # No volume: nothing may create it.
         data_dir=tmp_path / "no-volume",
         api_internal_url="http://127.0.0.1:9",
+        service_bootstrap_file=proof,
         **fields,
     )
 
@@ -439,7 +445,7 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
         # The worker reads the registry and the reports through the API's CRUD routes
         # (#5298 Task 29), which this test does not serve: the API's own stores write
         # the row, and the worker's reads answer what those read.
-        api_printers = PrinterStore(api.pool, deps.kek)
+        api_printers = PrinterStore(api.pool, load_kek(kek_file))
         api_reports = PrinterReportStore(api.pool)
         row = api_printers.create(PrinterCreate(serial="01P00A0000000EE", name="Garage"))
         api_printers.link_lan(
@@ -447,7 +453,7 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
         )
         api_printers.patch(row.id, PrinterPatch(preferred_path="native"))
         api_reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC))
-        for read in ("get", "list", "by_bambuddy_id"):
+        for read in ("get", "list", "by_bambuddy_id", "opens_access_codes"):
             monkeypatch.setattr(deps.printers, read, getattr(api_printers, read))
         monkeypatch.setattr(deps.reports, "get", api_reports.get)
         monkeypatch.setattr(deps.reports, "all", api_reports.all)

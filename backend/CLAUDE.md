@@ -13,11 +13,11 @@ The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API conn
 database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
 `auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
 Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
-empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. With
-a proof the worker exchanges that proof only (`exchange_source`, no view fallback), whether
-or not `SCADBUDDY_DATABASE_URL` is set; only with no proof and the URL set does it read its
-sealed credential from its view (`token_source`, until #5298 Task 34); with neither it
-refuses to start. The projects and render workers have no database client
+empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
+holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
+warning; the API opens every sealed value it needs (area `access-codes`: whether the API
+opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
 (#5298): they reach their data through CRUD routes. The projects worker has no grant
 list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
 every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
@@ -40,9 +40,8 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
-(the projects and render workers, #5298) takes `exchange_source` instead: the exchange only, with no
-view, and no proof refuses its start. The print worker takes `exchange_source` too whenever it
-has a proof.
+(the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
+only, with no view, and no proof refuses its start.
 `ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
@@ -476,10 +475,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
   volume and no Postgres pool, `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`,
-  `NoDatabaseSettings`, `tests/test_print_worker_nodb.py`); with a proof it exchanges that
-  proof only (`exchange_source`, no view fallback), whether or not `SCADBUDDY_DATABASE_URL`
-  is set; only with no proof and the URL set does it read its sealed credential from its
-  view (`token_source`, until #5298 Task 34); with neither it refuses to start; its
+  `NoDatabaseSettings`, `tests/test_print_worker_nodb.py`), and no KEK (#5298 Task 33): it
+  exchanges its proof only (`exchange_source`, no view fallback), refuses to start
+  without one, and ignores `SCADBUDDY_DATABASE_URL` with a warning; its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
   every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
@@ -500,8 +498,11 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   printer merge runs on the API alone; the access code is opened there and answered to
   `crud.print` only, `no-store`, never logged; a report's write (`advance`, which answers
   the print it ended and the one it started, the nudge's start) and a virtual printer's
-  sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and,
-  with no proof, its sealed credential), and its rack hotends' usage (`RemoteRackUsage`, a
+  sync take an `Idempotency-Key`; a virtual printer's sealed access code is opened on the API too,
+  `POST …/print/access-codes/virtual-printer`, and the LAN path's gate asks
+  `GET …/print/access-codes` whether the API opens access codes, area `access-codes`,
+  Task 33: with no KEK on the API an `auto` printer goes through Bambuddy and a `native`
+  one is 503 `LAN_NEEDS_KEK`), and its rack hotends' usage (`RemoteRackUsage`, a
   `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
   route and one transaction on the API; every write but `seen` takes an
   `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
