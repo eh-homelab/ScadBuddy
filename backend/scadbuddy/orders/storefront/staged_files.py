@@ -22,10 +22,12 @@ missing object is no error); a step retried after a crash in between finds no ro
 deletes them again (``gone``). It never reads a byte of the file (#5295, #5296).
 
 `sweep_staged` is the backstop, in the storefront drafts sweep: a staging object no row
-names past `ORPHAN_AGE` is deleted, and a row past `ORPHAN_AGE` whose watcher is not running
-gets its watcher started again. A pass checks at most `SWEEP_PASS_BATCHES` batches of rows
-and the next pass goes on from there (the cursor is the process's; a restart starts again
-from the oldest row). Both count `scadbuddy_staged_files_repaired`; any count is
+names past `ORPHAN_AGE` is deleted, a row past `ORPHAN_AGE` whose watcher is not running
+gets its watcher started again, and a file source still waiting for its check past
+`CHECK_STALE` whose check is not running gets its check started again. A pass checks at
+most `SWEEP_PASS_BATCHES` batches of rows and the next pass goes on from there (the
+cursor is the process's; a restart starts again from the oldest row). Each counts
+`scadbuddy_staged_files_repaired`; any count is
 a bug to look into.
 """
 
@@ -47,6 +49,7 @@ from scadbuddy.core.events import OrderChanged, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.storefront.listings import problem
 from scadbuddy.orders.storefront.model_requests import (
+    CHECK_STALE,
     EXPIRED,
     ORPHAN_AGE,
     STAGING_TTL,
@@ -173,7 +176,7 @@ def uploads_of(
 # -- the watcher's step -----------------------------------------------------------------
 
 
-def _s3(state: AppState) -> S3ContentBackend | None:
+def staged_backend(state: AppState) -> S3ContentBackend | None:
     content = state.store.content
     if state.store.backend != "s3" or content is None:
         return None
@@ -240,7 +243,7 @@ def _decide(state: AppState, upload_id: str, now: datetime) -> tuple[StagedFileS
 async def step(state: AppState, upload_id: str, *, now: datetime | None = None) -> StagedFileState:
     """One turn of the file's watcher (the module docstring): its state, and a clean-up
     when it is due. Safe to run again at any point."""
-    backend = _s3(state)
+    backend = staged_backend(state)
     if backend is None:
         # No slot is ever made on another store, so there is nothing to watch.
         return StagedFileState(phase="ended", reason="gone")
@@ -307,7 +310,7 @@ def _named(state: AppState, keys: Sequence[str]) -> set[str]:
 async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
     """The backstop (the module docstring); how many things it repaired. It should find
     nothing: each repair is logged and counted. Nothing on a store that is not S3."""
-    backend = _s3(state)
+    backend = staged_backend(state)
     if backend is None:
         return 0
     now = datetime.now(UTC) if now is None else now
@@ -346,4 +349,35 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
         # The pass stopped before the last row: the next one goes on from here.
         if after is not None:
             _resume[id(state)] = after
+    return repaired + await _restart_checks(state, now)
+
+
+def _unchecked(state: AppState, now: datetime) -> list[str]:
+    """The file sources still waiting for their check past `CHECK_STALE`, oldest first."""
+    with state.projection.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id FROM order_item_sources WHERE kind = 'file' AND check_status = 'checking'"
+            " AND upload_id IS NOT NULL AND updated_at < %s ORDER BY updated_at, id LIMIT %s",
+            (now - CHECK_STALE, SWEEP_BATCH * SWEEP_PASS_BATCHES),
+        ).fetchall()
+    return [row["id"] for row in rows]
+
+
+async def _restart_checks(state: AppState, now: datetime) -> int:
+    """A file source whose check is not running (its start was lost, or the check ended
+    without a verdict) gets its check started again (#6133 PR 2)."""
+    from scadbuddy.orders.storefront.intake import checker
+
+    checking = checker(state)
+    repaired = 0
+    for source_id in await asyncio.to_thread(_unchecked, state, now):
+        if await checking.running(source_id) is False:
+            logger.warning("customer file %s had no running check; starting one", source_id)
+            try:
+                await checking.start([source_id])
+            except Exception:
+                logger.warning("could not start the check of customer file %s", source_id)
+                continue
+            state.metrics.staged_files_repaired.labels("unchecked_source").inc()
+            repaired += 1
     return repaired

@@ -309,6 +309,26 @@ class S3ContentBackend:
             raise
         return int(head["ContentLength"])
 
+    async def read_staged(self, key: str, max_bytes: int) -> bytes | None:
+        """The staging object's bytes, as opaque bytes (its caller stores them, never opens
+        them), or None when there is none or it is past ``max_bytes``."""
+        checked = self._staged(key)
+        client = await self._s3()
+        try:
+            response = await client.get_object(Bucket=self.settings.bucket, Key=checked)
+        except ClientError as error:
+            if _missing(error):
+                return None
+            raise
+        body = response["Body"]
+        taken = bytearray()
+        async with body:
+            async for chunk in body.iter_chunks(_CHUNK):
+                taken += chunk
+                if len(taken) > max_bytes:
+                    return None
+        return bytes(taken)
+
     async def remove_staged(self, key: str) -> None:
         """The staging object deleted (none is no error: S3's delete is idempotent)."""
         checked = self._staged(key)

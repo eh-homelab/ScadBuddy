@@ -14,7 +14,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.orders.storefront import staged_files
+from scadbuddy.orders.storefront import intake, staged_files
 from scadbuddy.orders.storefront.model_requests import EXPIRED, STAGING_TTL, UNCLAIMED_GRACE
 from scadbuddy.orders.storefront.staged_files import WATCH_UNAVAILABLE, sweep_staged
 from scadbuddy.store.s3 import S3ContentBackend, staging_key
@@ -370,6 +370,29 @@ class FakeWatcher:
 def watcher(monkeypatch: pytest.MonkeyPatch) -> FakeWatcher:
     fake = FakeWatcher()
     monkeypatch.setattr(staged_files, "watcher", lambda _state: fake)
+    return fake
+
+
+class FakeChecker:
+    """The files' checks the claim and the backstop start, recorded (#6133 PR 2);
+    ``stopped`` names the sources whose check reads as not running."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.stopped: set[str] = set()
+
+    async def start(self, source_ids: Sequence[str]) -> None:
+        self.started.extend(source_ids)
+        self.stopped -= set(source_ids)
+
+    async def running(self, source_id: str) -> bool | None:
+        return source_id not in self.stopped
+
+
+@pytest.fixture(autouse=True)
+def checker(monkeypatch: pytest.MonkeyPatch) -> FakeChecker:
+    fake = FakeChecker()
+    monkeypatch.setattr(intake, "checker", lambda _state: fake)
     return fake
 
 

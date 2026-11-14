@@ -79,6 +79,9 @@ STAGING_TTL: Final = timedelta(hours=72)
 #: The backstop deletes a staging object no row names, and restarts the watcher of a row
 #: whose watcher is not running, past this age.
 ORPHAN_AGE: Final = timedelta(days=1)
+#: A file source still ``checking`` this long after its claim has its check started again
+#: by the backstop when the check is not running (#6133 PR 2).
+CHECK_STALE: Final = timedelta(hours=1)
 #: The rows one backstop query reads; a pass reads at most `SWEEP_PASS_BATCHES` of them.
 SWEEP_BATCH: Final = 200
 #: The batches one backstop pass walks (one Temporal ``describe`` per row), so the drafts
@@ -404,6 +407,7 @@ async def add_model_request(
     ``draft_full``; 409 ``upload_taken``, ``draft_changed``; 503
     ``storefront_needs_s3``. After the commit each claimed file's watcher is told."""
     from scadbuddy.orders.storefront.drafts import MAX_DRAFT_ITEMS, draft_changed, draft_full
+    from scadbuddy.orders.storefront.intake import start_checks
     from scadbuddy.orders.storefront.staged_files import poke
 
     orders = _orders(state)
@@ -425,10 +429,14 @@ async def add_model_request(
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
     entry = NewRequestItem(title=MODEL_REQUEST_TITLE, quantity=body.quantity, notes=note)
 
+    #: The file sources this call made, whose checks start after the commit.
+    checks: list[str] = []
+
     def write() -> Replay:
         # Outside the ledger's transaction: two first adds at once make one draft.
         draft = orders.lifecycle.ensure_draft(visitor.id, by, currency=currency)
         changes: list[tuple[Order, list[OrderItem]]] = []
+        checks.clear()
 
         def add(conn: Any) -> Replay:
             [item] = orders.lifecycle.add_items(
@@ -451,10 +459,11 @@ async def add_model_request(
             )
             position = 0
             for slot in slots:
-                conn.execute(
+                made = conn.execute(
                     "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
                     " purpose, upload_id, filename, size, media_type, check_status, status)"
-                    " VALUES (%s, %s, %s, 'file', 'print', %s, %s, %s, %s, 'checking', 'open')",
+                    " VALUES (%s, %s, %s, 'file', 'print', %s, %s, %s, %s, 'checking', 'open')"
+                    " RETURNING id",
                     (
                         draft.id,
                         item.id,
@@ -464,7 +473,9 @@ async def add_model_request(
                         slot.size,
                         slot.media_type,
                     ),
-                )
+                ).fetchone()
+                assert made is not None
+                checks.append(made["id"])
                 position += 1
             for link in links:
                 conn.execute(
@@ -500,6 +511,7 @@ async def add_model_request(
     except LifecycleError:
         raise draft_changed() from None
     await poke(state, [slot.id for slot in slots], "claimed")
+    await start_checks(state, checks)
     return done
 
 

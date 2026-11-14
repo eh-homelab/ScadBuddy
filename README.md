@@ -2330,6 +2330,35 @@ holds the manifests (until that PR merges, the deploy below skips the file with 
   three `scadbuddy.eh-homelab.io/{version,revision,source}` annotations, which the
   manifest must carry or the deploy fails.
 
+### Intake worker (#6133)
+
+A customer's own model files are checked by their own Deployment, `scadbuddy-intake`, from
+the same image: `python -m scadbuddy.intake_worker` polls the Temporal queue
+`customer-files` (`SCADBUDDY_TEMPORAL_TASK_QUEUE_CUSTOMER_FILES`, which the API names too)
+and answers `/healthz` on port 9090. The design is spec
+`docs/superpowers/specs/2026-11-13-storefront-customer-models-design.md` §7; eh-homelab/clusters
+holds the manifest (spec §12).
+
+- **No database and no key.** It refuses to start when `SCADBUDDY_DATABASE_URL`,
+  `PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` is set
+  (`intake_worker/settings.py` `FORBIDDEN_ENV`, #5295): it parses untrusted files. It is an
+  HTTP client of the CRUD port (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`) with a
+  projected ServiceAccount token of `scadbuddy-intake` (audience `scadbuddy`) named by
+  `SCADBUDDY_SERVICE_TOKEN_FILE`, and reaches the bucket only through the URLs the API
+  presigns. It holds no store credential.
+- **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
+  `SCADBUDDY_INTAKE_WORK_DIR` (a writable volume for downloads, since the root file system
+  is read-only; default `/tmp`), `SCADBUDDY_INTAKE_CONCURRENCY` (checks at once, default 2)
+  and `SCADBUDDY_LOG_LEVEL`.
+- **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
+  minutes, so size the pod's memory limit for `SCADBUDDY_INTAKE_CONCURRENCY` such children,
+  and its work volume for as many 256 MiB downloads.
+- **Pod:** `runAsNonRoot`, `readOnlyRootFilesystem` with an `emptyDir` for the work volume,
+  and no ServiceAccount token automount: the only token is the projected one its proof
+  needs.
+- **Network:** its egress allows DNS, the API's 8082, Temporal and the bucket host only:
+  nothing else on the LAN and no other internet.
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:

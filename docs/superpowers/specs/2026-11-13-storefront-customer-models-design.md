@@ -323,7 +323,8 @@ done, or if the file times out." Each upload has one watcher, the workflow `Stag
 Schedules) runs `staged_files.sweep_staged` after the carts; it owns no file's life. It
 deletes an object under `staging/` that no row names, older than `ORPHAN_AGE`, and it starts
 the watcher again of a row older than `ORPHAN_AGE` whose watcher is not running (Temporal's
-describe answers not found or closed); that watcher then applies the rules above, so a
+describe answers not found or closed), and the check again (§7) of a file source still
+`checking` past `CHECK_STALE` (1 hour) whose check is not running; that watcher then applies the rules above, so a
 submitted file is never deleted by the backstop. One pass checks at most 1000 rows
 (`SWEEP_PASS_BATCHES` batches of `SWEEP_BATCH`, one describe each, so the sweep keeps
 inside its 5-minute timeout); the next pass goes on from where it stopped, and past the
@@ -344,11 +345,16 @@ an address-space limit and a timeout, killed with its process group, as
 service, Temporal and the bucket host only (eh-homelab/clusters#3182 owns the policies; the
 clusters PR adds this pod's).
 
-`CustomerFileCheck(source_id)`:
+`CustomerFileCheck(source_id)` (`intake_worker/workflow.py`; the CRUD service starts it after
+a claim, `orders/storefront/intake.py` `start_checks`, workflow id
+`customer-file-check:<source id>`; the backstop starts it again for a source still
+`checking` an hour after its claim whose check is not running, §6.5). Its activity
+(`intake_worker/activities.py`), tried three times:
 
 1. asks the CRUD service for a presigned `GET` of the staging object
-   (`POST /api/v1/crud/intake/sources/{id}/read`, area `intake`, 5 minutes) and downloads it
-   to its disk, counting bytes (at most the declared size);
+   (`POST /api/v1/internal/crud/intake/sources/{id}/read`, area `sources`, 5 minutes; 409
+   `not_checking` for a source that no longer waits, which ends the run) and downloads it
+   to its disk, counting bytes (at most the declared size; any other size is refused);
 2. checks it by content, never by name or declared type:
    - a 3MF starts `PK\x03\x04`; a binary STL is `84 + 50 × n` bytes for the uint32 `n` at
      offset 80; otherwise printable ASCII starting `solid` is an ASCII STL; the name's
@@ -360,15 +366,39 @@ clusters PR adds this pod's).
      model present; then the read itself inflates through a counting reader that stops at
      each declared size (§7.1);
    - the model read under the read budget (`render/read_budget.py`) and the mesh caps;
-3. writes the facts (format, objects, plates with names, triangles, size in mm, colours),
-   the SHA-256 and the plate list the native library keeps, and uploads a preview PNG
-   (`render/thumbnail.py` `render_view`, the iso view) through a presigned `PUT` the CRUD
-   service mints for `<prefix>/staging/<id>.png`;
-4. posts the result: `PUT /api/v1/crud/intake/sources/{id}/check` (area `intake`). The CRUD
-   service checks the result with Pydantic, `HEAD`s the preview, copies it into the content
-   store as `customer-preview-<sha256>` held by the source, and deletes the staging preview.
-   A refusal writes `refused` and the reason; a timeout or crash writes `failed`, which the
-   back office can run again.
+3. writes the facts (format, each plate's index, triangles, size in mm and colours, the
+   triangles in all; at most 64 plates) and the SHA-256, and uploads a preview PNG of plate 1
+   (`render/thumbnail.py` `render_view`, the iso view) through a presigned `PUT` of exactly
+   its size the CRUD service mints for `<prefix>/staging/<id>.png`
+   (`POST …/intake/sources/{id}/preview`). The plate list the native library keeps is the
+   import's (§8.3, PR 5);
+4. posts the result: `PUT /api/v1/internal/crud/intake/sources/{id}/check` (an
+   `Idempotency-Key` that is the same on each retry). The CRUD service checks the result
+   with Pydantic, reads the preview as opaque bytes (at most 4 MiB; none is 409
+   `preview_missing`), stores it in the content store as `customer-preview-<sha256>` held by
+   the source (`blob_refs` holder `order_item_source`, dropped by a trigger with the source),
+   deletes the staging preview, and signals the watcher `checked`. A refusal writes
+   `refused` and the reason; a check whose attempts all fail (a timeout, a crash) writes
+   `failed`, which the back office can run again (PR 4). A verdict for a source that
+   stopped waiting meanwhile records nothing (`recorded` false).
+
+The worker (`intake_worker/worker.py`) refuses to start with `SCADBUDDY_DATABASE_URL`,
+`PGPASSWORD`, `PGPASSFILE` or `SCADBUDDY_SECRET_KEY_FILE` set, and imports no database code;
+only its child process (`intake_worker/child.py`) reads the file, under its own
+`RLIMIT_AS` (4 GiB) and a 5-minute timeout, with none of the worker's environment. The
+worker is not versioned (no worker deployment): a change to the workflow's commands goes
+behind `workflow.patched`. It serves `/healthz` on 9090. Its child gets no inherited file
+descriptor but its three standard streams, all `/dev/null` (`close_fds`), so it cannot
+reach the worker's sockets.
+
+**Serving the preview (PR 4).** The preview is bytes the untrusted check made. ScadBuddy
+never decodes, resizes or re-encodes it, and serves it only as `Content-Type: image/png`,
+`Content-Disposition: inline` and `X-Content-Type-Options: nosniff`, whatever the bytes
+are. A presigned `GET` can fix the first two (`ResponseContentType`,
+`ResponseContentDisposition`) but cannot add `nosniff`, because S3 overrides only six
+response headers ([GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)).
+So the back office and the edge stream it through a route of their own that sets all
+three, never a presigned URL.
 
 ### 7.1 The zip-bomb limits, measured
 
@@ -586,7 +616,8 @@ price a purchase. The customer's view sets `can_accept` false while the gate is 
 - `charges`: `kind`, `label`, `amount_minor` (so shipping and tax show too, which is
   intended: the customer must see what they pay);
 - `sources`: per request item, `kind`, `purpose`, `filename`, `url` (text), `note`, `status`,
-  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (a presigned `GET`).
+  `amount_minor` (a recorded purchase's), `shop_note`, `preview_url` (the edge's route that
+  streams it, §7, never a presigned `GET`).
 
 No cost entry, margin, staff name or import reason reaches the customer.
 

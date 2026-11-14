@@ -1409,8 +1409,26 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   so a lost signal costs time, never a file; the step retries with no limit.
   `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
   row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
-  running gets one started again, each counted in `scadbuddy_staged_files_repaired`. A pass
-  checks at most 1000 rows (`SWEEP_PASS_BATCHES`) and the next goes on from there.
+  running gets one started again, and a file source still `checking` past `CHECK_STALE`
+  (1 h) whose check is not running gets its check started again, each counted in
+  `scadbuddy_staged_files_repaired`. A pass checks at most 1000 rows (`SWEEP_PASS_BATCHES`)
+  and the next goes on from there.
+  The check (#6133 PR 2, spec §7) runs in the intake worker, `python -m
+  scadbuddy.intake_worker` (`intake_worker/`), which holds no database secret or KEK and
+  refuses to start with one (`settings.py` `FORBIDDEN_ENV`); its worker process imports no
+  database code (`tests/intake_worker/test_worker.py`). The claim starts one
+  `CustomerFileCheck` per file source on `temporal_task_queue_customer_files`
+  (`orders/storefront/intake.py` `start_checks`, best effort; the backstop above). Its
+  activity reads the staged file through the CRUD routes of caller `intake` (area
+  `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
+  verdict), checks it in a child process (`child.py`: `RLIMIT_AS`, a timeout, its own
+  process group; `check.py`: the kind by content, the zip's directory, the read within the
+  read budget) and posts `ready`, `refused` or, once its attempts are spent, `failed`. The
+  API stores the preview as opaque bytes, `customer-preview-<sha256>`, held by the source
+  (`blob_refs` holder `order_item_source`; the trigger of
+  `20261114T0603Z_intake_worker.sql` drops it with the source). The worker is not
+  versioned: a change to `intake_worker/workflow.py`'s commands goes behind
+  `workflow.patched`.
   `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
