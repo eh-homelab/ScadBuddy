@@ -166,11 +166,16 @@ function wordPattern(word: string, flags: string): RegExp {
 
 /**
  * The owner's rule: a colour the customer can choose never goes in a listing's title. The
- * names of the listing filaments' colours that `title` holds while the listing offers a colour.
+ * names of the colours the saved body offers (`withColourChoices`' choices, as the page's
+ * `titleColours` reads `listingInput`) that `title` holds: a support-only filament's colour,
+ * which no customer can choose, stays.
  */
 export function titleColours(title: string, listing: ListingDefaults, schema: Schema, filaments: readonly Filament[]): string[] {
-  if (!shownParams(schema).some((param) => param.type === 'color' && listing.params[param.name])) return []
-  const names = filaments.flatMap((filament) => (listing.colours.includes(filament.id) && filament.colour_name ? [filament.colour_name] : []))
+  const offered = Object.values(withColourChoices(listing, schema, filaments).params).flatMap((bound) => (bound.kind === 'choice' ? bound.choices : []))
+  if (offered.length === 0) return []
+  const names = filaments.flatMap((filament) =>
+    listing.colours.includes(filament.id) && filament.colour_name && offered.some((colour) => sameColour(colour, filament.colour)) ? [filament.colour_name] : [],
+  )
   return [...new Set(names)].filter((name) => wordPattern(name, 'iu').test(title))
 }
 

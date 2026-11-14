@@ -163,6 +163,31 @@ describe('storefront tools (#6131)', () => {
     await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, lock: ['nope'] }, ctx())).rejects.toThrow('nope is not a parameter')
   })
 
+  it('drafts from a model and its values, and refuses a value the schema does not have', async () => {
+    let posted: { title: string; params: Record<string, unknown>; fixed: unknown; colours: unknown } | undefined
+    serveOwl((body) => (posted = body as typeof posted))
+    const result = firstText(await tool('storefront_listing_draft').execute({ slug: 'owl', values: owl.values, title: 'Owl' }, ctx())) as Record<string, unknown>
+    expect(posted?.title).toBe('Owl')
+    expect(posted?.params).toEqual({
+      label: { kind: 'text', max_length: 200 },
+      body: { kind: 'choice', choices: ALL_COLOURS },
+      eyes: { kind: 'choice', choices: ALL_COLOURS },
+    })
+    expect(posted?.fixed).toEqual(owl.expected.fixed)
+    expect(posted?.colours).toEqual(owl.expected.colours)
+    // No render, so no render-time note; no colour in the title, so none taken out.
+    expect(result['notes']).toEqual([])
+    await expect(tool('storefront_listing_draft').execute({ slug: 'owl', values: { bodyy: '#000000' } }, ctx())).rejects.toThrow('bodyy is not a parameter')
+  })
+
+  it('leaves a support-only filament’s colour in the title, as the page does', () => {
+    const support = vectors.find((vector) => vector.name.startsWith('support settings')) as Vector
+    const listing = defaultsFor(support.schema, support.filaments, {})
+    expect(listing.colours).toContain('f-pva')
+    expect(titleColours('Owl – Natural PVA supports', listing, support.schema, support.filaments)).toEqual([])
+    expect(titleColours('Owl – White', listing, support.schema, support.filaments)).toEqual(['White'])
+  })
+
   it('names exactly one source', async () => {
     await expect(tool('storefront_listing_draft').execute({}, ctx())).rejects.toThrow('exactly one')
     await expect(tool('storefront_listing_draft').execute({ output_id: OUTPUT, slug: 'owl' }, ctx())).rejects.toThrow('exactly one')

@@ -93,6 +93,11 @@ export const storefrontTools: Tool[] = [
       )
       const book = await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')
       const filaments = book.filaments
+      // A name the schema does not have would be dropped and leave the template's default, so
+      // it is refused, as `lock` refuses one.
+      for (const name of Object.keys(values ?? {})) {
+        if (!(schema.parameters ?? []).some((p) => p.name === name)) throw new ToolError(`${name} is not a parameter of ${record.name}`)
+      }
       const given = (output?.params ?? values ?? {}) as Record<string, Value>
       const listing = defaultsFor(schema, filaments, given)
       for (const name of lock ?? []) {
