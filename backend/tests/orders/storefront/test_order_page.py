@@ -771,7 +771,7 @@ def test_the_customers_cancel_wakes_the_staged_files_watchers(
     api: TestClient, crud: CrudCaller, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6164: the files' watchers move to the ended-order grace at once."""
-    from scadbuddy.orders.storefront import order_page
+    from scadbuddy.orders.storefront import staged_files
 
     told: list[tuple[list[str], str]] = []
 
@@ -785,8 +785,8 @@ def test_the_customers_cancel_wakes_the_staged_files_watchers(
         asked.append(order_id)
         return ["u1"]
 
-    monkeypatch.setattr(order_page, "poke", poke)
-    monkeypatch.setattr(order_page, "uploads_of", uploads_of)
+    monkeypatch.setattr(staged_files, "poke", poke)
+    monkeypatch.setattr(staged_files, "uploads_of", uploads_of)
     assert made.reader.cancel(key="k1").status_code == 200
     assert asked == [made.order.id]
     assert told == [(["u1"], "closed")]
