@@ -339,7 +339,8 @@ export async function chainRows(sql: Sql | TransactionSql, sessionId: string): P
   // links come with no row (`id` NULL) when it has no entries of its own. An ancestor's rows
   // are read only up to `bound`, the least cut below it (LEAST skips the session's own NULL):
   // a load takes no more than that of the ancestor's transcript, and its rows come first in
-  // it, so none past its fork point is read (#4212). `LIMIT NULL` is no limit.
+  // it, so none past its fork point is read (#4212): the index `ai_session_entries_load`, in that
+  // order, lets the limit stop the scan. `LIMIT NULL` is no limit.
   return isUuid(sessionId)
     ? sql<ChainRow[]>`
         WITH RECURSIVE chain (id, parent, cut, depth, bound) AS (
