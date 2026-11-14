@@ -7,7 +7,8 @@ The worker hands it each check over HTTP on the pod network: ``POST /check`` on
 `runner`'s docstring; ``GET /healthz`` answers 200 while it serves. It holds no secret, so
 the RPC carries no key: its NetworkPolicy admits only the worker's pods, and the worker
 reads every answer as untrusted. It refuses to start with a database secret, the KEK or a
-proof (`check_sandbox_environment`), and makes itself non-dumpable
+proof (`check_sandbox_environment`), or with any file under `SECRETS_DIR` (a mounted
+ServiceAccount token or secret, `mounted_secrets`), and makes itself non-dumpable
 (`hardening.forbid_dumping`).
 
 Each check's child runs in a box of its own (``box/`` on the sandbox's own spool,
@@ -100,6 +101,34 @@ _REASONS: Final = {
     503: "Service Unavailable",
     504: "Gateway Timeout",
 }
+
+
+#: Where Kubernetes mounts a ServiceAccount token
+#: (``kubernetes.io/serviceaccount/token``) and where secret volumes go by convention. Any
+#: file here refuses the start (`mounted_secrets`): the sandbox's pod must set
+#: ``automountServiceAccountToken: false`` and mount no secret
+#: ([Kubernetes: ServiceAccount tokens](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting)).
+SECRETS_DIR: Path = Path("/var/run/secrets")
+
+
+def mounted_secrets(root: Path) -> list[str]:
+    """Every entry under ``root`` that is not a directory (a file, or a symlink as a
+    projected volume mounts them), plus every folder that cannot be listed (it may hold
+    one: fail closed). Empty when ``root`` is missing."""
+    found: list[str] = []
+
+    def unreadable(error: OSError) -> None:
+        if not isinstance(error, FileNotFoundError) or error.filename != str(root):
+            found.append(str(error.filename))
+
+    for folder, dirs, files in os.walk(root, onerror=unreadable, followlinks=False):
+        found += [os.path.join(folder, name) for name in files]
+        found += [
+            os.path.join(folder, name)
+            for name in dirs
+            if os.path.islink(os.path.join(folder, name))
+        ]
+    return sorted(found)
 
 
 def check_sandbox_environment(environ: Mapping[str, str]) -> None:
@@ -516,6 +545,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except IntakeRefusal as refusal:
         for reason in refusal.reasons:
             logger.error(reason)
+        return 2
+    secrets = mounted_secrets(SECRETS_DIR)
+    if secrets:
+        logger.error(
+            "the intake sandbox refuses to start: a mounted secret is present (%s); the"
+            " sandbox holds no token or secret (automountServiceAccountToken: false)",
+            ", ".join(secrets[:5]),
+        )
         return 2
     port = _port(os.environ.get("SCADBUDDY_INTAKE_SANDBOX_PORT", str(SANDBOX_PORT)))
     if port is None:

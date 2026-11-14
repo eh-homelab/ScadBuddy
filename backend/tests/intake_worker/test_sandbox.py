@@ -396,6 +396,7 @@ def test_the_sandbox_takes_no_concurrency_setting() -> None:
 def test_the_sandbox_refuses_a_bad_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
     for name in sandbox.SANDBOX_FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sandbox, "SECRETS_DIR", Path("/nowhere/secrets"))
     monkeypatch.setenv("SCADBUDDY_INTAKE_SANDBOX_PORT", port)
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
     assert sandbox.main([]) == 2

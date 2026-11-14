@@ -1448,7 +1448,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
   `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
   sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
-  no token, proof or secret, its own `emptyDir`, nothing shared with the worker's pod),
+  no token, proof or secret, its own `emptyDir`, nothing shared with the worker's pod; it
+  exits 2 with any file under `/var/run/secrets/`, `SECRETS_DIR`),
   never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
   its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
   worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,

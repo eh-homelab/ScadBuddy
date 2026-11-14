@@ -2366,7 +2366,9 @@ holds the manifest (spec §12).
   `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where each check gets a box that is
   removed after it), `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing
   else: it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
-  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set. It holds no secret, so
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set, and (exit 2) with any
+  file under `/var/run/secrets/`, so its pod must set `automountServiceAccountToken: false`
+  and mount no secret there. It holds no secret, so
   the RPC carries no key; the worker reads every answer as untrusted. It runs one check at
   a time and answers a second request 503 (the worker tries again for up to 60 s), so give
   it as many replicas as the worker.

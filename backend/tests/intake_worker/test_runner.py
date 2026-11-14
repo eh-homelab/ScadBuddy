@@ -489,6 +489,7 @@ def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
     """It fails closed: no check is served by a sandbox whose checks would run unconfined."""
     for name in sandbox.SANDBOX_FORBIDDEN_ENV:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sandbox, "SECRETS_DIR", Path("/nowhere/secrets"))
     monkeypatch.setattr(sandbox, "probe_isolation", lambda spool: "unshare: refused")
     monkeypatch.setattr(sandbox, "forbid_dumping", lambda: None)
     served: list[object] = []
@@ -504,3 +505,61 @@ def test_the_sandbox_refuses_a_secret_or_a_proof(
 ) -> None:
     monkeypatch.setenv(name, "x")
     assert sandbox.main([]) == 2
+
+
+@pytest.mark.parametrize(
+    "mounted",
+    [
+        "kubernetes.io/serviceaccount/token",
+        "kubernetes.io/serviceaccount/..data/token",
+        "scadbuddy/proof",
+        "anything",
+    ],
+)
+def test_the_sandbox_refuses_a_mounted_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    mounted: str,
+) -> None:
+    """A ServiceAccount token, or any file under ``/var/run/secrets/``, refuses the start
+    before anything else runs: the sandbox must hold no secret."""
+    for name in sandbox.SANDBOX_FORBIDDEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    secrets = tmp_path / "secrets"
+    (secrets / mounted).parent.mkdir(parents=True, exist_ok=True)
+    (secrets / mounted).write_text("t")
+    monkeypatch.setattr(sandbox, "SECRETS_DIR", secrets)
+    dumped: list[bool] = []
+    monkeypatch.setattr(sandbox, "forbid_dumping", lambda: dumped.append(True))
+    assert sandbox.main([]) == 2
+    assert dumped == []
+    assert "mounted secret" in capsys.readouterr().out
+
+
+def test_the_sandbox_refuses_a_mounted_secret_behind_a_symlink(tmp_path: Path) -> None:
+    """Kubernetes mounts a projected volume's files as symlinks into ``..data``."""
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (tmp_path / "elsewhere").write_text("t")
+    (secrets / "token").symlink_to(tmp_path / "elsewhere")
+    assert sandbox.mounted_secrets(secrets) == [str(secrets / "token")]
+
+
+def test_an_empty_or_missing_secrets_folder_is_no_secret(tmp_path: Path) -> None:
+    (tmp_path / "secrets" / "kubernetes.io").mkdir(parents=True)
+    assert sandbox.mounted_secrets(tmp_path / "secrets") == []
+    assert sandbox.mounted_secrets(tmp_path / "missing") == []
+
+
+def test_an_unreadable_secrets_folder_refuses_the_start(tmp_path: Path) -> None:
+    """Fail closed: a folder the sandbox cannot list may hold a secret."""
+    secrets = tmp_path / "secrets"
+    (secrets / "locked").mkdir(parents=True)
+    (secrets / "locked").chmod(0)
+    try:
+        if os.access(secrets / "locked", os.R_OK):
+            pytest.skip("this user reads a mode-0 folder (root)")
+        assert sandbox.mounted_secrets(secrets) == [str(secrets / "locked")]
+    finally:
+        (secrets / "locked").chmod(0o700)

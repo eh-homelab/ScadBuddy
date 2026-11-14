@@ -468,7 +468,10 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090). `SCADBUDDY_INTAKE_SANDBOX` has no
   default: the worker refuses to start without it, so a missing value never falls back to
   the weaker mode; `unsafe-local` (development only) starts the child in the worker's own
-  container. The sandbox refuses to start with a database secret, the KEK or a proof.
+  container. The sandbox refuses to start with a database secret, the KEK or a proof, and
+  with any file under `/var/run/secrets/` (where Kubernetes mounts a ServiceAccount token,
+  [Kubernetes: opt out of API credential automounting](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting);
+  `sandbox.mounted_secrets`; a folder it cannot list refuses too).
 - The RPC (`runner.py`'s docstring has every bound). `POST /check`: the body is the file's
   bytes (`Content-Length` required, at most 256 MiB, streamed to the box, never held in
   memory whole), and the header `X-Intake-Request` is the request as JSON (the filename,
