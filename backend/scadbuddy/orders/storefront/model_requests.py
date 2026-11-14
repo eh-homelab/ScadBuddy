@@ -4,11 +4,13 @@ The files never pass through ScadBuddy: `presign_uploads` writes one `storefront
 row per file and answers a presigned PUT for its staging key (`store/s3.py`
 `presign_put`: the exact size and the type are signed in, `UPLOAD_URL_TTL`). The browser
 PUTs each file straight to the bucket. `add_model_request` then claims the uploads the
-body names: each must be the visitor's, unclaimed, and a ``HEAD`` of its key must answer
-exactly its declared size. No byte of a file is read here (#5295: the intake worker
-checks it, `order_item_sources.check_status`). The same transaction adds a ``request``
-item to the visitor's draft, its `order_item_model_requests` row (the colours asked for)
-and one `order_item_sources` row per file and link, and claims the uploads.
+body names: each must be the visitor's and unclaimed, and is frozen (`_claimable`: a
+server-side copy to a key no presigned URL names, whose ``HEAD`` must answer exactly its
+declared size; the check and the import read only the copy). No byte of a file is read
+here (#5295: the intake worker checks it, `order_item_sources.check_status`). The same
+transaction adds a ``request`` item to the visitor's draft, its `order_item_model_requests`
+row (the colours asked for) and one `order_item_sources` row per file and link, and claims
+the uploads.
 
 A link is stored as text only (`orders/customer_links.py`): this side never fetches it.
 
@@ -24,9 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
@@ -84,6 +87,9 @@ ENDED_GRACE: Final = timedelta(days=30)
 #: The backstop deletes a staging object no row names, and restarts the watcher of a row
 #: whose watcher is not running, past this age.
 ORPHAN_AGE: Final = timedelta(days=1)
+#: A file source still ``checking`` this long after its claim has its check started again
+#: by the backstop when the check is not running (#6133 PR 2).
+CHECK_STALE: Final = timedelta(hours=1)
 #: The rows one backstop query reads; a pass reads at most `SWEEP_PASS_BATCHES` of them.
 SWEEP_BATCH: Final = 200
 #: The batches one backstop pass walks (one Temporal ``describe`` per row), so the drafts
@@ -152,6 +158,11 @@ class _Slot:
     filename: str
     size: int
     media_type: str
+    #: The claim attempt's frozen copy (`_claimable`): its key, ETag and SHA-256 (base64,
+    #: None where the endpoint gave none); empty before the claim.
+    frozen_key: str = ""
+    etag: str = ""
+    sha256: str | None = None
 
 
 async def _signed(backend: S3ContentBackend, slots: Sequence[_Slot]) -> UploadSlots:
@@ -356,9 +367,15 @@ def _upload_missing(index: int) -> ApiError:
 async def _claimable(
     state: AppState, backend: S3ContentBackend, visitor_id: str, ids: Sequence[str]
 ) -> list[_Slot]:
-    """The visitor's unclaimed slots of ``ids``, each ``HEAD``-checked: 422
-    ``upload_missing`` for an unknown, foreign, claimed or absent one, ``upload_size`` for
-    one whose object is not its declared size. No byte is read."""
+    """The visitor's unclaimed slots of ``ids``, each frozen: copied server side to a
+    frozen key of this attempt's own (`staging_key` ``frozen``, a random nonce), which no
+    presigned URL names, so the customer's PUT URL (valid up to `UPLOAD_URL_TTL`) cannot
+    change the file after the claim, and two claims at once never write one key: the one
+    whose claim commits keeps its copy, and `_drop_losers` deletes the other's. The check
+    and the import read only the kept copy. 422 ``upload_missing`` for an unknown,
+    foreign, claimed or absent one, ``upload_size`` for one whose copy is not its declared
+    size. A refusal deletes the copies this call made. No byte passes through this
+    process."""
     for index, slot_id in enumerate(ids):
         if UPLOAD_ID.fullmatch(slot_id) is None or ids.index(slot_id) != index:
             raise _upload_missing(index)
@@ -378,20 +395,66 @@ async def _claimable(
         ]
 
     by_id = {slot.id: slot for slot in await asyncio.to_thread(read)}
-    slots = []
-    for index, slot_id in enumerate(ids):
-        slot = by_id.get(slot_id)
-        if slot is None:
-            raise _upload_missing(index)
-        size = await backend.staged_size(slot.object_key)
-        if size is None:
-            raise _upload_missing(index)
-        if size != slot.size:
-            raise _unprocessable(
-                "upload_size", "A file arrived incomplete. Upload it again.", index=index
+    slots: list[_Slot] = []
+    try:
+        for index, slot_id in enumerate(ids):
+            slot = by_id.get(slot_id)
+            if slot is None:
+                raise _upload_missing(index)
+            frozen_key = staging_key(backend.settings.prefix, slot.id, frozen=secrets.token_hex(8))
+            frozen = await backend.freeze_staged(slot.object_key, frozen_key)
+            if frozen is None:
+                raise _upload_missing(index)
+            slots.append(
+                replace(slot, frozen_key=frozen_key, etag=frozen.etag, sha256=frozen.sha256)
             )
-        slots.append(slot)
+            if frozen.size != slot.size:
+                raise _unprocessable(
+                    "upload_size", "A file arrived incomplete. Upload it again.", index=index
+                )
+    except BaseException:
+        await _drop_copies(backend, slots)
+        raise
     return slots
+
+
+async def _drop_copies(backend: S3ContentBackend, slots: Sequence[_Slot]) -> None:
+    """The frozen copies of ``slots`` deleted, best effort (the file's watcher and the
+    orphan sweep take any left)."""
+    for slot in slots:
+        try:
+            await backend.remove_staged(slot.frozen_key)
+        except Exception:
+            logger.warning("could not delete a frozen copy of %s", slot.id, exc_info=True)
+
+
+def _kept_keys(state: AppState, slots: Sequence[_Slot]) -> dict[str, str | None]:
+    with state.projection.pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT id, frozen_key FROM storefront_uploads WHERE id = ANY(%s)",
+            ([slot.id for slot in slots],),
+        ).fetchall()
+    return {row["id"]: row["frozen_key"] for row in rows}
+
+
+async def _drop_losers(state: AppState, backend: S3ContentBackend, slots: Sequence[_Slot]) -> None:
+    """This attempt's frozen copies that no committed claim kept (another claim of the
+    slot won, or a replay answered another attempt's reply) deleted."""
+    if not slots:
+        return
+    kept = await asyncio.to_thread(_kept_keys, state, slots)
+    await _drop_copies(backend, [slot for slot in slots if kept.get(slot.id) != slot.frozen_key])
+
+
+async def _drop_originals(backend: S3ContentBackend, slots: Sequence[_Slot]) -> None:
+    """The claimed slots' writable originals deleted, now that their frozen copies are
+    claimed. Best effort: a failure is logged, and the file's watcher deletes every staging
+    key of the slot when it ends (`staged_files.step`)."""
+    for slot in slots:
+        try:
+            await backend.remove_staged(slot.object_key)
+        except Exception:
+            logger.warning("could not delete the claimed original %s", slot.id, exc_info=True)
 
 
 def _upload_taken() -> ApiError:
@@ -412,6 +475,7 @@ async def add_model_request(
     ``draft_full``; 409 ``upload_taken``, ``draft_changed``; 503
     ``storefront_needs_s3``. After the commit each claimed file's watcher is told."""
     from scadbuddy.orders.storefront.drafts import MAX_DRAFT_ITEMS, draft_changed, draft_full
+    from scadbuddy.orders.storefront.intake import start_checks
     from scadbuddy.orders.storefront.staged_files import poke
 
     orders = _orders(state)
@@ -433,10 +497,14 @@ async def add_model_request(
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])
     entry = NewRequestItem(title=MODEL_REQUEST_TITLE, quantity=body.quantity, notes=note)
 
+    #: The file sources this call made, whose checks start after the commit.
+    checks: list[str] = []
+
     def write() -> Replay:
         # Outside the ledger's transaction: two first adds at once make one draft.
         draft = orders.lifecycle.ensure_draft(visitor.id, by, currency=currency)
         changes: list[tuple[Order, list[OrderItem]]] = []
+        checks.clear()
 
         def add(conn: Any) -> Replay:
             [item] = orders.lifecycle.add_items(
@@ -446,9 +514,18 @@ async def add_model_request(
                 raise draft_full()
             if slots:
                 claimed = conn.execute(
-                    "UPDATE storefront_uploads SET claimed_at = now()"
-                    " WHERE id = ANY(%s) AND visitor_id = %s AND claimed_at IS NULL",
-                    ([slot.id for slot in slots], visitor.id),
+                    "UPDATE storefront_uploads AS u SET claimed_at = now(),"
+                    " frozen_key = v.frozen_key, frozen_etag = v.etag, frozen_sha256 = v.sha"
+                    " FROM unnest(%s::text[], %s::text[], %s::text[], %s::text[])"
+                    " AS v(id, frozen_key, etag, sha)"
+                    " WHERE u.id = v.id AND u.visitor_id = %s AND u.claimed_at IS NULL",
+                    (
+                        [slot.id for slot in slots],
+                        [slot.frozen_key for slot in slots],
+                        [slot.etag for slot in slots],
+                        [slot.sha256 for slot in slots],
+                        visitor.id,
+                    ),
                 ).rowcount
                 if claimed != len(slots):
                     raise _upload_taken()
@@ -459,10 +536,11 @@ async def add_model_request(
             )
             position = 0
             for slot in slots:
-                conn.execute(
+                made = conn.execute(
                     "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
                     " purpose, upload_id, filename, size, media_type, check_status, status)"
-                    " VALUES (%s, %s, %s, 'file', 'print', %s, %s, %s, %s, 'checking', 'open')",
+                    " VALUES (%s, %s, %s, 'file', 'print', %s, %s, %s, %s, 'checking', 'open')"
+                    " RETURNING id",
                     (
                         draft.id,
                         item.id,
@@ -472,7 +550,9 @@ async def add_model_request(
                         slot.size,
                         slot.media_type,
                     ),
-                )
+                ).fetchone()
+                assert made is not None
+                checks.append(made["id"])
                 position += 1
             for link in links:
                 conn.execute(
@@ -506,8 +586,15 @@ async def add_model_request(
     try:
         done = await asyncio.to_thread(write)
     except LifecycleError:
+        await _drop_losers(state, backend, slots)
         raise draft_changed() from None
+    except BaseException:
+        await _drop_losers(state, backend, slots)
+        raise
+    await _drop_losers(state, backend, slots)
+    await _drop_originals(backend, slots)
     await poke(state, [slot.id for slot in slots], "claimed")
+    await start_checks(state, checks)
     return done
 
 

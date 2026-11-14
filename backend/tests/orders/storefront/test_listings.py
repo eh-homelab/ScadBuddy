@@ -112,7 +112,7 @@ def test_only_published_listings_are_listed_as_published(
     store: ListingStore, published: Listing
 ) -> None:
     store.create(body(title="Draft"))
-    assert [listing.id for listing in store.published()] == [published.id]
+    assert [listing.id for listing in store.published(limit=10)] == [published.id]
     assert published.published and published.published_at is not None
     assert published.snapshot == SNAPSHOT
     assert published.fixed == {}

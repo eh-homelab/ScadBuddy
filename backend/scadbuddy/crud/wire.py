@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Literal
 
 #: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
-CrudCaller = Literal["projects", "render", "print", "storefront", "agent"]
+CrudCaller = Literal["projects", "render", "print", "storefront", "agent", "intake"]
 CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
 #: The reason of the 503 a CRUD route answers on a `psycopg.OperationalError`.
