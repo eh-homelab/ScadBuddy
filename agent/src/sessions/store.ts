@@ -339,16 +339,25 @@ async function segmentsOf(sql: Sql | TransactionSql, sessionId: string): Promise
   type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
   // From the session up to the first ancestor that is no fork. Links are only ever made to an
   // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
-  // links come with no row (`id` NULL) when it has no entries of its own.
+  // links come with no row (`id` NULL) when it has no entries of its own. An ancestor's rows
+  // are read only up to `bound`, the least cut below it (LEAST skips the session's own NULL):
+  // a load takes no more than that of the ancestor's transcript, and its rows come first in
+  // it, so none past its fork point is read (#4212). `LIMIT NULL` is no limit.
   const joined = isUuid(sessionId)
     ? await sql<ChainRow[]>`
-        WITH RECURSIVE chain (id, parent, cut, depth) AS (
-          SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
+        WITH RECURSIVE chain (id, parent, cut, depth, bound) AS (
+          SELECT id, fork_parent_id, fork_cut, 0, NULL::bigint FROM ai_sessions WHERE id = ${sessionId}::uuid
           UNION ALL
-          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
+          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1, LEAST(c.bound, c.cut)
+          FROM ai_sessions s JOIN chain c ON s.id = c.parent
         )
         SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
-        FROM chain c LEFT JOIN ai_session_entries e ON e.session_id = c.id::text AND e.subpath = ''
+        FROM chain c LEFT JOIN LATERAL (
+          SELECT id, uuid, entry, sealed, inherited FROM ai_session_entries
+          WHERE session_id = c.id::text AND subpath = ''
+          ORDER BY inherited DESC, id
+          LIMIT c.bound
+        ) e ON true
         ORDER BY c.depth, e.inherited DESC, e.id`
     : []
   const chain: { id: string; cut: number | null }[] = []
