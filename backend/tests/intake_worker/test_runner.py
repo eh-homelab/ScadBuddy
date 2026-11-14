@@ -341,8 +341,44 @@ def test_a_confined_child_cannot_read_the_rpc_token(tmp_path: Path) -> None:
     assert (secret / "token").read_text() == "x" * 40
 
 
-def test_the_sandbox_covers_its_token_directory() -> None:
+def test_the_sandbox_covers_its_token_directory_and_the_shared_memory_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container's ``/dev/shm`` (a tmpfs anyone may write) would let a parse fill pod
+    memory, or leave a file for a later check, so each check gets an empty one over it, after
+    the token's directory."""
+    monkeypatch.setattr(os.path, "isdir", lambda path: path == "/dev/shm")
+    assert sandbox.covered_dirs("/etc/scadbuddy-intake-rpc/token") == (
+        "/etc/scadbuddy-intake-rpc",
+        "/dev/shm",
+    )
+
+
+def test_the_sandbox_covers_only_its_token_directory_without_shared_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(os.path, "isdir", lambda path: False)
     assert sandbox.covered_dirs("/etc/scadbuddy-intake-rpc/token") == ("/etc/scadbuddy-intake-rpc",)
+
+
+@needs_confinement
+def test_a_confined_child_cannot_write_a_covered_folder(tmp_path: Path) -> None:
+    """What the parser writes in a covered folder (``/dev/shm`` in the sandbox) never
+    reaches the real one: the cover is an empty tmpfs of mode 0."""
+    spool, shared = tmp_path / "spool", tmp_path / "shm"
+    box = spool / "box"
+    box.mkdir(parents=True)
+    shared.mkdir()
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    open(sys.argv[1] + '/left', 'w').write('for the next check')\n"
+        "    print('written')\n"
+        "except OSError:\n"
+        "    print('refused')\n"
+    )
+    assert _confined(spool, code, str(shared), cwd=box, covers=(str(shared),)) == "refused"
+    assert list(shared.iterdir()) == []
 
 
 _PROBE_HEAD = (
