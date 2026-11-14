@@ -13,6 +13,8 @@ LISTING_ID: Final = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 LISTINGS_MAX_PAGE: Final = 48
 #: The longest title search the public list takes.
 LISTINGS_MAX_QUERY: Final = 100
+#: A title search holds no NUL: Postgres text cannot, and the bind would fail (500).
+LISTINGS_QUERY_PATTERN: Final = r"^[^\x00]*$"
 #: An order item's id (``gen_random_uuid()::text``). Both sides answer any other 404
 #: ``item_not_found`` before a lookup.
 ITEM_ID: Final = LISTING_ID

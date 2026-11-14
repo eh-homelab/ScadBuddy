@@ -174,6 +174,8 @@ def test_the_public_list_searches_titles_and_takes_wildcards_literally(
         "100% Plant pot"
     ]
     assert crud.get("/listings?q=_").json()["listings"] == []
+    # Postgres text holds no NUL: refused, never a 500.
+    assert crud.get("/listings?q=a%00b").status_code == 422
 
 
 @pytest.mark.parametrize(

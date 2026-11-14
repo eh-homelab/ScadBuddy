@@ -132,4 +132,23 @@ describe('ListingsPage', () => {
     expect(titles.every((title) => title?.startsWith('Key'))).toBe(true)
     expect(new Set(titles).size).toBe(titles.length)
   })
+
+  it('shows a card the shop moved between two pages once', async () => {
+    const page = (titles: string[], next: string | null) => ({
+      listings: titles.map((title) => card({ ...KEYCHAIN, id: title, title })),
+      next_cursor: next,
+      requests_enabled: false,
+    })
+    server.use(
+      http.get('/api/store/v1/listings', ({ request }) =>
+        HttpResponse.json(new URL(request.url).searchParams.get('cursor') ? page(['B', 'C'], null) : page(['A', 'B'], 'next')),
+      ),
+    )
+    const { user } = renderPage(<ListingsPage />)
+    await screen.findByRole('heading', { name: 'A' })
+    await user.click(screen.getByRole('button', { name: 'Show more designs' }))
+    await screen.findByRole('heading', { name: 'C' })
+    expect(screen.getAllByRole('article').map((article) => within(article).getByRole('heading').textContent)).toEqual(['A', 'B', 'C'])
+  })
 })
+

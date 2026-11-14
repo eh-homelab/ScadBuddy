@@ -62,6 +62,7 @@ from scadbuddy.storefront.wire import (
     LISTING_ID,
     LISTINGS_MAX_PAGE,
     LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     ORDER_VIEW_FIELDS,
     PAY_CHECKOUT_FIELDS,
     QUOTE_ID,
@@ -125,7 +126,9 @@ async def listings(
     client: Client,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int | None, Query(ge=1, le=LISTINGS_MAX_PAGE)] = None,
-    q: Annotated[str | None, Query(max_length=LISTINGS_MAX_QUERY)] = None,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
 ) -> Any:
     """One page of the published listings (#6154): the edge checks the query's bounds
     and sends on only these three."""

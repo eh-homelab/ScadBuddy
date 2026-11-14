@@ -166,6 +166,7 @@ from scadbuddy.orders.storefront.turnstile import (
 from scadbuddy.orders.storefront.wire import (
     LISTINGS_MAX_PAGE,
     LISTINGS_MAX_QUERY,
+    LISTINGS_QUERY_PATTERN,
     AccountOrder,
     AccountOrders,
     AccountView,
@@ -274,7 +275,9 @@ async def listings(
     _client: StoreClient,
     cursor: Annotated[str | None, Query(max_length=200)] = None,
     limit: Annotated[int, Query(ge=1, le=LISTINGS_MAX_PAGE)] = 24,
-    q: Annotated[str | None, Query(max_length=LISTINGS_MAX_QUERY)] = None,
+    q: Annotated[
+        str | None, Query(max_length=LISTINGS_MAX_QUERY, pattern=LISTINGS_QUERY_PATTERN)
+    ] = None,
 ) -> PublicListings:
     """One page of the published listings as cards, in the shop's order, after
     ``cursor`` and with ``q`` in the title when given, and whether "Ask for a design" is

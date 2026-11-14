@@ -211,6 +211,7 @@ def test_the_edge_sends_on_a_page_and_search_of_the_listings(
         assert r.status_code == 200, r.text
         refused = c.get("/api/store/v1/listings", params={"limit": "49"})
         assert refused.status_code == 422
+        assert c.get("/api/store/v1/listings", params={"q": "a\x00b"}).status_code == 422
     sent = crud_mock["listings"].calls.last.request
     assert dict(sent.url.params) == {"cursor": "5b305d", "q": "a&b=c"}
     assert crud_mock["listings"].call_count == 1

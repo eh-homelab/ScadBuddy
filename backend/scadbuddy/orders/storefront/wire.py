@@ -28,6 +28,7 @@ from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.storefront.wire import LISTINGS_MAX_PAGE as LISTINGS_MAX_PAGE
 from scadbuddy.storefront.wire import LISTINGS_MAX_QUERY as LISTINGS_MAX_QUERY
+from scadbuddy.storefront.wire import LISTINGS_QUERY_PATTERN as LISTINGS_QUERY_PATTERN
 from scadbuddy.storefront.wire import (
     MAX_COLOUR_CHOICES,
     MAX_LINK_NOTE,

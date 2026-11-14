@@ -31,6 +31,7 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
     let live = true
     searches.current += 1
     setNext(null)
+    setMore(false)
     // A search from outside the box (the shop's mark, Back): the box shows it.
     if (query !== wrote.current) {
       wrote.current = query
@@ -73,12 +74,16 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
     try {
       const answer = await store.listings({ cursor: next, q: query })
       if (searches.current !== search) return
-      setCards((before) => [...(before ?? []), ...answer.listings])
+      // A card the shop moved between two pages comes once.
+      setCards((before) => {
+        const seen = new Set((before ?? []).map((card) => card.id))
+        return [...(before ?? []), ...answer.listings.filter((card) => !seen.has(card.id))]
+      })
       setNext(answer.next_cursor)
     } catch (caught) {
       if (searches.current === search) setError(errorText(caught))
     } finally {
-      setMore(false)
+      if (searches.current === search) setMore(false)
     }
   }
 
