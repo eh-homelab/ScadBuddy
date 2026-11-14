@@ -867,8 +867,9 @@ def test_the_sandbox_refuses_a_token_directory_that_holds_the_spool(
     start_env: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A tmpfs over a directory hides it only from above: a cover that holds the spool
-    (or lies in it) would leave the token reachable by ``..`` from the box, so the start
-    refuses it."""
+    would hide the spool, and one in it would stay reachable by ``..`` from the box, so the
+    start refuses either, naming the covered directory."""
     start_env.setenv("SCADBUDDY_INTAKE_WORK_DIR", str(tmp_path / "rpc" / "spool"))
     assert sandbox.main([]) == 2
-    assert "token" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"a covered directory {tmp_path / 'rpc'} and the spool" in out
