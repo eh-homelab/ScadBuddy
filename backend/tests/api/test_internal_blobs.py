@@ -31,6 +31,7 @@ from scadbuddy.slicing.models import TransferUrl
 from scadbuddy.slicing.transfer import (
     INTERNAL_BLOBS,
     PENDING_PREFIX,
+    SLICED_OUTPUT_META,
     TRANSFER_HEADER,
     TRANSFER_TTL,
     PendingPut,
@@ -218,13 +219,30 @@ def test_put_then_finish_put(blob_client: TestClient) -> None:
     assert _path(put.url) == f"{INTERNAL_BLOBS}/{put.pending_key}"
     response = _upload(blob_client, _path(put.url), put.url.headers, b"hello")
     assert response.status_code == 204
-    key = _finish(blob_client, put, b"hello")
-    assert key == f"slice-{hashlib.sha256(b'hello').hexdigest()}"
     content = _content(blob_client)
     assert blob_client.portal is not None
+    pending = blob_client.portal.call(content.stat, f"slice-{hashlib.sha256(b'hello').hexdigest()}")
+    # The PUT alone marks nothing (a `slicedata` PUT is never finished).
+    assert pending is not None and pending.meta == {}
+    key = _finish(blob_client, put, b"hello")
+    assert key == f"slice-{hashlib.sha256(b'hello').hexdigest()}"
     stat = blob_client.portal.call(content.stat, key)
     assert stat is not None
     assert blob_client.portal.call(content.read, stat.ref) == b"hello"
+    # A slicer's output, marked for the print worker's read URL (#5298 Task 32).
+    assert stat.meta == SLICED_OUTPUT_META
+
+
+def test_an_unmarked_put_keeps_the_output_mark(blob_client: TestClient) -> None:
+    """A slicer's input of the same bytes as a marked output (one key) leaves the mark."""
+    put = _transfers(blob_client).mint_put()
+    assert _upload(blob_client, _path(put.url), put.url.headers, b"same").status_code == 204
+    key = _finish(blob_client, put, b"same")
+    content = _content(blob_client)
+    assert blob_client.portal is not None
+    blob_client.portal.call(partial(content.put, "slice", b"same", name="input.3mf", scope=SCOPE))
+    stat = blob_client.portal.call(content.stat, key)
+    assert stat is not None and stat.meta == SLICED_OUTPUT_META
 
 
 def test_a_second_put_to_the_same_pending_key_upserts(blob_client: TestClient) -> None:

@@ -79,8 +79,15 @@ def test_the_areas_are_served_and_awaited() -> None:
     for area in ("printer-ensure", "printers"):
         assert area in CRUD_AREAS["print"]
         assert area in PRINT_CRUD_AREAS
-    # Appended, so an older API's list is a prefix of a newer one's.
-    assert CRUD_AREAS["print"][-1] == "printers"
+    # Appended, so an older API's list is a prefix of a newer one's; Task 30's ``rack``
+    # and Task 31's ``spools`` came after it.
+    assert CRUD_AREAS["print"][-5:] == [
+        "printers",
+        "rack",
+        "spools",
+        "transfer-urls",
+        "access-codes",
+    ]
 
 
 def test_every_printer_method_is_remote_refused_or_named() -> None:
@@ -115,14 +122,14 @@ def test_the_worker_store_overrides_every_method_that_merges_rows() -> None:
 
 @pytest.mark.parametrize("name", PRINTERS_API_ONLY)
 def test_a_printer_method_only_the_api_calls_is_refused(name: str) -> None:
-    remote = RemotePrinterStore(None, None)  # type: ignore[arg-type]
+    remote = RemotePrinterStore(None)  # type: ignore[arg-type]
     with pytest.raises(ApiOnlyError):
         getattr(remote, name)("x")
 
 
 def test_neither_worker_store_holds_a_pool() -> None:
     with pytest.raises(ApiOnlyError):
-        _ = RemotePrinterStore(None, None).pool  # type: ignore[arg-type]
+        _ = RemotePrinterStore(None).pool  # type: ignore[arg-type]
     with pytest.raises(ApiOnlyError):
         _ = RemoteReports(None).pool  # type: ignore[arg-type]
 
@@ -155,7 +162,7 @@ def test_an_access_code_refusal_is_raised_as_the_sql_store_raises_it(
     client = _answering(status, {"status": status, "detail": "no", "reason": reason})
     try:
         with pytest.raises(raised) as error:
-            RemotePrinterStore(client, None).open_access_code(UNKNOWN)
+            RemotePrinterStore(client).open_access_code(UNKNOWN)
     finally:
         client.close()
     if raised is KekMissingError:
@@ -190,7 +197,7 @@ def test_a_report_write_answers_its_end_and_its_start(
 def test_a_name_that_is_no_printer_id_asks_nothing() -> None:
     client = _answering(500, {})
     try:
-        remote = RemotePrinterStore(client, None)
+        remote = RemotePrinterStore(client)
         assert remote.get("not-a-uuid") is None
         with pytest.raises(PrinterNotFoundError):
             remote.open_access_code("not-a-uuid")
@@ -258,7 +265,7 @@ def test_the_reads_answer_as_the_sql_store(
     lan = _lan_printer(printers)
     linked = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
     reports.put(lan, {"gcode_state": "IDLE"}, datetime.now(UTC))
-    remote = RemotePrinterStore(crud, None)
+    remote = RemotePrinterStore(crud)
     remote_reports = RemoteReports(crud)
     assert remote.list() == printers.list()
     assert remote.get(lan) == printers.get(lan)
@@ -295,7 +302,7 @@ def test_the_workers_merge_runs_on_the_api(store: SettingsStore, printers: Print
         )
     mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
     with threaded_print_crud(store, printers=printers) as client:
-        worker = RemotePrinterStore(client, None)
+        worker = RemotePrinterStore(client)
         row, written = worker.ensure_bambuddy_written(
             4, serial=SERIAL, name="H2C", model="H2C", listed={4}
         )
@@ -327,7 +334,7 @@ def test_the_access_code_is_released_unstored_and_never_logged(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     pid = _lan_printer(printers)
-    assert RemotePrinterStore(crud, None).open_access_code(pid) == CODE
+    assert RemotePrinterStore(crud).open_access_code(pid) == CODE
     response = crud.request("GET", f"{BASE}/printers/{pid}/access-code")
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["X-ScadBuddy-Crud"] == "1"
@@ -351,7 +358,7 @@ def test_an_access_code_the_api_cannot_answer_is_refused(
     unlinked = printers.create(PrinterCreate(serial=SERIAL, name="Bare")).id
     lan = _lan_printer(printers, serial="01P00A000000002")
     with threaded_print_crud(store, printers=printers) as client:
-        remote = RemotePrinterStore(client, None)
+        remote = RemotePrinterStore(client)
         with pytest.raises(NoAccessCodeError):
             remote.open_access_code(unlinked)
         with pytest.raises(PrinterNotFoundError):
@@ -361,7 +368,7 @@ def test_an_access_code_the_api_cannot_answer_is_refused(
         threaded_print_crud(store, printers=PrinterStore(store.pool, None)) as client,
         pytest.raises(KekMissingError) as missing,
     ):
-        RemotePrinterStore(client, KEK).open_access_code(lan)
+        RemotePrinterStore(client).open_access_code(lan)
     assert str(missing.value) == API_NEEDS_KEK
     assert CODE not in str(missing.value)
 
@@ -390,9 +397,13 @@ def test_a_report_put_sent_again_with_its_key_answers_the_same_end(
     assert reports.get(pid) == seen
     # Without the key's ledger the same write ends nothing: the print ended already.
     assert remote.put(pid, _report("FINISH"), start + timedelta(seconds=5)) is None
+    later = start + timedelta(seconds=10)
     # The write that shows a print start answers it, for the print watcher's nudge.
-    assert remote.advance(pid, _report("RUNNING", "plate_2"), start) == Advance(started="plate_2")
-    assert remote.put(pid, _report("FAILED", "plate_2"), start) == PrintEnd("plate_2", True)
+    assert remote.advance(pid, _report("RUNNING", "plate_2"), later) == Advance(started="plate_2")
+    assert remote.put(pid, _report("FAILED", "plate_2"), later) == PrintEnd("plate_2", True)
+    # A write that lands late, older than the row, moves nothing back (#5298 Task 30).
+    assert remote.put(pid, _report("RUNNING", "plate_2"), start) is None
+    assert reports.get(pid) == (_report("FAILED", "plate_2"), later)
     with pytest.raises(CrudRefusedError) as refused:
         crud.request("PUT", url, json=body)
     assert refused.value.status == 428
@@ -419,7 +430,7 @@ def test_each_natural_write_sent_twice_leaves_what_one_left(
     seen = reports.get(pid)
     assert seen is not None and seen[1] == now + timedelta(seconds=10)
     twice(
-        lambda: RemotePrinterStore(crud, None).ensure_bambuddy_written(
+        lambda: RemotePrinterStore(crud).ensure_bambuddy_written(
             9, serial=None, name="P1S", model="P1S"
         )
     )
@@ -429,7 +440,7 @@ def test_each_natural_write_sent_twice_leaves_what_one_left(
 def test_a_virtual_printers_sync_answers_its_first_write_under_its_key(
     crud: CrudSyncClient, printers: PrinterStore, store: SettingsStore
 ) -> None:
-    remote = RemotePrinterStore(crud, None)
+    remote = RemotePrinterStore(crud)
     view = BambuddyView(seen_at=datetime.now(UTC), name="VP7", mode="immediate")
     row, outcome, changed = remote.upsert_virtual(
         7, serial=None, name="VP7", model="X1C", mode="immediate", forwards_to=None, view=view

@@ -449,9 +449,21 @@ switch: with `native` it starts the same `SliceWorkflow` (one execution per copy
 subject and presets, until Temporal 1.31's standalone activities let `slice_plate` be
 the bare activity), and `read_preview` reads `slice_plate`'s heartbeat details for
 progress. The read routes, the toolpath included, take `?slicer=native` (a native row's
-id and a Bambuddy job's may be equal). The browser polls as it does today (every 2 s),
-and the heartbeat's `total_percent` rides that answer, so the pane shows "Slicing… 40%"
-and a progress bar; no realtime topic (realtime events carry ids, not content). A native
+id and a Bambuddy job's may be equal). The heartbeat's `total_percent` rides the read's
+answer, so the pane shows "Slicing… 40%" and a progress bar. As built (#265): the
+browser does not poll while the realtime socket is up. A read of a running slice makes
+the API process follow it (`preview_follow/follows.py`, every 2 s, either slicer), and
+each change is published as `preview_slice.progress` or `preview_slice.settled` on
+`preview-slice:<slicer>:<job id>`. The event carries ids only; the browser reads the
+route again for the percent. The browser polls every 2 s only while the socket is
+unavailable, or while the read says `followed: false` (past the 64 slices one process
+follows at once) (`usePreviewSlice.ts`). One API replica follows a slice (#6158; prod
+runs three): a follow first takes a session advisory lock on its slice
+(`preview_follow/claims.py`, all of one process's locks on one connection of its own),
+and a read on a replica that finds the lock held elsewhere starts nothing and answers
+`followed: true`, because the follower's events reach every replica's sockets over the
+Postgres bus. A follow releases its lock before its last event, so the read that event
+causes can follow the slice again on any replica. A native
 slice's slots carry no `side` (`slicing/preview.py`), so the side-mismatch warning does
 not fire for it until #4232.
 

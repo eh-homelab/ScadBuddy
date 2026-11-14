@@ -511,6 +511,31 @@ def test_the_archive_copied_backfill_marks_every_attempt_from_before_it(
 
 
 @pytest.mark.requires_postgres
+def test_the_sliced_output_backfill_marks_only_the_outputs_a_slice_names(
+    pg_conninfo: str,
+) -> None:
+    # #5298 Task 32: the print worker's read URL needs the output mark. The backfill marks
+    # each `slice` blob a native slice names, keeps its other meta, and leaves the
+    # slicer's inputs (named by no slice) unmarked.
+    backfill = _index("store_blobs_sliced_output_mark")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:backfill])
+        conn.execute(
+            "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size, meta)"
+            " VALUES ('slice-out', 'a', 'slice', 'local', 'a', 1, '{\"swept\": true}'),"
+            " ('slice-in', 'b', 'slice', 'local', 'b', 1, '{}')"
+        )
+        conn.execute(
+            "INSERT INTO native_slices"
+            " (workflow_id, subject, library_file_id, plate_id, preset_key, status,"
+            "  sliced_blob_key) VALUES ('w', 'output:a', 1, 1, 'k', 'completed', 'slice-out')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[backfill].id
+        rows = conn.execute("SELECT key, meta FROM store_blobs ORDER BY key").fetchall()
+    assert rows == [("slice-in", {}), ("slice-out", {"swept": True, "output": "sliced"})]
+
+
+@pytest.mark.requires_postgres
 def test_the_revisions_migration_gives_every_model_item_revision_one(pg_conninfo: str) -> None:
     # Storefront phase 1 (#5280): a model item's reference and colours become its
     # revision 1, which its quotes name; a custom item has none.

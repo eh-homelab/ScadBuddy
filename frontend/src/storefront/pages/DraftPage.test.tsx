@@ -24,8 +24,8 @@ const DRAFT: Draft = {
       kind: 'model',
       title: 'Name keychain',
       quantity: 2,
-      inputs: { name: 'Ada', base_colour: '#E8532F' },
-      labels: { name: 'Name', base_colour: 'Base colour' },
+      inputs: { name: 'Ada', base_colour: '#E8532F', ring: false },
+      labels: { name: 'Name', base_colour: 'Base colour', ring: 'Keyring hole' },
       notes: null,
       attachments: [],
     },
@@ -71,6 +71,15 @@ describe('DraftPage', () => {
     const item = (await screen.findByText('Name keychain')).closest('li')!
     expect(within(item).getByText('Base colour')).toBeInTheDocument()
     expect(within(item).queryByText('base_colour')).toBeNull()
+  })
+
+  it('shows a switch as Yes or No (#6141)', async () => {
+    server.use(http.get('/api/store/v1/draft', () => HttpResponse.json(DRAFT)))
+    renderPage(<DraftPage />)
+    const item = (await screen.findByText('Name keychain')).closest('li')!
+    const ring = within(item).getByText('Keyring hole').closest('div')!
+    expect(within(ring).getByText('No')).toBeInTheDocument()
+    expect(within(item).queryByText('false')).toBeNull()
   })
 
   it('removes one item at a time, so a late answer never puts one back', async () => {

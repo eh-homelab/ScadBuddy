@@ -225,6 +225,24 @@ class FlowRunEvent(BaseEvent):
     status: str
 
 
+class FlowChanged(BaseEvent):
+    """A flow's definition changed (#265): registered, restored, renamed, archived,
+    unarchived or deleted. Re-read ``GET /workflows``. Published on ``flows``."""
+
+    kind: Literal["flow.changed"] = "flow.changed"
+    name: str
+
+
+class PreviewSliceEvent(BaseEvent):
+    """The print dialog's background slice moved on (``preview_slice.progress``) or ended
+    (``preview_slice.settled``) (#265). Re-read its ``preview-slices/{job_id}`` route.
+    Published on ``preview-slice:<slicer>:<job id>`` by `preview_follow.follows`."""
+
+    kind: Literal["preview_slice.progress", "preview_slice.settled"]
+    slicer: Literal["bambuddy", "native"]
+    job_id: int
+
+
 class ActivityEvent(BaseEvent):
     """An activity row changed (spec 2026-10-09): re-read ``GET /activity/{id}``."""
 
@@ -406,6 +424,8 @@ Event = Annotated[
     | PrinterEvent
     | OperationEvent
     | FlowRunEvent
+    | FlowChanged
+    | PreviewSliceEvent
     | ActivityEvent
     | OrderChanged
     | OrderItemChanged

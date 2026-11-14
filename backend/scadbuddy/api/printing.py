@@ -163,6 +163,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.preview_follow.component import PreviewFollowsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
@@ -1534,6 +1535,7 @@ async def get_preview_slice(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     slicing: SlicingDep,
+    follows: PreviewFollowsDep,
     slicer: SlicerQuery = "bambuddy",
 ) -> SlicePreview:
     """#2169: grams per slot, print time, the side each filament went to and how many
@@ -1541,10 +1543,16 @@ async def get_preview_slice(
     this output, while Bambuddy's job is still that slice; else 404. ``slicer`` is the
     one `PreviewStarted` named: a native slice's id is a `native_slices` row's."""
     meta = require_output(outputs, output_id)
-    if slicer == "native":
-        return await read_native_preview(slicing, job_id, PrintSubject.output(meta.id).run_subject)
-    async with client_for(store.load()) as client:
-        return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
+    subject = PrintSubject.output(meta.id).run_subject
+
+    async def read() -> SlicePreview:
+        if slicer == "native":
+            return await read_native_preview(slicing, job_id, subject)
+        async with client_for(store.load()) as client:
+            return await read_preview(client, uploads, job_id, subject)
+
+    # #265: the slice is followed from here, so the dialog hears of each change.
+    return await follows.read(slicer, job_id, subject, read)
 
 
 @router.get(

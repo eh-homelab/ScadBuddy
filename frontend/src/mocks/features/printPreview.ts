@@ -3,6 +3,7 @@ import type { PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from
 import { demoToolpath } from '../toolpath'
 import { H2C_FILE, assignH2cTray, h2cPlan, h2cSlice, resetH2c } from '../h2c'
 import { mockSettings } from '../handlers'
+import { announcePreviewSlice } from '../realtime'
 import { acceptOperation } from './operations'
 
 /**
@@ -75,6 +76,8 @@ export const handlers = [
     job.reads += 1
     const done = job.reads > 1
     const native = new URL(request.url).searchParams.get('slicer') === 'native'
+    // #265: the dialog reads again on the next event, as the backend's follow sends it.
+    if (!done) announcePreviewSlice(native ? 'native' : 'bambuddy', jobId)
     // The native slicer's read says how far it has got while it runs (Task 14).
     if (native && !done) {
       return HttpResponse.json({

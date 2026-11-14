@@ -142,6 +142,17 @@
   padding: 18px 0;
   border-bottom: 1px solid var(--sf-line);
 }
+.sf-retry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.sf-header nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
 .sf-mark {
   display: inline-flex;
   align-items: center;

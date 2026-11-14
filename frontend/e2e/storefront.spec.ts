@@ -16,7 +16,6 @@ test.describe('the public storefront', () => {
     await expect(page.getByRole('heading', { name: 'Name keychain', level: 1 })).toBeVisible()
 
     await page.getByLabel('Name', { exact: true }).fill('Ada')
-    await page.getByRole('button', { name: 'Render' }).click()
     await expect(page.getByText('about $12.40, confirmed after we check it')).toBeVisible()
     // The real viewer drew the render.
     await expect(page.locator('canvas')).toBeVisible()

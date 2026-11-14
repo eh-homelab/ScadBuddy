@@ -1,5 +1,6 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
+import { shownLabel } from '../../storefront/params'
 
 /**
  * #5282 (spec 2026-11-02 §5.3) — a listing as the Storefront page edits it, and what the
@@ -266,8 +267,9 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
     .map(valueOf)
     .filter((colour) => !colourParams.some((param) => !isSupport(param) && sameColour(valueOf(param), colour)))
   const colours = filamentColours(draft, filaments).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
-  for (const name of Object.keys(params)) {
-    if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
+  for (const [name, bound] of Object.entries(params)) {
+    // A colour's choices are the filaments'; its own label stays (#6137).
+    if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours, ...(bound.label ? { label: bound.label } : {}) }
   }
   return { ...draft, params, fixed }
 }
@@ -318,7 +320,15 @@ export function previewListing(
   for (const param of schema?.parameters ?? []) {
     const bound = input.params?.[param.name]
     if (!bound) continue
-    params[param.name] = { ...bound, label: param.caption || param.name, group: param.group ?? '', colour: param.type === 'color' } as PublicParam
+    const placeholder = bound.kind === 'text' && typeof param.initial === 'string' && param.initial.trim() ? param.initial : null
+    params[param.name] = {
+      ...bound,
+      // As the public page shows it (`shown_label`, `_public_param`).
+      label: shownLabel(param.name, bound.label, param.caption),
+      group: param.group ?? '',
+      colour: param.type === 'color',
+      ...(bound.kind === 'text' ? { placeholder } : {}),
+    } as PublicParam
   }
   return {
     id: 'preview',

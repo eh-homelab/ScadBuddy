@@ -181,6 +181,11 @@ class NativeSpoolStore:
     def __init__(self, pool: ConnectionPool[Conn]) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> ConnectionPool[Conn]:
+        """The pool a CRUD route runs a settle and its ledger row on (`settle_uses_in`)."""
+        return self._pool
+
     def list(self, *, include_archived: bool = False) -> list[NativeSpool]:
         where = "" if include_archived else " WHERE archived_at IS NULL"
         with self._pool.connection() as conn:
@@ -275,39 +280,45 @@ class NativeSpoolStore:
         settled once, under its row lock, so two readers of one print take it off once.
         The spools whose weight changed."""
         with self._pool.connection() as conn, conn.transaction():
-            pending = conn.execute(
-                "SELECT subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
-                " WHERE run_id = %s AND settled_at IS NULL FOR UPDATE",
-                (run_id,),
-            ).fetchall()
-            if not pending:
-                return set()
-            row = conn.execute(
-                "SELECT result->'lan' AS lan FROM print_runs WHERE id = %s", (run_id,)
+            return self.settle_uses_in(conn, run_id, stages)
+
+    @staticmethod
+    def settle_uses_in(conn: Conn, run_id: str, stages: Sequence[str]) -> set[UUID]:
+        """`settle_uses` on ``conn``, in its caller's transaction: the CRUD route runs it
+        there whole, row locks included, with its ledger row (#5298, plans D5, D6)."""
+        pending = conn.execute(
+            "SELECT subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
+            " WHERE run_id = %s AND settled_at IS NULL FOR UPDATE",
+            (run_id,),
+        ).fetchall()
+        if not pending:
+            return set()
+        row = conn.execute(
+            "SELECT result->'lan' AS lan FROM print_runs WHERE id = %s", (run_id,)
+        ).fetchone()
+        starts = row["lan"] if row is not None and isinstance(row["lan"], list) else []
+        done = {
+            start.get("subtask_name")
+            for start, stage in zip(starts, stages, strict=False)
+            if isinstance(start, dict) and stage == "done"
+        }
+        taken: dict[UUID, float] = {}
+        for use in pending:
+            applied = use["subtask_name"] in done
+            conn.execute(
+                "UPDATE native_spool_uses SET settled_at = now(), applied = %s"
+                " WHERE run_id = %s AND subtask_name = %s AND slot_id = %s",
+                (applied, run_id, use["subtask_name"], use["slot_id"]),
+            )
+            if applied:
+                taken[use["spool_id"]] = taken.get(use["spool_id"], 0.0) + use["grams"]
+        changed: set[UUID] = set()
+        for spool_id, grams in taken.items():
+            updated = conn.execute(
+                "UPDATE native_spools SET remaining_g = GREATEST(remaining_g - %s, 0),"
+                " updated_at = now() WHERE id = %s AND remaining_g IS NOT NULL RETURNING id",
+                (grams, spool_id),
             ).fetchone()
-            starts = row["lan"] if row is not None and isinstance(row["lan"], list) else []
-            done = {
-                start.get("subtask_name")
-                for start, stage in zip(starts, stages, strict=False)
-                if isinstance(start, dict) and stage == "done"
-            }
-            taken: dict[UUID, float] = {}
-            for use in pending:
-                applied = use["subtask_name"] in done
-                conn.execute(
-                    "UPDATE native_spool_uses SET settled_at = now(), applied = %s"
-                    " WHERE run_id = %s AND subtask_name = %s AND slot_id = %s",
-                    (applied, run_id, use["subtask_name"], use["slot_id"]),
-                )
-                if applied:
-                    taken[use["spool_id"]] = taken.get(use["spool_id"], 0.0) + use["grams"]
-            changed: set[UUID] = set()
-            for spool_id, grams in taken.items():
-                updated = conn.execute(
-                    "UPDATE native_spools SET remaining_g = GREATEST(remaining_g - %s, 0),"
-                    " updated_at = now() WHERE id = %s AND remaining_g IS NOT NULL RETURNING id",
-                    (grams, spool_id),
-                ).fetchone()
-                if updated is not None:
-                    changed.add(spool_id)
+            if updated is not None:
+                changed.add(spool_id)
         return changed

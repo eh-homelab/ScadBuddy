@@ -88,12 +88,15 @@ DEADLOCK = "deadlock"
 API_OWNED_KEY = "api-owned-key"
 #: The index keys only the API writes: an upload's copy (`store/assets.py` `asset_key`,
 #: whose meta an adopt writes the upload's row from), a font family's
-#: (`store/fonts.py` `font_key`) and a template revision's snapshot
-#: (`store/snapshots.py` `snapshot_key`). The render worker reads and touches them and
-#: writes none of them: a copy it cannot read, the API drops (an upload's,
-#: ``POST …/assets/{id}/drop-copy``) or forgets (a font's or snapshot's,
+#: (`store/fonts.py` `font_key`), a template revision's snapshot
+#: (`store/snapshots.py` `snapshot_key`) and a slicer's input or output (kind ``slice``,
+#: written only by the API's `SliceWorkflow` activities and `api/internal_blobs.py`; the
+#: print worker's read URL is minted for a ``slice-`` key with `SLICED_OUTPUT_META`, so a
+#: render credential must not put or mark one, #5298 Task 32). The render worker reads and
+#: touches them and writes none of them: a copy it cannot read, the API drops (an
+#: upload's, ``POST …/assets/{id}/drop-copy``) or forgets (a font's or snapshot's,
 #: ``POST …/blob-index/{key}/forget-copy``) for it.
-API_OWNED_PREFIXES = ("asset-", "font-", "src-")
+API_OWNED_PREFIXES = ("asset-", "font-", "src-", "slice-")
 #: The owned keys a worker may have the API forget (the row only): `FontMirror.sync` and
 #: `SnapshotStore.materialize` forget a copy they cannot read, so the API stores it again.
 FORGETTABLE_PREFIXES = ("font-", "src-")

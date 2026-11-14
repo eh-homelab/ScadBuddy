@@ -433,3 +433,24 @@ async def test_a_nudge_that_fails_never_ends_the_watch(
     assert nudges.seen == [(pid, "x"), (pid, "y")]
     got = reports.get(pid)
     assert got is not None and got[0]["subtask_name"] == "y"
+
+
+def test_a_write_older_than_the_row_moves_nothing_back(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """#5298 Task 30 re-review D2: a write that lands after a newer one (a print worker's
+    request still running on the API after it gave the answer up) writes nothing, ends
+    nothing and keeps the print running; a write as old as the row writes again."""
+    _, reports, pid = linked
+    start = datetime.now(UTC)
+    later = start + timedelta(seconds=5)
+    assert reports.put(pid, RUNNING_X, start) is None
+    assert reports.put(pid, FINISH_X, later) == PrintEnd("x", timed=True)
+    # The older RUNNING report, landing late, would put "x" back running.
+    assert reports.put(pid, RUNNING_X, start) is None
+    assert reports.get(pid) == (FINISH_X, later)
+    # Nothing is running, so the next report ends nothing a second time.
+    assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
+    # A write as old as the row is the same write again: written, ending nothing.
+    assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
+    assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))

@@ -10,9 +10,14 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 ## Database access
 
 The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
-database owner and runs SQL on the agent's `ai_*` tables. The print worker connects as a
-role of its own, with the grant list in `auth/caller_grants.py` (`PRINT_GRANTS`, and
-`AGENT_GRANTS` for the agent). The projects and render workers have no database client
+database owner and runs SQL on the agent's `ai_*` tables. The agent's grant list is
+`auth/caller_grants.py` `AGENT_GRANTS`. The print worker holds no Postgres pool (#5298
+Task 31): every store it uses goes through CRUD routes, and its list (`PRINT_GRANTS`) is
+empty; its role `scadbuddy_print` keeps what it held until #5298 Task 35 revokes it. It
+holds no KEK either (#5298 Task 33): it exchanges its proof only (`exchange_source`, no
+view fallback), refuses to start without one, and ignores `SCADBUDDY_DATABASE_URL` with a
+warning; the API opens every sealed value it needs (area `access-codes`: whether the API
+opens access codes, and a virtual printer's sealed code). The projects and render workers have no database client
 (#5298): they reach their data through CRUD routes. The projects worker has no grant
 list, and the API and the agent revoke what its old role `scadbuddy_projects` held at
 every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`); `RENDER_GRANTS`
@@ -35,8 +40,9 @@ at `POST /api/v1/auth/service-token` (`ExchangeReader`; route `api/service_token
 `exchange`; verifiers `auth/exchange.py`: TokenReview, bootstrap hashes) for a 15-minute
 credential, falling back to its view on a 404 while it has a database URL; otherwise it
 reads its sealed one from its view (`TokenReader`), as before (#5494). A caller with no database
-(the projects and render workers, #5298) takes `exchange_source` instead: the exchange only, with no
-view, and no proof refuses its start. `ExchangeReader`, `exchange_source` and `ServiceAuth`
+(the projects, render and print workers, #5298) takes `exchange_source` instead: the exchange
+only, with no view, and no proof refuses its start.
+`ExchangeReader`, `exchange_source` and `ServiceAuth`
 live in `auth/service_auth.py`, which imports no Postgres code (`service_credentials.py`
 re-exports them), so the storefront edge (`python -m scadbuddy.storefront`, #5282; it holds
 no database secret and refuses to start with one) can use them. The API's own in-process callers use
@@ -327,8 +333,22 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `/opt/slicer-profiles` from the Dockerfile's `slicer-dist`; `Profiles.version` keys the
   slices), `presets.py` (a `SlicePlan` built into machine, process and filament files,
   `native_preset_key`), `slice_info.py` (grams and G-code from the sliced 3MF),
-  `transfer.py` and `transfer_token.py` (the worker's transfer URLs: presigned S3 GET or
-  the internal blob routes, a token MACed under a KEK-derived key; never log one),
+  `transfer.py` and `transfer_token.py` (the slicer worker's transfer URLs: presigned S3
+  GET or the internal blob routes, a token MACed under a KEK-derived key; never log one;
+  the print worker's LAN read URL is minted by the API too, `POST …/print/transfer-urls`,
+  always the internal route's, `READ_TTL`, only for a key the content index holds live as
+  a slicer's output (`SLICE_KIND` with `SLICED_OUTPUT_META`, which `Transfers.finish_put`
+  merges and `store/index.py` `put_in` keeps; its row swept or not; never the slicer's
+  inputs), else 403 `transfer-refused`; ScadBuddy strips print-host credential keys
+  whenever it parses a preset, and never stores, forwards or writes them into a slicer
+  file (`core/credentials.py` `strip_credentials`, applied at parse in `bambuddy/models.py`
+  `LocalPresetDetail`, nested keys too); the API strips the kept presets an older build
+  stored at its start and after each refresh, with no Bambuddy call (`slicing/held_presets.py`
+  `strip_kept_logged`); one window remains: preset files that older builds put in the
+  content store keep the keys until the content sweep collects them; the print worker, which holds the Bambuddy key,
+  can still read Bambuddy's local presets, including any such keys, in the bytes Bambuddy
+  sends, and what protects them is the Bambuddy key's scope; a backend that
+  fails the read is 503 `store_unavailable`, #5298 Task 32),
   `store.py` (`native_slices`; its blobs held in `blob_refs` while the row stands),
   `start.py` (`start_native_slice`: one running execution per copy, subject, copy sha256
   and presets, which the dialog and the run share; the dialog's Reslice gives a
@@ -454,7 +474,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `exchange_source`, and refuses the local store (`LocalStoreRefusedError`, plan D11). `run_inprocess_worker` is the API's
   `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain). `--queue bambuddy`
   (`run_print_worker`, #1060) is the print worker, deployment `scadbuddy-print`: no data
-  volume, Postgres and `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`); its
+  volume and no Postgres pool, `SCADBUDDY_API_INTERNAL_URL` only (`build_print_deps`,
+  `NoDatabaseSettings`, `tests/test_print_worker_nodb.py`), and no KEK (#5298 Task 33): it
+  exchanges its proof only (`exchange_source`, no view fallback), refuses to start
+  without one, and ignores `SCADBUDDY_DATABASE_URL` with a warning; its
   settings, the Bambuddy key among them, come from the API's CRUD route
   (`crud/print.py` `RemoteSettingsStore`, a `SettingsReader`; route `api/crud_print.py`,
   every sealed field but `PRINT_SECRETS` null, #5298), never from its own SQL; its print
@@ -475,8 +498,20 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   printer merge runs on the API alone; the access code is opened there and answered to
   `crud.print` only, `no-store`, never logged; a report's write (`advance`, which answers
   the print it ended and the one it started, the nudge's start) and a virtual printer's
-  sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and
-  signs a LAN print's transfer tokens), and it
+  sync take an `Idempotency-Key`; a virtual printer's sealed access code is opened on the API too,
+  `POST …/print/access-codes/virtual-printer`, and the LAN path's gate asks
+  `GET …/print/access-codes` whether the API opens access codes, area `access-codes`,
+  Task 33: with no KEK on the API an `auto` printer goes through Bambuddy and a `native`
+  one is 503 `LAN_NEEDS_KEK`), and its rack hotends' usage (`RemoteRackUsage`, a
+  `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
+  route and one transaction on the API; every write but `seen` takes an
+  `Idempotency-Key`; `spool_history` is the API's), and its spools, ScadBuddy's own spools
+  and their uses, the kept presets and a native slice's start (`RemoteSpoolStore`,
+  `RemoteNativeSpools`, `RemoteHeldPresets`, `RemoteNativeSlices`, area `spools`, #5298
+  Task 31: each write runs whole on the API under its lock; a provider's records and a
+  run's settle take an `Idempotency-Key`; the refresh, tray links and the shelf's edits
+  are the API's), and a LAN print's read URL of a native slice's file (`RemoteBlobs`
+  asks the API, area `transfer-urls`, #5298 Task 32; it signs nothing), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning

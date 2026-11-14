@@ -55,7 +55,7 @@ from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
-from scadbuddy.orders.archives import AttemptArchives, attempt_archives
+from scadbuddy.orders.archives import AttemptArchives, attempt_archives, mirror_archives
 from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
@@ -2843,33 +2843,76 @@ async def duplicate_item(
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
 
 
+#: How long a hand attempt's write waits for its archives' read (#6145). The read is
+#: one Bambuddy call per archive, which answers in well under a second when it is well.
+ARCHIVE_READ_TIMEOUT = 5.0
+
+
+async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> Fulfilment:
+    """A hand attempt with what its archives say copied onto it (#6132): job cost needs
+    its grams and seconds when the quote has none. Logged, never raised: the attempt is
+    recorded, and its archives are read again when they are shown. A read slower than
+    ``ARCHIVE_READ_TIMEOUT`` is stopped, and the attempt is answered as written (#6145)."""
+    if not attempt.archive_ids or attempt.print_run_id is not None:
+        return attempt
+    try:
+        written, _ = await asyncio.wait_for(
+            mirror_archives(orders.lifecycle, orders.integrations, attempt),
+            ARCHIVE_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.warning(
+            "a hand attempt's print archives were not read within %s s; recorded without them",
+            ARCHIVE_READ_TIMEOUT,
+        )
+        return attempt
+    except Exception:
+        logger.warning("could not copy a hand attempt's print archives", exc_info=True)
+        return attempt
+    return written
+
+
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments",
     response_model=Fulfilment,
     status_code=status.HTTP_201_CREATED,
     summary="Record a fulfilment attempt",
+    description=(
+        "An attempt by hand. With `archive_id`, the archive's grams, seconds and print "
+        "times are copied onto the attempt at once when a Bambuddy is linked (#6132); a "
+        "failed read, or one slower than 5 s, records the attempt without them."
+    ),
 )
 async def record_fulfilment(
     order_id: str, item_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
     check_path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.record_fulfilment(order_id, item_id, body, by))
+    attempt = await _run(lambda: orders.lifecycle.record_fulfilment(order_id, item_id, body, by))
+    return await _with_archive_facts(orders, attempt)
 
 
 @router.patch(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}",
     response_model=Fulfilment,
     summary="Edit an attempt not yet accepted",
+    description=(
+        "An edit keeps the attempt's archives. An attempt by hand with archives copies "
+        "their grams and seconds again when a Bambuddy is linked (#6132), as a read of "
+        "its archives does. Only the first copy writes their print times: after it, a time "
+        "the edit sets stays, and a time the first copy reads from the archives replaces "
+        "one the same edit sets. A failed read, or one slower than 5 s, keeps the edit."
+    ),
 )
 async def update_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, orders: OrdersDep
 ) -> Fulfilment:
     check_path(order_id, item_id, fulfilment_id)
     by = current_actor()
-    return await _run(
+    attempt = await _run(
         lambda: orders.lifecycle.update_fulfilment(order_id, item_id, fulfilment_id, body, by)
     )
+    return await _with_archive_facts(orders, attempt)
 
 
 class ArchiveCopy(BaseModel):

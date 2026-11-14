@@ -58,6 +58,7 @@ from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.output_reader import BlobMissingAnswerError, SlicedBlobs
 from scadbuddy.bambuddy.runs import PrintRunError
+from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
@@ -81,6 +82,7 @@ from scadbuddy.rack.rank import rack_serials
 from scadbuddy.rack.usage import (
     LanRackUsage,
     PickedHotend,
+    error_facts,
     group_spools,
     record_seen,
     save_lan_picks,
@@ -89,7 +91,7 @@ from scadbuddy.rack.usage import (
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.spools.native import NativeSpoolStore, spool_uses
-from scadbuddy.workflows.print_activities import heartbeating, raised_as
+from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
     LAN_PRINT_ACTIVITY,
@@ -230,8 +232,8 @@ class LanActivities:
         if sliced.blob_key is not None:
             if self.d.blobs is None:
                 raise _failed(
-                    "This worker cannot read the native slicer's files: it needs"
-                    " SCADBUDDY_API_INTERNAL_URL and SCADBUDDY_SECRET_KEY_FILE.",
+                    "This worker cannot read the native slicer's files: the API has no"
+                    " content store (set store_backend to s3 or bambuddy).",
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
             async with aclosing(self.d.blobs.stream(sliced.blob_key)) as chunks:
@@ -256,8 +258,10 @@ class LanActivities:
     async def lan_upload(self, input: LanUploadInput) -> LanUploaded:
         """The sliced 3MF, spooled as it downloads (heartbeating per chunk), then sent to
         the printer as ``input.remote_name`` in `UPLOAD_DIR`. Nothing starts here, so an
-        attempt that fails is safe to try again under the same name."""
-        _, lan = await self._printer(input.printer)
+        attempt that fails is safe to try again under the same name. The printer's read
+        (a CRUD call on the print worker) and the read URL's wait heartbeat, so a slow API
+        or Bambuddy never ends the attempt as a heartbeat timeout (#5298 Task 32)."""
+        _, lan = await heartbeating(self._printer(input.printer))
         with tempfile.SpooledTemporaryFile(max_size=SPOOL_IN_MEMORY) as spool:
             size = 0
             try:
@@ -468,7 +472,7 @@ class LanActivities:
                     # Usage only ranks (#1043): ranked as if no hotend had printed.
                     logger.warning(
                         "rack usage unreadable; ranked without it",
-                        extra={"printer": row.id, "error": type(exc).__name__},
+                        extra={"printer": row.id, **error_facts(exc)},
                     )
             chosen = choose_nozzles(
                 plan,
