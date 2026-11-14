@@ -1,7 +1,8 @@
 """The agent's schema migrations, which the API applies at start (#5299 D6).
 
-The agent's `ai_*` tables were created by the agent itself (`agent/src/db/migrations.ts`)
-until #5299: only the CRUD service may hold SQL access (#5295). Its files moved here byte
+The agent's `ai_*` tables were created by the agent itself until #5299: only the CRUD
+service may hold SQL access (#5295). Its runner is now the agent's tests' only
+(`agent/test/support/migrations.ts`). Its files moved here byte
 for byte, to ``backend/scadbuddy/migrations_agent/`` (`AGENT_MIGRATIONS_DIR`), and this
 module is a port of that runner, so a database it migrated reads the same to both:
 
@@ -19,11 +20,19 @@ module is a port of that runner, so a database it migrated reads the same to bot
   transaction every pending file runs in, each file through the simple query protocol
   (several statements per file).
 
-RULES FOR ADDING ONE (#491): add a NEW file to ``migrations_agent/``, named
-``<UTC timestamp>_<slug>.sql`` (``date -u +%Y%m%dT%H%MZ``), prefix every table ``ai_``,
-and add its id and SHA-256 to the agent's ``agent/src/db/expected-migrations.json``
-(``UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec vitest run test/schema.test.ts`` writes it),
-so the agent waits for it. Never edit, rename or remove a merged file.
+RULES FOR ADDING ONE (#491):
+
+- Add a NEW file to ``migrations_agent/``, named ``<UTC timestamp>_<slug>.sql``
+  (``date -u +%Y%m%dT%H%MZ``), and its id and SHA-256 to the agent's
+  ``agent/src/db/expected-migrations.json`` (``UPDATE_EXPECTED_MIGRATIONS=1 pnpm exec
+  vitest run test/schema.test.ts`` writes it), so the agent waits for it.
+- Never edit, rename or remove a merged file (even whitespace counts; ``.editorconfig``
+  leaves this directory's whitespace alone).
+- One story per file, named in a leading comment. Prefix every table ``ai_``.
+- Plain SQL, no parameters.
+- Secrets are never stored in the clear: use the envelope columns of the credentials
+  migration (``*_sealed bytea`` + ``dek_sealed bytea`` + ``kek_id text``, sealed by
+  ``agent/src/secrets.ts``). Tokens that are only ever compared are stored hashed.
 """
 
 from __future__ import annotations
