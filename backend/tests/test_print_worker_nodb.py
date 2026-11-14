@@ -454,15 +454,15 @@ async def _the_3mf(store: object, meta: object) -> bytes:
     return b"3mf"
 
 
-def _bambuddy_routes() -> respx.Route:
+def _bambuddy_routes(router: respx.MockRouter) -> respx.Route:
     """Bambuddy's library: an empty inbox folder, the upload, and the read that finds
     the copy (as `tests/api/test_send.py`'s `upload_route`)."""
-    respx.get(f"{BAMBUDDY_API}/printers/").mock(return_value=httpx.Response(200, json=[]))
-    respx.get(f"{BAMBUDDY_API}/library/files").mock(return_value=httpx.Response(200, json=[]))
-    respx.get(f"{BAMBUDDY_API}/library/files/41").mock(
+    router.get(f"{BAMBUDDY_API}/printers/").mock(return_value=httpx.Response(200, json=[]))
+    router.get(f"{BAMBUDDY_API}/library/files").mock(return_value=httpx.Response(200, json=[]))
+    router.get(f"{BAMBUDDY_API}/library/files/41").mock(
         return_value=httpx.Response(200, json={"id": 41, "filename": "demo.3mf", "folder_id": 2})
     )
-    return respx.post(f"{BAMBUDDY_API}/library/files").mock(
+    return router.post(f"{BAMBUDDY_API}/library/files").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -510,10 +510,10 @@ async def test_a_bambuddy_send_runs_on_a_worker_with_no_database_and_no_kek(
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     async with _api(api_store, tmp_path) as api:
         cfg = _worker_settings(tmp_path, api)
-        with pytest.MonkeyPatch.context() as refused, respx.mock(assert_all_called=False):
+        with pytest.MonkeyPatch.context() as refused, respx.mock(assert_all_called=False) as router:
             # The worker's calls to the API reach it; Bambuddy is respx's.
-            respx.route(host="127.0.0.1").pass_through()
-            uploaded = _bambuddy_routes()
+            router.route(host="127.0.0.1").pass_through()
+            uploaded = _bambuddy_routes(router)
             tried = _no_api_database(refused)
             deps = await asyncio.to_thread(build_print_deps, cfg)
             try:
