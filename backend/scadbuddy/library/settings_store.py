@@ -309,9 +309,11 @@ class ModelPrintChoices(BaseModel):
     the template's or the process's. ``part_settings`` are its slicer settings per
     filament slot (#5627, ``bambuddy/part_settings.py``), a model's or a library file's
     (#5628). Kept per model or file only, never at the print options' global or printer
-    scope, since a slot number means one file's colour. All default to "nothing remembered", so
-    a settings file written before them still loads; an empty ``nozzles`` means the
-    dialog's default.
+    scope, since a slot number means one file's colour. ``force_colour_match`` is the
+    spool step's "Wait for the right colour" (#6218), kept beside the spools it applies
+    to; ``None`` is nothing remembered, which the dialog and the agent read as on. All
+    default to "nothing remembered", so a settings file written before them still loads;
+    an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
@@ -323,6 +325,7 @@ class ModelPrintChoices(BaseModel):
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
     part_settings: PartSettingsMap | None = None
+    force_colour_match: bool | None = None
 
     @field_validator("part_settings")
     @classmethod

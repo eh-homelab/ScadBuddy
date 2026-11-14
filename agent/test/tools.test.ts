@@ -666,7 +666,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       copies: 2,
       plate_id: 1,
       all_plates: false,
-      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: false },
+      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: true },
       choices: {
         nozzles: [{ size: '0.6', flow: 'standard' }],
         tier: 'draft',
@@ -813,7 +813,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         expect(run.body).toMatchObject({
           printer: PRINTER,
           printer_id: null,
-          filament_plan: { slots: TRAYS.suggested, force_colour_match: false },
+          filament_plan: { slots: TRAYS.suggested, force_colour_match: true },
           choices: { nozzles: [{ size: '0.4', flow: 'standard' }], bed_type: 'Textured PEI Plate' },
         })
         expect(run.body).not.toHaveProperty('project_id')
@@ -1506,6 +1506,26 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids).toHaveLength(2)
       expect(ids[1]).toBe(ids[0])
     })
+  })
+
+  it('waits for the right colour unless the model remembers otherwise, or the call says (#6218)', async () => {
+    const fresh: { body?: unknown } = {}
+    server.use(choicesView(), ...capturedRun(fresh))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(fresh.body).toMatchObject({ filament_plan: { force_colour_match: true } })
+
+    const remembered: { body?: unknown } = {}
+    server.use(choicesView({ force_colour_match: false }), ...capturedRun(remembered))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(remembered.body).toMatchObject({ filament_plan: { force_colour_match: false } })
+
+    const asked: { body?: unknown } = {}
+    server.use(choicesView({ force_colour_match: false }), ...capturedRun(asked))
+    await tool('print_output').execute(
+      { output_id: OUT, filament_plan: { slots: [{ slot_id: 1, spool_id: 10 }], force_colour_match: true } },
+      ctx(),
+    )
+    expect(asked.body).toMatchObject({ filament_plan: { force_colour_match: true } })
   })
 
   it('passes a chosen project through', async () => {

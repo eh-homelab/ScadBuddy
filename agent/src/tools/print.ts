@@ -466,7 +466,17 @@ const PRINT_OUTPUT_INPUT = withSource({
   plate_id: z.number().int().min(1).default(1),
   all_plates: z.boolean().default(false),
   filament_plan: z
-    .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
+    .object({
+      slots: z.array(slotChoice),
+      force_colour_match: z
+        .boolean()
+        .optional()
+        .describe(
+          "Bambuddy's queue waits for a tray of each slot's colour before it starts (#6218). Omitted, it is " +
+            "what the model or file remembers (get_print_choices `model_choices.force_colour_match`) when the call " +
+            'leaves another choice to the dialog, else true',
+        ),
+    })
     .optional(),
   nozzles: nozzles.optional().describe('One size for the job; a second entry is the other extruder'),
   tier: tier.optional(),
@@ -1237,7 +1247,8 @@ export const printTools: Tool[] = [
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
       'time: the printer, per-slot spools, nozzles, the quality tier or named process, the print sequence, and ' +
-      'the slicer settings per filament slot (`part_settings`, #5627). Replaces the entry whole: an omitted ' +
+      'the slicer settings per filament slot (`part_settings`, #5627), and whether Bambuddy\'s queue waits for ' +
+      'each slot\'s colour (`force_colour_match`, #6218; nothing remembered is on). Replaces the entry whole: an omitted ' +
       'part is forgotten, and passing nothing forgets them all (get_print_choices shows the current ' +
       '`model_choices`). Settings per slot are kept per model or library file only, never by set_print_options: ' +
       "a slot number names one file's colour.",
@@ -1262,6 +1273,11 @@ export const printTools: Tool[] = [
           .optional()
           .describe("An Advanced-mode print sequence (#4970); omit for the template's own"),
         part_settings: partSettings,
+        force_colour_match: z
+          .boolean()
+          .nullable()
+          .optional()
+          .describe("Whether Bambuddy's queue waits for a tray of each slot's colour (#6218); omit or null for the default, on"),
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
@@ -1269,7 +1285,19 @@ export const printTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
     handler: async (
-      { slug, library_file_id, printer_id, printer, filament_plan, nozzles, tier, process_name, print_sequence, part_settings },
+      {
+        slug,
+        library_file_id,
+        printer_id,
+        printer,
+        filament_plan,
+        nozzles,
+        tier,
+        process_name,
+        print_sequence,
+        part_settings,
+        force_colour_match,
+      },
       { backend },
     ) => {
       const body = {
@@ -1281,6 +1309,7 @@ export const printTools: Tool[] = [
         process_name: process_name ?? null,
         print_sequence: print_sequence ?? null,
         part_settings: part_settings ?? null,
+        force_colour_match: force_colour_match ?? null,
       }
       if (library_file_id !== undefined) {
         return json(
@@ -1477,6 +1506,8 @@ export const printTools: Tool[] = [
       // say (`lan_printers`, the server's `hot_path_native`), never the tool's own guess.
       let native = lanOnly
       let slots = args.filament_plan?.slots
+      // #6218: what the model or file remembers, else on.
+      let forceColourMatch = args.filament_plan?.force_colour_match
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
       let processName: string | null | undefined = args.process_name
       if (processName !== undefined) chosenTier = null
@@ -1502,6 +1533,7 @@ export const printTools: Tool[] = [
         if (!lanOnly) printerId ??= view.printer_id ?? undefined
         bedType ??= view.bed_type
         const last = view.model_choices
+        forceColourMatch ??= last?.force_colour_match ?? true
         const remembered = last?.nozzles ?? []
         // With nothing remembered, the printer's defaults: one flow for both sides, High
         // Flow when either side has a High Flow nozzle of the size (#1895, #4272). A
@@ -1544,7 +1576,7 @@ export const printTools: Tool[] = [
         copies: args.copies ?? null,
         plate_id: args.plate_id,
         all_plates: args.all_plates,
-        filament_plan: { slots, force_colour_match: args.filament_plan?.force_colour_match ?? false },
+        filament_plan: { slots, force_colour_match: forceColourMatch ?? true },
         choices: {
           nozzles: chosenNozzles,
           tier: chosenTier ?? null,

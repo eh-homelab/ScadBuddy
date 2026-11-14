@@ -224,8 +224,13 @@ What is sent instead is the pair its scheduler actually matches on, in the shape
 own 3MF parser produces:
 
 - `filament_overrides`: `{slot_id, type, color, used_grams, force_color_match?}` per
-  slot. `force_color_match` is **opt-in** — on a class-targeted item, insisting can
-  leave the job unschedulable.
+  slot. `force_color_match` is **on by default** (#6218, the owner's decision on
+  2026-11-14): with it off, the scheduler treats colour as a preference at dispatch and
+  can print a part in the wrong colour when the right one is not loaded; with it on,
+  Bambuddy holds the queue item until a tray of the right colour is loaded. A caller can
+  still send `force_colour_match: false`. The dialog's spool step shows it as "Wait for
+  the right colour", remembered with the spools per model or library file
+  (`ModelPrintChoices.force_colour_match`; none remembered reads as on).
 - `required_filament_types`: the materials of the chosen spools.
 
 For the slice itself, a spool names its own preset (`slicer_filament`, e.g. `GFG00`),

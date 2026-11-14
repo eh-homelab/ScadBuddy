@@ -49,6 +49,8 @@ function describeChoices(choices: ModelPrintChoices, printerName: (id: number | 
   const spools = choices.filament_plan?.length ?? 0
   if (spools) parts.push(`${spools} ${spools === 1 ? 'spool' : 'spools'}`)
   if (choices.nozzles?.length) parts.push(`nozzles ${choices.nozzles.map((n) => n.size).join(' / ')} mm`)
+  // #6218 — on is the default, so only "off" is worth naming.
+  if (choices.force_colour_match === false) parts.push('any colour')
   return parts.join(' · ') || 'Choices remembered'
 }
 

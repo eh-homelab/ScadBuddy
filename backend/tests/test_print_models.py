@@ -91,9 +91,11 @@ def test_the_printer_is_part_of_the_key_only_without_a_bambuddy_id() -> None:
 def test_a_part_settings_requests_key_is_what_it_was_before_5627() -> None:
     """#5627 review: a read leaves unset part settings out, but a request's dump keeps
     them, so a retry that spans the deploy joins its run. The hash was computed on main
-    at b8e23b24c, before #5627."""
+    at b8e23b24c, before #5627, when the plan's ``force_colour_match`` was off by
+    default; the body sends it off, as every client did then (#6218)."""
     sent = request(
         printer_id=1,
+        filament_plan={"slots": [], "force_colour_match": False},
         part_settings={"2": {"top_shell_layers": 8, "sparse_infill_density": 20}},
     )
     assert (

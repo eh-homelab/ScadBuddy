@@ -231,12 +231,14 @@ class FilamentPlan(BaseModel):
 
     ``force_colour_match`` becomes ``force_color_match`` on every override, which is
     the flag Bambuddy's scheduler reads to require an exact type+colour match rather
-    than merely preferring one. It is off by default because it only bites on a
-    model-targeted queue item, where insisting can leave the job unschedulable.
+    than merely preferring one. It is on by default (#6218): with it off, the scheduler
+    can print a part in the wrong colour when the right one is not loaded; with it on,
+    Bambuddy holds the queue item until a tray of the right colour is loaded. A caller
+    may still send ``False``.
     """
 
     slots: list[SlotChoice] = Field(default_factory=list)
-    force_colour_match: bool = False
+    force_colour_match: bool = True
 
     def spool_for(self, slot_id: int) -> int | None:
         return next((slot.spool_id for slot in self.slots if slot.slot_id == slot_id), None)

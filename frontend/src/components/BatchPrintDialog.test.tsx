@@ -617,7 +617,7 @@ const REQUEST: PrintRunRequest = {
           }
         : choice,
     ),
-    force_colour_match: false,
+    force_colour_match: true,
   },
   choices: { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'standard', bed_type: 'Textured PEI Plate' },
   plate_id: 1,

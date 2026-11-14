@@ -380,18 +380,30 @@ def test_the_overrides_carry_the_shape_bambuddys_scheduler_reads() -> None:
     built = options(requirements=[SlotNeed(slot_id=1, colour="#0047BB", used_grams=12.5)])
     fields = queue_filaments(built, FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]))
     assert fields.filament_overrides == [
-        {"slot_id": 1, "type": "PLA", "color": "#0047BB", "used_grams": 12.5}
+        {
+            "slot_id": 1,
+            "type": "PLA",
+            "color": "#0047BB",
+            "used_grams": 12.5,
+            "force_color_match": True,
+        }
     ]
     assert fields.required_filament_types == ["PLA"]
-    assert "force_color_match" not in fields.filament_overrides[0]
 
 
-def test_force_colour_match_is_opt_in() -> None:
-    """On a model-targeted item it can leave the job unschedulable, so it is off unless
-    the caller asks."""
+def test_force_colour_match_is_on_by_default() -> None:
+    """With it off, Bambuddy's scheduler may print a part in the wrong colour when the
+    right one is not loaded; with it on, it holds the item until it is (#6218)."""
     built = options()
-    plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)], force_colour_match=True)
+    plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)])
+    assert plan.force_colour_match is True
     assert queue_filaments(built, plan).filament_overrides[0]["force_color_match"] is True
+
+
+def test_force_colour_match_can_be_turned_off() -> None:
+    built = options()
+    plan = FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)], force_colour_match=False)
+    assert "force_color_match" not in queue_filaments(built, plan).filament_overrides[0]
 
 
 def test_required_types_are_deduplicated_in_slot_order() -> None:

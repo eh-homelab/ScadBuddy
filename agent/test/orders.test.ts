@@ -1076,7 +1076,7 @@ describe('pricing tools (#4250)', () => {
     expect(body).toEqual({
       ...SLICE,
       printer,
-      filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
+      filament_plan: { ...SLICE.filament_plan, force_colour_match: true },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     // #5352: the quote slices on the route its print will take.
@@ -1151,7 +1151,7 @@ describe('pricing tools (#4250)', () => {
     // Copies and plates are the item's: the tool sends none.
     expect(body).toEqual({
       ...dialog,
-      filament_plan: { ...dialog.filament_plan, force_colour_match: false },
+      filament_plan: { ...dialog.filament_plan, force_colour_match: true },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })
     expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
