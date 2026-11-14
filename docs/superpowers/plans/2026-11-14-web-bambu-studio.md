@@ -74,7 +74,7 @@
 **Interfaces:**
 - Produces: `Clearances(max_radius: float, radius: float, height_to_rod: float, height_to_lid: float, dist_to_rod: float, nozzle_height: float, printable_height: float, bed_exclude: list[Polygon2], wrapping_exclude: list[Polygon2])`; `clearances_for(printer_model: str) -> Clearances | None`; `RuleObject(id: str, hull: list[tuple[float,float]], height: float)`; `RuleWarning(rule: Literal['hull_clearance','too_tall_rod','too_tall_lid','bed_exclude','wrapping_exclude'], objects: list[str], detail: str, source: str)`; `check_plate(objects: Sequence[RuleObject], *, sequence: Literal['by layer','by object'], clearances: Clearances, skirt_mm: float, wrapping_detection: bool) -> list[RuleWarning]`; `obj_distance(objects, clearances, skirt_mm, by_object: bool) -> float`.
 
-- [ ] **Step 1: Write the failing tests** — `test_h2c_values`: `clearances_for('Bambu Lab H2C')` has `max_radius == 96`, `radius == 49`, `height_to_rod == 47.4`, `height_to_lid == 201`, `dist_to_rod == 50`, `wrapping_exclude == [[(145,310),(251,310),(251,326),(145,326)]]`. `test_hull_clearance_h2c`: two 20 mm squares 95 mm apart in X, both 30 mm tall (shorter than `height_to_rod` 47.4, so no rod rule applies, and taller than the H2C's `nozzle_height` 4, so `max_radius` applies), by object → one `hull_clearance` warning; 96 mm apart → none. `test_skirt_adds`: skirt 10 mm → `obj_distance == max(47.9 + 5, 10)`. `test_tall_before_overlapping_y`: object A 70 mm prints first, B prints after in an overlapping Y band (bands grown by 25 mm per side) → `too_tall_rod` on A; swap order → none. `test_last_object_uses_printable_height`. `test_wrapping_exclude_warns_in_both_modes`: an object in the wrapping area → `wrapping_exclude` in both modes (spec assumption 11). `test_menorah_layout`: the owner's 3-plate layout from #6246 → no warnings; all 10 candles on one plate → warnings.
+- [ ] **Step 1: Write the failing tests** — `test_h2c_values`: `clearances_for('Bambu Lab H2C')` has `max_radius == 96`, `radius == 49`, `height_to_rod == 47.4`, `height_to_lid == 201`, `dist_to_rod == 50`, `wrapping_exclude == [[(145,310),(251,310),(251,326),(145,326)]]`. `test_hull_clearance_h2c`: two 20 mm squares 95 mm apart in X, both 30 mm tall (shorter than `height_to_rod` 47.4, so no rod rule applies, and taller than the H2C's `nozzle_height` 4, so `max_radius` applies), by object → one `hull_clearance` warning; 96 mm apart → none. `test_skirt_adds`: skirt 10 mm → `obj_distance == max(47.9 + 5, 10)`. `test_tall_before_overlapping_y`: object A 70 mm prints first, B 30 mm (shorter than `height_to_rod`) prints after in an overlapping Y band (bands grown by 25 mm per side) → `too_tall_rod` on A; swap order → none. `test_last_object_uses_printable_height`. `test_wrapping_exclude_warns_in_both_modes`: an object in the wrapping area → `wrapping_exclude` in both modes (spec assumption 11). `test_menorah_layout`: the owner's 3-plate layout from #6246 → no warnings; all 10 candles on one plate → warnings.
 - [ ] **Step 2: Run** `cd backend && uv run pytest tests/render/test_plate_rules.py -v` — expect FAIL.
 - [ ] **Step 3: Implement** with shapely. It is not a backend dependency today, so add `shapely` to `backend/pyproject.toml` and `backend/uv.lock`. Use `buffer(obj_distance, join_style='round')` for the grown hull. Each rule's docstring carries its `Print.cpp` link from spec §5.2. Write each test case also as a vector file (`{input, expected}`).
 - [ ] **Step 4: Run** — expect PASS.
@@ -101,7 +101,7 @@
 
 ### Task 4a: Warn when a by-object print has one multi-colour object (issue #6245)
 
-**Files:** Modify `backend/scadbuddy/bambuddy/clearance.py`; Test `backend/tests/bambuddy/test_clearance.py`.
+**Files:** Modify `backend/scadbuddy/bambuddy/clearance.py`; Test `backend/tests/test_clearance.py`.
 
 - [ ] **Step 1: Test** `test_one_object_by_object_warns`: a plate with one object of several parts and `print_sequence='by object'` → a warning whose text says the plate is one object and names `echo(objects = N)`.
 - [ ] **Step 2: Run, fail. Step 3: Implement. Step 4: Run, pass.**
@@ -122,7 +122,7 @@
 
 ### Task 5: The print check uses the rules (issue #6246)
 
-**Files:** Modify `backend/scadbuddy/bambuddy/clearance.py` (call `plate_rules.check_plate` with hulls from `objects3mf.plate_boxes` grown to hulls); Test `backend/tests/bambuddy/test_clearance.py`.
+**Files:** Modify `backend/scadbuddy/bambuddy/clearance.py` (call `plate_rules.check_plate` with hulls from `objects3mf.plate_boxes` grown to hulls); Test `backend/tests/test_clearance.py`.
 
 - [ ] **Step 1: Test** `test_h2c_reads_max_radius`: two objects 60 mm apart on the H2C, by object → warning (it passed with 49 mm before). **Steps 2–4:** fail, implement, pass.
 - [ ] **Step 5: Commit** `fix(print): the by-object check reads extruder_clearance_max_radius and the Y band (#6246)`.

@@ -503,13 +503,15 @@ a pending action. Printing stays one.
 ## 12. Milestones
 
 1. **ORD-2026-2 prints by object from ScadBuddy.** The rules module, the print check and
-   Arrange's by-object goal (#6246), the template split (#6245), `process_overrides`
-   (#2998), and remembered choices (#6219). No editor yet.
-2. **The editor in the back office.** The plate document, the operations, `PlateEditor`,
-   transforms, object operations, per-object and per-part settings (#6253), the agent's
-   plate tools.
+   Arrange's by-object goal (#6246), the real prime-tower footprint (#3770), the template
+   split (#6245), `process_overrides` (#2998), and remembered choices (#6219). No editor
+   yet.
+2. **The editor in the back office.** The settings catalogue (#6273), the plate document,
+   the operations, `PlateEditor` with the read-only hosts moved to it, transforms, object
+   operations, per-object and per-part settings (#6253), the agent's plate tools.
 3. **Everywhere else.** Halos (#3772), pinning (#2330), assemblies, the catalogue in the
-   settings list, storefront and read-only hosts.
+   settings list, the storefront and quote-link hosts, and the ORD-2026-2 end-to-end
+   test.
 
 The epic is done when milestone 3 ships and the ORD-2026-2 end-to-end test passes.
 
