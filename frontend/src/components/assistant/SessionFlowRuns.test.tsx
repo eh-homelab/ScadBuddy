@@ -1,6 +1,6 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ATTENTION_POLL_MS } from '../../agent/attention'
+import { fakePendingChanges } from '../../lib/pendingChanges.fake'
 import { setFlowDetails, setFlowRunChildren } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
 import { SessionFlowRuns } from './SessionFlowRuns'
@@ -45,17 +45,17 @@ describe('SessionFlowRuns', () => {
     expect(within(waiting).getByRole('link', { name: 'Nightly swap' })).toHaveAttribute('href', '/workflows/runs/run-escalated')
   })
 
-  it("re-reads the queues while a child's call is listed, which no run topic announces", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
+  it("re-reads the queues on the agent's pending-input stream while a child's call is listed, which no run topic announces (#265)", async () => {
+    const stream = fakePendingChanges()
     try {
       renderPage(<SessionFlowRuns sessionId="sess-escalated" />)
       const waiting = await screen.findByRole('list', { name: 'Waiting in runs started here' })
       expect(waiting).toHaveTextContent('print_output (in a session it talks to)')
       setFlowRunChildren('run-escalated', [])
-      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await stream.changed()
       await waitFor(() => expect(screen.getByRole('list', { name: 'Waiting in runs started here' })).not.toHaveTextContent('print_output'))
     } finally {
-      vi.useRealTimers()
+      vi.unstubAllGlobals()
     }
   })
 })

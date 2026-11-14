@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, Param } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
 import { ListingEditor } from './ListingEditor'
-import { defaultsFor, emptyDraft, listingInput, type ListingDraft } from './listingDraft'
+import { defaultsFor, emptyDraft, listingInput, previewListing, type ListingDraft } from './listingDraft'
 
 const COMMIT = 'a'.repeat(40)
 const PLA: Filament = {
@@ -93,6 +93,43 @@ describe('ListingEditor (#5282)', () => {
       params: { body_color: { kind: 'choice', choices: [] } },
     }
     expect(listingInput(draft, keychainSchema, [PLA]).params).toEqual({ body_color: { kind: 'choice', choices: ['#FF0000'] } })
+  })
+
+  it('keeps an offered colour’s own label when it is saved (#6137)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('name-keychain', COMMIT),
+      title: 'Tag',
+      colours: [PLA.id],
+      params: { body_color: { kind: 'choice', choices: [], label: 'Colour of the letters' } },
+    }
+    expect(listingInput(draft, keychainSchema, [PLA]).params).toEqual({
+      body_color: { kind: 'choice', choices: ['#FF0000'], label: 'Colour of the letters' },
+    })
+  })
+
+  it('previews each label and placeholder as the public page shows them (#6137)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        { ...keychainSchema.parameters!.find((p) => p.name === 'body_color')!, caption: 'Letter colour (extruder 2)' },
+        { name: 'line', type: 'string', initial: 'Your name', caption: 'Name', group: 'Text', max_length: 20 } as Param,
+        { name: 'size', type: 'slider', initial: 40, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param,
+      ],
+    }
+    const draft: ListingDraft = {
+      ...emptyDraft('name-keychain', COMMIT),
+      title: 'Tag',
+      colours: [PLA.id],
+      params: {
+        body_color: { kind: 'choice', choices: [] },
+        line: { kind: 'text', max_length: 20 },
+        size: { kind: 'number', min: 20, max: 80, step: 1, label: 'How big' },
+      },
+    }
+    const shown = previewListing(draft, schema, [PLA], [], () => '').params
+    expect(shown.body_color!.label).toBe('Letter colour')
+    expect(shown.size!.label).toBe('How big')
+    expect(shown.line).toMatchObject({ label: 'Name', placeholder: 'Your name' })
   })
 
   it('locks a numeric select at one of its options, as a number', async () => {

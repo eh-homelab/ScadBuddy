@@ -2900,14 +2900,29 @@ async def duplicate_item(
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
 
 
+#: How long a hand attempt's write waits for its archives' read (#6145). The read is
+#: one Bambuddy call per archive, which answers in well under a second when it is well.
+#: Only the read is timed: a copy that has started is finished and answered (#6167).
+ARCHIVE_READ_TIMEOUT = 5.0
+
+
 async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> Fulfilment:
     """A hand attempt with what its archives say copied onto it (#6132): job cost needs
     its grams and seconds when the quote has none. Logged, never raised: the attempt is
-    recorded, and its archives are read again when they are shown."""
+    recorded, and its archives are read again when they are shown. A read slower than
+    ``ARCHIVE_READ_TIMEOUT`` is stopped, and the attempt is answered as written (#6145)."""
     if not attempt.archive_ids or attempt.print_run_id is not None:
         return attempt
     try:
-        written, _ = await mirror_archives(orders.lifecycle, orders.integrations, attempt)
+        written, _ = await mirror_archives(
+            orders.lifecycle, orders.integrations, attempt, ARCHIVE_READ_TIMEOUT
+        )
+    except TimeoutError:
+        logger.warning(
+            "a hand attempt's print archives were not read within %s s; recorded without them",
+            ARCHIVE_READ_TIMEOUT,
+        )
+        return attempt
     except Exception:
         logger.warning("could not copy a hand attempt's print archives", exc_info=True)
         return attempt
@@ -2922,7 +2937,8 @@ async def _with_archive_facts(orders: OrdersComponent, attempt: Fulfilment) -> F
     description=(
         "An attempt by hand. With `archive_id`, the archive's grams, seconds and print "
         "times are copied onto the attempt at once when a Bambuddy is linked (#6132); a "
-        "failed read records the attempt without them."
+        f"failed read, or one slower than {ARCHIVE_READ_TIMEOUT:g} s, records the attempt "
+        "without them."
     ),
 )
 async def record_fulfilment(
@@ -2942,7 +2958,9 @@ async def record_fulfilment(
         "An edit keeps the attempt's archives. An attempt by hand with archives copies "
         "their grams and seconds again when a Bambuddy is linked (#6132), as a read of "
         "its archives does. Only the first copy writes their print times: after it, a time "
-        "the edit sets stays. A failed read keeps the edit."
+        "the edit sets stays, and a time the first copy reads from the archives replaces "
+        "one the same edit sets. A failed read, or one slower than "
+        f"{ARCHIVE_READ_TIMEOUT:g} s, keeps the edit."
     ),
 )
 async def update_fulfilment(

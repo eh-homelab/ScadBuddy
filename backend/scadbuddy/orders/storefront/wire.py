@@ -13,17 +13,29 @@ commit's defaults.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.orders.customer_links import MAX_LINK_CHARS
 from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import (
+    MAX_COLOUR_CHOICES,
+    MAX_LINK_NOTE,
+    MAX_MODEL_FILE_BYTES,
+    MAX_MODEL_FILES,
+    MAX_PRINT_LINKS,
+    MAX_PURCHASE_LINKS,
+    MAX_REQUEST_TEXT,
+    MAX_UPLOAD_NAME,
+)
 from scadbuddy.storefront.wire import (
     MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
 )
@@ -34,16 +46,51 @@ from scadbuddy.storefront.wire import (
     REQUEST_KINDS as REQUEST_KINDS,
 )
 
+#: The most units of a "print my own model" request: a listing item's own cap
+#: (`AddListingItem`).
+MAX_ITEM_QUANTITY = 100
+
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
 #: The most text a customer may type into a free text parameter.
 MAX_TEXT_LENGTH = 200
 
 
-class NumberBound(BaseModel):
-    """A number the customer picks between ``min`` and ``max``, on ``step`` when set."""
+#: The most a listing's own label for a parameter may hold.
+MAX_LABEL_LENGTH = 200
+#: A template caption's note of the extruder that prints a colour: the shop's, not the
+#: customer's (#6137).
+#: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
+EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
 
+
+def shown_label(name: str, label: str | None, caption: str | None) -> str:
+    """What the customer reads for parameter ``name``: the listing's own ``label``, else
+    the template's ``caption`` without its extruder note, else the name (#6137). The back
+    office's preview applies the same rule (`frontend/src/storefront/params.ts`
+    `shownLabel`): change both together."""
+    if label:
+        return label
+    if caption:
+        return " ".join(EXTRUDER_NOTE.sub(" ", caption).split()) or caption
+    return name
+
+
+class _Bound(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    #: The listing's own name for the parameter, which the customer reads instead of the
+    #: template's caption (#6137).
+    label: (
+        Annotated[
+            str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_LABEL_LENGTH)
+        ]
+        | None
+    ) = None
+
+
+class NumberBound(_Bound):
+    """A number the customer picks between ``min`` and ``max``, on ``step`` when set."""
 
     kind: Literal["number"]
     min: float
@@ -51,21 +98,17 @@ class NumberBound(BaseModel):
     step: float | None = Field(default=None, gt=0)
 
 
-class ChoiceBound(BaseModel):
+class ChoiceBound(_Bound):
     """One of ``choices``. For a ``// color`` parameter, each choice is the colour of one
     of the listing's filaments. An empty list is refused when the listing is saved (422
     ``listing_choice_empty``), with a sentence that names the parameter."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["choice"]
     choices: list[ParamValue]
 
 
-class TextBound(BaseModel):
+class TextBound(_Bound):
     """Free text of at most ``max_length`` characters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["text"]
     max_length: int = Field(ge=1, le=MAX_TEXT_LENGTH)
@@ -156,9 +199,9 @@ class ListingOrder(BaseModel):
 
 
 class _Shown(BaseModel):
-    """What the page shows beside a bound: the schema's label (its caption, else its
-    name) and group, and whether it is a ``// color`` parameter, whose choices are the
-    colours of the listing's filaments. The schema has no help text to show."""
+    """What the page shows beside a bound: its label (`shown_label`) and the schema's
+    group, and whether it is a ``// color`` parameter, whose choices are the colours of
+    the listing's filaments. The schema has no help text to show."""
 
     label: str
     group: str = ""
@@ -166,17 +209,21 @@ class _Shown(BaseModel):
 
 
 class PublicNumber(NumberBound, _Shown):
-    pass
+    label: str
 
 
 class PublicChoice(ChoiceBound, _Shown):
+    label: str
     #: A colour's choices are the listing filaments the price book still has, so none
     #: may be left.
     choices: list[ParamValue]
 
 
 class PublicText(TextBound, _Shown):
-    pass
+    label: str
+    #: The template's default text, which the design uses when the field is left blank
+    #: (#6137); null when it has none.
+    placeholder: str | None = None
 
 
 PublicParam = Annotated[PublicNumber | PublicChoice | PublicText, Field(discriminator="kind")]
@@ -283,6 +330,32 @@ class DraftAttachment(BaseModel):
     url: str
 
 
+SourceKind = Literal["file", "link"]
+SourcePurpose = Literal["print", "purchase"]
+CheckStatus = Literal["checking", "ready", "refused", "failed"]
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+
+
+class DraftSource(BaseModel):
+    """A file or a link of a request item, as its customer reads it. A link is text only:
+    the page shows it escaped, never as an anchor (spec 2026-11-13 §9.3). A file's check
+    (``checking``, ``ready``, ``refused`` with ``check_reason``, ``failed``) is the intake
+    worker's (§7)."""
+
+    id: str
+    kind: SourceKind
+    purpose: SourcePurpose
+    filename: str | None = None
+    size: int | None = None
+    url: str | None = None
+    note: str = ""
+    check_status: CheckStatus | None = None
+    check_reason: str | None = None
+    status: SourceStatus
+
+
 class DraftItem(BaseModel):
     """An item of the visitor's draft. ``inputs`` are a model item's parameter values
     (``labels`` names each as the page shows it), ``notes`` a request's text; each is None
@@ -298,6 +371,75 @@ class DraftItem(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     notes: str | None
     attachments: list[DraftAttachment]
+    #: A request's files and links (#6133): its models, and the things to buy.
+    sources: list[DraftSource] = Field(default_factory=list)
+    #: Whether the request is a "print my own model" request (#6133), not a design one.
+    own_model: bool = False
+
+
+class UploadSlotAsk(BaseModel):
+    """One file the visitor will upload (#6133, spec 2026-11-13 §6.2): its name, its exact
+    size in bytes and its type. The store refuses a body of any other size or type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=MAX_UPLOAD_NAME)
+    size: int = Field(ge=1, le=MAX_MODEL_FILE_BYTES)
+    media_type: Literal["model/stl", "model/3mf"]
+
+
+class UploadSlotsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[UploadSlotAsk] = Field(min_length=1, max_length=MAX_MODEL_FILES)
+
+
+class UploadSlot(BaseModel):
+    """Where the browser PUTs one file: ``url`` with ``headers``, until ``expires_at``.
+    The URL carries a signature: it is the visitor's alone and is never logged."""
+
+    id: str
+    filename: str
+    url: str
+    headers: dict[str, str]
+    expires_at: datetime
+
+
+class UploadSlots(BaseModel):
+    uploads: list[UploadSlot]
+
+
+class LinkAsk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=MAX_LINK_CHARS)
+    purpose: SourcePurpose = "print"
+    note: str = Field(default="", max_length=MAX_LINK_NOTE)
+
+
+class ColourAsk(BaseModel):
+    """The colours the visitor asked for: the shop's choice, or price book filaments by
+    id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_choice: bool = True
+    filaments: list[str] = Field(default_factory=list, max_length=MAX_COLOUR_CHOICES)
+
+
+class ModelRequestBody(BaseModel):
+    """A "print my own model" request (#6133, spec 2026-11-13 §6.3): the upload slots the
+    browser filled, the links, one quantity, the colours and a note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    uploads: list[str] = Field(default_factory=list, max_length=MAX_MODEL_FILES)
+    links: list[LinkAsk] = Field(
+        default_factory=list, max_length=MAX_PRINT_LINKS + MAX_PURCHASE_LINKS
+    )
+    quantity: int = Field(default=1, ge=1, le=MAX_ITEM_QUANTITY)
+    colours: ColourAsk = Field(default_factory=ColourAsk)
+    note: str = Field(default="", max_length=MAX_REQUEST_TEXT)
 
 
 class DraftView(BaseModel):

@@ -102,13 +102,17 @@ async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> lis
 
 
 async def mirror_archives(
-    lifecycle: Lifecycle, integrations: OrderIntegrations, attempt: Fulfilment
+    lifecycle: Lifecycle,
+    integrations: OrderIntegrations,
+    attempt: Fulfilment,
+    read_timeout: float | None = None,
 ) -> tuple[Fulfilment, list[ArchiveFacts]]:
     """The attempt with its archives' facts copied (once its print settled), and those
     facts. An attempt recorded by hand naming its archive (#4251, a print attached to
     the item from its own page) copies that archive's, its print being over. Nothing is
     asked without a Bambuddy, for an attempt by hand naming none, or one whose run
-    Bambuddy has linked no archive to yet."""
+    Bambuddy has linked no archive to yet. A read of Bambuddy slower than
+    ``read_timeout`` raises ``TimeoutError`` before anything is written (#6167)."""
     if not integrations.linked:
         return attempt, []
     if attempt.print_run_id is None:
@@ -118,7 +122,7 @@ async def mirror_archives(
         settled = attempt.finished_at is not None
     if not archive_ids:
         return attempt, []
-    facts = await _facts(integrations, archive_ids)
+    facts = await asyncio.wait_for(_facts(integrations, archive_ids), read_timeout)
     if not settled or not facts:
         return attempt, facts
     started = [f.started_at for f in facts if f.started_at is not None]

@@ -131,11 +131,15 @@ async def test_the_api_restarting_is_waited_out() -> None:
 async def test_the_print_worker_reads_native_files_remotely_and_closes_it(
     pg_conninfo: str, tmp_path: Path
 ) -> None:
+    # The worker ignores the URL and needs a proof to exchange (#5298 Task 33).
+    proof = tmp_path / "bootstrap"
+    proof.write_text("p" * 40)
     settings = Settings(
         database_url=pg_conninfo,
         temporal_address=UNUSED_TEMPORAL_ADDRESS,
         data_dir=tmp_path / "data",
         api_internal_url=BASE,
+        service_bootstrap_file=proof,
     )
     deps = await asyncio.to_thread(build_print_deps, settings)
     library = deps.library

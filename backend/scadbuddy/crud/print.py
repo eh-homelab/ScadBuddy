@@ -31,6 +31,40 @@ refuses the methods only the API calls (`PRINTERS_API_ONLY`), `link_bambuddy` am
 `RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
 4); sent again, the first record answers.
 
+`RemoteRackUsage` is `rack/usage.py` `RackUsageStore` (Q27, #5298 Task 30) for the
+methods the print worker calls: the hotends a run sees, their usage, a Bambuddy run's
+picks, the follow's settle of its archives, a LAN start's picks and the settles of a LAN
+start, from the follow (`lan_settle_hook`), ``lan_wait`` and the printer's watch. It holds
+no pool. A LAN start's picks replace an earlier pick of that start (deletes and inserts),
+so they are one route, one transaction on the API (plan D6). ``seen`` is natural. Every
+other write answers the rows it wrote, which a resend would not repeat, so each takes an
+``Idempotency-Key``. A queue item's picks and a run's settle (`settle_lan`, whose body a
+retried attempt sends again unchanged) take `WriteKeys` ``rack`` inside an activity: a
+retried attempt's same write answers as the lost one did, and one whose body differs is
+refused 422 and sent again under a new key, as `RemoteBlobIndex` does. The others take a
+new UUID per call, which the client sends again on its retries: a LAN start's picks,
+which a retried attempt ranks again (the newer pick must replace the earlier one, never
+replay it), a settled archive's rows, whose body carries the settle's ``now()``, and the
+watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys across
+attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
+API's (the rack usage route).
+
+`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets` and `RemoteNativeSlices`
+are `spools/store.py` `SpoolStore`, `spools/native.py` `NativeSpoolStore`,
+`slicing/held_presets.py` `HeldPresetStore` and `slicing/store.py` `NativeSliceStore`
+(Q28-Q30, #5298 Task 31) for the methods the print worker calls: a native run's overlay
+and the native provider's recache after a print (``overlay``, ``replace_records``,
+``failed``), the shelf, a LAN start's uses and their settle (``list``, ``any``,
+``record_uses``, ``settle_uses``), the kept presets a native run reads (``rows``,
+``documents``) and a native slice's ``start``. None holds a pool, and none is called in
+the printer watch. Each SQL write is one transaction, under the spools' advisory lock,
+the uses' row locks or the slice key's lock, so each is one route run whole on the API
+(plan D6). ``failed``, ``record_uses`` and ``start`` are natural (an upsert, ``ON CONFLICT
+DO NOTHING``, and the key's newest row). ``replace_records`` and ``settle_uses`` take an
+``Idempotency-Key`` of their own, a new UUID per call, sent again on the client's
+retries: a refresh's body carries its time, and a settle runs in the follow's one long
+activity. The refresh, the tray links and the shelf's edits are the API's.
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -73,16 +107,25 @@ import logging
 import threading
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Collection, Iterable, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime, timedelta
 from typing import Any, NoReturn
 from urllib.parse import quote, urlencode
+from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.copy_leases import CopyLease, LeaseLostError, hold_lease
+from scadbuddy.bambuddy.models import LocalPreset, LocalPresetDetail
 from scadbuddy.bambuddy.print_links import (
     LinkedPrint,
     PrintLink,
@@ -103,11 +146,17 @@ from scadbuddy.bambuddy.uploads import (
     ProjectTarget,
     SlicedCopy,
 )
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.events import Event, PrintOutcome, Subscription
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import CLOSE_TIMEOUT, DEFAULT_OUTBOX_SIZE, Outbox
-from scadbuddy.core.secrets import Kek, SealError
-from scadbuddy.crud.client import CrudClient, CrudRefusedError, CrudSyncClient
+from scadbuddy.core.secrets import SealError
+from scadbuddy.crud.client import (
+    CrudClient,
+    CrudRefusedError,
+    CrudSyncClient,
+    CrudUnavailableError,
+)
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.crud.idempotency import KEY_PROBLEM
 from scadbuddy.crud.render import WriteKeys
@@ -128,6 +177,13 @@ from scadbuddy.printers.store import (
     VirtualOutcome,
     printer_uuid,
 )
+from scadbuddy.rack.rank import Usage
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.slicing.held_presets import HeldPresetStore, HeldRow
+from scadbuddy.slicing.store import NativeSlice, NativeSliceStore, SliceSubjectError
+from scadbuddy.spools.models import Overlay, SeenTray, SpoolSnapshot
+from scadbuddy.spools.native import NativeSpool, NativeSpoolStore, SpoolUse
+from scadbuddy.spools.store import SpoolStore
 
 logger = logging.getLogger(__name__)
 
@@ -840,18 +896,13 @@ API_NEEDS_KEK = "LAN printing needs SCADBUDDY_SECRET_KEY_FILE on the API"
 class RemotePrinterStore(PrinterStore):
     """Blocking: called through ``asyncio.to_thread``, as the SQL store is. No pool:
     every method the worker calls is a route under ``…/print/printers`` (areas
-    ``printer-ensure`` and ``printers``). A row is made or merged on the API, which
-    announces a merge. ``kek`` is the worker's own: the API opens the access code (plan
-    D8), but the worker still needs its KEK for a virtual printer's sealed request
-    (`bambuddy/virtual_printers.py`) and a LAN print's transfer tokens (`RemoteBlobs`),
-    so `bambuddy/print_run.py` `_registry_path` still reads it."""
+    ``printer-ensure``, ``printers`` and ``access-codes``). A row is made or merged on
+    the API, which announces a merge. The worker holds no KEK (#5298 Task 33): the API
+    opens a printer's access code (plan D8) and a virtual printer's sealed one, says
+    whether it can open them at all, and mints a LAN print's read URL (Task 32)."""
 
-    def __init__(
-        self, client: CrudSyncClient, kek: Kek | None, *, previous_kek: Kek | None = None
-    ) -> None:
+    def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
-        self.kek = kek
-        self.previous_kek = previous_kek
         #: The API announces a merge; the worker announces nothing of the registry's.
         self.events = None
 
@@ -897,6 +948,37 @@ class RemotePrinterStore(PrinterStore):
             if error.status == 404 and reason == NO_SUCH_PRINTER:
                 raise PrinterNotFoundError(printer_id) from None
             if reason == NOT_CONFIGURED:
+                raise KekMissingError(API_NEEDS_KEK) from None
+            if _refused_as(error, ACCESS_CODE_UNREADABLE):
+                raise SealError("the access code was sealed under another key") from None
+            raise
+        return str(response.json()["code"])
+
+    def opens_access_codes(self) -> bool:
+        """Whether the API can open an access code (it holds the KEK), asked on each call:
+        an API pod may roll with or without its key. A short read, bounded as the watch's
+        calls are (`WATCH_CALL_TIMEOUT`, `WATCH_CALL_BUDGET`): an API out of reach is the
+        client's `CrudUnavailableError`, which the run's retry tries again."""
+        response = self._client.request(
+            "GET", f"{BASE}/access-codes", timeout=WATCH_CALL_TIMEOUT, budget=WATCH_CALL_BUDGET
+        )
+        return bool(response.json()["opens"])
+
+    def open_virtual_access_code(self, sealed: str, context: str) -> str:
+        """A virtual printer's sealed access code, opened on the API. Raises
+        `KekMissingError` when the API has no KEK and `SealError` when ``sealed`` does not
+        open for ``context``; no exception here carries the code."""
+        body = {"sealed": sealed, "context": context}
+        try:
+            response = self._client.request(
+                "POST",
+                f"{BASE}/access-codes/virtual-printer",
+                json=body,
+                timeout=WATCH_CALL_TIMEOUT,
+                budget=WATCH_CALL_BUDGET,
+            )
+        except CrudRefusedError as error:
+            if error.problem.get("reason") == NOT_CONFIGURED:
                 raise KekMissingError(API_NEEDS_KEK) from None
             if _refused_as(error, ACCESS_CODE_UNREADABLE):
                 raise SealError("the access code was sealed under another key") from None
@@ -995,6 +1077,18 @@ PRINTERS_COMPOSED = ("require", "ensure_bambuddy")
 _refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
 
 
+#: The retry budget of each CRUD call the printer watch makes between two heartbeats (a
+#: report's `put` or `touch`, a start's `settle_lan_ended`), and each try's timeout. A
+#: call ends within about their sum (a try started just before the budget ends runs its
+#: timeout), so a report's write and its settle take at most about 8 s, well inside the
+#: watch's 30 s heartbeat timeout (`workflows/printer_watch.py` `WATCH_HEARTBEAT`) with
+#: its 10 s quiet wait (`HEARD_EVERY`). Each is advisory there: a report not written is
+#: written at the next quiet tick, and a missed settle is closed by ``lan_wait``, the
+#: run's follow or the pick's age.
+WATCH_CALL_BUDGET = 2.0
+WATCH_CALL_TIMEOUT = 2.0
+
+
 def _report(printer_id: str) -> str:
     return f"{BASE}/reports/{quote(printer_id, safe='')}"
 
@@ -1007,7 +1101,9 @@ class RemoteReports(PrinterReportStore):
     of its own, a new UUID, which the client sends again on each retry: the route
     answers a resend the first write's end and start. The watch writes from one
     loop for as long as its connection lasts, so an activity's ordinal would not name
-    one write. `touch` is natural: it never moves ``seen_at`` back."""
+    one write. `touch` is natural: it never moves ``seen_at`` back. Only the watch writes
+    (`advance`, `touch`), between two of its heartbeats, so each write is bounded by
+    `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, not the client's own budget."""
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
@@ -1016,17 +1112,36 @@ class RemoteReports(PrinterReportStore):
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         raise ApiOnlyError("PrinterReportStore.pool is the API's; the worker has none")
 
-    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
-        return self.advance(printer_id, report, seen_at).ended
+    def put(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> PrintEnd | None:
+        return self.advance(printer_id, report, seen_at, idempotency_key=idempotency_key).ended
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
+        """``idempotency_key`` names the write across calls: the watch sends a report whose
+        answer was lost again under the same key, so the route answers the end and the
+        start the first write showed (`printers/watch.py`). None is a new key."""
         if printer_uuid(printer_id) is None:
             return Advance()
         answer = self._client.request(
             "PUT",
             _report(printer_id),
             json={"report": report, "seen_at": seen_at.isoformat()},
-            idempotency_key=uuid.uuid4().hex,
+            idempotency_key=idempotency_key or uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         ).json()
         ended = answer["ended"]
         return Advance(
@@ -1037,7 +1152,11 @@ class RemoteReports(PrinterReportStore):
         if printer_uuid(printer_id) is None:
             return
         self._client.request(
-            "POST", f"{_report(printer_id)}/touch", json={"seen_at": seen_at.isoformat()}
+            "POST",
+            f"{_report(printer_id)}/touch",
+            json={"seen_at": seen_at.isoformat()},
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         )
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
@@ -1052,6 +1171,479 @@ class RemoteReports(PrinterReportStore):
             printer_id: (seen["report"], datetime.fromisoformat(seen["seen_at"]))
             for printer_id, seen in body.items()
         }
+
+
+#: The `RackUsageStore` methods only the API calls: the rack usage route's spool history
+#: (`api/printing.py`), and the ``*_in`` writes, which run on the API's connection.
+RACK_API_ONLY = (
+    "spool_history",
+    "record_picks_in",
+    "record_prints_in",
+    "record_lan_picks_in",
+    "settle_lan_in",
+    "settle_lan_ended_in",
+)
+
+
+def _unique(values: Iterable[Any]) -> list[Any]:
+    return sorted({value for value in values if value})
+
+
+class RemoteRackUsage(RackUsageStore):
+    """`RackUsageStore` (Q27) over ``…/print/rack`` (area ``rack``, #5298 Task 30). Async,
+    as the SQL store is. No pool and no migration: the API owns the tables."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+        self._keys = WriteKeys("rack")
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("RackUsageStore.pool is the API's; the worker has none")
+
+    def close(self) -> None:
+        """Nothing to close: the CRUD client is the worker's."""
+
+    async def _keyed(self, path: str, body: Any) -> Any:
+        """A write that answers the rows it wrote, under `WriteKeys`' key. A key an
+        earlier attempt of this activity spent on another write is refused 422, and this
+        write is sent again under a new one."""
+        url = f"{BASE}/rack{path}"
+        try:
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=self._keys.next()
+            )
+        except CrudRefusedError as error:
+            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                raise
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=uuid.uuid4().hex
+            )
+        return response.json()
+
+    async def _ids(self, path: str, ids: Iterable[int]) -> set[int]:
+        unique = sorted(set(ids))
+        if not unique:
+            return set()
+        url = f"{BASE}/rack{path}?{urlencode({'id': unique}, doseq=True)}"
+        return {int(found) for found in (await self._client.request("GET", url)).json()}
+
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
+        """Natural: an upsert by serial."""
+        unique = _unique(serials)
+        if unique:
+            await self._client.request(
+                "POST", f"{BASE}/rack/seen", json={"printer": printer, "serials": unique}
+            )
+
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        """A ``POST`` read: the serials stay out of the URL, so out of access logs (spec
+        §7)."""
+        unique = _unique(serials)
+        if not unique:
+            return {}
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/usage", json={"serials": unique}
+        )
+        return {
+            serial: Usage(
+                prints=row["prints"],
+                print_seconds=row["print_seconds"],
+                grams=row["grams"],
+                first_seen_at=_when(row["first_seen_at"]),
+                pending=row["pending"],
+                last_used_at=_when(row["last_used_at"]),
+            )
+            for serial, row in response.json().items()
+        }
+
+    async def record_picks(
+        self,
+        queue_item_id: int,
+        printer: str | None,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "queue_item_id": queue_item_id,
+            "printer": printer,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+            "copies": copies,
+        }
+        return int((await self._keyed("/picks", body))["written"])
+
+    async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/picked", queue_item_ids)
+
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/recorded-archives", archive_ids)
+
+    async def record_prints(
+        self,
+        *,
+        archive_id: int,
+        queue_item_id: int,
+        settled_at: datetime,
+        print_seconds: int | None,
+        grams: float | None,
+    ) -> int:
+        body = {
+            "archive_id": archive_id,
+            "queue_item_id": queue_item_id,
+            "settled_at": settled_at.isoformat(),
+            "print_seconds": print_seconds,
+            "grams": grams,
+        }
+        # A new UUID per call, which the client sends again on its retries: the body
+        # carries the settle's ``now()``, so a retried attempt's write is never the same
+        # request and an activity's key would only cost a 422 round trip.
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/prints", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
+
+    async def record_lan_picks(
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer: str | None,
+        picks: Sequence[PickedHotend],
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "run_id": run_id,
+            "subtask_name": subtask_name,
+            "printer": printer,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+        }
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/lan-picks", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
+
+    async def settle_lan(
+        self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+    ) -> int:
+        body = {"run_id": run_id, "subtask_name": subtask_name, "timed": timed}
+        return int((await self._keyed("/settle-lan", body))["written"])
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        body = {
+            "printer": printer,
+            "subtask_name": subtask_name,
+            "ended_at": ended_at.isoformat(),
+            "timed": timed,
+        }
+        # Only the watch calls this, between two heartbeats: a new UUID per call (its one
+        # long activity repeats `WriteKeys`' keys across attempts), sent again on the
+        # client's retries within `WATCH_CALL_BUDGET`.
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/rack/settle-lan-ended",
+            json=body,
+            idempotency_key=uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
+        )
+        return int(response.json()["written"])
+
+
+def _when(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+_refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
+
+
+# -- spools, native spools, held presets, native slices (Q28-Q30, #5298 Task 31) ---------
+
+#: The route's reason for a refresh's write that ran past its deadline
+#: (`api/crud_print.py`): it rolled back, as `SpoolStore.replace_records`' does.
+PAST_DEADLINE = "past-deadline"
+#: Seconds a `RemoteSpoolStore.replace_records` with a timeout keeps between the API's
+#: deadline and its own: the request's way there and the commit after the last check.
+DEADLINE_MARGIN = 1.0
+#: The route's reason for a slice start of a copy another subject's row holds.
+SLICE_SUBJECT = "slice-subject"
+
+#: The `SpoolStore` methods only the API calls: the refresh's ``seen`` half and the
+#: providers' list, on the ``library`` worker (`spools/activities.py`), a person's tray
+#: links (`api/tray_spools.py`), and the ``_in`` write, which runs on the API's connection.
+SPOOLS_API_ONLY = ("seen", "refreshes", "link", "unlink", "replace_records_in", "deadline")
+
+
+class RemoteSpoolStore(SpoolStore):
+    """`spools/store.py` `SpoolStore` (Q28) over ``…/print/spools`` (area ``spools``).
+    Async, as the SQL store is. No pool. The print worker calls it for a native run's
+    overlay (`spools/overlay.py`) and the native provider's recache after a print took
+    its grams (`spools/spool_providers.py` `recache`). Every SQL write is one transaction
+    under the store's advisory lock, so each is one route, run whole on the API (plan
+    D6)."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("SpoolStore.pool is the API's; the worker has none")
+
+    async def replace_records(
+        self,
+        provider: str,
+        snapshots: Sequence[SpoolSnapshot],
+        at: datetime,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Under an ``Idempotency-Key`` of its own, a new UUID per call, which the client
+        sends again on its retries (plan D5): the body carries the refresh's ``at``, so a
+        retried activity's `WriteKeys` key would never replay, and a refresh is a whole
+        new answer, never a replay of an earlier one.
+
+        With a ``timeout`` the API does not commit after this call gives up, as the SQL
+        store never does, as long as the request reaches the route and its last insert
+        and commit end within `DEADLINE_MARGIN`: a longer wait in front of the handler,
+        or a slower commit, can still commit after the raise. The call is sent once,
+        with no retry, and waits ``timeout`` seconds for its answer; the API's deadline
+        is ``timeout`` less `DEADLINE_MARGIN` from its receipt, so it rolls back (409
+        ``past-deadline``, raised here as `TimeoutError`) before this call stops
+        waiting. A call that gets no answer waits out its ``timeout`` before it raises,
+        so the API is past its deadline by then. Less than the margin left raises
+        `TimeoutError` unsent."""
+        body: dict[str, Any] = {
+            "provider": provider,
+            "snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots],
+            "at": at.isoformat(),
+        }
+        if timeout is None:
+            await self._send_records(provider, body)
+            return
+        if timeout <= DEADLINE_MARGIN:
+            raise TimeoutError(f"the refresh of {provider} ran past its deadline")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            await self._send_records(
+                provider,
+                {**body, "timeout": timeout - DEADLINE_MARGIN},
+                budget=0.0,
+                timeout=timeout,
+            )
+        except CrudUnavailableError:
+            await asyncio.sleep(max(0.0, deadline - loop.time()))
+            raise
+
+    async def _send_records(
+        self,
+        provider: str,
+        body: dict[str, Any],
+        *,
+        budget: float | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        try:
+            await self._client.request(
+                "POST",
+                f"{BASE}/spools/records",
+                json=body,
+                idempotency_key=uuid.uuid4().hex,
+                budget=budget,
+                timeout=timeout,
+            )
+        except CrudRefusedError as error:
+            if _refused_as(error, PAST_DEADLINE):
+                raise TimeoutError(f"the refresh of {provider} ran past its deadline") from None
+            raise
+
+    async def failed(self, provider: str, at: datetime, failure: str) -> None:
+        """Natural: an upsert of the provider's failure."""
+        await self._client.request(
+            "POST",
+            f"{BASE}/spools/refreshes/{quote(provider, safe='')}/failed",
+            json={"at": at.isoformat(), "failure": failure},
+        )
+
+    async def overlay(
+        self,
+        printer_id: UUID,
+        trays: Sequence[SeenTray],
+        *,
+        now: datetime,
+        providers: Sequence[str],
+        located: Mapping[str, str] | None = None,
+    ) -> Overlay:
+        """A ``POST`` read: the trays' RFID keys stay out of the URL (spec §7)."""
+        body = {
+            "printer_id": str(printer_id),
+            "trays": [tray.model_dump(mode="json") for tray in trays],
+            "now": now.isoformat(),
+            "providers": list(providers),
+            "located": dict(located or {}),
+        }
+        response = await self._client.request("POST", f"{BASE}/spools/overlay", json=body)
+        return Overlay.model_validate(response.json())
+
+
+_refuse(RemoteSpoolStore, "SpoolStore", SPOOLS_API_ONLY)
+
+
+#: The `NativeSpoolStore` methods only the API calls: the shelf's routes
+#: (`api/native_spools.py`), and the ``_in`` settle, which runs on the API's connection.
+NATIVE_SPOOLS_API_ONLY = ("get", "create", "update", "delete", "settle_uses_in")
+
+
+class RemoteNativeSpools(NativeSpoolStore):
+    """`spools/native.py` `NativeSpoolStore` (Q29) over ``…/print/native-spools`` (area
+    ``spools``). Blocking, as the SQL store is: callers on the loop use a thread. No
+    pool. The worker reads the shelf (the native provider), saves what a LAN start uses
+    and settles a run's uses once its print settles."""
+
+    def __init__(self, client: CrudSyncClient) -> None:
+        self._client = client
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("NativeSpoolStore.pool is the API's; the worker has none")
+
+    def list(self, *, include_archived: bool = False) -> list[NativeSpool]:
+        query = urlencode({"include_archived": "true" if include_archived else "false"})
+        body = self._client.request("GET", f"{BASE}/native-spools?{query}").json()
+        return [NativeSpool.model_validate(row) for row in body]
+
+    def any(self) -> bool:
+        return bool(self._client.request("GET", f"{BASE}/native-spools/any").json()["any"])
+
+    def record_uses(self, run_id: str, subtask_name: str, uses: Sequence[SpoolUse]) -> None:
+        """Natural: ``ON CONFLICT DO NOTHING`` on the start's slot, so a resend keeps the
+        rows one send wrote."""
+        if not uses:
+            return
+        body = {
+            "run_id": run_id,
+            "subtask_name": subtask_name,
+            "uses": [use.model_dump(mode="json") for use in uses],
+        }
+        self._client.request("POST", f"{BASE}/native-spools/uses", json=body)
+
+    def settle_uses(self, run_id: str, stages: Sequence[str]) -> set[UUID]:
+        """One route, one transaction on the API, its row locks included (plan D6). The
+        answer is the spools this settle changed, which a resend would not repeat (the
+        rows read settled then), so an ``Idempotency-Key`` of its own, a new UUID per
+        call, sent again on the client's retries: the follow's read hook settles a run
+        from one long activity, whose ordinals would not name one settle."""
+        response = self._client.request(
+            "POST",
+            f"{BASE}/native-spools/uses/settle",
+            json={"run_id": run_id, "stages": list(stages)},
+            idempotency_key=uuid.uuid4().hex,
+        )
+        return {UUID(spool_id) for spool_id in response.json()["changed"]}
+
+
+_refuse(RemoteNativeSpools, "NativeSpoolStore", NATIVE_SPOOLS_API_ONLY)
+
+
+#: The `HeldPresetStore` methods only the API calls: the copy's refresh, on the
+#: ``library`` worker (`slicing/held_presets.py` `refresh_held_presets`), its clear at
+#: the API's start (`slicing/component.py`), and the strip of credential keys at that
+#: start and after each refresh (`strip_kept`).
+HELD_PRESETS_API_ONLY = ("stamps", "forget_unlisted", "keep", "clear", "strip_kept")
+
+
+class RemoteHeldPresets(HeldPresetStore):
+    """`slicing/held_presets.py` `HeldPresetStore` (Q30) over ``…/print/held-presets``
+    (area ``spools``): the kept copy a native run's catalogue and presets read. Reads
+    only. Async, as the SQL store is. No pool."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def rows(self) -> list[HeldRow]:
+        body = (await self._client.request("GET", f"{BASE}/held-presets")).json()
+        return [
+            HeldRow(preset=LocalPreset.model_validate(row["preset"]), sha256=row["sha256"])
+            for row in body
+        ]
+
+    async def documents(self, ids: Collection[int]) -> dict[int, LocalPresetDetail]:
+        unique = sorted(set(ids))
+        if not unique:
+            return {}
+        url = f"{BASE}/held-presets/documents?{urlencode({'id': unique}, doseq=True)}"
+        body = (await self._client.request("GET", url)).json()
+        # The route already strips them; an older API's answer is stripped here.
+        return {
+            int(found): LocalPresetDetail.model_validate(
+                {**doc, "setting": strip_credentials(doc.get("setting") or {})}
+            )
+            for found, doc in body.items()
+        }
+
+
+_refuse(RemoteHeldPresets, "HeldPresetStore", HELD_PRESETS_API_ONLY)
+
+
+#: The `NativeSliceStore` methods only the API calls: the `SliceWorkflow`'s activities
+#: on the ``library`` worker (`workflows/slicing_activities.py`), the dialog's read
+#: (`slicing/preview.py`) and the sweeps (`slicing/start.py`, from `main.py`).
+NATIVE_SLICES_API_ONLY = (
+    "running",
+    "prepared",
+    "finish",
+    "lost",
+    "stop_lost",
+    "slicing",
+    "get",
+    "reusable",
+    "sweep",
+)
+
+
+class RemoteNativeSlices(NativeSliceStore):
+    """`slicing/store.py` `NativeSliceStore` (Q30) over ``…/print/native-slices`` (area
+    ``spools``) for the one method the print worker calls: a native slice's ``start``
+    (`slicing/start.py` `start_native_slice`, from the dialog's background slice).
+    Async, as the SQL store is. No pool. The start runs whole on the API, under its lock
+    on the workflow id (plan D6), and is natural on that id: a start sent again answers
+    the key's newest running or completed row, which the first send left."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+
+    async def start(
+        self,
+        *,
+        workflow_id: str,
+        subject: str,
+        library_file_id: int,
+        plate_id: int,
+        preset_key: str,
+        fresh: bool = False,
+    ) -> NativeSlice:
+        body = {
+            "workflow_id": workflow_id,
+            "subject": subject,
+            "library_file_id": library_file_id,
+            "plate_id": plate_id,
+            "preset_key": preset_key,
+            "fresh": fresh,
+        }
+        try:
+            response = await self._client.request("POST", f"{BASE}/native-slices/start", json=body)
+        except CrudRefusedError as error:
+            if _refused_as(error, SLICE_SUBJECT):
+                raise SliceSubjectError(str(error.problem.get("detail", ""))) from None
+            raise
+        return NativeSlice.model_validate(response.json())
+
+
+_refuse(RemoteNativeSlices, "NativeSliceStore", NATIVE_SLICES_API_ONLY)
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

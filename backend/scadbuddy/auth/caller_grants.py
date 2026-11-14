@@ -4,14 +4,14 @@ follow-up to #4975 phase 4, spec 2026-11-01 §7.2).
 The deployment creates the roles and their passwords (`auth/service_credentials.py`
 `ROLES`); the app owns the lists, as `render/worker_role.py` owns `RENDER_GRANTS`. The API
 grants each existing role its list at every start (`grant_callers`), beside its credential
-view (`grant_caller_views`). A worker on its own role never migrates: it waits until the
-API has migrated and granted (`open_for_caller`), while a worker on the API's own role
-(the deployment before it makes the roles) migrates as it always did.
+view (`grant_caller_views`).
 
 The projects worker has no list and no role: it holds no database (#5298), and the API
-takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`). A
-table dropped from a list is taken back at every start too (`auth/revoke.py`
-`RETIRED_GRANTS`): `grant_role` never revokes.
+takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`). The
+print worker's list is empty: it holds no pool (#5298 Task 31), and its role keeps what
+it held until #5298 Task 35 revokes it. A table dropped from a list is taken back at every
+start only once it is listed in `auth/revoke.py` `RETIRED_GRANTS`: `grant_role` never
+revokes.
 
 A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
@@ -25,62 +25,38 @@ lists here hold the backend's relations only.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import psycopg
 
 from scadbuddy.auth.service_credentials import ROLES, ServiceCaller
-from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.render.worker_role import grant_role, owns_schema, wait_until_ready
+from scadbuddy.render.worker_role import grant_role
 
 logger = logging.getLogger(__name__)
 
 Grants = Mapping[str, tuple[str, ...]]
 
-_ALL = ("SELECT", "INSERT", "UPDATE", "DELETE")
 _READ = ("SELECT",)
 
-#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches. It reads
-#: no settings over SQL (#5298: the Bambuddy key comes from the API's CRUD route), and its
-#: printer registry, LAN reports and access codes go through the API's CRUD routes too
-#: (`crud/print.py` `RemotePrinterStore`, `RemoteReports`, #5298 Task 29). So a printer
-#: merge (`printers/store.py` `_merge`) runs on the API alone, and the worker writes none
-#: of the tables `PRINTER_REFERENCES` names for it. An existing role keeps what it held of
-#: `printers`, `printer_reports`, `settings`, `printer_bed_types`, `activity` and
-#: `project_print_targets`, and the merge's UPDATE and DELETE of `tray_spool_links`, until
-#: the revoke. Never add a table here for a merge.
-PRINT_GRANTS: Grants = {
-    # Whether the API has migrated (`wait_until_ready`).
-    "scadbuddy_migrations": _READ,
-    # Read by a native print's spool uses (`spools/native.py`) until #5298 Task 31. The
-    # runs themselves, their outcomes, the operations and the events go through the
-    # API's CRUD routes (`crud/print.py`, `crud/operations.py`, #5298 Task 24), and so do
-    # the print links, the sends and the outputs' last prints (`RemotePrintLinks`,
-    # `RemoteOutputPrints`, #5298 Task 28); an existing role keeps those grants until
-    # the revoke.
-    "print_runs": _ALL,
-    # A native run's slice (`slicing/store.py` `start`) and held presets.
-    "native_slices": ("SELECT", "INSERT", "UPDATE"),
-    "held_local_presets": _READ,
-    # The rack's nozzles (`rack/usage.py`).
-    "rack_nozzle_seen": ("SELECT", "INSERT", "UPDATE"),
-    "rack_nozzle_picks": _ALL,
-    "rack_nozzle_pick_spools": ("SELECT", "INSERT", "DELETE"),
-    "rack_nozzle_prints": ("SELECT", "INSERT"),
-    # Spools: the overlay's recache and a native run's uses (`spools/`).
-    "physical_spools": ("SELECT", "INSERT", "UPDATE"),
-    "spool_provider_records": ("SELECT", "INSERT", "DELETE"),
-    "spool_record_links": ("SELECT", "INSERT", "DELETE"),
-    "spool_provider_refreshes": ("SELECT", "INSERT", "UPDATE"),
-    # Read by the overlay; a tray's link is written on the API, and the merge's
-    # repoint (`spools/store.py` `repoint_tray_links`) runs there too (#5298 Task 29).
-    "tray_spool_links": _READ,
-    "native_spools": ("SELECT", "UPDATE"),
-    "native_spool_uses": ("SELECT", "INSERT", "UPDATE"),
-}
-#: The bigserial keys the print worker inserts with.
-PRINT_SEQUENCES = ("native_slices_id_seq",)
+#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches over SQL:
+#: nothing (#5298). Every store it reads or writes goes through the API's CRUD routes
+#: (`crud/print.py`): its settings, runs, outcomes, operations, events, uploads, slices,
+#: background slices, project records, print links, sends, outputs' last prints, printer
+#: registry, LAN reports, access codes and rack hotends' usage (Tasks 23 to 30), and its
+#: spools, ScadBuddy's own spools and their uses, the kept presets and a native slice's
+#: start (`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets`,
+#: `RemoteNativeSlices`, Task 31). It no longer waits for the migrations ledger either: it
+#: waits for its CRUD areas. With a proof it exchanges that proof only (`exchange_source`,
+#: no view fallback), whether or not `SCADBUDDY_DATABASE_URL` is set; only with no proof
+#: and the URL set does it read its sealed credential from its view (`grant_caller_views`,
+#: until #5298 Task 34); with neither it refuses to start. An existing role keeps every table it
+#: held, and the `native_slices_id_seq` sequence, until #5298 Task 35 revokes it. Never
+#: add a table here: add a CRUD route instead.
+PRINT_GRANTS: Grants = {}
+#: The bigserial keys the print worker inserts with: none (`native_slices` is written on
+#: the API, #5298 Task 31).
+PRINT_SEQUENCES: tuple[str, ...] = ()
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, and reads
 #: flow runs and their decisions. Its workspace files' `blob_refs` holds go through the
@@ -109,21 +85,3 @@ def grant_callers(conn: psycopg.Connection[Any]) -> list[str]:
         if grant_role(conn, role, grants, sequences=SEQUENCES.get(caller, ())):
             granted.append(role)
     return granted
-
-
-def open_for_caller(
-    store: SettingsStore,
-    caller: ServiceCaller,
-    *,
-    stopping: Callable[[], bool] = lambda: False,
-) -> None:
-    """Open a worker's settings store: on the API's own role, migrate and seal as
-    before; on a role of its own, wait until the API has migrated and granted it."""
-    store.open(migrate_schema=False)
-    pool = store.pool
-    with pool.connection() as conn:
-        owner = owns_schema(conn)
-    if owner:
-        store.migrate_and_seal()
-        return
-    wait_until_ready(pool, stopping=stopping, grants=GRANTS[caller], role=ROLES[caller])

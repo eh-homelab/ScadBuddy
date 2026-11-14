@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem } from '../params'
+import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem, valueText } from '../params'
 
 interface Props {
   param: PublicParam
@@ -18,9 +18,11 @@ const INPUT =
   'min-h-12 w-full rounded-[10px] border-[1.5px] border-input bg-background px-3.5 py-2.5 aria-invalid:border-destructive'
 
 /**
- * One parameter a listing offers. The public view has no default to show, so a field the
- * visitor has not touched says the shop's choice stands, and sends nothing (spec §5.4: the
- * CRUD side fills it in). Labels and choices are the shop's text, shown as text. Styled
+ * One parameter a listing offers. A field the visitor has not touched says the shop's
+ * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in); only a text
+ * field shows the design's default, as its placeholder (#6137). Labels are the listing's
+ * own or the template's caption without its extruder note (`shown_label`), and choices
+ * are the shop's values, a switch's as Yes or No (`valueText`); all are shown as text. Styled
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
@@ -45,7 +47,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
         >
           {param.choices.map((choice, index) => {
             const filament = param.colour && typeof choice === 'string' ? filamentOf(filaments, choice) : undefined
-            const name = filament ? filamentName(filament) : String(choice)
+            const name = filament ? filamentName(filament) : valueText(choice)
             return (
               <ToggleGroupItem
                 key={String(choice)}
@@ -87,7 +89,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           className={INPUT}
           type="text"
           value={typeof value === 'string' ? value : ''}
-          placeholder="The shop's text"
+          placeholder={param.kind === 'text' ? (param.placeholder ?? undefined) : undefined}
           aria-describedby={hintId}
           aria-invalid={problem ? true : undefined}
           onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}

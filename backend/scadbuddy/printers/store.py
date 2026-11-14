@@ -701,6 +701,23 @@ class PrinterStore:
         )
         return open_secret(self.kek, envelope, access_code_aad(str(data["id"]), data["serial"]))
 
+    def opens_access_codes(self) -> bool:
+        """Whether this store can open an access code: it holds the KEK. The LAN path
+        needs it (`bambuddy/print_run.py` `_registry_path`)."""
+        return self.kek is not None
+
+    def open_virtual_access_code(self, sealed: str, context: str) -> str:
+        """A virtual printer's sealed access code (`bambuddy/virtual_printers.py`
+        `access_code_request`), opened under the KEK or, during a rotation, the previous
+        one. Raises `KekMissingError` with no KEK and `SealError` when ``sealed`` does not
+        open for ``context``."""
+        # Imported here: `virtual_printers` imports this module.
+        from scadbuddy.bambuddy.virtual_printers import open_access_code
+
+        if self.kek is None:
+            raise KekMissingError()
+        return open_access_code(self.kek, sealed, context, previous=self.previous_kek)
+
     def ensure_bambuddy(
         self,
         bambuddy_printer_id: int,

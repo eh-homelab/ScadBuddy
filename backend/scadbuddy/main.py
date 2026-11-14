@@ -115,6 +115,7 @@ from scadbuddy.operations.kinds import OperationKind, Queue
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
+from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
 from scadbuddy.payments.deposits import sync_deposits
@@ -227,6 +228,7 @@ from scadbuddy.workflows.printer_watch import ensure_watches
 from scadbuddy.workflows.slicing import VersionedSliceWorkflow
 from scadbuddy.workflows.slicing_activities import slice_activities
 from scadbuddy.workflows.spool_refresh import VersionedSpoolRefresh, ensure_spool_schedule
+from scadbuddy.workflows.staged_file import VersionedStagedFile
 from scadbuddy.workflows.store_migration import VersionedStoreMigration
 
 API_PREFIX = "/api/v1"
@@ -1292,16 +1294,24 @@ def _sweep_storefront(
 
 async def _sweep_storefront_drafts_logged(state: AppState) -> None:
     """#5282: the storefront carts idle past ``storefront_draft_ttl_days``, then the
-    visitors idle as long with no order, and the visitors' renders past a day."""
+    visitors idle as long with no order, the visitors' renders past a day, and the
+    storefront's staged files' backstop (#6133, `staged_files.sweep_staged`)."""
     try:
         drafts, visitors, renders = await asyncio.to_thread(_sweep_storefront, state)
+        # The backstop only: each staged file's watcher owns its clean-up.
+        staged = await sweep_staged(state)
     except Exception:
         logger.exception("could not sweep the idle storefront carts")
         raise
-    if drafts or visitors or renders:
+    if drafts or visitors or renders or staged:
         logger.info(
             "swept idle storefront carts",
-            extra={"drafts": len(drafts), "visitors": visitors, "renders": renders},
+            extra={
+                "drafts": len(drafts),
+                "visitors": visitors,
+                "renders": renders,
+                "staged": staged,
+            },
         )
 
 
@@ -1612,6 +1622,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
             settings.temporal_task_queue_library,
             settings.temporal_task_queue_bambuddy,
         ).nudge,
+        write_failed=state.metrics.printer_watch_write_failed,
     )
     content = state.store.content
     lan = LanDeps(
@@ -1688,6 +1699,7 @@ LIBRARY_WORKFLOWS: tuple[type, ...] = (
     VersionedLibraryCopy,
     VersionedSliceWorkflow,
     VersionedSpoolRefresh,
+    VersionedStagedFile,
 )
 
 
@@ -1811,7 +1823,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             state.components.get(PRINT_LIBRARY),
             lambda: state.settings_store,
             lambda: state.uploads,
-        ),
+        ),  # Each staged customer file's watcher (#6133).
+        *staged_file_activities(state),
     ]
     try:
         while not stop.is_set():

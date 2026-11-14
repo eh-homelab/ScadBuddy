@@ -22,6 +22,7 @@ from scadbuddy.core.events import (
     BusResync,
     Event,
     EventBus,
+    FlowChanged,
     FlowRunEvent,
     FontInstalled,
     InProcessEventBus,
@@ -30,6 +31,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
+    PreviewSliceEvent,
     PrinterEvent,
     PrintEvent,
     PrintRunEvent,
@@ -408,6 +410,12 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             ["analyzers"],
         ),
         (SessionBusEvent(kind="session.message", session_id="s", seq=3), []),
+        # #265: the dialog's background slice, and a flow's definition.
+        (
+            PreviewSliceEvent(kind="preview_slice.progress", slicer="native", job_id=12),
+            ["preview-slice:native:12"],
+        ),
+        (FlowChanged(name="swap"), ["flows"]),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:
@@ -426,6 +434,9 @@ def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
         FontInstalled(family="DejaVu Sans"),
         SettingsChanged(section="connection"),
         FlowRunEvent(run_id=FLOW_RUN_ID, definition_id="d1", status="running"),
+        FlowChanged(name="swap"),
+        PreviewSliceEvent(kind="preview_slice.settled", slicer="bambuddy", job_id=7),
+        PreviewSliceEvent(kind="preview_slice.progress", slicer="native", job_id=10**17),
     ]
     for event in events:
         for topic in realtime.topics_of(event):

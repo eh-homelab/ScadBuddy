@@ -233,8 +233,9 @@ class ServiceCredentialConfigError(ValueError):
 def exchange_source(caller: ServiceCaller, settings: ExchangeSettings) -> ExchangeReader:
     """The credential of a caller whose credential comes only from the exchange of
     ``SCADBUDDY_SERVICE_TOKEN_FILE`` or ``SCADBUDDY_SERVICE_BOOTSTRAP_FILE``, with no view
-    to fall back to, whatever ``SCADBUDDY_DATABASE_URL`` says (#5298): the projects and
-    render workers, which hold no database (and the render worker no KEK either)."""
+    to fall back to, whatever ``SCADBUDDY_DATABASE_URL`` says (#5298): the projects, render
+    and print workers, which hold no database (the render and print workers no KEK
+    either)."""
     proof: Literal["k8s", "bootstrap"]
     if settings.service_token_file is not None:
         proof_file, proof = settings.service_token_file, "k8s"

@@ -13,6 +13,7 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.slicing.presets import (
     apply_overrides,
     build_presets,
@@ -267,6 +268,108 @@ async def test_a_local_printer_takes_bambuddys_document_over_the_trees_parent(
     machine = json.loads(files.machine)
     assert machine["printable_height"] == "300" and machine["nozzle_diameter"] == ["0.4"]
     assert files.from_bambuddy == {"printer": hashlib.sha256(files.machine).hexdigest()}
+
+
+#: Bambu Studio's print-host fields, as a user's machine preset can carry them, plus
+#: names that only contain a credential word.
+PRINT_HOST = {
+    "print_host": "octopi.local",
+    "print_host_webui": "http://octopi.local",
+    "printhost_port": "",
+    "printhost_authorization_type": "key",
+    "printhost_apikey": "k-123",
+    "printhost_password": "p-123",
+    "printhost_user": "pi",
+    "Upload_Token": "t-123",
+    "client_secret": "s-123",
+}
+CREDENTIALS = {"printhost_apikey", "printhost_password", "printhost_user"}
+CREDENTIALS |= {"Upload_Token", "client_secret"}
+
+
+def test_strip_credentials_keeps_the_host_and_drops_every_credential() -> None:
+    stripped = strip_credentials({**PRINT_HOST, "layer_height": "0.2"})
+    assert not CREDENTIALS & set(stripped)
+    assert stripped["print_host"] == "octopi.local"
+    assert stripped["printhost_authorization_type"] == "key"
+    assert stripped["layer_height"] == "0.2"
+
+
+def test_strip_credentials_reaches_nested_objects_and_lists() -> None:
+    document = {
+        "host": {"print_host": "octopi.local", "printhost_apikey": "k-123"},
+        "hosts": [{"auth": {"password": "p-123", "user": "pi"}}, "plain", ["x"]],
+        "layer_height": "0.2",
+    }
+    assert strip_credentials(document) == {
+        "host": {"print_host": "octopi.local"},
+        "hosts": [{"auth": {"user": "pi"}}, "plain", ["x"]],
+        "layer_height": "0.2",
+    }
+
+
+@respx.mock
+async def test_a_local_preset_answer_parses_without_its_credentials(
+    client: BambuddyClient,
+) -> None:
+    """Stripped at parse (`LocalPresetDetail`), so no caller, on the API or the print
+    worker, holds the keys past `BambuddyClient.local_preset`."""
+    respx.get(f"{API}/local-presets/3").respond(
+        200,
+        json={
+            "id": 3,
+            "name": "My Printer",
+            "preset_type": "printer",
+            "source": "orcaslicer",
+            "setting": {
+                "type": "machine",
+                "printhost_apikey": "k-123",
+                "print_host": "octopi.local",
+                "extra": {"hosts": [{"name": "octopi", "client_secret": "s-123"}]},
+            },
+        },
+    )
+    row = await client.local_preset(3)
+    assert row.setting == {
+        "type": "machine",
+        "print_host": "octopi.local",
+        "extra": {"hosts": [{"name": "octopi"}]},
+    }
+    assert "k-123" not in row.model_dump_json() and "s-123" not in row.model_dump_json()
+
+
+@respx.mock
+async def test_a_local_printers_credentials_never_reach_a_preset_file(
+    profiles: Profiles, plan: SlicePlan, client: BambuddyClient
+) -> None:
+    respx.get(f"{API}/local-presets/3").respond(
+        200,
+        json={
+            "id": 3,
+            "name": "My Printer",
+            "preset_type": "printer",
+            "source": "orcaslicer",
+            "setting": {
+                "type": "machine",
+                "name": "My Printer",
+                "inherits": "Test Printer 0.4 nozzle",
+                **PRINT_HOST,
+            },
+        },
+    )
+    local = plan.model_copy(
+        update={
+            "printer_preset": PresetRef(source="local", id="3"),
+            "process_overrides": {"api_token": "x"},
+        }
+    )
+    files = await build_presets(local, profiles, client)
+    for document in (files.machine, files.process, *files.filaments):
+        assert not CREDENTIALS & set(json.loads(document))
+        assert b"k-123" not in document and b"p-123" not in document
+    machine = json.loads(files.machine)
+    assert machine["print_host"] == "octopi.local"
+    assert "api_token" not in json.loads(files.process)
 
 
 @respx.mock

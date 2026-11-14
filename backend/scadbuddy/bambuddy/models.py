@@ -22,6 +22,8 @@ from pydantic import (
 )
 from pydantic.json_schema import SkipJsonSchema
 
+from scadbuddy.core.credentials import strip_credentials
+
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
 #: ``bed_levelling``, ``flow_cali`` and ``nozzle_offset_cali`` on the queue route.
@@ -120,9 +122,18 @@ class LocalPresetDetail(LocalPreset):
     uploaded document merged over the OrcaSlicer BBL base its ``inherits`` names, child
     over parent, with ``inherits`` kept (``services/orca_profiles.py`` ``import_orca_file``
     and ``resolve_preset``); ``PUT /local-presets/{id}`` rewrites it under the same id. A
-    stored document Bambuddy cannot parse answers ``{}``."""
+    stored document Bambuddy cannot parse answers ``{}``.
+
+    ``setting`` loses its print-host credential keys here, as it is parsed
+    (`core/credentials.py` `strip_credentials`, nested ones too), so no caller on the API
+    or the print worker holds them past parsing (#5298 Task 32)."""
 
     setting: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("setting")
+    @classmethod
+    def _without_credentials(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return strip_credentials(value)
 
 
 class LocalPresetCatalogue(BambuddyModel):

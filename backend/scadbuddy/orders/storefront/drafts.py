@@ -50,7 +50,9 @@ from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestI
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
+from scadbuddy.orders.storefront.model_requests import draft_sources
 from scadbuddy.orders.storefront.renders import checked_choice
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
     MAX_REQUEST_FILE_BYTES,
@@ -63,6 +65,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftView,
     Listing,
     PublicShippingOption,
+    shown_label,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -93,7 +96,7 @@ def item_not_found() -> ApiError:
     return problem(status.HTTP_404_NOT_FOUND, "item_not_found", "There is no such item.")
 
 
-def _draft_changed() -> ApiError:
+def draft_changed() -> ApiError:
     """409 ``draft_changed``: the draft moved under the write (submitted, or swept)."""
     return problem(
         status.HTTP_409_CONFLICT, "draft_changed", "Your order has changed. Load it again."
@@ -107,7 +110,7 @@ def requests_disabled() -> ApiError:
     )
 
 
-def _draft_full() -> ApiError:
+def draft_full() -> ApiError:
     """422 ``draft_full``: the draft holds `MAX_DRAFT_ITEMS` items already."""
     return problem(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -168,15 +171,37 @@ def _inputs(item: OrderItem, offered: list[str] | None) -> dict[str, Any] | None
 
 
 def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, str]]:
-    """Each published template commit's parameter captions, by (slug, commit): what a
-    draft item's values are called on the page."""
-    found: dict[tuple[str, str], dict[str, str]] = {}
+    """Each published template commit's parameter labels, by (slug, commit): what a
+    draft item's values are called on the page (`shown_label`).
+
+    An item does not record which listing it came from, and several listings may share a
+    slug and commit. So a listing's own label is used only when every listing at that
+    pair that offers the parameter shows the same one; otherwise the item reads the
+    template's caption without its extruder note, which never names another listing's
+    choice. Like the listing page, this reads each row's live ``params``, so an edited
+    label shows at once."""
+    seen: dict[tuple[str, str], dict[str, set[str]]] = {}
+    captions: dict[tuple[str, str], dict[str, str | None]] = {}
     for listing in listings:
         if listing.snapshot is None:
             continue
-        found.setdefault((listing.slug, listing.commit), {}).update(
-            {p.name: p.caption for p in listing.snapshot.schema_.parameters if p.caption}
-        )
+        pair = (listing.slug, listing.commit)
+        bounds = listing.params
+        names = seen.setdefault(pair, {})
+        for p in listing.snapshot.schema_.parameters:
+            captions.setdefault(pair, {})[p.name] = p.caption
+            votes = names.setdefault(p.name, set())
+            # Only a listing that offers the parameter has a say in its label.
+            if p.name in bounds:
+                votes.add(shown_label(p.name, bounds[p.name].label, p.caption))
+    found: dict[tuple[str, str], dict[str, str]] = {}
+    for pair, names in seen.items():
+        labels = found.setdefault(pair, {})
+        for name, shown in names.items():
+            caption = captions[pair][name]
+            label = next(iter(shown)) if len(shown) == 1 else shown_label(name, None, caption)
+            if label != name:
+                labels[name] = label
     return found
 
 
@@ -225,6 +250,11 @@ async def _view(state: AppState, order: Order) -> DraftView:
         )
 
     rows, offered, files, listings, shipping, currency = await asyncio.to_thread(read)
+    sources = (
+        await asyncio.to_thread(draft_sources, state, order.id)
+        if any(item.kind == "request" for item in rows)
+        else {}
+    )
     captions = _captions(listings)
     by_subject: dict[str, list[Attachment]] = {}
     for attachment in files:
@@ -256,6 +286,8 @@ async def _view(state: AppState, order: Order) -> DraftView:
                 labels=_labels(item, inputs, captions),
                 notes=item.notes if item.kind == "request" else None,
                 attachments=attachments,
+                own_model=sources.get(item.id, (False, []))[0],
+                sources=sources.get(item.id, (False, []))[1],
             )
         )
     return DraftView(
@@ -272,11 +304,12 @@ def _stored(state: AppState, key: str, route: str, asked: Any) -> Replay | None:
         return stored(conn, "storefront", key, route, asked)
 
 
-def request_sent(state: AppState, key: str) -> bool:
-    """Whether ``key`` holds a committed design request: its retry is answered even
-    once "Ask for a design" is off (`add_request`)."""
+def request_sent(state: AppState, key: str, route: str | None = None) -> bool:
+    """Whether ``key`` holds a committed write of ``route`` (a design request's by
+    default): its retry is answered even once "Ask for a design" is off
+    (`add_request`)."""
     with state.projection.pool.connection() as conn:
-        return has_reply(conn, "storefront", key, REQUEST_ROUTE)
+        return has_reply(conn, "storefront", key, route or REQUEST_ROUTE)
 
 
 async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
@@ -294,8 +327,13 @@ async def _answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
 
     order = await asyncio.to_thread(find)
     if order is None:
-        raise _draft_changed()
+        raise draft_changed()
     return await _view(state, order)
+
+
+async def answer(state: AppState, visitor_id: str, reply: Replay) -> DraftView:
+    """`_answer`, for the other draft writes (`model_requests.add_model_request`)."""
+    return await _answer(state, visitor_id, reply)
 
 
 async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
@@ -344,7 +382,7 @@ async def add_listing_item(
             items = orders.lifecycle.add_items(draft.id, by, [entry], cart_of=visitor.id, conn=conn)
             # Under the order's lock, which the add took: a full draft takes nothing.
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, items))
@@ -359,7 +397,7 @@ async def add_listing_item(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)
 
 
@@ -385,6 +423,8 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
         changes: list[Order] = []
 
         def remove(conn: Any) -> Replay:
+            # The staged files the line held, for their watchers (#6133).
+            freed.extend(uploads_of(state, item_id=item_id, conn=conn))
             orders.lifecycle.delete_item(draft.id, item_id, by, cart_of=visitor.id, conn=conn)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
@@ -399,12 +439,14 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
             orders.lifecycle.told(order)
         return done
 
+    freed: list[str] = []
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError as error:
         if error.not_found:
             raise item_not_found() from None
-        raise _draft_changed() from None
+        raise draft_changed() from None
+    await poke(state, freed, "unclaimed")
     return await _answer(state, visitor_id, reply)
 
 
@@ -514,7 +556,7 @@ async def add_request(
                 draft.id, by, [entry], cart_of=visitor.id, conn=conn
             )
             if len(orders.store.items(draft.id, conn=conn)) > MAX_DRAFT_ITEMS:
-                raise _draft_full()
+                raise draft_full()
             for file, blob in zip(checked, kept, strict=True):
                 attachment = orders.lifecycle.add_attachment(
                     draft.id,
@@ -551,5 +593,5 @@ async def add_request(
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError:
-        raise _draft_changed() from None
+        raise draft_changed() from None
     return await _answer(state, visitor_id, reply)

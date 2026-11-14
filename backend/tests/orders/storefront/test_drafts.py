@@ -229,6 +229,9 @@ def test_add_to_order_makes_revision_one(
             "labels": {"width": "Width (mm)"},
             "notes": None,
             "attachments": [],
+            # A customer's own files and links (#6133): none on a listing's item.
+            "sources": [],
+            "own_model": False,
         }
     ]
 
@@ -983,3 +986,30 @@ def test_an_item_added_before_a_new_commit_shows_raw_parameter_names(
     [item] = crud.get("/draft").json()["items"]
     assert item["inputs"] == {"width": 40}
     assert item["labels"] == {"width": "width"}
+
+
+def test_the_view_labels_an_item_with_its_listings_own_label(
+    crud: CrudCaller, api: TestClient, listing: Listing
+) -> None:
+    """A listing's own label reaches the cart through the draft view (#6137)."""
+    store = _orders(api).listings
+    current = store.get(listing.id)
+    assert current is not None
+    labelled = store.update(
+        listing.id,
+        ListingInput(
+            slug="demo",
+            commit=COMMIT,
+            title="A demo box",
+            params={
+                "width": {"kind": "number", "min": 20, "max": 80, "step": 1, "label": "How wide"}  # type: ignore[dict-item]
+            },
+        ),
+        expected_updated_at=current.updated_at,
+    )
+    published = store.mark_published(
+        labelled.id, snapshot=_snapshot(), media=[], expected_updated_at=labelled.updated_at
+    )
+    r = crud.post("/draft/items", json=add_body(published, {"width": 40}), key="own1")
+    assert r.status_code == 200, r.text
+    assert r.json()["items"][0]["labels"] == {"width": "How wide"}

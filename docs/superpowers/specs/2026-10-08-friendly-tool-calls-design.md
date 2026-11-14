@@ -62,7 +62,8 @@ from what the panel shows (the model still gets them).
 Postgres table. No base64 in the event.**
 
 The panel's events go into `ai_session_events`. Every attach replays that log from the
-start, to every watcher, over the socket and the SSE route, and a fork copies it. One
+start, to every watcher, over the socket and the SSE route, and a fork reads it through its
+cut (`eventLog.ts` `read`, #4212). One
 render preview Claude Code re-encoded is ~630 kB of base64 (§2.3), and a session that
 renders ten times would replay megabytes on every attach and every reconnect.
 Inlining only small images would leave two paths to build and test, and would still
@@ -74,9 +75,10 @@ replica serves it, because the bytes are in Postgres like the rest of the sessio
   media_type, data bytea, created_at, PRIMARY KEY (session_id, name))`, a new migration.
   A session's images go when it is deleted, and not before: a session keeps every image
   its transcript names, so the panel can show any of them, and its growth is bounded by
-  its budget (each image is a paid tool call). A fork copies only the rows the events it
-  copies name (`forkPoint.ts` `blobNames`, `manager.ts` `fork`, #2150), so a fork up to an
-  earlier reply does not carry the parent's later images down the fork chain.
+  its budget (each image is a paid tool call). A fork copies no rows (#4212): it serves only
+  the ancestor images named by the events it reads through `fork_event_cut` (`blobs.ts`
+  `get`), so a fork up to an earlier reply never serves the parent's later images (#2150),
+  and forgetting the parent copies those rows into it first (`copyForkBlobs`).
 - **Name** `<sha256 of the bytes, hex>.<png|jpg|gif|webp>`, so the same image twice in a
   session is one row (`ON CONFLICT DO NOTHING`).
 - **What is kept.** Only the four types the Messages API takes, only when the bytes

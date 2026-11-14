@@ -82,6 +82,7 @@ from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
 from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, ProcessValue
+from scadbuddy.core.credentials import strip_credentials
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.profiles import (
     Flat,
@@ -276,7 +277,9 @@ async def _local(
     if not row.setting:
         raise ProfileError(f"{what} {row.name}: Bambuddy holds no settings for it")
     try:
-        return await asyncio.to_thread(profiles.flatten_over, _KINDS[slot], row.name, row.setting)
+        return await asyncio.to_thread(
+            profiles.flatten_over, _KINDS[slot], row.name, strip_credentials(row.setting)
+        )
     except ProfileImageError:
         raise
     except ProfileError as error:
@@ -337,9 +340,10 @@ async def build_presets(
     process = apply_overrides(process, plan.process_overrides)
     if plan.bed_type:
         process["curr_bed_type"] = plan.bed_type
-    machine_document = _document(machine)
-    process_document = _document(process)
-    filament_documents = [_document(filament) for filament, _ in filaments]
+    # No print-host credential reaches a slicer file, whichever tree or document it came from.
+    machine_document = _document(strip_credentials(machine))
+    process_document = _document(strip_credentials(process))
+    filament_documents = [_document(strip_credentials(filament)) for filament, _ in filaments]
     from_bambuddy: dict[str, str] = {}
     if machine_held:
         from_bambuddy["printer"] = _digest(machine_document)
