@@ -5,6 +5,8 @@ pod's sandbox container."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import inspect
 import json
 import os
@@ -13,7 +15,9 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -212,11 +216,30 @@ def _confined(hide: Path, code: str, *args: str, cwd: Path | None = None) -> str
 
 #: Why a check cannot be confined on this machine (a container's default seccomp profile
 #: refuses ``unshare(CLONE_NEWUSER)``), or None. Where it is refused, the sandbox refuses
-#: to start, so the tests that need it skip.
+#: to start, so the tests that need it skip, except where it is required.
 _REFUSED = sandbox.probe_isolation(Path(tempfile.gettempdir()))
-needs_confinement = pytest.mark.skipif(
-    _REFUSED is not None, reason=f"confinement refused: {_REFUSED}"
-)
+#: Set by CI's confinement step: a refusal there fails these tests rather than skipping
+#: them, so a run always proves the sandbox.
+_REQUIRED = os.environ.get("SCADBUDDY_REQUIRE_CONFINEMENT") == "1"
+
+
+def needs_confinement(test: Callable[..., None]) -> Callable[..., None]:
+    if _REFUSED is None:
+        return test
+    if _REQUIRED:
+
+        @functools.wraps(test)
+        def refused(*args: Any, **kwargs: Any) -> None:
+            pytest.fail(f"confinement refused where it is required: {_REFUSED}")
+
+        return refused
+    skip: Callable[..., None] = pytest.mark.skip(reason=f"confinement refused: {_REFUSED}")(test)
+    return skip
+
+
+def test_confinement_holds_where_it_is_required() -> None:
+    if _REQUIRED:
+        assert _REFUSED is None, _REFUSED
 
 
 def test_the_worker_makes_itself_non_dumpable() -> None:
@@ -312,13 +335,99 @@ def test_a_confined_child_sees_no_other_process(tmp_path: Path) -> None:
         "    print(error.strerror)\n"
         "parent = os.getppid()\n"
         "calls = [(310 if X86 else 270, 1), (311 if X86 else 271, 1), (312 if X86 else 272, 1),"
-        " (434, 1), (438, 1), (424, 1)]\n"
+        " (434, 1), (438, 1), (424, 1), (112 if X86 else 157, 0), (109 if X86 else 154, 0)]\n"
         "print([errno(libc.syscall(nr, arg, 0, 0, 0, 0, 0)) for nr, arg in calls])"
     )
     lines = _confined(tmp_path, code).splitlines()
     assert lines[0] == "1"
     assert lines[1] in ("[]", "Permission denied")
-    assert lines[2] == str(["Operation not permitted"] * 6)
+    # The six cross-process calls, then setsid and setpgid: the parser cannot leave the
+    # process group a timeout kills.
+    assert lines[2] == str(["Operation not permitted"] * 8)
+
+
+def _state(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def _descendants(pid: int) -> list[int]:
+    found: list[int] = []
+    todo = [pid]
+    while todo:
+        parent = todo.pop()
+        for children in Path(f"/proc/{parent}/task").glob("*/children"):
+            with contextlib.suppress(OSError):
+                for child in children.read_text().split():
+                    found.append(int(child))
+                    todo.append(int(child))
+    return found
+
+
+@needs_confinement
+def test_killing_the_launcher_ends_every_process_of_the_job(tmp_path: Path) -> None:
+    """The parser dies with its launcher (``PR_SET_PDEATHSIG``), and with PID 1 of its
+    namespace gone the kernel kills the rest: no process of the job outlives it."""
+    code = (
+        "import os, time\n"
+        "if os.fork() == 0:\n"
+        "    time.sleep(60)\n"
+        "    raise SystemExit\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)"
+    )
+    launcher = subprocess.Popen(
+        confine.command(str(tmp_path), [sys.executable, "-I", "-c", code], strict=True),
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert launcher.stdout is not None
+        assert launcher.stdout.readline().strip() == "ready"
+        job = _descendants(launcher.pid)
+        assert len(job) == 2  # the parser and its child
+        launcher.kill()
+        launcher.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while any(_state(pid) not in (None, "Z", "X") for pid in job):
+            assert time.monotonic() < deadline, [(pid, _state(pid)) for pid in job]
+            time.sleep(0.05)
+    finally:
+        launcher.kill()
+        launcher.wait(timeout=10)
+
+
+@needs_confinement
+def test_the_sandbox_kills_a_job_process_left_alive_before_it_claims(tmp_path: Path) -> None:
+    launcher = subprocess.Popen(
+        confine.command(
+            str(tmp_path), [sys.executable, "-I", "-c", "import time; time.sleep(60)"], strict=True
+        )
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while len(found := sandbox.job_processes()) < 2:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        # The launcher (non-dumpable, so unreadable) and the parser (another PID namespace).
+        assert sorted(found) == sorted([launcher.pid, *_descendants(launcher.pid)])
+        asyncio.run(sandbox.clear_job_processes())
+        assert sandbox.job_processes() == []
+        assert all(_state(pid) in (None, "Z", "X") for pid in found)
+    finally:
+        launcher.kill()
+        launcher.wait(timeout=10)
+
+
+def test_the_sandbox_stops_when_a_job_process_will_not_die(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox, "JOB_EXIT_GRACE", 0.2)
+    monkeypatch.setattr(sandbox, "job_processes", lambda: [2**22 + 12345])
+    with pytest.raises(sandbox.JobOutlivedError):
+        asyncio.run(sandbox.clear_job_processes())
 
 
 @needs_confinement

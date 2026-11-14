@@ -31,5 +31,9 @@ def forbid_dumping() -> None:
         raise OSError(errno, f"prctl(PR_SET_DUMPABLE, 0): {os.strerror(errno)}")
 
 
+def prctl(option: int, value: int) -> int:
+    return int(_libc().prctl(option, value, 0, 0, 0))
+
+
 def dumpable() -> bool:
     return bool(_libc().prctl(PR_GET_DUMPABLE, 0, 0, 0, 0))

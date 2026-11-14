@@ -4,8 +4,13 @@
 It makes itself non-dumpable (``PR_SET_DUMPABLE`` 0, lifted only for the three writes of
 its id maps, which a non-dumpable process cannot open), confines itself, then forks the
 parser as PID 1 of a PID namespace of its own and reaps it, exiting with its code (128 plus
-the signal when one killed it). Both stay in the runner's process group, which a kill
-reaches whole:
+the signal when one killed it). The parser dies with its launcher: it sets
+``PR_SET_PDEATHSIG`` to ``SIGKILL`` and then checks, through a pipe only the launcher holds
+open, that the launcher is still there (``getppid`` cannot tell: the launcher is outside
+its PID namespace, so it reads 0). When PID 1 of a PID namespace dies the kernel kills
+every process in it ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)),
+so a kill of the launcher, which the runner's process-group kill includes, ends the whole
+job, and the parser cannot leave the group (``setsid`` and ``setpgid`` are refused):
 
 1. ``unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)``, the process's own
    uid and gid mapped to themselves
@@ -29,7 +34,8 @@ reaches whole:
    ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)).
 3. A seccomp filter that refuses (``EPERM``) every call that could undo step 1 or reach
    another process: ``mount``, ``umount2``, ``pivot_root``, ``chroot``, the new mount API,
-   ``unshare``, ``setns``, ``clone`` with a namespace flag, ``ptrace``,
+   ``unshare``, ``setns``, ``clone`` with a namespace flag, ``setsid``, ``setpgid``,
+   ``ptrace``,
    ``process_vm_readv``, ``process_vm_writev``, ``kcmp``, ``pidfd_open``, ``pidfd_getfd``,
    ``pidfd_send_signal``, ``keyctl``, ``add_key``, ``request_key``, ``bpf``,
    ``perf_event_open`` and ``userfaultfd``; ``clone3``
@@ -58,6 +64,8 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import select
+import signal
 import struct
 import sys
 from pathlib import Path
@@ -97,17 +105,18 @@ _NR_CLONE3 = 435
 
 #: ``platform.machine()`` → (``AUDIT_ARCH_*``, ``__NR_clone``, the refused calls: mount,
 #: umount2, pivot_root, chroot, unshare, setns, ptrace, keyctl, add_key, request_key, bpf,
-#: perf_event_open, userfaultfd, process_vm_readv, process_vm_writev, kcmp).
+#: perf_event_open, userfaultfd, process_vm_readv, process_vm_writev, kcmp, setsid,
+#: setpgid).
 ARCHES: dict[str, tuple[int, int, tuple[int, ...]]] = {
     "x86_64": (
         0xC000003E,
         56,
-        (165, 166, 155, 161, 272, 308, 101, 250, 248, 249, 321, 298, 323, 310, 311, 312),
+        (165, 166, 155, 161, 272, 308, 101, 250, 248, 249, 321, 298, 323, 310, 311, 312, 112, 109),
     ),
     "aarch64": (
         0xC00000B7,
         220,
-        (40, 39, 41, 51, 97, 268, 117, 219, 217, 218, 280, 241, 282, 270, 271, 272),
+        (40, 39, 41, 51, 97, 268, 117, 219, 217, 218, 280, 241, 282, 270, 271, 272, 157, 154),
     ),
 }
 _X32_SYSCALL_BIT = 0x40000000
@@ -123,6 +132,7 @@ _RET_K = 0x06
 _RET_ALLOW = 0x7FFF0000
 _RET_KILL_PROCESS = 0x80000000
 _RET_ERRNO = 0x00050000
+_PR_SET_PDEATHSIG = 1
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
 _PR_SET_SECCOMP = 22
@@ -284,15 +294,23 @@ def main(argv: list[str]) -> NoReturn:
         os.environ[ISOLATION_ENV] = refused
         restrict(libc)
         _exec(command)
+    # The launcher holds the write end; its death closes it, which the parser can see.
+    alive, held = os.pipe()
     child = os.fork()
     if child == 0:
         # PID 1 of the new PID namespace.
+        os.close(held)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, None, 0, 0)
+        if select.select([alive], [], [], 0)[0]:
+            # The launcher died before the death signal was armed.
+            os._exit(126)
         refused = hide_proc(libc) or restrict(libc)
         if refused is not None:
             if strict:
                 _fail(refused)
             os.environ[ISOLATION_ENV] = refused
         _exec(command)
+    os.close(alive)
     # The launcher holds the namespaces' capabilities while it waits: it takes the same
     # filter, and the parser, in a PID namespace below it with no /proc, cannot see it.
     if (refused := restrict(libc)) is not None and strict:

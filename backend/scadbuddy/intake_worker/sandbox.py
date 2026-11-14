@@ -19,7 +19,9 @@ The isolation rule (spec §7): one customer's file per pod at any moment. The sa
 one check at a time, fixed, and empties every finished job before it claims the next
 (`_wipe`); the worker takes one check at a time too. So while a parse runs, no other
 customer's file or process exists in the pod to reach. Scale with replicas of the
-Deployment, never with checks at once.
+Deployment, never with checks at once. Before each claim it also makes sure no process of
+an earlier job is alive (`clear_job_processes`): it is the pod's child subreaper, so a
+job's orphans become its own, and it kills what it finds; one that survives makes it exit.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from scadbuddy.core.logging import configure_logging
 from scadbuddy.intake_worker import confine
 from scadbuddy.intake_worker.child import PREVIEW, UPLOAD, VERDICT
 from scadbuddy.intake_worker.hardening import forbid_dumping
+from scadbuddy.intake_worker.hardening import prctl as hardening_prctl
 from scadbuddy.intake_worker.runner import (
     BOX,
     BOX_MODE,
@@ -245,6 +248,75 @@ async def _run_claimed(job_fd: int, spool: Path) -> None:
     _answer(job_fd, answer)
 
 
+#: How long the processes of an earlier job may take to die once killed.
+JOB_EXIT_GRACE: Final = 5.0
+_PR_SET_CHILD_SUBREAPER: Final = 36
+
+
+class JobOutlivedError(RuntimeError):
+    """A process of an earlier job is still alive: no next job may be claimed."""
+
+
+def job_processes() -> list[int]:
+    """This process's descendants in another PID namespace than its own, or whose
+    namespace cannot be read: the processes of a job, since each parse has a PID namespace
+    of its own and its launcher and parser are non-dumpable (`confine.py`). Between jobs no
+    other descendant exists. A zombie does not count, and is reaped when it is this
+    process's child (the sandbox is the pod's child subreaper)."""
+    own = os.readlink("/proc/self/ns/pid")
+    found: list[int] = []
+    todo = [os.getpid()]
+    while todo:
+        parent = todo.pop()
+        try:
+            tasks = os.listdir(f"/proc/{parent}/task")
+        except OSError:
+            continue
+        for tid in tasks:
+            try:
+                with open(f"/proc/{parent}/task/{tid}/children") as listed:
+                    children = [int(pid) for pid in listed.read().split()]
+            except OSError:
+                continue
+            for pid in children:
+                todo.append(pid)
+                if _zombie(pid):
+                    if parent == os.getpid():
+                        with suppress(ChildProcessError):
+                            os.waitpid(pid, os.WNOHANG)
+                    continue
+                try:
+                    if os.readlink(f"/proc/{pid}/ns/pid") != own:
+                        found.append(pid)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except OSError:
+                    found.append(pid)
+    return found
+
+
+def _zombie(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as stat_file:
+            return stat_file.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+    except (OSError, IndexError):
+        return True
+
+
+async def clear_job_processes() -> None:
+    """No process of an earlier job left alive: each found is killed, and one still alive
+    after `JOB_EXIT_GRACE` raises `JobOutlivedError`."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + JOB_EXIT_GRACE
+    while left := job_processes():
+        if loop.time() > deadline:
+            raise JobOutlivedError(f"processes of an earlier job outlived it: {left[:10]}")
+        for pid in left:
+            with suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        await asyncio.sleep(SPOOL_POLL)
+
+
 def _wipe(job: Path) -> None:
     """Everything in a finished job removed but ``done`` (the job's directory is the
     worker's, in its ``jobs/``, which only it can remove)."""
@@ -282,6 +354,7 @@ async def serve(spool: Path, stop: asyncio.Event) -> None:
             for job in jobs:
                 if (job / DONE).exists():
                     _wipe(job)
+            await clear_job_processes()
             await run_job(ready[0], spool)
             continue
         with suppress(TimeoutError):
@@ -315,7 +388,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             refused[:300],
         )
         return 3
-    asyncio.run(_main(spool))
+    # A job's orphans become this process's children, so `job_processes` sees them.
+    if hardening_prctl(_PR_SET_CHILD_SUBREAPER, 1) != 0:
+        logger.error("the intake sandbox refuses to start: it cannot be the child subreaper")
+        return 3
+    try:
+        asyncio.run(_main(spool))
+    except JobOutlivedError as error:
+        logger.error("the intake sandbox stops: %s", error)
+        return 4
     return 0
 
 

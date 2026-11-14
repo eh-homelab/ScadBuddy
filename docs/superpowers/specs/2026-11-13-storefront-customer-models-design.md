@@ -424,7 +424,10 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
 - **Fail closed.** A step that cannot be taken stops the check; it never runs weaker.
 - **The isolation rule: one tenant per pod.** A pod holds one customer's file at any
   moment. The sandbox container runs one check at a time, fixed and not configurable, and
-  empties every finished job before it claims the next (`sandbox._wipe`); the worker takes
+  empties every finished job before it claims the next (`sandbox._wipe`). Before each claim
+  it also checks that no process of an earlier job is alive (`clear_job_processes`: it is
+  the pod's child subreaper, so a job's orphans become its children; it kills what it
+  finds, and exits 4 when one survives five seconds). The worker takes
   one check at a time too (`max_concurrent_activities=1`). So while a parse runs, no other
   customer's file or process exists in the pod for an exploit to reach, whatever it
   escapes. Throughput comes from replicas of the intake Deployment, never from checks at
@@ -464,10 +467,15 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
      ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)).
      No fresh `/proc` is mounted: a container's masked `/proc` paths make the kernel
      refuse one in a user namespace, and the parser needs none. The launcher reaps the
-     parser and exits with its code;
+     parser and exits with its code. The parser dies with its launcher: it sets
+     `PR_SET_PDEATHSIG` to `SIGKILL`, then checks through a pipe only the launcher holds
+     that the launcher is still alive (`getppid` reads 0 across the namespace boundary).
+     When PID 1 of a PID namespace dies the kernel kills every process in it, so the
+     runner's kill of the launcher's process group ends the whole job;
   2. `prctl(PR_SET_NO_NEW_PRIVS, 1)`;
   3. a seccomp filter that answers `EPERM` to `mount`, `umount2`, `pivot_root`, `chroot`,
-     the new mount API, `unshare`, `setns`, `clone` with a namespace flag, `ptrace`,
+     the new mount API, `unshare`, `setns`, `clone` with a namespace flag, `setsid`,
+     `setpgid` (the parser cannot leave the process group a timeout kills), `ptrace`,
      `process_vm_readv`, `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd`,
      `pidfd_send_signal`, `keyctl`, `add_key`, `request_key`, `bpf`, `perf_event_open` and `userfaultfd`, and
      `ENOSYS` to `clone3` and `io_uring_setup`
@@ -481,8 +489,9 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   the parser's `CapEff` and `CapPrm` are 0, `NoNewPrivs` 1, `Seccomp` 2; `umount2` of the
   cover, `mount`, `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` each fail with
   `EPERM`; the parser is PID 1 and `/proc` lists nothing; `process_vm_readv`,
-  `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal` fail
-  with `EPERM`; a connect to a host loopback listener fails; the spool's other jobs are
+  `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`,
+  `setsid` and `setpgid` fail with `EPERM`; a kill of the launcher alone ends the parser
+  and its child; a connect to a host loopback listener fails; the spool's other jobs are
   unreachable by absolute path and by `..`. CI proves the same on every run: shard 1 of
   `backend-pytest` runs `tests/intake_worker/test_runner.py` as uid 10001 in a container
   unconfined by seccomp and AppArmor, with the runner's AppArmor user-namespace
