@@ -16,14 +16,34 @@ Never a pooled one: a lock held for minutes must not hold a connection the route
 Closing the connection ends every lock on it, so a process that stops frees its slices.
 
 A claim whose connection fails answers that this process follows the slice: the dialog
-then hears of its changes, at worst twice while Postgres cannot be reached. A lock lost
-with its connection lets another replica follow the slice too, until one follow ends.
+then hears of its changes, at worst twice while Postgres cannot be reached. After a failed
+claim, the claims answer the same with no connect for `CONNECT_BACKOFF` seconds, so
+during an outage reads of new slices do not queue behind each other's connects, each up
+to `CONNECT_TIMEOUT` seconds (#6162). A lock lost with its connection lets another
+replica follow the slice too, until one follow ends.
+
+A process that stops frees its locks at once when its kernel closes the socket (an exit
+or a crash of the process). A host that vanishes with no FIN or RST (a node lost, a
+partition) leaves the server a half-open session, and its locks stay held, with no
+follower, until the server sees the session is dead. The client's `TCP_KEEPALIVE` does
+not help there: it only lets this process see a dead server. The server sees a dead
+client only on its own timers: ``tcp_keepalives_idle``, ``tcp_keepalives_interval`` and
+``tcp_keepalives_count``, and ``tcp_user_timeout`` while it has unacknowledged data
+(https://www.postgresql.org/docs/18/runtime-config-connection.html#GUC-TCP-KEEPALIVES-IDLE).
+Each is 0 by default, which takes the operating system's value; on Linux that is 7200 s
+idle, then 9 probes 75 s apart, about 2 h 11 min
+(https://docs.kernel.org/networking/ip-sysctl.html, ``tcp_keepalive_*``).
+So those server settings bound how long such a slice can stay "held elsewhere" with no
+follower. Until then its dialogs hear no event, and see the slice only when they read it
+again for another reason.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import psycopg
@@ -36,6 +56,8 @@ logger = logging.getLogger(__name__)
 #: The claims' connection, as `core/pg_pool.py`'s registry and ``pg_stat_activity`` name it.
 CLAIMS_NAME = "scadbuddy-preview-follows"
 CONNECT_TIMEOUT = 5
+#: Seconds after a failed claim in which a claim answers True with no connect.
+CONNECT_BACKOFF = 10.0
 
 
 class FollowClaims(Protocol):
@@ -56,9 +78,12 @@ class PgFollowClaims:
     name = CLAIMS_NAME
     max_size = 1
 
-    def __init__(self, conninfo: str) -> None:
+    def __init__(self, conninfo: str, *, clock: Callable[[], float] = time.monotonic) -> None:
         self.conninfo = conninfo
+        self._clock = clock
         self._conn: psycopg.Connection[Any] | None = None
+        #: When a claim may connect again after a failed one.
+        self._retry_at = 0.0
         #: Serialises the connection's statements: claims come from several threads.
         self._lock = threading.Lock()
         record_connection(self)
@@ -68,6 +93,8 @@ class PgFollowClaims:
 
     def claim(self, key: str) -> bool:
         with self._lock:
+            if self._conn is None and self._clock() < self._retry_at:
+                return True
             try:
                 if self._conn is None:
                     self._conn = psycopg.connect(
@@ -75,8 +102,9 @@ class PgFollowClaims:
                         autocommit=True,
                         connect_timeout=CONNECT_TIMEOUT,
                         application_name=CLAIMS_NAME,
-                        # A lock may be held for minutes: a peer that went away is found
-                        # in about 30 s, and the server then frees its locks.
+                        # A server that went away is found in about 30 s. These are the
+                        # client's timers only: when this host vanishes, the server frees
+                        # its locks on its own tcp_keepalives_* (the module docstring).
                         **TCP_KEEPALIVE,  # type: ignore[arg-type]
                     )
                 row = self._conn.execute(
@@ -85,6 +113,7 @@ class PgFollowClaims:
             except psycopg.Error:
                 logger.warning("a background slice's follow could not be claimed", exc_info=True)
                 self._drop()
+                self._retry_at = self._clock() + CONNECT_BACKOFF
                 return True
             return bool(row and row[0])
 

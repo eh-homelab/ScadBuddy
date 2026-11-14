@@ -21,10 +21,21 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
+from scadbuddy.orders.customer_links import MAX_LINK_CHARS
 from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.storefront.wire import (
+    MAX_COLOUR_CHOICES,
+    MAX_LINK_NOTE,
+    MAX_MODEL_FILE_BYTES,
+    MAX_MODEL_FILES,
+    MAX_PRINT_LINKS,
+    MAX_PURCHASE_LINKS,
+    MAX_REQUEST_TEXT,
+    MAX_UPLOAD_NAME,
+)
 from scadbuddy.storefront.wire import (
     MAX_REQUEST_FILE_BYTES as MAX_REQUEST_FILE_BYTES,
 )
@@ -34,6 +45,10 @@ from scadbuddy.storefront.wire import (
 from scadbuddy.storefront.wire import (
     REQUEST_KINDS as REQUEST_KINDS,
 )
+
+#: The most units of a "print my own model" request: a listing item's own cap
+#: (`AddListingItem`).
+MAX_ITEM_QUANTITY = 100
 
 #: A commit of the models repository, whole: a listing never pins a short id.
 LISTING_COMMIT = r"^[0-9a-f]{40}$"
@@ -284,7 +299,9 @@ class StoreRender(BaseModel):
     plates: list[PlateInfo]
     bbox_mm: BoundingBox | None
     colors: list[str] | None
-    #: The edge's path of the preview, once the render is done.
+    #: The edge's path of the preview, once the render is done and its files are in the
+    #: API's cache (`renders.py` `shown_render`); null until then, so the page keeps
+    #: polling (#6120).
     preview_url: str | None
     error: str | None
 
@@ -315,6 +332,32 @@ class DraftAttachment(BaseModel):
     url: str
 
 
+SourceKind = Literal["file", "link"]
+SourcePurpose = Literal["print", "purchase"]
+CheckStatus = Literal["checking", "ready", "refused", "failed"]
+SourceStatus = Literal[
+    "open", "imported", "manual", "declined", "pending", "recorded", "not_needed"
+]
+
+
+class DraftSource(BaseModel):
+    """A file or a link of a request item, as its customer reads it. A link is text only:
+    the page shows it escaped, never as an anchor (spec 2026-11-13 §9.3). A file's check
+    (``checking``, ``ready``, ``refused`` with ``check_reason``, ``failed``) is the intake
+    worker's (§7)."""
+
+    id: str
+    kind: SourceKind
+    purpose: SourcePurpose
+    filename: str | None = None
+    size: int | None = None
+    url: str | None = None
+    note: str = ""
+    check_status: CheckStatus | None = None
+    check_reason: str | None = None
+    status: SourceStatus
+
+
 class DraftItem(BaseModel):
     """An item of the visitor's draft. ``inputs`` are a model item's parameter values
     (``labels`` names each as the page shows it), ``notes`` a request's text; each is None
@@ -330,6 +373,75 @@ class DraftItem(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     notes: str | None
     attachments: list[DraftAttachment]
+    #: A request's files and links (#6133): its models, and the things to buy.
+    sources: list[DraftSource] = Field(default_factory=list)
+    #: Whether the request is a "print my own model" request (#6133), not a design one.
+    own_model: bool = False
+
+
+class UploadSlotAsk(BaseModel):
+    """One file the visitor will upload (#6133, spec 2026-11-13 §6.2): its name, its exact
+    size in bytes and its type. The store refuses a body of any other size or type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=MAX_UPLOAD_NAME)
+    size: int = Field(ge=1, le=MAX_MODEL_FILE_BYTES)
+    media_type: Literal["model/stl", "model/3mf"]
+
+
+class UploadSlotsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    files: list[UploadSlotAsk] = Field(min_length=1, max_length=MAX_MODEL_FILES)
+
+
+class UploadSlot(BaseModel):
+    """Where the browser PUTs one file: ``url`` with ``headers``, until ``expires_at``.
+    The URL carries a signature: it is the visitor's alone and is never logged."""
+
+    id: str
+    filename: str
+    url: str
+    headers: dict[str, str]
+    expires_at: datetime
+
+
+class UploadSlots(BaseModel):
+    uploads: list[UploadSlot]
+
+
+class LinkAsk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=MAX_LINK_CHARS)
+    purpose: SourcePurpose = "print"
+    note: str = Field(default="", max_length=MAX_LINK_NOTE)
+
+
+class ColourAsk(BaseModel):
+    """The colours the visitor asked for: the shop's choice, or price book filaments by
+    id."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shop_choice: bool = True
+    filaments: list[str] = Field(default_factory=list, max_length=MAX_COLOUR_CHOICES)
+
+
+class ModelRequestBody(BaseModel):
+    """A "print my own model" request (#6133, spec 2026-11-13 §6.3): the upload slots the
+    browser filled, the links, one quantity, the colours and a note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    uploads: list[str] = Field(default_factory=list, max_length=MAX_MODEL_FILES)
+    links: list[LinkAsk] = Field(
+        default_factory=list, max_length=MAX_PRINT_LINKS + MAX_PURCHASE_LINKS
+    )
+    quantity: int = Field(default=1, ge=1, le=MAX_ITEM_QUANTITY)
+    colours: ColourAsk = Field(default_factory=ColourAsk)
+    note: str = Field(default="", max_length=MAX_REQUEST_TEXT)
 
 
 class DraftView(BaseModel):

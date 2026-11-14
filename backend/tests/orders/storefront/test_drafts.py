@@ -229,6 +229,9 @@ def test_add_to_order_makes_revision_one(
             "labels": {"width": "Width (mm)"},
             "notes": None,
             "attachments": [],
+            # A customer's own files and links (#6133): none on a listing's item.
+            "sources": [],
+            "own_model": False,
         }
     ]
 

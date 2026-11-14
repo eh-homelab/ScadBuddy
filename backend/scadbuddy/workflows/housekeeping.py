@@ -198,8 +198,11 @@ BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
 #: #5282: delete the storefront carts idle past ``storefront_draft_ttl_days``
 #: (`orders.lifecycle.Lifecycle.sweep_drafts`: each cart's attachments and their holds,
 #: then the order), then the visitors idle as long with no order and the
-#: `storefront_renders` rows past a day (`VisitorStore.sweep`). Last, behind its own
-#: patch; on the prune Schedule too, so carts go with the sweeps off as well.
+#: `storefront_renders` rows past a day (`VisitorStore.sweep`), then the backstop of a
+#: customer's staged files (#6133, `orders.storefront.staged_files.sweep_staged`; each
+#: file's own ``StagedFile`` workflow cleans it up).
+#: Last, behind its own patch; on the prune Schedule too, so carts go with the sweeps off
+#: as well.
 STOREFRONT_DRAFTS_SWEEP = "housekeeping_sweep_storefront_drafts"
 STOREFRONT_DRAFTS_PATCH = "housekeeping-sweep-storefront-drafts"
 #: #5283: send the storefront mail the after-commit send left queued
@@ -358,7 +361,8 @@ PAYMENT_CAPTURES_TIMEOUT = timedelta(minutes=15)
 #: each call at most 20 s (`plaid.TIMEOUT`): 10 minutes, then the matches, and a margin.
 BANK_DEPOSITS_TIMEOUT = timedelta(minutes=12)
 #: Up to 200 carts (`Lifecycle.sweep_drafts`'s limit), each a short transaction of a few
-#: deletes, then two deletes.
+#: deletes, then two deletes, then the staged files' backstop (a listing of the staging
+#: prefix and at most 1000 rows, one Temporal ``describe`` each, `SWEEP_PASS_BATCHES`).
 STOREFRONT_DRAFTS_TIMEOUT = timedelta(minutes=5)
 #: One `send_queued` call: a pass of up to 50 rows, and any pass a kick asked for meanwhile,
 #: all of which stop claiming `mail.PASS_BUDGET` (8 min) after the call started; a row in

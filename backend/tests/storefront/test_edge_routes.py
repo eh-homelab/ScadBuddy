@@ -1683,3 +1683,121 @@ def test_a_pay_checkout_refusal_with_a_problem_is_the_edge_s_502_not_an_empty_40
     # The edge answers its own 502 problem, never an empty 404 and never the CRUD text.
     assert r.status_code == 502
     assert r.json()["detail"] == "The shop could not answer this request."
+
+
+# -- a customer's own models (#6133) -----------------------------------------------------
+
+UPLOADS = "/api/v1/internal/crud/storefront/uploads"
+MODELS = "/api/v1/internal/crud/storefront/draft/models"
+SLOTS_BODY = {"files": [{"filename": "cube.stl", "size": 5, "media_type": "model/stl"}]}
+SLOTS = {
+    "uploads": [
+        {
+            "id": "a" * 32,
+            "filename": "cube.stl",
+            "url": "https://s3/x",
+            "headers": {"Content-Type": "model/stl"},
+            "expires_at": "2026-11-13T00:00:00Z",
+        }
+    ]
+}
+
+
+def test_upload_slots_take_the_bot_check_then_are_forwarded_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks: list[str] = []
+    route = crud_mock.post(UPLOADS).respond(200, json=SLOTS, headers=CRUD)
+
+    async def check(_request: Request, action: str) -> None:
+        assert route.call_count == 0
+        checks.append(action)
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+    assert r.status_code == 200 and r.json() == SLOTS
+    assert checks == ["model"]
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == SLOTS_BODY
+    assert len(sent.headers["idempotency-key"]) == 64
+
+
+def test_upload_slots_share_the_design_requests_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock.post(UPLOADS).respond(200, json=SLOTS, headers=CRUD)
+    crud_mock.post(REQUESTS).respond(200, json=VIEW, headers=CRUD)
+    codes = [
+        edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed()).status_code
+        for _ in range(3)
+    ]
+    codes += [_ask(edge).status_code for _ in range(4)]
+    assert codes == [200] * 6 + [429]
+
+
+def test_a_failed_bot_check_spends_no_upload_allowance(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check(_request: Request, _action: str) -> None:
+        raise bot_check_failed()
+
+    monkeypatch.setattr(routes, "require_turnstile", check)
+    route = crud_mock.post(UPLOADS)
+    for _ in range(REQUEST_UPLOADS + 1):
+        r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+        assert r.status_code == 403
+    assert route.call_count == 0
+
+
+def test_upload_slots_are_refused_while_requests_are_off(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    crud_mock["requests_enabled"].respond(200, json={"enabled": False}, headers=CRUD)
+    route = crud_mock.post(UPLOADS)
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers=_keyed())
+    assert r.status_code == 404
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}requests_disabled"
+    assert route.call_count == 0
+
+
+def test_upload_slots_need_a_browser_key(edge: TestClient) -> None:
+    r = edge.post("/api/store/v1/uploads", json=SLOTS_BODY, headers={"Origin": PUBLIC_URL})
+    assert r.status_code == 428
+
+
+def test_a_model_request_is_forwarded_as_sent_with_a_key(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    route = crud_mock.post(MODELS).respond(200, json=VIEW, headers=CRUD)
+    body = {"uploads": ["a" * 32], "links": [{"url": "https://makerworld.com/en/models/1"}]}
+    r = edge.post("/api/store/v1/draft/models", json=body, headers=_keyed())
+    assert r.status_code == 200 and r.json() == VIEW
+    sent = route.calls.last.request
+    assert json.loads(sent.content) == body
+    assert len(sent.headers["idempotency-key"]) == 64
+
+
+def test_a_model_request_refusal_passes_through(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+) -> None:
+    problem = {
+        "type": f"{STOREFRONT_PROBLEMS}upload_missing",
+        "title": "Unprocessable Content",
+        "status": 422,
+        "detail": "A file did not arrive. Upload it again.",
+        "index": 0,
+    }
+    crud_mock.post(MODELS).respond(
+        422, json=problem, headers={**CRUD, "Content-Type": "application/problem+json"}
+    )
+    r = edge.post("/api/store/v1/draft/models", json={"uploads": ["a" * 32]}, headers=_keyed())
+    assert r.status_code == 422
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}upload_missing"

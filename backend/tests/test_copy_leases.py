@@ -1,7 +1,7 @@
 """The copy lease (#5298 Task 27, `bambuddy/copy_leases.py`) on the API's SQL: two
 holders exclude each other, an expired lease is taken over, a record under a lease
-another holder took is refused, a renewed lease outlives its TTL, and a holder of the
-old session advisory lock makes an acquire busy."""
+another holder took is refused, a renewed lease outlives its TTL, and neither an acquire
+nor the API's `copy_lock` takes the old session advisory lock (#5298 Task 35)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.copy_leases import (
-    COPY_LOCK_PREFIX,
     CopyLease,
     CopyLeases,
     LeaseLostError,
@@ -28,6 +27,8 @@ pytestmark = pytest.mark.requires_postgres
 
 KEY = "native:output:abc:7"
 OUTPUT = "a" * 32
+#: The key of the session advisory lock the lease replaced (#5298 Task 27).
+OLD_LOCK = "scadbuddy-library-copy:" + KEY
 
 
 def token() -> str:
@@ -46,7 +47,7 @@ def uploads(pg_pool: ConnectionPool[Connection[DictRow]]) -> BambuddyUploadStore
 
 @pytest.fixture
 def old_pod(pg_conninfo: str) -> Iterator[Connection[DictRow]]:
-    """A connection of its own, as an old print pod's `copy_lock` takes."""
+    """A connection of its own, as a print pod of a build before the lease took."""
     with psycopg.connect(pg_conninfo, autocommit=True, row_factory=dict_row) as conn:
         yield conn
 
@@ -118,27 +119,23 @@ async def test_renew_keeps_a_long_upload_held(leases: CopyLeases) -> None:
         assert await leases.acquire(KEY, token(), 60, 0) is None
 
 
-async def test_an_old_holder_of_the_advisory_lock_makes_acquire_busy(
-    leases: CopyLeases, old_pod: Connection[DictRow]
+async def test_the_old_advisory_lock_is_no_longer_taken(
+    leases: CopyLeases, uploads: BambuddyUploadStore, old_pod: Connection[DictRow]
 ) -> None:
-    old_pod.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK_PREFIX + KEY,))
-    assert await leases.acquire(KEY, token(), 60, 0.3) is None
-    old_pod.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK_PREFIX + KEY,))
-    assert await leases.acquire(KEY, token(), 60, 0) is not None
-
-
-async def test_the_apis_copy_lock_also_holds_the_advisory_lock(
-    uploads: BambuddyUploadStore, old_pod: Connection[DictRow]
-) -> None:
-    """So an old print pod, which takes only that lock, waits for an API holder."""
+    """#5298 Task 35: no pod of a build before the lease is left, so a held old lock no
+    longer makes an acquire busy, and the API's `copy_lock` no longer takes it."""
 
     def old_pod_gets_it() -> bool:
         row = old_pod.execute(
-            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got",
-            (COPY_LOCK_PREFIX + KEY,),
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (OLD_LOCK,)
         ).fetchone()
+        old_pod.execute("SELECT pg_advisory_unlock_all()")
         return bool(row is not None and row["got"])
 
     async with uploads.copy_lock(KEY):
-        assert not old_pod_gets_it()
-    assert old_pod_gets_it()
+        assert old_pod_gets_it()
+    old_pod.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (OLD_LOCK,))
+    try:
+        assert await leases.acquire(KEY, token(), 60, 0) is not None
+    finally:
+        old_pod.execute("SELECT pg_advisory_unlock_all()")

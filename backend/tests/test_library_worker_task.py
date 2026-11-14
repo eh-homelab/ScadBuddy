@@ -419,6 +419,13 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
 
     monkeypatch.setattr(main, "_sweep_storefront", slow_storefront)
 
+    # #6133: the staged files' backstop, a listing of the staging area.
+    async def slow_staged(state: object) -> int:
+        await asyncio.sleep(0.1)
+        return 0
+
+    monkeypatch.setattr(main, "sweep_staged", slow_staged)
+
     # #4439, #4747: the Bambuddy printer sync, Bambuddy lists and a probe or two.
     async def slow_sync(*args: object) -> SimpleNamespace:
         await asyncio.sleep(0.1)

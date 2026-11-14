@@ -1,4 +1,4 @@
-"""Take back a caller's database role (#5298 Task 11): every privilege the API granted it
+"""Take back a caller's database role (#5298 Tasks 11 and 35): every privilege the API granted it
 in the current schema, and its row policies, so the deployment can drop the role
 (CNPG's `ensure: absent`). The role itself stays; dropping it is the deployment's. A
 caller that keeps its role loses only the tables dropped from its list
@@ -26,8 +26,9 @@ from psycopg.rows import tuple_row
 from scadbuddy.render.worker_role import GRANT_LOCK
 
 #: The roles the API takes back at every start (`revoke_retired`): the projects worker's,
-#: unused since the worker holds no database (#5576).
-RETIRED_ROLES: tuple[str, ...] = ("scadbuddy_projects",)
+#: unused since the worker holds no database (#5576), and the print worker's, unused since
+#: it holds no pool (#5298 Tasks 31 and 33).
+RETIRED_ROLES: tuple[str, ...] = ("scadbuddy_projects", "scadbuddy_print")
 
 
 def revoke_retired(conn: Connection[Any]) -> list[str]:
