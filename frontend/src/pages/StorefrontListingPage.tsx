@@ -268,7 +268,7 @@ export function StorefrontListingPage() {
     const body: StorefrontListingInput = listingInput(current.draft, schema.data, filaments)
     const text = savedKey(body)
     if (current.id !== null && current.saved === text) return null
-    const why = unsaveable(body)
+    const why = unsaveable(body, schema.data)
     if (why) throw new Error(why)
     const saved =
       current.id === null || current.updatedAt === null

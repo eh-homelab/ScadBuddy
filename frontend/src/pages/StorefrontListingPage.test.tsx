@@ -247,7 +247,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
     await user.click(screen.getByRole('checkbox', { name: 'PETG Black' }))
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/body_color.*choose at least one filament/)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/“Plate” is offered with nothing to choose.*tick a colour on offer/)
     expect(seen.filter((r) => r.startsWith('POST /api/v1/storefront/listings'))).toEqual([])
   })
 
