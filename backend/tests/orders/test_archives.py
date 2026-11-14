@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -350,6 +351,31 @@ async def test_a_hand_attempt_is_answered_when_its_archive_read_is_slow(
     )
     kept = shop.rows.fulfilments(item.id)[0]
     assert (kept.id, kept.actual_seconds) == (answered.id, None)
+
+
+async def test_a_slow_copy_after_a_quick_read_answers_what_it_stored(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6167: only the archives' read is timed. A write that is still going when the
+    time runs out finishes, and the answer is the attempt it stored."""
+    monkeypatch.setattr("scadbuddy.api.orders.ARCHIVE_READ_TIMEOUT", 0.05)
+    record = shop.lifecycle.record_archive_facts
+
+    def slow_record(*args: Any, **kwargs: Any) -> Fulfilment:
+        time.sleep(0.2)
+        return record(*args, **kwargs)
+
+    monkeypatch.setattr(shop.lifecycle, "record_archive_facts", slow_record)
+    order, item = shop.accepted()
+    body = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81)
+
+    answered = await record_fulfilment(
+        order.id, item.id, body, orders_of(shop, Archives(facts(81)))
+    )
+
+    assert (answered.actual_seconds, answered.actual_grams) == (7200, 12.5)
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.actual_seconds, kept.actual_grams) == (7200, 12.5)
 
 
 async def test_a_hand_attempts_archive_without_facts_keeps_corrected_times(shop: Shop) -> None:
