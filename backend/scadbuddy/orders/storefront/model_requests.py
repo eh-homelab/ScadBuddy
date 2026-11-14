@@ -105,6 +105,8 @@ EXPIRED: Final = "This file expired before the order was sent; upload it again."
 #: The customer's order page shows it (spec §10.5); a new request uploads the file again.
 ENDED: Final = "The order ended; the staged file was removed. Upload it again."
 #: How long after the submit a staged file's import may run before it reads `IMPORT_STUCK`.
+#: Nothing reads it yet: the watcher's import child (#6133 PR 5) sets the reason after it,
+#: and until then no source reads `import_stuck`.
 IMPORT_STUCK_AFTER: Final = timedelta(hours=1)
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 

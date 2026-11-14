@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.orders.models import IMPORT_STUCK
-from tests.orders.storefront.test_customer_sources import PREVIEW_HEADERS, preview_headers
+from tests.orders.storefront.test_customer_sources import PREVIEW_HEADERS, preview_headers, ready
 from tests.orders.storefront.test_drafts import (  # noqa: F401  (fixtures)
     CrudCaller,
     _state,
@@ -235,6 +235,18 @@ def test_a_stuck_import_is_retried(
     r = asks.api.post(f"{ORDERS}/{order_id}/sources/{file_id}/retry-import")
     assert r.status_code == 200, r.text
     assert (ids["upload"], "retry") in watcher.signals
+
+
+def test_the_back_office_never_checks_or_imports_on_a_visitors_cart(
+    asks: CrudCaller,  # noqa: F811
+    worker: Intake,  # noqa: F811
+) -> None:
+    """Review of #6217: as a decline is, a check again and a retry of the import are
+    refused on a cart not yet submitted (the back office never acts on one)."""
+    order_id, source_id, _upload = ready(asks, worker)
+    for action in ("check", "retry-import"):
+        r = asks.api.post(f"{ORDERS}/{order_id}/sources/{source_id}/{action}")
+        assert r.status_code == 409 and slug(r) == "order_not_submitted", (action, r.text)
 
 
 def test_the_orders_list_filters_by_own_model_purchase_and_stuck(
