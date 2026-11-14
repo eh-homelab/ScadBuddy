@@ -937,11 +937,6 @@ async def _media_url(content: ContentStore, listing_id: str, key: str) -> str | 
     return await backend.presign_get(stat.ref.backend_id, PUBLIC_MEDIA_TTL)
 
 
-def _like_escaped(text: str) -> str:
-    """``text`` with LIKE's wildcards and its escape character taken literally."""
-    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
 def listing_cursor(listing: Listing) -> str:
     """The public list's cursor after ``listing``: its position and id, as hex of JSON."""
     return json.dumps([listing.position, listing.id], separators=(",", ":")).encode().hex()
