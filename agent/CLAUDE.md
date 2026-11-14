@@ -377,6 +377,12 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
+    `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
+    with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the
+    frontend's `listingDraft.ts` tested against `test-fixtures/storefront/sell-draft-vectors.json`;
+    a colour the customer can choose is taken out of the title) and
+    `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
     in `ai_plugin_packages` (`src/plugins/packages/`, routes
     `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);

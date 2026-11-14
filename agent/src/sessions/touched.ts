@@ -342,6 +342,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
+  // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
+  // answer links it there.
+  storefront_listing_draft: () => [],
+  storefront_listing_publish: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
   price_book_import_spools: () => [],

@@ -106,7 +106,8 @@ same way, `vite.config.ts`).
   `/storefront/listings/new?sell=…`); `?listing=<id>` redirects to a saved one's editor. The smart defaults are `listingDraft.ts` `defaultsFor` (free text and
   every colour offered, from the priced filaments of the design's material, the rest locked;
   a support setting is never offered, `isSupport`), pinned by
-  `test-fixtures/storefront/sell-draft-vectors.json`; a
+  `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
+  (`agent/src/tools/storefrontDraft.ts`) is tested against too; a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
