@@ -15,8 +15,10 @@ from scadbuddy.render import bambu3mf, zipcopy
 from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PROJECT_SETTINGS_NAME,
+    TooManyTrianglesError,
     write_bambu_3mf,
 )
+from scadbuddy.render.geometry import MeshBudget, parts_from_3mf
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
@@ -113,3 +115,47 @@ def test_recolouring_copies_what_it_does_not_change_and_writes_nothing_to_disk(
     assert PROJECT_SETTINGS_NAME not in copied
     assert _colours(recoloured) == ["#00C000", "#FF9425"]
     assert not np.array_equal(_cover(recoloured), _cover(payload))
+
+
+def test_an_authors_unlit_cover_is_redrawn_too(tmp_path: Path) -> None:
+    """#6170: Bambu Studio saves ``plate_no_light_1.png`` beside ``plate_1.png``, and the
+    CLI keeps it as it keeps the others, so it is redrawn in the chosen colours too."""
+    payload = _written(tmp_path)
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in entries:
+            archive.writestr(info, data)
+        archive.writestr("Metadata/plate_no_light_1.png", archive.read(PLATE_THUMBNAIL))
+
+    recoloured = recolour_3mf(buffer.getvalue(), ["#00C000", "#FF9425"])
+
+    with zipfile.ZipFile(io.BytesIO(recoloured)) as archive:
+        unlit = archive.read("Metadata/plate_no_light_1.png")
+        assert unlit == archive.read(PLATE_THUMBNAIL)
+    assert not np.array_equal(read_png(unlit), _cover(payload))
+
+
+def test_a_file_past_the_triangle_budget_is_refused(tmp_path: Path) -> None:
+    """The budget bounds the meshes read for the covers, over every plate: the two
+    boxes hold 24 triangles. Past it, nothing is drawn (#6172 review)."""
+    payload = _written(tmp_path)
+    with pytest.raises(TooManyTrianglesError):
+        recolour_3mf(payload, ["#00C000", "#FF9425"], max_triangles=20)
+    recolour_3mf(payload, ["#00C000", "#FF9425"], max_triangles=24)
+
+
+def test_the_vertex_budget_is_shared_across_objects(tmp_path: Path) -> None:
+    """Each object's parse is capped at the vertices the budget has left, not at a fresh
+    allowance: the plate's two boxes are the same size, so a budget a little over one
+    box's vertices reads the first and refuses the second (#6172 review)."""
+    payload = _written(tmp_path)
+    whole = MeshBudget(10**6)
+    parts_from_3mf(io.BytesIO(payload), 1, budget=whole)
+    both = 3 * 10**6 - whole.vertices
+    assert whole.triangles == 10**6 - 24
+    tight = MeshBudget(10**6)
+    tight.vertices = both // 2 + 1
+    with pytest.raises(TooManyTrianglesError):
+        parts_from_3mf(io.BytesIO(payload), 1, budget=tight)

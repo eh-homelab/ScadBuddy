@@ -98,7 +98,7 @@ import math
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from pathlib import Path
 from typing import IO, Literal
 
@@ -116,6 +116,8 @@ from scadbuddy.render.bambu3mf import (
     PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
+    MeshArrays,
+    TooManyTrianglesError,
     laid_out_plates,
     parse_model,
 )
@@ -351,22 +353,45 @@ class Unreadable3MFError(ValueError):
     """
 
 
-def parts_from_3mf(path: Path | IO[bytes], plate: int = 1) -> list[ColourPart]:
+class MeshBudget:
+    """What a read of untrusted meshes may still parse, shared across every object and
+    plate it reads: each parse is capped at what is left, and spends what it read."""
+
+    def __init__(self, triangles: int) -> None:
+        self.triangles = triangles
+        self.vertices = 3 * triangles
+
+    def spend(self, meshes: Iterable[MeshArrays]) -> None:
+        for arrays in meshes:
+            self.triangles -= len(arrays.faces)
+            self.vertices -= len(arrays.vertices)
+
+
+def parts_from_3mf(
+    path: Path | IO[bytes], plate: int = 1, *, budget: MeshBudget | None = None
+) -> list[ColourPart]:
     """The parts on one plate of a ScadBuddy 3MF, in extruder order.
 
     Read from the ``3D/Objects/object_<n>.model`` files `bambu3mf.write_plates_3mf`
     wrote for that plate -- the meshes in model coordinates, without the build
     item's placement. Each part's ``material_index`` is its extruder, which on a
     later plate is not its position. Raises :class:`NoSuchPlateError` when there is
-    no such plate and :class:`Unreadable3MFError` when the file is damaged.
+    no such plate and :class:`Unreadable3MFError` when the file is damaged. With
+    ``budget``, every object parsed is capped at what the budget has left and spends
+    what it read, so one budget bounds several plates together: past it,
+    :class:`TooManyTrianglesError`, raised as the parse reaches it.
     """
-    return _plate_parts(path, plate)[0]
+    return _plate_parts(path, plate, budget)[0]
 
 
-def _plate_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
+def _plate_parts(
+    path: Path | IO[bytes], plate: int, budget: MeshBudget | None = None
+) -> tuple[list[ColourPart], int]:
     """The plate's parts and how many plates the 3MF has."""
     try:
-        return _read_parts(path, plate)
+        return _read_parts(path, plate, budget)
+    except TooManyTrianglesError:
+        raise
     except (zipfile.BadZipFile, ET.ParseError, zlib.error, EOFError, ValueError) as error:
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
@@ -400,7 +425,9 @@ def _placed(
     return moved, faces[:, ::-1] if mirrors else faces
 
 
-def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], int]:
+def _read_parts(
+    path: Path | IO[bytes], plate: int, budget: MeshBudget | None = None
+) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -444,7 +471,14 @@ def _read_parts(path: Path | IO[bytes], plate: int) -> tuple[list[ColourPart], i
             if index in negative:
                 continue
             name = f"3D/Objects/object_{index}.model"
-            model = parse_model(archive, name)
+            model = parse_model(
+                archive,
+                name,
+                max_triangles=None if budget is None else budget.triangles,
+                max_vertices=None if budget is None else budget.vertices,
+            )
+            if budget is not None:
+                budget.spend(model.meshes.values())
             obj = model.root.find(f".//{{{CORE_NS}}}object")
             meshes = list(model.meshes.values())
             vertices = meshes[0].vertices if meshes else np.empty((0, 3))
