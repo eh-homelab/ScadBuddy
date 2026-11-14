@@ -299,6 +299,59 @@ async def test_a_hand_attempt_is_recorded_when_its_archive_cannot_be_read(shop: 
     assert len(shop.rows.fulfilments(item.id)) == 2
 
 
+async def test_an_edit_that_makes_the_first_copy_takes_the_archives_times(shop: Shop) -> None:
+    """#6145: the record's read failed, so the edit's copy is the first. The first copy
+    writes the archive's times over the times the same edit set; a later edit's stay."""
+    order, item = shop.accepted()
+    body = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81)
+    answered = await record_fulfilment(order.id, item.id, body, orders_of(shop, FailingArchives()))
+    assert answered.actual_seconds is None
+
+    corrected = datetime(2026, 11, 1, 9, tzinfo=UTC)
+    ended = datetime(2026, 11, 1, 14, tzinfo=UTC)
+    edit = FulfilmentInput(quantity=1, outcome="succeeded", started_at=corrected, finished_at=ended)
+    seam = orders_of(shop, Archives(facts(81)))
+    edited = await update_fulfilment(order.id, item.id, answered.id, edit, seam)
+
+    assert (edited.actual_seconds, edited.actual_grams) == (7200, 12.5)
+    assert edited.started_at == datetime(2026, 11, 1, 10, tzinfo=UTC)
+    assert edited.finished_at == datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+    again = await update_fulfilment(order.id, item.id, answered.id, edit, seam)
+    assert (again.started_at, again.finished_at) == (corrected, ended)
+
+
+class SlowArchives(Archives):
+    """A Bambuddy whose archive reads never answer in time."""
+
+    async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        await asyncio.sleep(5)
+        return await super().archive(archive_id)
+
+
+async def test_a_hand_attempt_is_answered_when_its_archive_read_is_slow(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6145: the write waits for the archives' read only so long; past it, the attempt
+    is recorded and answered with no actuals."""
+    monkeypatch.setattr("scadbuddy.api.orders.ARCHIVE_READ_TIMEOUT", 0.05)
+    order, item = shop.accepted()
+    body = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81)
+
+    answered = await asyncio.wait_for(
+        record_fulfilment(order.id, item.id, body, orders_of(shop, SlowArchives(facts(81)))),
+        2,
+    )
+
+    assert (answered.archive_ids, answered.actual_seconds, answered.actual_grams) == (
+        [81],
+        None,
+        None,
+    )
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.id, kept.actual_seconds) == (answered.id, None)
+
+
 async def test_a_hand_attempts_archive_without_facts_keeps_corrected_times(shop: Shop) -> None:
     """#5273: an archive with no time or grams leaves no sign it was copied, which once
     made every read copy the times again over one a person corrected."""
