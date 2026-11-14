@@ -21,10 +21,79 @@ import type { ServerEvent } from './protocol.js'
 // `followSessionEvents`). Polling every `pollMs` stays as the fallback for a
 // NOTIFY that never arrives (a dropped LISTEN connection, no listener).
 
+// A fork is copy-on-write for its log (#4212): its `ai_sessions` row names the session it was
+// forked from (`fork_parent_id`) and the seq of the last event of that session's log, as that
+// session reads it, it takes (`fork_event_cut`). Its own `session.started` is its seq 1, and its
+// own later events come after the cut (`inheritThrough`), so `read` is the parent's conversation
+// events through the cut (for a fork of a fork, the parent's own read, through the smallest cut on
+// the chain) in among the child's own rows, by seq, each addressed to the child. Nothing is copied
+// at the fork. Forgetting a parent copies each child's range into the child first
+// (`copyForkEvents`, store.ts `copyForkRanges`), at the same seqs, and clears the link. A fork made
+// before the cut has its own copy and no `fork_event_cut`, and the chain stops there.
+
 export type LoggedEvent = { seq: number; event: ServerEvent }
+
+/** The conversation events a fork takes; lifecycle events (status, owner, result) are the parent's own. */
+export const FORK_EVENT_TYPES: readonly ServerEvent['type'][] = ['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result']
 
 export const DEFAULT_POLL_MS = 1000
 const PAGE = 500
+
+/**
+ * `sessionId` and the sessions its log reads through: each one's id, its depth (the session itself
+ * is 0), and the highest seq of its log taken (`bound`, NULL for the session itself). Stops at a
+ * session with no event cut. Links are only ever made to an existing session and only ever
+ * cleared, so the chain has no cycle.
+ */
+export function forkChain(sql: Sql | TransactionSql, sessionId: string) {
+  return sql`
+    WITH RECURSIVE chain (id, parent, cut, bound, depth) AS (
+      SELECT id, fork_parent_id, fork_event_cut, NULL::bigint, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
+      UNION ALL
+      SELECT s.id, s.fork_parent_id, s.fork_event_cut, LEAST(c.bound, c.cut), c.depth + 1
+        FROM ai_sessions s JOIN chain c ON s.id = c.parent WHERE c.cut IS NOT NULL
+    )`
+}
+
+/**
+ * The rows of `sessionId`'s log after `afterSeq`, by seq: its own (with `ancestors`) and those it
+ * takes through its fork chain, the latter re-addressed to it. One statement, so one snapshot.
+ */
+async function chainRows(
+  sql: Sql | TransactionSql,
+  sessionId: string,
+  afterSeq: number,
+  limit: number | null,
+  own: boolean,
+): Promise<LoggedEvent[]> {
+  const rows = await sql<{ seq: string; event: string; depth: number }[]>`
+    ${forkChain(sql, sessionId)}
+    SELECT e.seq, e.event, c.depth FROM chain c JOIN ai_session_events e ON e.session_id = c.id
+     WHERE e.seq > ${afterSeq}
+       AND (${own ? sql`c.depth = 0 OR` : sql``} (c.depth > 0 AND e.seq <= c.bound AND e.event::jsonb->>'type' = ANY(${sql.array(FORK_EVENT_TYPES as string[])})))
+     ORDER BY e.seq ${limit === null ? sql`` : sql`LIMIT ${limit}`}`
+  return rows.map((r) => {
+    const event = JSON.parse(r.event) as ServerEvent
+    return { seq: Number(r.seq), event: r.depth === 0 ? event : { ...event, sessionId } }
+  })
+}
+
+/**
+ * Before the parent of `sessionId` goes (store.ts `copyForkRanges`, in forgetSubject's
+ * transaction): the events it reads through its chain become rows of its own, at the same seqs.
+ * The caller clears its link. The events copied, so their images can be copied too.
+ */
+export async function copyForkEvents(tx: TransactionSql, sessionId: string): Promise<ServerEvent[]> {
+  const rows = await chainRows(tx, sessionId, 0, null, false)
+  for (let at = 0; at < rows.length; at += PAGE) {
+    const batch = rows.slice(at, at + PAGE)
+    await tx`
+      INSERT INTO ai_session_events (session_id, seq, event)
+      SELECT ${sessionId}, e.seq, e.event
+        FROM unnest(${tx.array(batch.map((r) => r.seq))}::bigint[], ${tx.array(batch.map((r) => JSON.stringify(r.event)))}::text[]) AS e(seq, event)`
+  }
+  return rows.map((r) => r.event)
+}
 
 /**
  * The `WHERE` of a session's `user.turn` rows with `turnId`, in `ai_session_events`: the
@@ -107,13 +176,18 @@ export class EventLog {
     this.onAppend(sessionId, events, await this.lastSeq(sessionId))
   }
 
-  /** Events after `afterSeq`, oldest first. */
+  /**
+   * A new fork (`sessionId`, its `session.started` already logged) takes its parent's log through
+   * seq `cut`: its own events go on after it. Its row must already name the parent.
+   */
+  async inheritThrough(sessionId: string, cut: number, tx?: TransactionSql): Promise<void> {
+    await (tx ?? this.sql)`
+      UPDATE ai_sessions SET fork_event_cut = ${cut}, event_seq = GREATEST(event_seq, ${cut}) WHERE id = ${sessionId}`
+  }
+
+  /** Events after `afterSeq`, oldest first: a fork's through its chain too. */
   async read(sessionId: string, afterSeq = 0, limit = PAGE): Promise<LoggedEvent[]> {
-    const rows = await this.sql<{ seq: string; event: string }[]>`
-      SELECT seq, event FROM ai_session_events
-      WHERE session_id = ${sessionId} AND seq > ${afterSeq}
-      ORDER BY seq LIMIT ${limit}`
-    return rows.map((r) => ({ seq: Number(r.seq), event: JSON.parse(r.event) as ServerEvent }))
+    return chainRows(this.sql, sessionId, afterSeq, limit, true)
   }
 
   /**

@@ -56,7 +56,7 @@ import { SessionBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
+import { forkEventCut, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import type { UserImage } from './images.js'
@@ -1729,15 +1729,17 @@ export class SessionManager {
     }
     // Through the entry the SDK's forkSession({upToMessageId}) sliced at (forkPoint.ts), inclusive.
     const upToMessageId = options.upTo === undefined || !transcript ? undefined : transcriptCut(transcript, options.upTo)
-    const history = await forkHistory(this.events, id, options.upTo)
-    if (!history || (options.upTo !== undefined && transcript && upToMessageId === undefined)) {
+    // Where the child's log is cut (#4212): the parent's seq of that reply's end, or its last.
+    const eventCut = await forkEventCut(this.events, id, options.upTo)
+    if (eventCut === undefined || (options.upTo !== undefined && transcript && upToMessageId === undefined)) {
       throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
     }
     // Where the child's transcript is cut: how many of the parent's entries, as the parent loads them, it
-    // reads. None for a parent with no transcript, whose child reads nothing of it.
-    const forkOf = transcript
-      ? { parentId: id, cut: upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1 }
-      : undefined
+    // reads. None for a parent with no transcript, whose child reads only its log through the link.
+    const forkOf = {
+      parentId: id,
+      cut: !transcript ? 0 : upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1,
+    }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
       throw new SessionError(
@@ -1767,7 +1769,7 @@ export class SessionManager {
     const child = await this.insert(
       randomUUID(),
       principal,
-      { ...fields, runtime: 'unified', ...(forkOf ? { forkOf } : {}) },
+      { ...fields, runtime: 'unified', forkOf },
       insertOptions,
     )
     try {
@@ -1779,24 +1781,25 @@ export class SessionManager {
       throw err
     }
     const childId = child.id
-    // The images the copied events name (#782, #2150), before the events that name them: the
-    // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
-    // copy every image of every ancestor.
-    await this.blobs.copy(id, childId, blobNames(history))
-    await this.events.append(childId, [
-      event({
-        type: 'session.started',
-        sessionId: childId,
-        origin: child.origin,
-        owner: child.owner,
-        title,
-        budgetUsd: child.budgetUsd,
-        mode: child.mode,
-      }),
-      // The conversation, re-addressed to the child.
-      ...history.map((e) => ({ ...e, sessionId: childId })),
-      event({ type: 'session.status', sessionId: childId, status: 'idle' }),
-    ])
+    // Its log (#4212): its own start, then the parent's conversation through the cut, read through
+    // the link and never copied (eventLog.ts), with the images it names (blobs.ts), then its own
+    // status. In one transaction, so the start is its seq 1 and nothing of its own lands in the range.
+    const started = event({
+      type: 'session.started',
+      sessionId: childId,
+      origin: child.origin,
+      owner: child.owner,
+      title,
+      budgetUsd: child.budgetUsd,
+      mode: child.mode,
+    })
+    const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
+    const seqs = await this.deps.sql.begin(async (tx) => {
+      const first = await this.events.append(childId, [started], tx)
+      await this.events.inheritThrough(childId, eventCut, tx)
+      return [...first, ...(await this.events.append(childId, [idle], tx))]
+    })
+    this.events.committed(childId, [started, idle], seqs)
     // Recorded once the child is complete (#2159): a fork that failed after the insert has only
     // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
     if (options.audit) {

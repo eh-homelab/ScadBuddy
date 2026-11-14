@@ -14,7 +14,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      and its tool calls still open (`session-<id>-call-<tool_use_id>`, plan 2026-10-13
 //      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
-//      Step 6.5) take the range each references, sealed under their own keys, in the
+//      Step 6.5) take the range each references, sealed under their own keys, with the
+//      events and images they read through it (#4212), in the
 //      transaction that then goes on to
 //      delete the subject's `ai_payload_keys` row and record it in
 //      `ai_forgotten_subjects`, so no key is ever made for it again: from then on every

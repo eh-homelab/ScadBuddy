@@ -3,6 +3,9 @@ import type { Sql, TransactionSql } from 'postgres'
 import { isUuid } from '../harness/uuid.js'
 import { openBytes, sealBytes } from '../secrets.js'
 import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/payloadCodec.js'
+import { copyForkBlobs } from './blobs.js'
+import { copyForkEvents } from './eventLog.js'
+import { blobNames } from './forkPoint.js'
 
 // The Agent SDK `SessionStore` adapter on Postgres (#300, spec §6 "Storage"):
 // the SDK mirrors every transcript line here, so any replica can resume a
@@ -68,7 +71,9 @@ import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/
 // parent's own cut, for a fork of a fork), cut there and opened under each owner's
 // key, then the child's own rows. Nothing is copied at the fork. Forgetting a parent
 // copies each child's range into the child first (`copyForkRanges`, forget.ts): those
-// rows are `inherited`, read before the child's own, and the link is cleared. The
+// rows are `inherited`, read before the child's own, and the link is cleared. Its events
+// and the images they name are copied in then too (eventLog.ts `copyForkEvents`, blobs.ts
+// `copyForkBlobs`), since the child reads those through the same link. The
 // parent's entries are passed on as they are, with the parent's `sessionId`: Claude
 // Code restores a session-scoped entry (a `cost-state`) only of the session it
 // resumes (warm.ts `restoredCostUsd`, measured in test/warmResumeCost.sdk.test.ts), so
@@ -409,8 +414,9 @@ export async function hasForks(sql: Sql, parentId: string): Promise<boolean> {
 /**
  * Before `parentId`'s key goes (forgetSubject, in its transaction, under the parent's lock): each
  * fork that reads through it takes the range it references as rows of its own, `inherited` and
- * sealed under its own key, and its link is cleared, so it needs neither the parent's rows nor
- * its key again. A fork being forgotten itself gets no rows, only its link cleared. `keys` opens
+ * sealed under its own key, with its events and the images they name (#4212), and its link is
+ * cleared, so it needs neither the parent's rows nor its key again. A fork being forgotten itself
+ * gets no rows, only its link cleared. `keys` opens
  * the parent's transcript (its own ancestors' too) and seals the copies; without them a parent
  * with forks is not forgotten. How many forks there were.
  */
@@ -468,7 +474,9 @@ export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | und
           }
         }
       }
-      await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${child.id}::uuid`
+      // Its events and the images they name (#4212), read through the link before it goes.
+      if (!forgotten) await copyForkBlobs(tx, child.id, blobNames(await copyForkEvents(tx, child.id)))
+      await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL, fork_event_cut = NULL WHERE id = ${child.id}::uuid`
     } finally {
       dek?.fill(0)
     }
