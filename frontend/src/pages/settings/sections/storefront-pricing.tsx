@@ -125,7 +125,7 @@ function SliceProfileEditor() {
         }}
       >
         <div className="flex flex-col gap-1">
-          <Label>Printer</Label>
+          <Label>Printer for storefront prices</Label>
           <Select
             value={printer ?? ''}
             onValueChange={(value) => {
@@ -133,7 +133,7 @@ function SliceProfileEditor() {
               setPrinter(value)
             }}
           >
-            <SelectTrigger aria-label="Printer" className="w-72">
+            <SelectTrigger aria-label="Printer for storefront prices" className="w-72">
               <SelectValue placeholder="No printer" />
             </SelectTrigger>
             <SelectContent position="popper">
