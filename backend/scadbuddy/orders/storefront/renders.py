@@ -87,7 +87,9 @@ _PARTS: Final = TypeAdapter(list[EstimatedPart])
 UNAVAILABLE_RETRY: Final = 5
 #: The longest a status or estimate request waits on work behind it (#6120): a done
 #: render's files being fetched, or its analysis. Past it the request answers "not ready
-#: yet" and the page asks again, so no request is held near Cloudflare's 100 s.
+#: yet" and the page asks again, so no request is held near Cloudflare's 100 s. The
+#: fetch state below (`_fetches`, `_ready`, `_failed`) is this process's: it assumes one
+#: API process, as today; with more, a preview read may still fetch on its own.
 READY_WAIT: Final = 3.0
 #: What the page waits before it asks again for a price that is not ready.
 PENDING_RETRY: Final = 2
@@ -202,14 +204,10 @@ def files_lost(job_id: str) -> bool:
     return _failures(job_id)[0] >= FETCH_TRIES
 
 
-async def files_ready(state: AppState, job: Job) -> bool:
-    """Whether the done ``job``'s files are in this process's cache: starts their fetch
-    (`materialize_result`) when none runs, and waits on it at most `READY_WAIT` seconds.
-    The fetch runs on when the wait ends, so the page's next poll finds it done. A job
-    fetched before answers at once. Only a fetch that succeeded is ready: the estimate
-    never analyses, and so never records, files that are not here."""
-    if job.id in _ready:
-        return True
+async def _fetch(state: AppState, job: Job) -> bool:
+    """Starts the fetch of the done ``job``'s files (`materialize_result`) when none
+    runs, shared by every request, and waits on it at most `READY_WAIT` seconds: whether
+    it succeeded. It runs on when the wait ends, so the next request finds it done."""
     task = _fetches.get(job.id)
     if task is None:
         task = asyncio.create_task(materialize_result(state.store.blobs, job.result))
@@ -217,6 +215,14 @@ async def files_ready(state: AppState, job: Job) -> bool:
         task.add_done_callback(lambda done: _fetched(job.id, done))
     done, _ = await asyncio.wait({task}, timeout=READY_WAIT)
     return task in done and not task.cancelled() and task.exception() is None
+
+
+async def files_ready(state: AppState, job: Job) -> bool:
+    """Whether the status may name the done ``job``'s preview: its files were fetched
+    into this process's cache (a job fetched before answers at once), else `_fetch`.
+    Only the preview leans on this: its read fetches again if the cache evicted them.
+    The estimate always fetches (`_parts`)."""
+    return job.id in _ready or await _fetch(state, job)
 
 
 async def shown_render(state: AppState, job: Job) -> StoreRender:
@@ -671,7 +677,14 @@ async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
         # Lock-free: the loop never takes `_lock`. A miss only means `_begin` looks again.
         outcome = _flights.get(job.id)
         if outcome is None:
-            if not await files_ready(state, job):
+            # Always fetched, never taken from `_ready`: the cache may have evicted the
+            # files since, and an analysis of missing files is recorded for good.
+            if not await _fetch(state, job):
+                if files_lost(job.id):
+                    raise _unavailable(
+                        "We cannot price this design here. Add it to your order and we"
+                        " will price it."
+                    )
                 raise _pending()
             runtime = await asyncio.to_thread(_runtime, state)
             outcome = await asyncio.to_thread(_begin, state, job, runtime.render_timeout)
