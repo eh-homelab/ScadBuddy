@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserImage } from './images.js'
-import type { ImageRef, SentImage } from './protocol.js'
+import { forkChain } from './eventLog.js'
+import type { ImageRef, SentImage, ServerEvent } from './protocol.js'
 
 // The images a session's tool results carried (#782, design
 // docs/superpowers/specs/2026-10-08-friendly-tool-calls-design.md §3.1), in
@@ -25,8 +26,9 @@ import type { ImageRef, SentImage } from './protocol.js'
 //
 // Rows go with their session (ON DELETE CASCADE) and are not pruned before that:
 // a session keeps every image its transcript names, so the panel can show any of
-// them. A fork copies only the ones the events it copies name (#2150), so a fork
-// chain does not multiply the images its ancestors held past the fork point.
+// them. A fork copies none (#4212): it reads its ancestors' images that the events it
+// reads through its chain name (`get`), never those past its cut (#2150), and
+// forgetting a parent copies those into it first (`copyForkBlobs`).
 
 /** The most images one tool result keeps; any past it stay `[image]` in the summary. */
 export const RESULT_IMAGES_MAX = 8
@@ -139,27 +141,45 @@ export class SessionBlobs {
     }
   }
 
-  /** One of the session's images, or undefined: a malformed name is never looked up. */
+  /**
+   * One of the session's images, or undefined: a malformed name is never looked up. A fork's
+   * (#4212) is its own, else an ancestor's that an event it reads through its chain names
+   * (eventLog.ts), so a fork reads no image of its parent's turns past the cut.
+   */
   async get(sessionId: string, name: string): Promise<StoredBlob | undefined> {
     if (!BLOB_NAME.test(name)) return undefined
-    const [row] = await this.sql<{ media_type: ImageMediaType; data: Buffer }[]>`
-      SELECT media_type, data FROM ai_session_blobs WHERE session_id = ${sessionId} AND name = ${name}`
-    return row ? { mediaType: row.media_type, bytes: row.data } : undefined
+    return getThroughChain(this.sql, sessionId, name)
   }
+}
 
-  /**
-   * A fork's copy of the parent's images `names` lists: those the events it copies name
-   * (forkPoint.ts `blobNames`, #2150), never every image the parent holds.
-   * `ai_session_tool_images` links are not copied, on purpose (#2658): they matter only
-   * until follow_session has named a call's images on its logged `tool.result`, and the
-   * events a fork copies already carry those names, so the blobs come from them.
-   */
-  async copy(from: string, to: string, names: readonly string[]): Promise<void> {
-    if (names.length === 0) return
-    await this.sql`
-      INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)
-      SELECT ${to}, name, media_type, data, created_at FROM ai_session_blobs
-       WHERE session_id = ${from} AND name = ANY(${names as string[]})
-      ON CONFLICT (session_id, name) DO NOTHING`
-  }
+/** The events a fork takes that can name an image (forkPoint.ts `blobNames`), all among eventLog.ts `FORK_EVENT_TYPES`. */
+const IMAGE_EVENT_TYPES: readonly ServerEvent['type'][] = ['tool.result', 'user.turn']
+
+async function getThroughChain(sql: Sql | TransactionSql, sessionId: string, name: string): Promise<StoredBlob | undefined> {
+  const [row] = await sql<{ media_type: ImageMediaType; data: Buffer }[]>`
+    ${forkChain(sql, sessionId)}
+    SELECT b.media_type, b.data FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id AND b.name = ${name}
+     WHERE c.depth = 0 OR EXISTS (
+       SELECT 1 FROM chain r JOIN ai_session_events e ON e.session_id = r.id
+        WHERE r.depth > 0 AND e.seq <= r.bound AND strpos(e.event, ${name}) > 0
+          AND e.event::jsonb->>'type' = ANY(${sql.array(IMAGE_EVENT_TYPES as string[])}))
+     ORDER BY c.depth LIMIT 1`
+  return row ? { mediaType: row.media_type, bytes: row.data } : undefined
+}
+
+/**
+ * Before the parent of `sessionId` goes (store.ts `copyForkRanges`, in forgetSubject's
+ * transaction, before the link is cleared): the images `names` lists (forkPoint.ts `blobNames`
+ * of the events `copyForkEvents` copied), found through its chain, become rows of its own.
+ */
+export async function copyForkBlobs(tx: TransactionSql, sessionId: string, names: readonly string[]): Promise<void> {
+  if (names.length === 0) return
+  await tx`
+    ${forkChain(tx, sessionId)}
+    INSERT INTO ai_session_blobs (session_id, name, media_type, data, created_at)
+    SELECT DISTINCT ON (b.name) ${sessionId}::uuid, b.name, b.media_type, b.data, b.created_at
+      FROM chain c JOIN ai_session_blobs b ON b.session_id = c.id
+     WHERE c.depth > 0 AND b.name = ANY(${names as string[]})
+     ORDER BY b.name, c.depth
+    ON CONFLICT (session_id, name) DO NOTHING`
 }

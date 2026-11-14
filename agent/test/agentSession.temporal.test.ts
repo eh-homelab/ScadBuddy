@@ -839,13 +839,17 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await m.store.load({ projectKey: '', sessionId: parent.id })).toBeNull()
 
       const child = await m.fork(parent.id, browser, { upTo: 'durable-2' })
-      const [row] = await db.sql<{ runtime: string; fork_parent_id: string | null; parent_id: string | null }[]>`
-        SELECT runtime, fork_parent_id, parent_id FROM ai_sessions WHERE id = ${child.id}`
-      // An AgentSession that reads nothing of its parent's (it has no transcript), linked as its fork.
-      expect(row).toEqual({ runtime: 'unified', fork_parent_id: null, parent_id: parent.id })
+      const [row] = await db.sql<{ runtime: string; fork_parent_id: string | null; fork_cut: number | null; event_cut: boolean; parent_id: string | null }[]>`
+        SELECT runtime, fork_parent_id::text AS fork_parent_id, fork_cut, fork_event_cut IS NOT NULL AS event_cut, parent_id
+          FROM ai_sessions WHERE id = ${child.id}`
+      // An AgentSession linked as its fork that takes none of its parent's transcript (it has none),
+      // only its log through the cut (#4212).
+      expect(row).toEqual({ runtime: 'unified', fork_parent_id: parent.id, fork_cut: 0, event_cut: true, parent_id: parent.id })
       const texts = (await m.events.read(child.id)).flatMap(({ event: e }) => (e.type === 'user.turn' ? [e.text] : e.type === 'assistant.text.delta' ? [e.delta] : []))
       expect(texts).toEqual(['make a box', 'a box'])
       expect(await m.store.load({ projectKey: '', sessionId: child.id })).toBeNull()
+      // So its first turn starts a transcript rather than resuming one (turnRunner.ts, warm.ts).
+      expect(await m.store.exists(child.id)).toBe(false)
 
       // Its first turn runs on its own AgentSession.
       const turn = await m.send(child.id, browser, 'and a lid')
