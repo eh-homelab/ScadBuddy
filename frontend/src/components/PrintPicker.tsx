@@ -1399,7 +1399,9 @@ export function PrintPicker({
     const mine = slotKeys(filaments)
     const same = mine.length === seeded.seedSlots.length && mine.every((key, at) => key === seeded.seedSlots[at])
     if (!seeded.seedIsOwn && !same) return
-    // #6218: the seed's colour match, as it was chosen or quoted.
+    // #6218: the seed's colour match, as it was chosen or quoted. A seed made before
+    // #6218 (an item quoted, or a batch step saved, then) carries the dialog's old fixed
+    // `false`, so it opens with the switch off, as it was quoted; the user may switch it on.
     if (typeof seededPlan?.force_colour_match === 'boolean') setForceColourMatch(seededPlan.force_colour_match)
     const inventory = new Set((filaments.spools ?? []).map((spool) => spool.spool_id))
     setPlan((current) =>
@@ -1948,7 +1950,10 @@ export function PrintPicker({
                       }
                     />
                   )}
-                  {filaments && <ColourMatchSwitch value={forceColourMatch} onChange={setForceColourMatch} />}
+                  {/* #6218: a native LAN run maps its trays itself and never reads the flag. */}
+                  {filaments && !native && (
+                    <ColourMatchSwitch value={forceColourMatch} onChange={setForceColourMatch} />
+                  )}
                   {partsUnquoted && (
                     <p className="text-sm text-muted-foreground" role="status" data-testid="part-settings-unquoted">
                       These settings per colour are not the accepted quote&rsquo;s, so the print would not be

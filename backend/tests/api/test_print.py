@@ -51,6 +51,8 @@ NO_DIALOG_CHOICES: dict[str, object] = {
     "tier": None,
     "process_name": None,
     "print_sequence": None,
+    # #6218: nothing remembered, which the dialog and the agent read as on.
+    "force_colour_match": None,
 }
 
 
