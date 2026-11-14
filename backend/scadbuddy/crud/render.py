@@ -92,9 +92,11 @@ REUSE_LOST = "reuse-lost"
 DEADLOCK = "deadlock"
 #: `api/crud_render.py` `BAMBUDDY_UNAVAILABLE`.
 BAMBUDDY_UNAVAILABLE = "bambuddy-unavailable"
-#: `api/crud_render.py` `FORGETTABLE_PREFIXES`: the keys only the API writes that the
-#: worker has it forget.
-FORGETTABLE_PREFIXES = ("font-", "src-")
+#: `api/crud_render.py` `FORGETTABLE_PREFIXES` and `LIBRARY_PIECE_KEY`: the keys only the
+#: API writes that the worker has it forget. A library file's object (``lib3-``) is
+#: forgotten only when the API cannot read it either; else a 409 `COPY_INTACT`.
+FORGETTABLE_PREFIXES = ("font-", "src-", "lib3-")
+COPY_INTACT = "copy-intact"
 #: `api/crud_render.py` `NO_COPY` and `COPY_MISMATCH`: an adopt's own refusals.
 NO_COPY = "no-copy"
 COPY_MISMATCH = "copy-mismatch"
@@ -462,13 +464,26 @@ class RemoteBlobIndex:
         self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/touch")
 
     def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
-        """A font's or snapshot's key with no ``backend`` (`ContentStore.forget` of a copy
-        the worker could not read) goes to ``…/forget-copy``, where the API drops the
-        row: the worker writes no key but a render job's. Any other key that is not a
+        """A font's, snapshot's or library file object's key with no ``backend``
+        (`ContentStore.forget` of a copy the worker could not read) goes to
+        ``…/forget-copy``, where the API drops the row: the worker writes no key but a
+        render job's. A library object the API reads whole keeps its row (a 409
+        `COPY_INTACT`, answered as None: nothing was taken). Any other key that is not a
         render job's is refused (a `CrudRefusedError` 403); an upload's copy is dropped
         through `RemoteAssetRows.drop_copy`."""
         if backend is None and key.startswith(FORGETTABLE_PREFIXES):
-            response = self._client.request("POST", f"{BASE}/blob-index/{_part(key)}/forget-copy")
+            try:
+                response = self._client.request(
+                    "POST", f"{BASE}/blob-index/{_part(key)}/forget-copy"
+                )
+            except CrudRefusedError as error:
+                if error.status != 409 or error.problem.get("reason") != COPY_INTACT:
+                    raise
+                logger.warning(
+                    "the API reads this library object whole; its row stays",
+                    extra={"key": key},
+                )
+                return None
             forgotten = response.json()
             return None if forgotten is None else BlobStat.model_validate(forgotten)
         body = self._write("DELETE", f"/{_part(key)}", backend=backend)

@@ -13,6 +13,7 @@ import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,10 +23,14 @@ from temporalio import activity
 
 from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.render import BASE, RemoteBlobIndex, WriteKeys
-from scadbuddy.store.content_models import BlobRef, ReuseLostError
+from scadbuddy.store.archive import pack_dir
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content_models import BlobRef, BlobScope, ReuseLostError
 from scadbuddy.store.index import BlobIndex, Pool
-from tests.crud.crud_support import served_render_crud
-from tests.support.store import store_pool
+from scadbuddy.store.local import LocalBlobStore
+from tests.crud.crud_support import served_render_crud, threaded_render_crud
+from tests.support.store import local_content, overwrite_object, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -411,7 +416,8 @@ async def test_the_worker_cannot_store_a_key_that_is_not_a_render_jobs(
     drop an agent's file. An upload's copy is what an adopt writes the upload's row from,
     and a marked ``slice-`` key gets the print worker a read URL. Nor may it delete one:
     a delete whose object release then failed would leave the object untracked. A touch
-    is allowed; a font's or snapshot's forget goes to the API's ``forget-copy``."""
+    keeps a row from its sweep: only a library file's object and a snapshot are touched.
+    A font's, snapshot's or library object's forget goes to the API's ``forget-copy``."""
     sql = BlobIndex(pool)
     sql.put(key, _ref("b"), slug=None, meta={"name": "real"})
     for write in (
@@ -429,12 +435,23 @@ async def test_the_worker_cannot_store_a_key_that_is_not_a_render_jobs(
         assert refused.value.problem["reason"] == "api-owned-key"
     held = sql.get(key)
     assert held is not None and held.meta == {"name": "real"} and held.ref == _ref("b")
-    await asyncio.to_thread(index.touch, key)
+    if key.startswith(("lib3-", "src-")):
+        await asyncio.to_thread(index.touch, key)
+    else:
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(index.touch, key)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "api-owned-key"
     if key.startswith(("font-", "src-")):
         forgotten = await asyncio.to_thread(index.delete, key)  # through ``forget-copy``
         assert forgotten is not None and forgotten.ref == _ref("b")
         assert sql.get(key) is None
         assert await asyncio.to_thread(index.delete, key) is None  # natural
+    elif key.startswith("lib3-"):
+        # This API has no blob store to read it from (`state.store.content` is None, a
+        # local store): nothing is forgotten. `test_a_library_object_*` read one.
+        assert await asyncio.to_thread(index.delete, key) is None
+        assert sql.get(key) is not None
     else:
         # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only; every
         # other key is its service's, and the API's sweep's.
@@ -542,22 +559,95 @@ async def test_the_worker_reads_what_it_renders_from(index: RemoteBlobIndex, poo
 async def test_the_worker_lists_and_finds_only_the_kinds_it_reads(
     index: RemoteBlobIndex,
 ) -> None:
+    """It lists the kinds it reads (`FontMirror.sync`), and finds by SHA-256 only a piece,
+    the one kind it stores (`ContentStore.put`)."""
     for read in (
         lambda: index.stats(None),
         lambda: index.stats(["piece", "slice"]),
         lambda: index.stats(["workspace"]),
-        lambda: index.by_sha("a" * 64, "library-file", "bambuddy"),
-        lambda: index.by_sha("a" * 64, "customer-file", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "library", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "media", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "workspace", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "font", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "asset", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "snapshot", "bambuddy"),
     ):
         with pytest.raises(CrudRefusedError) as refused:
             await asyncio.to_thread(read)
         assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "api-owned-key"
     assert await asyncio.to_thread(index.stats, ["font"]) == []
     assert await asyncio.to_thread(index.by_sha, "a" * 64, "piece", "bambuddy") is None
 
 
 async def test_forget_copy_takes_only_a_fonts_or_snapshots_key(client: CrudSyncClient) -> None:
-    for key in ("asset-" + "a" * 64, "piece-x"):
+    for key in ("asset-" + "a" * 64, "piece-x", K):
         with pytest.raises(CrudRefusedError) as refused:
             await asyncio.to_thread(client.request, "POST", f"{BASE}/blob-index/{key}/forget-copy")
         assert refused.value.status == 403
+
+
+# -- a library file's object the worker cannot read (#5298 final review I-3) ----------
+
+LIB3 = "lib3-" + "a" * 48 + "-0"
+
+
+@pytest.fixture
+async def api_content(tmp_path: Path, pool: Pool) -> AsyncIterator[ContentStore]:
+    """The API's blob store, which reads the object before it forgets a library row."""
+    store = local_content(tmp_path / "remote", pool)
+    try:
+        yield store
+    finally:
+        await store.aclose()
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "missing", "none"])
+async def test_a_library_object_is_forgotten_only_when_the_api_cannot_read_it(
+    api_content: ContentStore, pool: Pool, damage: str
+) -> None:
+    """The render credential may not drop a library row the API reads whole: a 409
+    ``copy-intact``, and the row stays. One whose object is gone or altered is dropped,
+    so the next Arrange of the file stores it again."""
+    ref = await api_content.put("piece", b"objects", name="o", scope=BlobScope(), key=LIB3)
+    if damage == "corrupt":
+        await overwrite_object(api_content, ref.backend_id, b"altered")
+    elif damage == "missing":
+        await api_content.backend.remove(ref.backend_id)
+    with threaded_render_crud(pool, content=api_content) as client:
+        if damage == "none":
+            with pytest.raises(CrudRefusedError) as refused:
+                await asyncio.to_thread(
+                    client.request, "POST", f"{BASE}/blob-index/{LIB3}/forget-copy"
+                )
+            assert refused.value.status == 409
+            assert refused.value.problem["reason"] == "copy-intact"
+        forgotten = await asyncio.to_thread(RemoteBlobIndex(client).delete, LIB3)
+    held = api_content.index.get(LIB3)
+    if damage == "none":
+        assert forgotten is None  # the worker reads the 409 as nothing taken
+        assert held is not None and held.ref == ref
+    else:
+        assert forgotten is not None and forgotten.ref == ref
+        assert held is None
+
+
+async def test_a_worker_fetching_an_altered_library_object_has_the_api_forget_it(
+    api_content: ContentStore, pool: Pool, tmp_path: Path
+) -> None:
+    """`CachedBlobStore._fetch` forgets a piece it cannot read; for a library file's
+    object that goes through ``forget-copy``, not the refused delete."""
+    source = tmp_path / "objects"
+    source.mkdir()
+    (source / "layout.json").write_text("{}")
+    ref = await api_content.put("piece", pack_dir(source), name="o", scope=BlobScope(), key=LIB3)
+    await overwrite_object(api_content, ref.backend_id, b"altered")
+    with threaded_render_crud(pool, content=api_content) as client:
+        worker = CachedBlobStore(
+            LocalBlobStore(tmp_path / "worker"),
+            ContentStore(api_content.backend, RemoteBlobIndex(client)),
+            max_bytes=1 << 30,
+            min_age=0,
+        )
+        assert await worker.fetch(LIB3) is False
+    assert api_content.index.get(LIB3) is None
