@@ -503,12 +503,15 @@ class Settings(BaseSettings):
     # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
     # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
     # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
-    # start. Every process that reads them (the API and both workers) needs the same file.
+    # start. Only the API reads the settings' sealed values: the render and print workers
+    # read theirs, already opened, from its CRUD routes (#5298). The projects worker
+    # reads the same file for its flows' sealed payloads.
     secret_key_file: Path | None = None
     # SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: during a rotation, the KEK before it (the
     # agent's variable of the same name). Tried after the current key only where a value
-    # sealed before the rotation may still be in flight: a virtual printer's access code
-    # sealed by the API and opened by the print worker's run (#4888).
+    # sealed before the rotation may still be in flight: a virtual printer's access code,
+    # which the API seals and, for a print worker's run, opens again
+    # (`printers/component.py`, #4888, #5298).
     secret_key_previous_file: Path | None = None
 
     @field_validator("database_url")

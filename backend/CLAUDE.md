@@ -22,13 +22,17 @@ opens access codes, and a virtual printer's sealed code). The projects and rende
 and the agent revoke what the projects worker's old role `scadbuddy_projects` held at
 every start (`auth/revoke.py`, `agent/src/db/grants.ts` `revokeRole`), and the API what
 the render worker's old role `scadbuddy_render` held (#5298 Task 22). The render
-worker also holds no KEK and runs only on a remote store (plan D11). Template `pipeline/`
+worker also holds no KEK and runs only on a remote store (plan D11). Its blob-index
+routes take an allowlist (`api/crud_render.py` `RENDER_KEY`, `HELD_KEY`): it writes only
+a render job's own `piece` keys, and its settings route never releases the full Bambuddy
+key (`withheld`; with no render key saved the worker gets none). Template `pipeline/`
 Python runs in the render worker's pod, and openscad and `openscad-lsp` run in the API's
 pod.
 
 Under the rule the API becomes the CRUD service: the only process with SQL access, and
-nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
-credential, and loses its database secret, role and grant list (#5298). The `ai_*` reads
+nothing untrusted in its pod. Each worker is now an HTTP client of it, with a service
+credential, and has lost its database secret, role and grant list (#5298, done: prod has
+no worker role or worker database secret since 2026-11-14). The `ai_*` reads
 become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
 the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
 database secret (#5296). Never add a worker table grant, a cross-service table read or a

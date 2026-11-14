@@ -905,9 +905,9 @@ store or another caller's credential:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
-| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start, so the deployment can drop it (#5298 Task 22) | `scadbuddy-render.yaml`, until eh-homelab/clusters removes it |
-| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start, so the deployment can drop it (#5298 Task 35) | `scadbuddy-print.yaml`, until eh-homelab/clusters removes it |
-| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
+| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
+| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
@@ -1792,17 +1792,19 @@ form as the `store_backend` one above.
 With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
 (`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
 `settings` table with envelope encryption, in the agent's format and under the same key
-file (see "The agent sidecar" below: 32 random bytes, base64). At start the API (and the print
-worker, which opens the same store) seals any key still stored in plaintext, once, under the migration lock, and logs
+file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
+key still stored in plaintext, once, under the migration lock, and logs
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API and the print worker, in one rollout. Both read the
-  keys from the database; a process without the key (or with another one) cannot open a
-  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
-  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
-  keys and answers them on its CRUD route (#5298).
-- Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
+- Mount the file into the API only (and the agent, which shares it). The API reads the
+  keys from the database and opens them; a process without the key (or with another one)
+  cannot open a sealed key, logs `ignoring a stored secret this process cannot open` and
+  falls back to its own `SCADBUDDY_<FIELD>`. The render and print workers need no key and
+  must not mount it: they hold no settings store and read their settings, already opened,
+  from the API's CRUD routes (`GET …/crud/render/settings`, `GET …/crud/print/settings`,
+  #5298). Only the projects worker mounts it, for its flows' sealed payloads.
+- Unset, the keys stay in plaintext as before, and the API logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
 - Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again

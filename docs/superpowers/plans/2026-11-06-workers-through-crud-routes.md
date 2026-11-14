@@ -358,11 +358,11 @@ Per-step specifics are in each task's **Rolling deploy** line.
   `include_in_schema=False`, the guard on every route, and a response hook that sets
   `X-ScadBuddy-Crud: 1` and `Cache-Control: no-store`.
 
-- [ ] **Step 1:** Write `tests/crud/test_guard.py`: a test app with one `crud_router("projects")` route; in `off`, `observe` and `enforce` it answers 401 with no bearer, 403 for a `print` and an `agent` credential, 200 for a `projects` credential with `crud.projects`, 403 for a `projects` credential without it; every answer, refusals included, carries `X-ScadBuddy-Crud: 1`.
-- [ ] **Step 2:** Run `uv run --frozen pytest tests/crud/test_guard.py -v`; expect failures (module missing).
-- [ ] **Step 3:** Implement `crud/guard.py` and the `routes.py` changes. `would_refuse` treats `crud.*` and `flow.host` like `internal.*` (class must be in the scopes). Task 8 replaced the `flow.host` part: a flow host route takes every caller an `api` route takes, and also a service credential that holds `flow.host`.
-- [ ] **Step 4:** Extend `tests/auth/test_routes.py`: every mounted path under `/api/v1/internal/crud/<caller>/` has class `crud.<caller>` and depends on `require_crud(<caller>)` (walk `app.routes`, check `route.dependant`).
-- [ ] **Step 5:** Run the backend check; commit `feat(auth): crud route classes, refused without a credential in every mode (#5298)`.
+- [x] **Step 1:** Write `tests/crud/test_guard.py`: a test app with one `crud_router("projects")` route; in `off`, `observe` and `enforce` it answers 401 with no bearer, 403 for a `print` and an `agent` credential, 200 for a `projects` credential with `crud.projects`, 403 for a `projects` credential without it; every answer, refusals included, carries `X-ScadBuddy-Crud: 1`.
+- [x] **Step 2:** Run `uv run --frozen pytest tests/crud/test_guard.py -v`; expect failures (module missing).
+- [x] **Step 3:** Implement `crud/guard.py` and the `routes.py` changes. `would_refuse` treats `crud.*` and `flow.host` like `internal.*` (class must be in the scopes). Task 8 replaced the `flow.host` part: a flow host route takes every caller an `api` route takes, and also a service credential that holds `flow.host`.
+- [x] **Step 4:** Extend `tests/auth/test_routes.py`: every mounted path under `/api/v1/internal/crud/<caller>/` has class `crud.<caller>` and depends on `require_crud(<caller>)` (walk `app.routes`, check `route.dependant`).
+- [x] **Step 5:** Run the backend check; commit `feat(auth): crud route classes, refused without a credential in every mode (#5298)`.
 
 ### Task 2: The CRUD client
 
@@ -375,9 +375,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Consumes: `ServiceAuth` (`auth/service_credentials.py`, exchanging after #5494).
 - Produces: `CrudClient(base_url, caller, auth, *, timeout=10.0)` with `request(method, path, *, json=None, idempotency_key=None) -> httpx.Response` (async) and `CrudSyncClient` (same, sync, for stores called through `asyncio.to_thread`); exceptions `CrudUnavailableError` (route missing, 5xx, transport; retryable), `CrudRefusedError` (4xx problem with the header; carries the problem). `activity_key(ordinal: int) -> str` builds D5's key from `activity.info()`.
 
-- [ ] **Step 1:** Tests against an `httpx.MockTransport`: a 404 without the header is retried on a new connection then raises `CrudUnavailableError` after the budget (inject a 0.2 s budget); a 404 with the header raises `CrudRefusedError`; a 403 `out_of_scope` calls `auth.refresh()` once and retries; a 5xx and a connect error retry with the same `Idempotency-Key`; the histogram counts each outcome.
-- [ ] **Step 2:** Run; expect failures. Implement. Run; pass.
-- [ ] **Step 3:** Backend check; commit `feat(crud): the workers' CRUD client (#5298)`.
+- [x] **Step 1:** Tests against an `httpx.MockTransport`: a 404 without the header is retried on a new connection then raises `CrudUnavailableError` after the budget (inject a 0.2 s budget); a 404 with the header raises `CrudRefusedError`; a 403 `out_of_scope` calls `auth.refresh()` once and retries; a 5xx and a connect error retry with the same `Idempotency-Key`; the histogram counts each outcome.
+- [x] **Step 2:** Run; expect failures. Implement. Run; pass.
+- [x] **Step 3:** Backend check; commit `feat(crud): the workers' CRUD client (#5298)`.
 
 ### Task 3: The CRUD listener, `areas`, and the idempotency ledger
 
@@ -390,9 +390,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 **Interfaces:**
 - Produces: `idempotent(conn, caller, key, route, body) -> Replay | None` (inside the caller's transaction: answers the stored reply, refuses the same key with another body as 422, or records after the write); `GET /api/v1/internal/crud/{caller}/areas -> {"areas": [str]}` (one route per caller, each under its own prefix), fed by a registry `CRUD_AREAS[caller]` that each later task appends to; the CRUD listener answers only `/api/v1/internal/crud/*`, `/api/v1/auth/service-token`, `/healthz`.
 
-- [ ] **Step 1:** Tests: two calls with one key give one row and one write; the second answers the first's body; another body with the same key is 422; a rollback of the write leaves no ledger row; the CRUD port answers 404 (plain) for `/api/v1/models` and 401 for a crud route without a bearer.
-- [ ] **Step 2:** Implement. The listener is a second `uvicorn.Server` on the same app with an ASGI path filter in front, started and stopped in the lifespan.
-- [ ] **Step 3:** Backend check; commit `feat(crud): crud listener, areas and the idempotency ledger (#5298)`. Open PR A.
+- [x] **Step 1:** Tests: two calls with one key give one row and one write; the second answers the first's body; another body with the same key is 422; a rollback of the write leaves no ledger row; the CRUD port answers 404 (plain) for `/api/v1/models` and 401 for a crud route without a bearer.
+- [x] **Step 2:** Implement. The listener is a second `uvicorn.Server` on the same app with an ASGI path filter in front, started and stopped in the lifespan.
+- [x] **Step 3:** Backend check; commit `feat(crud): crud listener, areas and the idempotency ledger (#5298)`. Open PR A.
 
 **Rolling deploy:** additive table and a new port; nothing calls them yet.
 
@@ -414,9 +414,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - `GET /proposals/{request_id}` (J21); `GET /sessions/{session}/tiers?principal=` → `{"tiers": [str] | null}` (J22); `GET /approval-expiry` → `{"seconds": int}` (J23)
 - `RemoteFlowStore` implements these methods with `CrudClient`, same names and signatures as `FlowStore`.
 
-- [ ] **Step 1:** Tests per route against the app with a seeded run (reuse `tests/test_flow_store.py` seeds): the route's answer equals `FlowStore`'s for the same input; each write called twice answers the same; `move_hop` and `project` publish one event each (read `events`).
-- [ ] **Step 2:** Implement routes as thin calls to `get_state(request).flows.store`. Register area `flows` in `CRUD_AREAS["projects"]` only in Task 5 (the area is complete then).
-- [ ] **Step 3:** Backend check; commit `feat(crud): flow run routes for the projects worker (#5298)`.
+- [x] **Step 1:** Tests per route against the app with a seeded run (reuse `tests/test_flow_store.py` seeds): the route's answer equals `FlowStore`'s for the same input; each write called twice answers the same; `move_hop` and `project` publish one event each (read `events`).
+- [x] **Step 2:** Implement routes as thin calls to `get_state(request).flows.store`. Register area `flows` in `CRUD_AREAS["projects"]` only in Task 5 (the area is complete then).
+- [x] **Step 3:** Backend check; commit `feat(crud): flow run routes for the projects worker (#5298)`.
 
 **Rolling deploy:** routes only; no caller yet.
 
@@ -438,9 +438,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - `POST /runs/{run_id}/reset` `{replaced, point, request_id}` → `Run | null`, 409 problem `reset-superseded` (J11)
 - Area `flows` registered.
 
-- [ ] **Step 1:** Tests: `consume` twice with one `request_id` gives one `flow_grant_uses` row and one spend; two concurrent consumes on a trigger-seeded grant at its limit admit exactly one (`asyncio.gather`); `reset` with a fake `flows.client` whose reset answers a run id moves the row once, a second call with the same `request_id` answers the same row, a call with another `request_id` for the same `replaced` is 409; `test_caller_grants.py` runs the remaining projects stores as a role with the shortened list.
-- [ ] **Step 2:** Implement; run the flow tests (`tests/test_flow_*`, `tests/test_project_workflow*`) against a projects worker built with `RemoteFlowStore` over the test app (add a fixture `crud_app` that serves the app on a local port and a `CrudClient` with an in-process credential).
-- [ ] **Step 3:** Backend check, agent check (`cd agent && pnpm lint && pnpm typecheck && pnpm test`); commit `feat(projects): flow runs, decisions and grants through crud routes (#5298)`. Open PR P1.
+- [x] **Step 1:** Tests: `consume` twice with one `request_id` gives one `flow_grant_uses` row and one spend; two concurrent consumes on a trigger-seeded grant at its limit admit exactly one (`asyncio.gather`); `reset` with a fake `flows.client` whose reset answers a run id moves the row once, a second call with the same `request_id` answers the same row, a call with another `request_id` for the same `replaced` is 409; `test_caller_grants.py` runs the remaining projects stores as a role with the shortened list.
+- [x] **Step 2:** Implement; run the flow tests (`tests/test_flow_*`, `tests/test_project_workflow*`) against a projects worker built with `RemoteFlowStore` over the test app (add a fixture `crud_app` that serves the app on a local port and a `CrudClient` with an in-process credential).
+- [x] **Step 3:** Backend check, agent check (`cd agent && pnpm lint && pnpm typecheck && pnpm test`); commit `feat(projects): flow runs, decisions and grants through crud routes (#5298)`. Open PR P1.
 
 **Rolling deploy:** new worker on an old API pod: route missing, retried (D4). Old worker on SQL: grants stay (never revoked). A reset by an old worker (SQL, lock in the worker) and one by a new worker (route, lock in the API) take the same row lock, so they serialise.
 
@@ -456,9 +456,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /operations` `{op_id, kind, subject, operation_key, request, workflow_id, workflow_run_id, idempotency_key, author, person}` → `Operation` (J24, natural on the workflow ids); `POST /operations/{id}/finish` `{result, error}` → `Operation` (J25, natural on the state guard). The API counts the finish metric (`operations/store.py:293-298`) only when its write ended the row, as today. Area `operations`.
 
-- [ ] **Step 1:** Tests: insert twice gives one row and one event; retention prunes finished rows on the API side; finish twice counts once.
-- [ ] **Step 2:** Implement; the projects worker starts with no bus (no LISTEN, no prune, J3, J4).
-- [ ] **Step 3:** Backend check; commit `feat(projects): operations through crud routes; no event bus in the worker (#5298)`. PR P2.
+- [x] **Step 1:** Tests: insert twice gives one row and one event; retention prunes finished rows on the API side; finish twice counts once.
+- [x] **Step 2:** Implement; the projects worker starts with no bus (no LISTEN, no prune, J3, J4).
+- [x] **Step 3:** Backend check; commit `feat(projects): operations through crud routes; no event bus in the worker (#5298)`. PR P2.
 
 **Rolling deploy:** as Task 5. An old projects pod still prunes and fails (J4) until it goes.
 
@@ -473,9 +473,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /payload-keys/{subject}` `{"create": bool}` → `{"dek_sealed": base64, "kek_id": str}`; 410 problem `subject-forgotten`; 403 problem for a subject outside D10's patterns or `create` on `session-*`. Area `payload-keys`.
 
-- [ ] **Step 1:** Tests: create twice gives one row (concurrent `gather`); a forgotten subject is 410 and creates nothing; `session-<uuid>` with `create` is 403; the answer never holds the open key (assert it differs from the opened bytes).
-- [ ] **Step 2:** Implement; the flow workflow tests pass on the remote keys.
-- [ ] **Step 3:** Backend and agent checks; commit `feat(projects): payload keys through a crud route (#5298)`. PR P3.
+- [x] **Step 1:** Tests: create twice gives one row (concurrent `gather`); a forgotten subject is 410 and creates nothing; `session-<uuid>` with `create` is 403; the answer never holds the open key (assert it differs from the opened bytes).
+- [x] **Step 2:** Implement; the flow workflow tests pass on the remote keys.
+- [x] **Step 3:** Backend and agent checks; commit `feat(projects): payload keys through a crud route (#5298)`. PR P3.
 
 **Rolling deploy:** the create runs under the same advisory lock in the API as in the old worker, so an old and a new worker never make two keys.
 
@@ -486,9 +486,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Modify: `auth/service_credentials.py` (`SCOPES["projects"] = {"flow.host", "crud.projects"}`)
 - Test: `tests/auth/test_routes.py`, `tests/flows/test_flow_host_paths.py`, `tests/api/test_auth_enforce.py`
 
-- [ ] **Step 1:** Write a test that records every path the flow host functions and grant checks call (run them against an `httpx.MockTransport` that logs paths) and asserts each one matches a `flow.host` route, and that no other route is `flow.host`.
-- [ ] **Step 2:** Implement. `flow.host` is an extra admission, not a narrowing: `would_refuse` answers a flow host route as an `api` route for every caller, and also admits a service credential that holds `flow.host`.
-- [ ] **Step 3:** Backend check; commit `feat(auth): flow.host, the projects worker's only public routes (#5298)`. PR P4.
+- [x] **Step 1:** Write a test that records every path the flow host functions and grant checks call (run them against an `httpx.MockTransport` that logs paths) and asserts each one matches a `flow.host` route, and that no other route is `flow.host`.
+- [x] **Step 2:** Implement. `flow.host` is an extra admission, not a narrowing: `would_refuse` answers a flow host route as an `api` route for every caller, and also admits a service credential that holds `flow.host`.
+- [x] **Step 3:** Backend check; commit `feat(auth): flow.host, the projects worker's only public routes (#5298)`. PR P4.
 
 **Rolling deploy:** the projects worker exchanges its projected token (`SCADBUDDY_SERVICE_TOKEN_FILE`, set by eh-homelab/clusters#3246; checked on the live Deployment on 2026-11-07) and falls back to the view's legacy credential only while an exchange fails (`token_source`). An exchanged credential carries the `SCOPES` of the API that minted it and lives 15 minutes (spec §6.3), so the worker holds the new scopes at most 15 minutes after the new API answers its exchange. For the view's credential, the new API mints a new one at once when `SCOPES` changes (`rotate_due`), and keeps the old one, which carries `api`, live until it expires; a worker on the fallback reads the newest again on a refusal (at most every 5 s, `REREAD_MIN_SECONDS`) and every hour (`REREAD_SECONDS`). In `off` and `observe` nothing is refused. `flow.host` takes everyone `api` takes, so a person, a personal token and the agent get the same answers there in every mode; only their refusals there are counted as `class="flow.host"`, not `class="api"`. The counter has no caller label: after the roll, a rise in `scadbuddy_auth_would_refuse_total{class="api", reason="out_of_scope"}` is a credential without `api` (the projects, print or render worker's) on a public route outside its classes, or a write with a read-only personal access token (`auth/routes.py` `would_refuse`); the route in the log line tells them apart. Old pods add nothing to it while their credential holds `api`; `tests/flows/test_flow_host_paths.py` keeps the list whole. It must stay 0 for a day before #5297 moves to `enforce`.
 
@@ -499,9 +499,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Modify: `auth/caller_grants.py` (`PROJECTS_GRANTS = {}`), `README.md` "Flow runs on the `projects` queue" (what it needs: no database)
 - Test: `tests/test_projects_worker_nodb.py`
 
-- [ ] **Step 1:** Test: build and start the projects worker with `SCADBUDDY_DATABASE_URL` unset and `psycopg.connect`, `psycopg.AsyncConnection.connect` and `ConnectionPool.__init__` patched to raise; run one flow through record, a decision, a grant consume and close against the `crud_app` fixture.
-- [ ] **Step 2:** Widen the projects worker's start gate (`crud/client.py` `wait_for_areas`, added in P1) to every area it calls.
-- [ ] **Step 3:** Backend check; commit `feat(projects): the projects worker needs no database (#5298)`. PR P5.
+- [x] **Step 1:** Test: build and start the projects worker with `SCADBUDDY_DATABASE_URL` unset and `psycopg.connect`, `psycopg.AsyncConnection.connect` and `ConnectionPool.__init__` patched to raise; run one flow through record, a decision, a grant consume and close against the `crud_app` fixture.
+- [x] **Step 2:** Widen the projects worker's start gate (`crud/client.py` `wait_for_areas`, added in P1) to every area it calls.
+- [x] **Step 3:** Backend check; commit `feat(projects): the projects worker needs no database (#5298)`. PR P5.
 
 **Rolling deploy:** every area exists on the API since P1 to P3. The Deployment still sets the secret; the worker ignores it. Rollback to P4's build works (secret still there).
 
@@ -512,8 +512,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Modify: `applications/scadbuddy/networkpolicy-projects.yaml` (drop the Postgres egress rule)
 - Modify: `applications/scadbuddy/scadbuddy.yaml` (Service port 8082) and `networkpolicy-agent.yaml` (admit print and projects to 8082). This task owns the Service port; Task 12 adds only render's admission and egress.
 
-- [ ] **Step 1:** Before merge: `kubectl --context primary -n bambuddy exec scadbuddy-db-1 -- psql -c "select count(*) from pg_stat_activity where usename='scadbuddy_projects'"` is 0 for 24 h after P5 deployed. Record the output in the PR.
-- [ ] **Step 2:** Edit, `kustomize build` the app, open the PR (`fix(scadbuddy): projects worker without a database secret (ScadBuddy#5298)`).
+- [x] **Step 1:** Before merge: `kubectl --context primary -n bambuddy exec scadbuddy-db-1 -- psql -c "select count(*) from pg_stat_activity where usename='scadbuddy_projects'"` is 0 for 24 h after P5 deployed. Record the output in the PR.
+- [x] **Step 2:** Edit, `kustomize build` the app, open the PR (`fix(scadbuddy): projects worker without a database secret (ScadBuddy#5298)`).
 
 **Rolling deploy:** the new pods start without the secret on P5's image. Rollback of the app past P5 requires reverting this PR first.
 
@@ -526,9 +526,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 - Then (eh-homelab/clusters): `applications/scadbuddy/cnpg-cluster.yaml:114-119` `ensure: absent`; delete `clusters/prod/scadbuddy/onepassworditem-projects-db.yaml` and its kustomization line
 - Test: `tests/auth/test_revoke.py`, `agent/test/grants.test.ts`
 
-- [ ] **Step 1:** Test: a role with grants and a row policy has none after `revoke_role`; a second call is a no-op; a missing role is a no-op; `DROP ROLE` then succeeds in the test database.
-- [ ] **Step 2:** Implement; backend and agent checks; commit `feat(auth): revoke the projects worker's database role (#5298)`. PR P7.
-- [ ] **Step 3:** After P7 deploys, open the clusters PR P8. The owner archives the 1Password item `scadbuddy-projects-db` after it merges.
+- [x] **Step 1:** Test: a role with grants and a row policy has none after `revoke_role`; a second call is a no-op; a missing role is a no-op; `DROP ROLE` then succeeds in the test database.
+- [x] **Step 2:** Implement; backend and agent checks; commit `feat(auth): revoke the projects worker's database role (#5298)`. PR P7.
+- [x] **Step 3:** After P7 deploys, open the clusters PR P8. The owner archives the 1Password item `scadbuddy-projects-db` after it merges.
 
 **Rolling deploy:** P7's API revokes at start; no pod uses the role since Task 10. Rollback of P7: the old API re-grants at start; harmless.
 
@@ -536,7 +536,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy-render.yaml` (`SCADBUDDY_API_INTERNAL_URL=http://scadbuddy:8082`, the projected token of #5494 if not there), `networkpolicy-agent.yaml` (render to 8082 only; replace the comment at `:58`; the Service port 8082 is Task 10's), and a new egress policy for render: DNS, the API on 8082, Temporal, Postgres (until Task 21), the store's endpoints (Bambuddy, S3), OTLP.
 
-- [ ] **Step 1:** Edit; `kubectl --context primary -n bambuddy exec deploy/scadbuddy-render -- python -c "import httpx;print(httpx.get('http://scadbuddy:8082/api/v1/models').status_code)"` answers 404 and `…:8080/…` times out after merge. Record it.
+- [x] **Step 1:** Edit; `kubectl --context primary -n bambuddy exec deploy/scadbuddy-render -- python -c "import httpx;print(httpx.get('http://scadbuddy:8082/api/v1/models').status_code)"` answers 404 and `…:8080/…` times out after merge. Record it.
 
 **Rolling deploy:** no code uses the URL yet. The egress policy must not cut Bambuddy or S3: check the render health `store` block after the roll.
 
@@ -546,9 +546,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `GET /api/v1/internal/crud/render/settings` → `RenderStoreSettings` with the opened render key (or the fallback full key, `library/settings_store.py:1383`) and S3 keys (D8). Area `settings`.
 
-- [ ] **Step 1:** Tests: answer equals `load_render_store_settings`; `no-store` header; the log line names the fields released, not values; a `print` credential is 403.
-- [ ] **Step 2:** Implement; the worker reads settings through the route; the 30 s TTL and "keep the last good" behaviour stay (`store/bambuddy.py:134-152`).
-- [ ] **Step 3:** Backend check; commit `feat(render): store settings through a crud route (#5298)`. PR R1.
+- [x] **Step 1:** Tests: answer equals `load_render_store_settings`; `no-store` header; the log line names the fields released, not values; a `print` credential is 403.
+- [x] **Step 2:** Implement; the worker reads settings through the route; the 30 s TTL and "keep the last good" behaviour stay (`store/bambuddy.py:134-152`).
+- [x] **Step 3:** Backend check; commit `feat(render): store settings through a crud route (#5298)`. PR R1.
 
 **Rolling deploy:** as Task 5. During the roll the worker's first read may be route-missing: the start gate waits for area `settings`.
 
@@ -558,9 +558,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /jobs/accept` `{job, key, workflow_id, run_id, max_pending, supersedes}` → `Job`, 409 problem `queue-full` mapped back to `QueueFullError` (R3, natural); `PUT /jobs/{id}/claims` (R4); `POST /jobs/{id}/started` → `Job | null` (R5); `PUT /jobs/{id}/steps` (R6); `POST /jobs/{id}/finish` `Job` → `{"settled": bool}` (R7: answers true when the row already holds this terminal state and `finished_at`, so a retry answers the same); `GET /jobs/{id}` (R8). Activity and events stay in the API's transaction (R9, R10). Area `jobs`.
 
-- [ ] **Step 1:** Tests: accept twice, one row, one event, one activity row; `max_pending` full is 409 and writes nothing; finish twice answers true twice and announces once; a 6 s slow route makes the client raise inside the attempt.
-- [ ] **Step 2:** Implement; run `tests/test_render_workflow*.py` with the worker on the remote projection.
-- [ ] **Step 3:** Backend check; commit `feat(render): job projection through crud routes (#5298)`. PR R2.
+- [x] **Step 1:** Tests: accept twice, one row, one event, one activity row; `max_pending` full is 409 and writes nothing; finish twice answers true twice and announces once; a 6 s slow route makes the client raise inside the attempt.
+- [x] **Step 2:** Implement; run `tests/test_render_workflow*.py` with the worker on the remote projection.
+- [x] **Step 3:** Backend check; commit `feat(render): job projection through crud routes (#5298)`. PR R2.
 
 **Rolling deploy:** both paths take the event-log lock then the row (`core/pg_events.py:20-28`), so an old SQL writer and the API never deadlock in a new order.
 
@@ -570,7 +570,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /blob-refs` `{key, holder_kind, holder_id}` (R11, natural; holder kind must be `job`); `GET|PUT|DELETE /geometry/{geometry_key}` (`DELETE` takes `piece_key`) (R12, natural). Area `refs`.
 
-- [ ] Steps: tests (twice-called writes, `holder_kind` other than `job` is 403), implement, check, commit `feat(render): blob refs and geometry through crud routes (#5298)`. PR R3.
+- [x] Steps: tests (twice-called writes, `holder_kind` other than `job` is 403), implement, check, commit `feat(render): blob refs and geometry through crud routes (#5298)`. PR R3.
 
 **Rolling deploy:** as Task 5.
 
@@ -580,9 +580,9 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `GET /blob-index/{key}`; `GET /blob-index?sha256=&kind=&backend=`; `GET /blob-index/now`; `PUT /blob-index/{key}` `{ref, slug, meta, reuse}` → `{"previous": BlobRef | null}`; `POST /blob-index/{key}/swap` `{ref, expected, slug, meta, reuse}` → `{"swapped": bool}`; `POST /blob-index/mark`; `POST /blob-index/{key}/touch`; `DELETE /blob-index/{key}?backend=` → `BlobStat | null`; `DELETE /blob-index/{key}/stale?before=` → `bool`; `GET /blob-index/backends/{backend}/{backend_id}` → `{"shared": bool}`. `put`, `swap`, both deletes and `mark` require `Idempotency-Key` (D5). `ReuseLostError` maps to a 409 problem and back. Area `blob-index`.
 
-- [ ] **Step 1:** Tests: a `put` retried with its key answers the first `previous`, not the new ref; a `put` without a key is 428; two concurrent `put`s swapping objects between two keys both finish (the deadlock retry stays in the API, `store/index.py:134-149`); `ReuseLostError` round-trips.
-- [ ] **Step 2:** Implement; run `tests/store/` with the worker's `ContentStore` over `RemoteBlobIndex`.
-- [ ] **Step 3:** Backend check; commit `feat(render): blob index through crud routes (#5298)`. PR R4.
+- [x] **Step 1:** Tests: a `put` retried with its key answers the first `previous`, not the new ref; a `put` without a key is 428; two concurrent `put`s swapping objects between two keys both finish (the deadlock retry stays in the API, `store/index.py:134-149`); `ReuseLostError` round-trips.
+- [x] **Step 2:** Implement; run `tests/store/` with the worker's `ContentStore` over `RemoteBlobIndex`.
+- [x] **Step 3:** Backend check; commit `feat(render): blob index through crud routes (#5298)`. PR R4.
 
 **Rolling deploy:** the row-lock order is the API's and the old worker's, the same code.
 
@@ -592,8 +592,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /store-folders/find` `{slug, role}` → `{"folder_id": int}` (the API reads its render target, takes the advisory lock with the 30 s `lock_timeout`, finds or creates, records; natural); `DELETE /store-folders/{slug}`; `GET /store-folders/work` → `[int]`. Area `store-folders`.
 
-- [ ] **Step 1:** Tests with a fake Bambuddy: two concurrent finds create one folder; a find after a recorded folder makes no Bambuddy call.
-- [ ] **Step 2:** Implement; commit `feat(render): store folders found by the API (#5298)`. PR R5.
+- [x] **Step 1:** Tests with a fake Bambuddy: two concurrent finds create one folder; a find after a recorded folder makes no Bambuddy call.
+- [x] **Step 2:** Implement; commit `feat(render): store folders found by the API (#5298)`. PR R5.
 
 **Rolling deploy:** an old worker and the API take the same advisory key (`folder_lock_key`, `store/bambuddy.py:181`), so they still exclude each other.
 
@@ -603,7 +603,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `GET /assets/{id}` → `AssetMeta`; `POST /assets/{id}/use` → `AssetMeta` (R19); `POST /assets/{id}/adopt` `AssetMeta` (R20, natural; the API checks the id format and takes the asset's advisory lock); `POST /assets/last-used` `{ids}` → `{id: datetime | null}` (R21). Area `assets`.
 
-- [ ] Steps: tests (a `use` during a local prune keeps the file or re-fetches it; adopt twice one row), implement, check, commit `feat(render): assets through crud routes (#5298)`. PR R6.
+- [x] Steps: tests (a `use` during a local prune keeps the file or re-fetches it; adopt twice one row), implement, check, commit `feat(render): assets through crud routes (#5298)`. PR R6.
 
 **Rolling deploy:** the API's sweep still locks the row before a delete; `use` on the API waits on it as before.
 
@@ -613,7 +613,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /leases` `{token, holder, checkouts: [{library, commit}], ttl_s}`, `PUT /leases/{token}`, `DELETE /leases/{token}`; the same under `/pin-holds`; `POST /install-slots` `{token}` → `{"slot": int | null}` (the same token answers the same slot), `PUT|DELETE /install-slots/{slot}?token=`. All natural. Area `libraries`.
 
-- [ ] Steps: tests (a lease taken while the API's removal holds `REMOVAL_LOCK` waits; a renewed lease survives its first TTL; one token never takes two slots), implement, check, commit `feat(render): library leases through crud routes (#5298)`. PR R7.
+- [x] Steps: tests (a lease taken while the API's removal holds `REMOVAL_LOCK` waits; a renewed lease survives its first TTL; one token never takes two slots), implement, check, commit `feat(render): library leases through crud routes (#5298)`. PR R7.
 
 **Rolling deploy:** both paths take `pg_advisory_xact_lock_shared(REMOVAL_LOCK)` (`library/libraries.py:480`).
 
@@ -621,8 +621,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Files:** `worker.py:200-289` (no pool, no `wait_until_ready`, `wait_for_areas("render", {...})`, refuse `local` (D11), no `settings_kek`); `render/worker_role.py` (`RENDER_GRANTS = {}`); `README.md` "Render worker (#424)"; test `tests/test_render_worker_nodb.py`.
 
-- [ ] **Step 1:** Test as Task 9: psycopg patched to raise, `SCADBUDDY_SECRET_KEY_FILE` unset, one render through accept, pieces, finish against `crud_app` with a fake Bambuddy store; `local` refuses with a message naming D11.
-- [ ] **Step 2:** Implement; commit `feat(render): the render worker needs no database (#5298)`. PR R8.
+- [x] **Step 1:** Test as Task 9: psycopg patched to raise, `SCADBUDDY_SECRET_KEY_FILE` unset, one render through accept, pieces, finish against `crud_app` with a fake Bambuddy store; `local` refuses with a message naming D11.
+- [x] **Step 2:** Implement; commit `feat(render): the render worker needs no database (#5298)`. PR R8.
 
 **Rolling deploy:** as Task 9.
 
@@ -630,13 +630,13 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Files (clusters):** `scadbuddy-render.yaml:161-168` (drop the URL and `PGPASSWORD`), `:223-229`, `:301-307` (drop the KEK env, mount and volume); the render egress policy drops Postgres. Precondition as Task 10 for `scadbuddy_render`.
 
-- [ ] Steps: check `pg_stat_activity` for 24 h; edit; PR `fix(scadbuddy): render worker without a database secret or KEK (ScadBuddy#5298)`.
+- [x] Steps: check `pg_stat_activity` for 24 h; edit; PR `fix(scadbuddy): render worker without a database secret or KEK (ScadBuddy#5298)`.
 
 ### Task 22: Revoke and forget `scadbuddy_render`
 
 **Files:** `main.py` (`revoke_role(conn, "scadbuddy_render")`; stop `grant_at_start`, `render/worker_role.py:195-205`); `render/worker_role.py` (delete `RENDER_GRANTS`, `RENDER_ROWS`, `grant_render_role`; keep `grant_role` until Task 35); `tests/test_render_worker_role.py` (replace by a revoke test); docs as Task 11; then clusters `cnpg-cluster.yaml:94-99` `ensure: absent` and delete `onepassworditem-render-db.yaml`.
 
-- [ ] Steps as Task 11. Commit `feat(render): revoke the render worker's database role (#5298)`.
+- [x] Steps as Task 11. Commit `feat(render): revoke the render worker's database role (#5298)`.
 
 ### Task 23: Print: the settings projection
 
@@ -644,8 +644,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `GET /api/v1/internal/crud/print/settings` → `StoredSettings` (D8). Area `settings`.
 
-- [ ] **Step 1:** Tests: every sealed field outside `PRINT_SECRETS` is null in the answer; the Bambuddy key is opened; `no-store`; a test fails when a new sealed field appears that is in neither list.
-- [ ] **Step 2:** Implement; commit `feat(print): settings through a crud route (#5298)`. PR Q1.
+- [x] **Step 1:** Tests: every sealed field outside `PRINT_SECRETS` is null in the answer; the Bambuddy key is opened; `no-store`; a test fails when a new sealed field appears that is in neither list.
+- [x] **Step 2:** Implement; commit `feat(print): settings through a crud route (#5298)`. PR Q1.
 
 **Rolling deploy:** as Task 5. `settings` and `printer_bed_types` stay granted until Task 29 (the merge writes them).
 
@@ -655,8 +655,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `/runs` routes for Q10 to Q13 (`POST /runs` `{output_id, request, …}` → `PrintRun`, natural on the run key; `POST /runs/{id}/start-enqueue|succeed|fail|fail-lost|result|lan-stopped`, state-guarded; reads `GET /runs/{id}`, `GET /runs?ids=`, `GET /runs/latest?output_id=`, `GET /runs/find?key=&has_request_id=`, `GET /runs/lan-waiting?printers=`, `GET /runs/running?output_id=`); `POST /outcomes` (Q14, natural); `POST /events` `{event}` with kinds `print.progress`, the kinds `bambuddy/progress.py:639` emits, `printer.report`, `printer.changed` (Q5). Areas `runs`, `operations`, `events`.
 
-- [ ] **Step 1:** Tests: an event posted twice is one row and one NOTIFY; a kind outside the allowlist is 403; a run's `succeed` twice announces once; the worker builds no `PgListener`.
-- [ ] **Step 2:** Implement; commit `feat(print): runs, outcomes and events through crud routes (#5298)`. PR Q2.
+- [x] **Step 1:** Tests: an event posted twice is one row and one NOTIFY; a kind outside the allowlist is 403; a run's `succeed` twice announces once; the worker builds no `PgListener`.
+- [x] **Step 2:** Implement; commit `feat(print): runs, outcomes and events through crud routes (#5298)`. PR Q2.
 
 **Rolling deploy:** `activity` stays granted until Task 29. An old print pod still LISTENs; harmless.
 
@@ -666,7 +666,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** one route per method in Q15 and Q17 under `/uploads`, `/slices`, `/slice-starts`; bodies are the method arguments; answers their returns. All natural (ON CONFLICT or delete-by-key); the test proves each. Area `uploads`.
 
-- [ ] Steps: tests, implement, commit `feat(print): uploads and slices through crud routes (#5298)`. PR Q3.
+- [x] Steps: tests, implement, commit `feat(print): uploads and slices through crud routes (#5298)`. PR Q3.
 
 ### Task 26: Print: previews, project targets, folderless projects, destination touches
 
@@ -674,7 +674,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `/previews…` (`claim_preview` takes `Idempotency-Key`: a lost answer must not turn a won claim into a lost one), `/project-targets…`, `/folderless…`, `/destination-touches…`. Area `previews`.
 
-- [ ] Steps: tests (claim retried with its key answers true once won), implement, commit `feat(print): previews and project targets through crud routes (#5298)`. PR Q4.
+- [x] Steps: tests (claim retried with its key answers true once won), implement, commit `feat(print): previews and project targets through crud routes (#5298)`. PR Q4.
 
 ### Task 27: Print: the copy lease
 
@@ -686,8 +686,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /copy-leases/{key}` `{token, ttl_s ≤ 300, wait_s ≤ 25}` → `{token, expires_at}` or 409 `busy`; `PUT /copy-leases/{key}` `{token}`; `DELETE /copy-leases/{key}?token=`. The acquire also probes `pg_try_advisory_lock` of the old key and releases it at once; a held old lock is `busy`. Natural (client token). Area `copy-leases`.
 
-- [ ] **Step 1:** Tests: two holders exclude each other; an expired lease is taken over; a record with a stale token is 409; renew keeps a 2-minute upload held; an old-style holder of the advisory lock makes acquire answer `busy`.
-- [ ] **Step 2:** Implement; commit `feat(print): copy lease instead of a session lock (#5298)`. PR Q5.
+- [x] **Step 1:** Tests: two holders exclude each other; an expired lease is taken over; a record with a stale token is 409; renew keeps a 2-minute upload held; an old-style holder of the advisory lock makes acquire answer `busy`.
+- [x] **Step 2:** Implement; commit `feat(print): copy lease instead of a session lock (#5298)`. PR Q5.
 
 **Rolling deploy:** new API holders take both the lease and the old lock, so they exclude old print pods both ways. A new remote holder holds only the lease; an old print pod that takes the old lock after that acquire is not excluded. That needs both print pods (one replica, `maxSurge: 1`) to copy into one folder in the same seconds of the roll; the worst result is one extra library copy (#317), which a person can delete. Accepted.
 
@@ -697,7 +697,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** one route per method in Q20, Q21. `pending_library` takes `Idempotency-Key` (it claims rows); the rest natural. Area `links`.
 
-- [ ] Steps: tests, implement, commit `feat(print): links and last prints through crud routes (#5298)`. PR Q6.
+- [x] Steps: tests, implement, commit `feat(print): links and last prints through crud routes (#5298)`. PR Q6.
 
 ### Task 29: Print: printer registry, reports and access codes
 
@@ -705,8 +705,8 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** reads (Q22); `POST /printers/ensure-bambuddy` `{bambuddy_printer_id, serial, name, model, listed}` → `{row, written}` (Q24, natural: decided under the lock); the Q25 writes; `GET /printers/{id}/access-code` → `{"code": str}` (Q23, D8); `PUT /reports/{printer_id}` `{report, seen_at}` → `{"ended": PrintEnd | null}` with `Idempotency-Key` (Q26: only the first write answers the end); `POST /reports/{id}/touch`; `GET /reports/{id}`, `GET /reports`. Area `printers`.
 
-- [ ] **Step 1:** Tests: a `put` retried with its key answers the same `PrintEnd`; a merge rewrites `settings` and `activity` on the API; the access code answer is `no-store` and its log line has no code.
-- [ ] **Step 2:** Implement; commit `feat(print): printers and reports through crud routes (#5298)`. PR Q7.
+- [x] **Step 1:** Tests: a `put` retried with its key answers the same `PrintEnd`; a merge rewrites `settings` and `activity` on the API; the access code answer is `no-store` and its log line has no code.
+- [x] **Step 2:** Implement; commit `feat(print): printers and reports through crud routes (#5298)`. PR Q7.
 
 **Rolling deploy:** the merge takes `pg_advisory_xact_lock('scadbuddy:printers')` in both paths.
 
@@ -716,7 +716,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `/rack/seen`, `/rack/usage`, `/rack/spool-history`, `/rack/picks`, `/rack/picked`, `/rack/recorded-archives`, `/rack/prints`, `/rack/lan-picks` (`Idempotency-Key`), `/rack/settle-lan`, `/rack/settle-lan-ended`. Area `rack`.
 
-- [ ] Steps: tests, implement, commit `feat(print): rack usage through crud routes (#5298)`. PR Q8.
+- [x] Steps: tests, implement, commit `feat(print): rack usage through crud routes (#5298)`. PR Q8.
 
 ### Task 31: Print: spools, native spools, held presets, native slices
 
@@ -724,7 +724,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** one route per method in Q28 to Q30. `replace_records` and `link` take `Idempotency-Key`; `NativeSliceStore.start` is natural on its workflow id (`slicing/store.py:125`). Area `spools`.
 
-- [ ] Steps: tests, implement, commit `feat(print): spools and native slices through crud routes (#5298)`. PR Q9.
+- [x] Steps: tests, implement, commit `feat(print): spools and native slices through crud routes (#5298)`. PR Q9.
 
 ### Task 32: Print: transfer URLs from the API
 
@@ -732,25 +732,25 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Interfaces:** `POST /transfer-urls` `{key}` → `{"url": str, "expires_at": datetime}`; the API refuses a key that no `native_slices` row names (the LAN print's sliced file) and signs with `slicing/transfer_token.py`. Area `transfer-urls`.
 
-- [ ] Steps: tests (an unknown key is 403; the URL reads the blob through `/internal/blobs`), implement, commit `feat(print): transfer URLs minted by the API (#5298)`. PR Q10.
+- [x] Steps: tests (an unknown key is 403; the URL reads the blob through `/internal/blobs`), implement, commit `feat(print): transfer URLs minted by the API (#5298)`. PR Q10.
 
 ### Task 33: The print worker needs no database and no KEK
 
 **Files:** `worker.py:1096-1378` (no `SettingsStore`, no pool, no `settings_kek`; `wait_for_areas("print", …)`); `auth/caller_grants.py` (`PRINT_GRANTS = {}`, `PRINT_SEQUENCES = ()`); `README.md` "The print worker (#1060)"; test `tests/test_print_worker_nodb.py`.
 
-- [ ] Steps as Task 20, running a native LAN print and a Bambuddy send against `crud_app` with fakes. Commit `feat(print): the print worker needs no database (#5298)`. PR Q11.
+- [x] Steps as Task 20, running a native LAN print and a Bambuddy send against `crud_app` with fakes. Commit `feat(print): the print worker needs no database (#5298)`. PR Q11.
 
 ### Task 34: Clusters: remove the print database secret and KEK
 
 **Files (clusters):** `scadbuddy-print.yaml:139-145` (URL, `PGPASSWORD`), `:181-185`, `:237-243` (KEK); `networkpolicy-print.yaml` (drop Postgres). Precondition as Task 10 for `scadbuddy_print`.
 
-- [ ] Steps as Task 21.
+- [x] Steps as Task 21.
 
 ### Task 35: Revoke and forget `scadbuddy_print`; finish the docs
 
 **Files:** `main.py` (`revoke_role(conn, "scadbuddy_print")`); `auth/caller_grants.py` (delete; keep `AGENT_GRANTS` for #5299 only if still used, else delete the module); `render/worker_role.py` (delete `grant_role` if unused); `bambuddy/uploads.py` (drop the old advisory lock from `copy_lock`); docs: trust page (no worker holds a secret or a KEK but projects' KEK until #5342), root and backend `CLAUDE.md` "Database access", `README.md`; then clusters `cnpg-cluster.yaml:108-113` `ensure: absent`, delete `onepassworditem-print-db.yaml`.
 
-- [ ] Steps as Task 11. Commit `feat(print): revoke the print worker's database role (#5298)`; the body says `Fixes #5298`.
+- [x] Steps as Task 11. Commit `feat(print): revoke the print worker's database role (#5298)`; the body says `Fixes #5298`.
 
 **Rolling deploy:** dropping the old advisory lock from `copy_lock` is safe only now: no pod of a build before Task 27 is left.
 
