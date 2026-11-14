@@ -1712,6 +1712,32 @@ async def test_a_reused_job_is_kept_by_the_prune_for_another_ttl(
     assert held is not None and held[0] > 0
 
 
+async def test_a_job_ttl_of_0_keeps_a_settled_render_forever(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """#6236: with ``job_ttl`` 0 the prune removes no settled job and no blob ref of one,
+    however old."""
+    config = replace(deps.config, job_ttl=0.0)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue, config=config)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            first = await service.submit(SLUG, {"width": _w()})
+            await _settled(projection, first.id)
+            await asyncio.to_thread(_finished_ago, projection, first.id, timedelta(days=400))
+            await service.prune()
+        await service.aclose()
+
+    kept = await asyncio.to_thread(projection.read, first.id)
+    assert kept.state == "done"
+    with psycopg.connect(projection.conninfo) as conn:
+        held = conn.execute(
+            "SELECT count(*) FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s",
+            (first.id,),
+        ).fetchone()
+    assert held is not None and held[0] > 0
+
+
 async def test_a_reuse_still_releases_the_render_it_supersedes(
     make_service: ServiceFactory,
     deps: WorkerDeps,

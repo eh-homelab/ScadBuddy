@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
-import type { StorefrontListing, StorefrontListingInput } from '../api/types'
+import type { ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
+import type { LivePictures } from '../components/storefront/ListingPictures'
 import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
 import { sellListing, type SellListing } from '../components/storefront/sellSource'
 import { ListingView, type ParamValues } from '../storefront/components/ListingView'
@@ -38,6 +39,8 @@ interface Open {
   filled: boolean
   /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
   notes: string[]
+  /** #6213 — the pictures the public site shows now (`liveMedia`). */
+  live: LivePictures
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -51,12 +54,24 @@ function newKey(): symbol {
 
 /** A new listing: blank, or the one "Sell on storefront" filled in. */
 function fresh(sold?: SellListing): Open {
-  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [], live: null }
+}
+
+/**
+ * #6213 — the media ids a published listing shows, in order; null while it is not
+ * published. A listing published before publish kept each picture's `media_id` is
+ * `unknown`: its `media_ids` may have changed since (`PUT …/media` keeps it published when
+ * a republish is refused), so its pictures are never matched by place.
+ */
+function liveMedia(listing: StorefrontListing): LivePictures {
+  if (!listing.published) return null
+  const ids = listing.media.map((item) => item.media_id)
+  return ids.every((id) => typeof id === 'string') ? (ids as string[]) : 'unknown'
 }
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [] }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [], live: liveMedia(listing) }
 }
 
 function message(error: unknown): string {
@@ -85,6 +100,11 @@ export function StorefrontListingPage() {
   const back = (location.state as BackState | null)?.back ?? ''
   const listPath = `/storefront${back}`
   const models = useAsync(() => api.listModels(), [])
+  /** The newest templates read, for an answer that lands after renders it did not see (an upload's). */
+  const latestModels = useRef(models.data)
+  useEffect(() => {
+    latestModels.current = models.data
+  }, [models.data])
   const book = useAsync(() => api.priceBook(), [])
   const [open, setOpen] = useState<Open | null>(() => (routeId === 'new' ? fresh() : null))
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -239,6 +259,23 @@ export function StorefrontListingPage() {
     edited.current = true
     // Another template's defaults fill in once its schema loads.
     setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug })
+  }
+
+  /**
+   * #6213 — a picture uploaded in the editor of `key`'s opening: the template as the upload
+   * left it put in the newest templates read (so the editor knows the new image at once),
+   * and the id added to that listing as it is now (edits, saves and publishes may have
+   * landed while it uploaded).
+   */
+  function pictureUploaded(key: symbol, model: ModelSummary, id: string) {
+    const current = latestModels.current
+    if (current) models.setData(current.map((m) => (m.slug === model.slug ? model : m)), { supersede: true })
+    else models.refresh()
+    whileOpen(key, (cur) => {
+      if (cur.draft.media_ids.includes(id)) return cur
+      edited.current = true
+      return { ...cur, draft: { ...cur.draft, media_ids: [...cur.draft.media_ids, id] } }
+    })
   }
 
   async function act(run: () => Promise<void>) {
@@ -411,6 +448,9 @@ export function StorefrontListingPage() {
                 schema={schema.data}
                 filaments={filaments}
                 media={media}
+                live={open.live}
+                mediaState={models.error ? 'failed' : models.data ? 'ready' : 'loading'}
+                onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
               />
             </section>
 

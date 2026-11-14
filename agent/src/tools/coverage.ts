@@ -27,6 +27,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The Storefront page's \"Move to top\" and \"Move to position…\" (#6157); an agent tool follows with #5283.",
   },
   {
+    operation: 'PUT /api/v1/storefront/listings/{listing_id}/media',
+    reason: "The Storefront page's pictures and a model media's \"Storefront…\" dialog (#6213); an agent tool follows with #5283.",
+  },
+  {
     operation: 'POST /api/v1/storefront/listings/{listing_id}/unpublish',
     reason: "The shop edits listings on the Storefront page (#5282, spec 2026-11-02 §5.3); the assistant drafts and publishes through storefront_listing_draft and storefront_listing_publish (#6131).",
   },

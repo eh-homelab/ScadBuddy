@@ -270,7 +270,7 @@ async def test_a_failing_sweep_fails_its_activity(
         store=SimpleNamespace(content=None),
         blobs=object(),
         refs=object(),
-        config=SimpleNamespace(job_ttl=60.0),
+        config=SimpleNamespace(sweep_grace=60.0),
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
         events=None,

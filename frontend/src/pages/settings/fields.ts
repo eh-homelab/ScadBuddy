@@ -305,6 +305,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'rendering',
     label: 'Keep finished renders for',
     kind: 'seconds',
+    help: '0 keeps them forever: the store then keeps every render’s files.',
   },
   {
     name: 'render_concurrency',

@@ -12,7 +12,7 @@ vi.mock('@react-three/fiber', () => ({
     if (scene.failure) throw scene.failure
     return null
   },
-  useLoader: Object.assign(() => ({ scene: { clone: () => ({}) } }), { clear: scene.clear }),
+  useLoader: Object.assign(() => ({ scene: { clone: () => ({ traverse: () => {} }) } }), { clear: scene.clear }),
   useThree: () => null,
 }))
 vi.mock('@react-three/drei', () => ({ Grid: () => null, OrbitControls: () => null }))

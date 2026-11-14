@@ -86,6 +86,24 @@ def test_a_dark_colour_reads_back_exactly(tmp_path: Path) -> None:
     assert [part.colour for part in read_glb(out)] == ["#0A0B0C"]
 
 
+def test_a_translucent_parts_alpha_is_its_meshs_extra_and_reads_back(tmp_path: Path) -> None:
+    """Owner, 2026-11-14: the viewer and the covers read one value, `scadbuddy_alpha`."""
+    out = tmp_path / "preview.glb"
+    clear = ColourPart(1, "Color 1", "#FFFFFF", trimesh.creation.box(extents=(1, 1, 1)), alpha=128)
+    write_glb([clear, _parts()[1]], out)
+
+    data = out.read_bytes()
+    length = struct.unpack("<I", data[12:16])[0]
+    extras = {
+        mesh["name"]: mesh.get("extras", {}).get("scadbuddy_alpha")
+        for mesh in json.loads(data[20 : 20 + length])["meshes"]
+    }
+    assert extras == {"Color 1": 128, "Color 2": None}
+    # The material stays opaque: the extra is the one source.
+    assert _material_factors(out)["Color 1"][3] == 1.0
+    assert {part.name: part.alpha for part in read_glb(out)} == {"Color 1": 128, "Color 2": 255}
+
+
 def test_a_preview_written_before_1319_reads_back_its_srgb_colour(tmp_path: Path) -> None:
     """A saved output's GLB from before the fix holds the sRGB bytes as the factor."""
     out = tmp_path / "preview.glb"

@@ -1,11 +1,7 @@
 import { act, render, screen } from '@testing-library/react'
-import type { BootstrapValue } from '../../api/types'
 import { resetAppLinks, setAppLinks } from '../../lib/appLinks'
+import { allowedOrigins } from '../../test/appLinks'
 import { Markdown } from './Markdown'
-
-function allowedOrigins(value: string): BootstrapValue {
-  return { name: 'allowed_origins', env_var: 'SCADBUDDY_ALLOWED_ORIGINS', value, source: 'env', reason: '' }
-}
 import { parseBlocks } from './markdownBlocks'
 import { pageContext, suggestedPrompts } from './pageContext'
 import { toolLabel } from './labels'

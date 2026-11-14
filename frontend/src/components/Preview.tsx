@@ -27,6 +27,7 @@ import {
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, type DisplayUnit } from '../lib/units'
+import { withPartOpacity } from '../lib/partOpacity'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
@@ -1044,7 +1045,17 @@ function Model({
   onMeasured: (url: string, bbox: BoundingBox) => void
 }) {
   const gltf = useLoader(GLTFLoader, url)
-  const scene = useMemo(() => gltf.scene.clone(true), [gltf])
+  // A translucent part gets materials of its own; the rest share the loader's.
+  const { scene, owned } = useMemo(() => {
+    const copy = gltf.scene.clone(true)
+    return { scene: copy, owned: withPartOpacity(copy) }
+  }, [gltf])
+  useEffect(
+    () => () => {
+      for (const material of owned) material.dispose()
+    },
+    [owned],
+  )
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
   // put it on the bed) is measured, so it is centred and framed like any other. It is
   // measured on the loader's own scene, never on the drawn clone (#3026 review): the
