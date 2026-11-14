@@ -1,5 +1,11 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
+import type { BootstrapValue } from '../../api/types'
+import { resetAppLinks, setAppLinks } from '../../lib/appLinks'
 import { Markdown } from './Markdown'
+
+function allowedOrigins(value: string): BootstrapValue {
+  return { name: 'allowed_origins', env_var: 'SCADBUDDY_ALLOWED_ORIGINS', value, source: 'env', reason: '' }
+}
 import { parseBlocks } from './markdownBlocks'
 import { pageContext, suggestedPrompts } from './pageContext'
 import { toolLabel } from './labels'
@@ -18,6 +24,32 @@ describe('Markdown', () => {
     expect(screen.getByText('cube(1);')).toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
     expect(container.textContent).toContain('<img src=x onerror=alert(1)>')
+  })
+
+  // #6232 — a reply's link to ScadBuddy is shown on the host the user is on.
+  describe('links to ScadBuddy', () => {
+    const INTERNAL = 'https://scadbuddy.internal.nullreference.io'
+    const SSO = 'https://scadbuddy.sso.nullreference.io'
+    afterEach(() => {
+      resetAppLinks()
+      vi.unstubAllGlobals()
+    })
+
+    it.each([INTERNAL, SSO])('moves a ScadBuddy link to %s when the page is there', (host) => {
+      vi.stubGlobal('location', new URL(`${host}/m/name-keychain`))
+      setAppLinks({ public_url: INTERNAL, bootstrap: [] })
+      render(<Markdown text={`[open](${INTERNAL}/m/name-keychain?preset=p1#top) and [other](https://example.org/a)`} />)
+      expect(screen.getByRole('link', { name: 'open' })).toHaveAttribute('href', `${host}/m/name-keychain?preset=p1#top`)
+      expect(screen.getByRole('link', { name: 'other' })).toHaveAttribute('href', 'https://example.org/a')
+    })
+
+    it('moves a link once the known origins load', () => {
+      vi.stubGlobal('location', new URL(`${SSO}/`))
+      render(<Markdown text={`[open](${INTERNAL}/edit/o1)`} />)
+      expect(screen.getByRole('link', { name: 'open' })).toHaveAttribute('href', `${INTERNAL}/edit/o1`)
+      act(() => setAppLinks({ public_url: null, bootstrap: [allowedOrigins(`${INTERNAL},${SSO}`)] }))
+      expect(screen.getByRole('link', { name: 'open' })).toHaveAttribute('href', `${SSO}/edit/o1`)
+    })
   })
 
   it('refuses non-http links', () => {
