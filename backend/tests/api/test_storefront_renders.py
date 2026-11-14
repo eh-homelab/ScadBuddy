@@ -24,6 +24,7 @@ from scadbuddy.orders.storefront import renders as renders_module
 from scadbuddy.orders.storefront.renders import RENDER_FAILED, store_render
 from scadbuddy.render.job_models import Job, QueueFullError, now
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.wire import CLIENT_HEADER, STOREFRONT_PROBLEMS, VISITOR_HEADER
 from scadbuddy.workflows.commands import (
@@ -888,7 +889,7 @@ def test_a_done_render_names_its_preview_once_its_files_are_here(
     page never asks for a preview the API would hold open; a later poll names it."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 69})
     monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
-    real = renders_module.materialize_result
+    real = materialize_result
     fetches = 0
 
     async def slow(blobs: Any, result: Any) -> None:
