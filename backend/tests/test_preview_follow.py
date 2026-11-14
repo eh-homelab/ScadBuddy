@@ -11,6 +11,7 @@ import pytest
 from scadbuddy.bambuddy.preview import SlicePreview
 from scadbuddy.core.events import Event, InProcessEventBus, PreviewSliceEvent
 from scadbuddy.core.problems import ApiError
+from scadbuddy.preview_follow.claims import PgFollowClaims
 from scadbuddy.preview_follow.follows import MAX_FOLLOWS, PreviewFollows, Reader
 
 SUBJECT = "a" * 12
@@ -192,3 +193,127 @@ async def test_shutdown_cancels_a_follow_whose_read_is_in_flight() -> None:
     assert follows.following == 0
     # A cancelled read is not a failed one: nothing tells the dialog it settled.
     assert seen == []
+
+
+class SharedClaims:
+    """`FollowClaims` shared by the replicas of one test, as Postgres's advisory locks are."""
+
+    def __init__(self) -> None:
+        self.held: dict[str, str] = {}
+        self.closed: list[str] = []
+        self.made: list[str] = []
+
+    def of(self, replica: str) -> ReplicaClaims:
+        return ReplicaClaims(self, replica)
+
+
+class ReplicaClaims:
+    def __init__(self, shared: SharedClaims, replica: str) -> None:
+        self.shared = shared
+        self.replica = replica
+
+    def claim(self, key: str) -> bool:
+        self.shared.made.append(key)
+        return self.shared.held.setdefault(key, self.replica) == self.replica
+
+    def release(self, key: str) -> None:
+        if self.shared.held.get(key) == self.replica:
+            del self.shared.held[key]
+
+    def close(self) -> None:
+        self.shared.held = {k: r for k, r in self.shared.held.items() if r != self.replica}
+        self.shared.closed.append(self.replica)
+
+
+async def test_a_slice_read_on_two_replicas_is_followed_by_one() -> None:
+    """#6158: every replica's sockets hear the follower's events over the Postgres bus, so
+    a read on another replica answers ``followed`` and reads the slice no more."""
+    bus, seen = watching()
+    shared = SharedClaims()
+    one = PreviewFollows(bus, claims=shared.of("one"), interval=0)
+    two = PreviewFollows(bus, claims=shared.of("two"), interval=0)
+    reads_made = 0
+    answers = [running(10), running(10), running(40), SlicePreview(job_id=7, status="completed")]
+
+    async def read() -> SlicePreview:
+        nonlocal reads_made
+        reads_made += 1
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    first = await one.read("native", 7, SUBJECT, read)
+    other = await two.read("native", 7, SUBJECT, read)
+    assert (first.followed, other.followed) == (True, True)
+    assert (one.following, two.following) == (1, 0)
+    await settle(one)
+    # Each change once, and no reads but the two answered ones and one follow's.
+    assert kinds(seen) == ["preview_slice.progress", "preview_slice.settled"]
+    assert reads_made == 4
+    assert shared.held == {}
+
+
+async def test_a_follow_releases_its_claim_before_its_last_event() -> None:
+    """The read that the last event causes may reach any replica, and it must be able to
+    follow the slice again there."""
+    bus = InProcessEventBus()
+    shared = SharedClaims()
+    held_at_event: list[dict[str, str]] = []
+    bus.add_listener(lambda _: held_at_event.append(dict(shared.held)))
+    follows = PreviewFollows(bus, claims=shared.of("one"), interval=0, quiet_reads=1)
+    await follows.read("native", 7, SUBJECT, reads(running(5)))
+    await settle(follows)
+    assert held_at_event == [{}]
+    again = PreviewFollows(bus, claims=shared.of("two"), interval=3600)
+    await again.read("native", 7, SUBJECT, reads(running(5)))
+    assert again.following == 1
+    await again.aclose()
+
+
+async def test_a_claim_on_its_way_is_not_made_twice() -> None:
+    bus, _ = watching()
+    shared = SharedClaims()
+    follows = PreviewFollows(bus, claims=shared.of("one"), interval=3600)
+    read = reads(running())
+    answers = await asyncio.gather(*(follows.read("native", 7, SUBJECT, read) for _ in range(3)))
+    assert [a.followed for a in answers] == [True] * 3
+    assert shared.made == [f"native:7:{SUBJECT}"]
+    assert follows.following == 1
+    await follows.aclose()
+
+
+async def test_shutdown_releases_every_claim() -> None:
+    bus, seen = watching()
+    shared = SharedClaims()
+    follows = PreviewFollows(bus, claims=shared.of("one"), interval=3600)
+    await follows.read("bambuddy", 7, SUBJECT, reads(running()))
+    assert list(shared.held) == [f"bambuddy:7:{SUBJECT}"]
+    await follows.aclose()
+    assert shared.held == {}
+    assert shared.closed == ["one"]
+    assert seen == []
+
+
+def test_a_claim_postgres_cannot_answer_follows_here() -> None:
+    """The dialog still hears of its slice, at worst from two replicas."""
+    claims = PgFollowClaims("postgresql://nobody@127.0.0.1:1/nothing")
+    assert claims.claim("native:7:x") is True
+    assert claims.open_connections() == 0
+    claims.release("native:7:x")
+    claims.close()
+
+
+@pytest.mark.requires_postgres
+def test_one_process_holds_a_slice_claim_at_a_time(pg_conninfo: str) -> None:
+    one, two = PgFollowClaims(pg_conninfo), PgFollowClaims(pg_conninfo)
+    try:
+        assert one.claim("native:7:x") is True
+        assert one.open_connections() == 1
+        assert two.claim("native:7:x") is False
+        assert two.claim("native:8:x") is True
+        one.release("native:7:x")
+        assert two.claim("native:7:x") is True
+        two.close()
+        # Closing a process's connection frees every slice it held.
+        assert one.claim("native:8:x") is True
+    finally:
+        one.close()
+        two.close()

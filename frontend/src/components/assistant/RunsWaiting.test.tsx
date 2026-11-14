@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
-import { RunsWaitingContext, type RunWaiting } from '../../agent/attention'
+import { ATTENTION_POLL_MS, RunsWaitingContext, type RunWaiting } from '../../agent/attention'
 import { fakeRealtime } from '../../lib/realtime.fake'
 import { setFlowDetails } from '../../mocks/features/flows'
 import { server } from '../../mocks/server'
@@ -67,6 +67,47 @@ describe('RunsWaiting', () => {
       setFlowDetails('swap', { display_name: 'Renamed swap' })
       await realtime.signal('flows', 'flow.changed')
       await waitFor(() => expect(within(list).getByRole('link', { name: 'Renamed swap' })).toBeInTheDocument())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the display names on a timer while the realtime socket is unavailable (#6158)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const realtime = fakeRealtime()
+      setFlowDetails('swap', { display_name: 'Nightly swap' })
+      shown([{ id: 'run-1', name: 'swap', waiting: 1 }])
+      const list = screen.getByRole('list', { name: 'Flow runs waiting for you' })
+      expect(await within(list).findByRole('link', { name: 'Nightly swap' })).toBeInTheDocument()
+      realtime.setStatus('unavailable')
+      setFlowDetails('swap', { display_name: 'Renamed swap' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+      })
+      await waitFor(() => expect(within(list).getByRole('link', { name: 'Renamed swap' })).toBeInTheDocument())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads nothing on the timer while no run waits (#6158)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const realtime = fakeRealtime()
+      realtime.setStatus('unavailable')
+      let asked = 0
+      server.use(
+        http.get('/api/v1/workflows', () => {
+          asked += 1
+          return HttpResponse.json([])
+        }),
+      )
+      shown([])
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS * 2)
+      })
+      expect(asked).toBe(0)
     } finally {
       vi.useRealTimers()
     }

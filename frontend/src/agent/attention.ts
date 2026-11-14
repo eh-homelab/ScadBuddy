@@ -28,7 +28,8 @@ export const ATTENTION_POLL_MS = 15_000
  * #815 — the agent's event stream that says, with no data, when what `ATTENTION_PATH` lists may
  * have changed (agent routes/pendingInput.ts `PENDING_CHANGES_PATH`), so a new request is read
  * within moments rather than on the next poll, which a background tab's throttled timers stretch.
- * The poll stays: it covers an agent without the stream (a 503 closes the EventSource for good).
+ * The poll stays: it covers an agent without the stream. A 204 or a 503 closes that EventSource,
+ * and `lib/pendingChanges.ts` opens a new one after a back-off; the poll covers the gap.
  * #265: the tab's one stream, shared with each view of a flow run's queue (`lib/pendingChanges.ts`).
  */
 export { PENDING_CHANGES_PATH }
