@@ -2348,11 +2348,11 @@ holds the manifest (spec §12).
   presigns. It holds no store credential.
 - **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`,
   `SCADBUDDY_INTAKE_WORK_DIR` (a writable volume for downloads, since the root file system
-  is read-only; default `/tmp`), `SCADBUDDY_INTAKE_CONCURRENCY` (checks at once, default 2)
-  and `SCADBUDDY_LOG_LEVEL`.
+  is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`. A pod checks one file at a time,
+  fixed (spec §7, the isolation rule): scale with the Deployment's replicas.
 - **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
-  minutes, so size the sandbox container's memory limit for `SCADBUDDY_INTAKE_CONCURRENCY`
-  such children, and the work volume for as many 256 MiB downloads.
+  minutes, so size the sandbox container's memory limit for one such child, and the work
+  volume for one 256 MiB download.
 - **Two containers (spec §7, "The child's sandbox").** The worker container runs
   `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true` and
   `SCADBUDDY_INTAKE_SANDBOX_UID` set to the sandbox container's `runAsUser` (required with
@@ -2364,10 +2364,10 @@ holds the manifest (spec §12).
   `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set),
   `readOnlyRootFilesystem`. The two share only the work volume, an `emptyDir` mounted at
   `SCADBUDDY_INTAKE_WORK_DIR` in both, with a pod `fsGroup` both users are in (the spool's
-  files are group read-write). Both take the same `SCADBUDDY_INTAKE_CONCURRENCY`.
+  files are group read-write).
 - **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
-  user, network and mount namespaces, no capabilities, no new privileges, a seccomp
-  filter) and exits 3 at start, logging why, when any step is refused. A container
+  user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
+  a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
   runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so give the
   `sandbox` container a seccomp profile that allows it (and, on Ubuntu 24.04 nodes, an
   AppArmor profile that allows unprivileged user namespaces). While the sandbox is down,

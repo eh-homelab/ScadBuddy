@@ -95,7 +95,9 @@ async def run(
             task_queue=settings.temporal_task_queue_customer_files,
             workflows=[CustomerFileCheck],
             activities=[activities.check, activities.failed],
-            max_concurrent_activities=settings.intake_concurrency,
+            # One customer's file per pod at any moment (spec §7, the isolation rule):
+            # scale with replicas, never with checks at once.
+            max_concurrent_activities=1,
         )
         async with worker:
             logger.info("intake worker polling %s", settings.temporal_task_queue_customer_files)

@@ -1,11 +1,14 @@
 """The check's launcher (#6133, spec 2026-11-13 §7):
 ``python -I -S confine.py [--strict] <hide> -- <program> [args...]``.
 
-It confines this process, then ``execv``s the parser in place (its pid stays the one the
-runner kills by group):
+It makes itself non-dumpable (``PR_SET_DUMPABLE`` 0, lifted only for the three writes of
+its id maps, which a non-dumpable process cannot open), confines itself, then forks the
+parser as PID 1 of a PID namespace of its own and reaps it, exiting with its code (128 plus
+the signal when one killed it). Both stay in the runner's process group, which a kill
+reaches whole:
 
-1. ``unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)``, the process's own uid and gid
-   mapped to themselves
+1. ``unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)``, the process's own
+   uid and gid mapped to themselves
    ([user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)): a
    network namespace with only a loopback device that is down
    ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
@@ -16,17 +19,25 @@ runner kills by group):
    the covered spool would still reach its siblings by ``..``
    ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html);
    measured by `tests/intake_worker/test_runner.py`
-   `test_a_confined_child_reaches_only_its_own_box`).
+   `test_a_confined_child_reaches_only_its_own_box`). The forked parser is PID 1 of its
+   own PID namespace, and an empty tmpfs covers ``/proc``, so it sees no process, not even
+   its launcher
+   ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)). No
+   fresh ``/proc`` is mounted: a container's masked ``/proc`` paths make the kernel refuse
+   one in a user namespace, and the parser needs none.
 2. ``prctl(PR_SET_NO_NEW_PRIVS, 1)``
    ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)).
 3. A seccomp filter that refuses (``EPERM``) every call that could undo step 1 or reach
    another process: ``mount``, ``umount2``, ``pivot_root``, ``chroot``, the new mount API,
-   ``unshare``, ``setns``, ``clone`` with a namespace flag, ``ptrace``, ``keyctl``,
-   ``add_key``, ``request_key``, ``bpf``, ``perf_event_open`` and ``userfaultfd``; ``clone3``
+   ``unshare``, ``setns``, ``clone`` with a namespace flag, ``ptrace``,
+   ``process_vm_readv``, ``process_vm_writev``, ``kcmp``, ``pidfd_open``, ``pidfd_getfd``,
+   ``pidfd_send_signal``, ``keyctl``, ``add_key``, ``request_key``, ``bpf``,
+   ``perf_event_open`` and ``userfaultfd``; ``clone3``
    and ``io_uring_setup`` are ``ENOSYS`` (``clone3``'s flags sit in memory a filter cannot
    read, and libc falls back to ``clone``), and a process of another ABI is killed
    ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html)).
-4. ``execv`` of the parser. The creator of a user namespace holds every capability in it,
+4. ``execv`` of the parser, in the forked PID 1 (the launcher takes steps 2 and 3 too).
+   The creator of a user namespace holds every capability in it,
    enough to unmount the tmpfs; an ``execve`` by a uid that is not 0 in the namespace
    clears them all (capabilities(7), "Capabilities and execution of programs by root" and
    "Effect of user ID changes on capabilities":
@@ -80,15 +91,24 @@ ISOLATION_ENV = "SCADBUDDY_INTAKE_ISOLATION"
 
 # The asm-generic numbers past 403 are the same on both architectures.
 _NEW_MOUNT_API = (428, 429, 430, 431, 432, 433, 442)  # open_tree … fspick, mount_setattr
+_PIDFD = (424, 434, 438)  # pidfd_send_signal, pidfd_open, pidfd_getfd
 _NR_IO_URING_SETUP = 425
 _NR_CLONE3 = 435
 
 #: ``platform.machine()`` → (``AUDIT_ARCH_*``, ``__NR_clone``, the refused calls: mount,
 #: umount2, pivot_root, chroot, unshare, setns, ptrace, keyctl, add_key, request_key, bpf,
-#: perf_event_open, userfaultfd).
+#: perf_event_open, userfaultfd, process_vm_readv, process_vm_writev, kcmp).
 ARCHES: dict[str, tuple[int, int, tuple[int, ...]]] = {
-    "x86_64": (0xC000003E, 56, (165, 166, 155, 161, 272, 308, 101, 250, 248, 249, 321, 298, 323)),
-    "aarch64": (0xC00000B7, 220, (40, 39, 41, 51, 97, 268, 117, 219, 217, 218, 280, 241, 282)),
+    "x86_64": (
+        0xC000003E,
+        56,
+        (165, 166, 155, 161, 272, 308, 101, 250, 248, 249, 321, 298, 323, 310, 311, 312),
+    ),
+    "aarch64": (
+        0xC00000B7,
+        220,
+        (40, 39, 41, 51, 97, 268, 117, 219, 217, 218, 280, 241, 282, 270, 271, 272),
+    ),
 }
 _X32_SYSCALL_BIT = 0x40000000
 _EPERM = 1
@@ -103,6 +123,7 @@ _RET_K = 0x06
 _RET_ALLOW = 0x7FFF0000
 _RET_KILL_PROCESS = 0x80000000
 _RET_ERRNO = 0x00050000
+_PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
 _PR_SET_SECCOMP = 22
 _SECCOMP_MODE_FILTER = 2
@@ -127,7 +148,7 @@ def program(arch: int, nr_clone: int, refused: tuple[int, ...]) -> list[bytes]:
     ]
     for nr in (_NR_IO_URING_SETUP, _NR_CLONE3):
         ops += [_op(_JEQ_K, nr, jf=1), _op(_RET_K, _RET_ERRNO | _ENOSYS)]
-    for nr in (*refused, *_NEW_MOUNT_API):
+    for nr in (*refused, *_NEW_MOUNT_API, *_PIDFD):
         ops += [_op(_JEQ_K, nr, jf=1), _op(_RET_K, _RET_ERRNO | _EPERM)]
     ops += [
         _op(_JEQ_K, nr_clone, jt=1),
@@ -174,16 +195,22 @@ def _write(path: str, text: str) -> None:
 
 
 def isolate(libc: ctypes.CDLL, hide: str) -> str | None:
-    """Step 1; None when all of it took, else what the kernel refused."""
+    """Step 1 but the parser's own ``/proc`` (`hide_proc`, in the forked PID 1); None when
+    all of it took, else what the kernel refused."""
     uid, gid = os.getuid(), os.getgid()
-    if libc.unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS) != 0:
-        return _refused("unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)")
+    if libc.unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID) != 0:
+        return _refused("unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)")
+    # A non-dumpable process's /proc files belong to root, which the new namespace does
+    # not map, so the maps are written dumpable; nothing else of the process is open then.
+    libc.prctl(_PR_SET_DUMPABLE, 1, None, 0, 0)
     try:
         _write("/proc/self/setgroups", "deny")
         _write("/proc/self/uid_map", f"{uid} {uid} 1")
         _write("/proc/self/gid_map", f"{gid} {gid} 1")
     except OSError as error:
         return f"the user namespace's id maps: {error.strerror}"
+    finally:
+        libc.prctl(_PR_SET_DUMPABLE, 0, None, 0, 0)
     if libc.mount(None, b"/", None, MS_REC | MS_PRIVATE, None) != 0:
         return _refused("mount(MS_REC | MS_PRIVATE)")
     flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
@@ -204,6 +231,20 @@ def isolate(libc: ctypes.CDLL, hide: str) -> str | None:
         os.chdir(inner)
     finally:
         os.close(box)
+    return None
+
+
+def hide_proc(libc: ctypes.CDLL) -> str | None:
+    """An empty tmpfs over ``/proc``: the parser sees no process."""
+    flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    if libc.mount(b"tmpfs", b"/proc", b"tmpfs", flags, b"size=4k,mode=0") != 0:
+        return _refused("mount(tmpfs over /proc)")
+    return None
+
+
+def forbid_dumping(libc: ctypes.CDLL) -> str | None:
+    if libc.prctl(_PR_SET_DUMPABLE, 0, None, 0, 0) != 0:
+        return _refused("prctl(PR_SET_DUMPABLE, 0)")
     return None
 
 
@@ -235,13 +276,34 @@ def main(argv: list[str]) -> NoReturn:
     if strict and os.getuid() == 0:
         _fail("refusing to run the parser as root: its exec would keep its capabilities")
     libc = _libc()
-    refused = isolate(libc, hide) or restrict(libc)
+    refused = forbid_dumping(libc) or isolate(libc, hide)
     if refused is not None:
         if strict:
             _fail(refused)
+        # Development only: the parser runs unconfined but for what still applies.
         os.environ[ISOLATION_ENV] = refused
-        # The steps after the one refused still apply where they can.
         restrict(libc)
+        _exec(command)
+    child = os.fork()
+    if child == 0:
+        # PID 1 of the new PID namespace.
+        refused = hide_proc(libc) or restrict(libc)
+        if refused is not None:
+            if strict:
+                _fail(refused)
+            os.environ[ISOLATION_ENV] = refused
+        _exec(command)
+    # The launcher holds the namespaces' capabilities while it waits: it takes the same
+    # filter, and the parser, in a PID namespace below it with no /proc, cannot see it.
+    if (refused := restrict(libc)) is not None and strict:
+        os.kill(child, 9)
+        _fail(refused)
+    _, status = os.waitpid(child, 0)
+    code = os.waitstatus_to_exitcode(status)
+    raise SystemExit(code if code >= 0 else 128 - code)
+
+
+def _exec(command: list[str]) -> NoReturn:
     try:
         os.execv(command[0], command)
     except OSError as error:

@@ -5,6 +5,7 @@ pod's sandbox container."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import socket
@@ -266,31 +267,69 @@ def test_a_confined_child_reaches_only_its_own_box(tmp_path: Path) -> None:
     assert _confined(spool, code, str(other / "secret"), cwd=mine) == "mine,hidden,hidden"
 
 
+_PROBE_HEAD = (
+    "import ctypes, os, sys\n"
+    "libc = ctypes.CDLL(None, use_errno=True)\n"
+    "libc.mount.argtypes = [ctypes.c_char_p] * 3 + [ctypes.c_ulong, ctypes.c_char_p]\n"
+    "X86 = os.uname().machine == 'x86_64'\n"
+    "def errno(rc):\n"
+    "    return 'ok' if rc == 0 else os.strerror(ctypes.get_errno())\n"
+)
+
+
 @needs_confinement
 def test_a_confined_child_holds_no_capability_and_cannot_mount(tmp_path: Path) -> None:
     """The parser's exec as a uid that is not 0 in its user namespace clears every
     capability, so it cannot unmount the tmpfs that hides the spool (or mount, or make a
-    namespace of its own); the seccomp filter refuses those calls besides."""
+    namespace of its own); the seccomp filter refuses those calls besides. Read with
+    ``capget`` and ``prctl``: the parser has no ``/proc``."""
     target = tmp_path / "target"
     target.mkdir()
-    code = (
-        "import ctypes, os, sys\n"
-        "libc = ctypes.CDLL(None, use_errno=True)\n"
-        "libc.mount.argtypes = [ctypes.c_char_p] * 3 + [ctypes.c_ulong, ctypes.c_char_p]\n"
-        "def errno(rc):\n"
-        "    return 'ok' if rc == 0 else os.strerror(ctypes.get_errno())\n"
-        "status = dict(line.split(':', 1) for line in open('/proc/self/status'))\n"
-        "print(status['CapEff'].strip(), status['CapPrm'].strip(),"
-        " status['NoNewPrivs'].strip(), status['Seccomp'].strip())\n"
+    code = _PROBE_HEAD + (
+        "head = (ctypes.c_uint32 * 2)(0x20080522, 0)\n"
+        "data = (ctypes.c_uint32 * 6)()\n"
+        "assert libc.capget(head, data) == 0\n"
+        "print(list(data), libc.prctl(39, 0, 0, 0, 0), libc.prctl(21, 0, 0, 0, 0))\n"
         "print(errno(libc.umount2(sys.argv[1].encode(), 2)))\n"
         "print(errno(libc.mount(b'tmpfs', sys.argv[2].encode(), b'tmpfs', 0, None)))\n"
         "print(errno(libc.unshare(0x10000000)))\n"
-        "print(errno(libc.syscall(56 if os.uname().machine == 'x86_64' else 220,"
-        " 0x10000000 | 17, 0, 0, 0, 0)))"
+        "print(errno(libc.syscall(56 if X86 else 220, 0x10000000 | 17, 0, 0, 0, 0)))"
     )
     lines = _confined(tmp_path, code, str(tmp_path), str(target)).splitlines()
-    assert lines[0] == "0000000000000000 0000000000000000 1 2"
+    assert lines[0] == "[0, 0, 0, 0, 0, 0] 1 2"
     assert lines[1:] == ["Operation not permitted"] * 4
+
+
+@needs_confinement
+def test_a_confined_child_sees_no_other_process(tmp_path: Path) -> None:
+    """PID 1 of its own PID namespace, with no ``/proc``; ``process_vm_readv``,
+    ``process_vm_writev``, ``kcmp`` and the pidfd calls are refused even so."""
+    code = _PROBE_HEAD + (
+        "print(os.getpid())\n"
+        "try:\n"
+        "    print(os.listdir('/proc'))\n"
+        "except OSError as error:\n"
+        "    print(error.strerror)\n"
+        "parent = os.getppid()\n"
+        "calls = [(310 if X86 else 270, 1), (311 if X86 else 271, 1), (312 if X86 else 272, 1),"
+        " (434, 1), (438, 1), (424, 1)]\n"
+        "print([errno(libc.syscall(nr, arg, 0, 0, 0, 0, 0)) for nr, arg in calls])"
+    )
+    lines = _confined(tmp_path, code).splitlines()
+    assert lines[0] == "1"
+    assert lines[1] in ("[]", "Permission denied")
+    assert lines[2] == str(["Operation not permitted"] * 6)
+
+
+@needs_confinement
+def test_the_launcher_answers_the_parsers_exit(tmp_path: Path) -> None:
+    out = subprocess.run(
+        confine.command(
+            str(tmp_path), [sys.executable, "-I", "-c", "raise SystemExit(7)"], strict=True
+        ),
+        timeout=60,
+    )
+    assert out.returncode == 7
 
 
 def test_the_launcher_refuses_root_with_strict(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -316,7 +355,7 @@ def _spooled(job: Path, **kwargs: Any) -> runner.Verdict:
 
     async def go() -> runner.Verdict:
         stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, 1, stop))
+        serving = asyncio.create_task(sandbox.serve(spool, stop))
         try:
             return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=OWN, **kwargs)
         finally:
@@ -391,7 +430,7 @@ def test_a_spooled_out_dir_swapped_for_a_symlink_is_refused(tmp_path: Path) -> N
             (decoy / VERDICT).write_text('{"outcome": "refused", "reason": "decoy"}')
             (handed / runner.OUT).rename(tmp_path / "moved")
             (handed / runner.OUT).symlink_to(decoy)
-            await sandbox.serve(job.parent, 1, stop)
+            await sandbox.serve(job.parent, stop)
 
         serving = asyncio.create_task(swap_then_serve())
         try:
@@ -433,7 +472,7 @@ def test_a_spooled_answer_of_another_owner_is_refused(tmp_path: Path) -> None:
 def _spooled_as(job: Path, uid: int) -> runner.Verdict:
     async def go() -> runner.Verdict:
         stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(job.parent, 1, stop))
+        serving = asyncio.create_task(sandbox.serve(job.parent, stop))
         try:
             return await run_check(job / UPLOAD, "box.stl", job, sandbox_uid=uid)
         finally:
@@ -455,7 +494,7 @@ def test_the_sandbox_answers_a_bad_request_without_running_it(tmp_path: Path) ->
 
     async def go() -> None:
         stop = asyncio.Event()
-        serving = asyncio.create_task(sandbox.serve(spool, 1, stop))
+        serving = asyncio.create_task(sandbox.serve(spool, stop))
         while not (job / runner.DONE).exists():
             await asyncio.sleep(0.05)
         stop.set()
@@ -477,6 +516,40 @@ def test_the_sandbox_refuses_to_start_when_a_check_cannot_be_confined(
     assert sandbox.main([]) == 3
     assert served == []
     assert "refuses to start" in capsys.readouterr().out
+
+
+def test_the_sandbox_empties_a_finished_job_before_it_claims_the_next(tmp_path: Path) -> None:
+    """One customer's file in the pod at a time: what a finished job left (the worker's
+    upload included) is gone before the next job is claimed."""
+    spool = tmp_path / "work"
+    old = spool / runner.JOBS / "check-0"
+    (old / runner.OUT).mkdir(parents=True)
+    (old / UPLOAD).write_bytes(b"the last customer's file")
+    (old / runner.OUT / VERDICT).write_text("{}")
+    (old / runner.DONE).write_text("0")
+    new = spool / runner.JOBS / "check-1"
+    new.mkdir()
+    (new / UPLOAD).write_bytes(box_stl())
+    (new / runner.REQUEST).write_text(
+        json.dumps({"filename": "box.stl", "timeout": 0, "address_space": 1})
+    )
+    (new / runner.OUT).mkdir()
+
+    async def go() -> None:
+        stop = asyncio.Event()
+        serving = asyncio.create_task(sandbox.serve(spool, stop))
+        while not (new / runner.DONE).exists():
+            await asyncio.sleep(0.05)
+        stop.set()
+        await serving
+
+    asyncio.run(go())
+    assert sorted(p.name for p in old.iterdir()) == [runner.DONE]
+    assert (new / runner.DONE).read_text() == "bad-request"
+
+
+def test_the_sandbox_takes_no_concurrency_setting() -> None:
+    assert list(inspect.signature(sandbox.serve).parameters) == ["spool", "stop"]
 
 
 @pytest.mark.parametrize("name", sandbox.SANDBOX_FORBIDDEN_ENV)

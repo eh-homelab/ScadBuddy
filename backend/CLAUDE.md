@@ -1428,8 +1428,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity reads the staged file through the CRUD routes of caller `intake` (area
   `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
   verdict; the GET is of the frozen copy, `If-Match` its ETag), checks it in a child process
-  (`child.py`: `RLIMIT_AS`, non-dumpable, started by its launcher `confine.py`: new user,
-  network and mount namespaces, the spool under a tmpfs with the box bind-mounted inside it,
+  (`child.py`: `RLIMIT_AS`, non-dumpable, started by its launcher `confine.py`: non-dumpable,
+  new user, network, mount and PID namespaces (the parser forked as PID 1, `/proc` under a
+  tmpfs), the spool under a tmpfs with the box bind-mounted inside it,
   `PR_SET_NO_NEW_PRIVS`, a seccomp filter, then `execv` as a non-root uid, which clears every
   capability; a timeout, its own process group; `check.py`: the kind by content, the zip's
   directory, the read within the read budget) and posts `ready`, `refused` or, once its
@@ -1440,7 +1441,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `unsafe-local` runs it in the worker's container. The sandbox fails closed: it runs the
   launcher with `--strict` (a refused step is exit 126, no parse) and exits 3 at start when
   its probe is refused (`probe_isolation`); the worker counts unanswered checks,
-  `scadbuddy_intake_sandbox_unanswered_total` on its `/metrics`. A job is built in the
+  `scadbuddy_intake_sandbox_unanswered_total` on its `/metrics`. One tenant per pod: the
+  worker and the sandbox each run one check at a time, fixed, and the sandbox empties each
+  finished job before it claims the next; scale with replicas. A job is built in the
   worker's 0700 scratch folder and handed over by one rename into the spool's `jobs/`
   (0750, the worker's); each child gets a `box/` of its own; every spool output is read by
   `runner.read_output` (`O_NOFOLLOW` by a directory descriptor, a regular file with one link

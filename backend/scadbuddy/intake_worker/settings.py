@@ -64,8 +64,6 @@ class IntakeSettings(BaseSettings):
     #: The sandbox container's ``runAsUser``, required with ``true``: everything the
     #: worker reads back from the spool must be owned by it (`runner.read_output`).
     intake_sandbox_uid: int | None = None
-    #: Checks at once; each holds a download and a child process.
-    intake_concurrency: int = 2
     log_level: str = "INFO"
 
     @field_validator("api_internal_url")
@@ -74,13 +72,6 @@ class IntakeSettings(BaseSettings):
         parts = urlsplit(value)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
-        return value
-
-    @field_validator("intake_concurrency")
-    @classmethod
-    def _concurrency_in_range(cls, value: int) -> int:
-        if not 1 <= value <= 16:
-            raise ValueError("SCADBUDDY_INTAKE_CONCURRENCY must be between 1 and 16")
         return value
 
     @field_validator("log_level")

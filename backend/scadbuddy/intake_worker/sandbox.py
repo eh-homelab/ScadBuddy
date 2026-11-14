@@ -14,6 +14,12 @@ once (`probe_isolation`), and where any step is refused it logs why and exits 3 
 serving a job, so the pod never parses a file unconfined (the worker counts the checks it
 then hands over unanswered, `runner.SANDBOX_UNANSWERED`). A job is the spool's
 ``jobs/<name>``, which the worker moves in whole (`runner`'s docstring).
+
+The isolation rule (spec §7): one customer's file per pod at any moment. The sandbox runs
+one check at a time, fixed, and empties every finished job before it claims the next
+(`_wipe`); the worker takes one check at a time too. So while a parse runs, no other
+customer's file or process exists in the pod to reach. Scale with replicas of the
+Deployment, never with checks at once.
 """
 
 from __future__ import annotations
@@ -239,43 +245,56 @@ async def _run_claimed(job_fd: int, spool: Path) -> None:
     _answer(job_fd, answer)
 
 
-async def serve(spool: Path, concurrency: int, stop: asyncio.Event) -> None:
-    """Claims and runs the spool's ready jobs, at most ``concurrency`` at once, until
-    ``stop``."""
-    slots = asyncio.Semaphore(concurrency)
-    running: set[asyncio.Task[None]] = set()
-
-    async def one(job: Path) -> None:
-        try:
-            await run_job(job, spool)
-        finally:
-            slots.release()
-
-    while not stop.is_set():
-        for job in sorted((spool / JOBS).glob("*")):
-            if (job / DONE).exists() or (job / BOX).exists() or slots.locked():
+def _wipe(job: Path) -> None:
+    """Everything in a finished job removed but ``done`` (the job's directory is the
+    worker's, in its ``jobs/``, which only it can remove)."""
+    try:
+        job_fd = open_dir(job)
+    except OSError:
+        return
+    try:
+        for name in os.listdir(job_fd):
+            if name == DONE:
                 continue
             with suppress(OSError):
-                os.stat(job / TAKEN, follow_symlinks=False)
-                continue
-            await slots.acquire()
-            task = asyncio.create_task(one(job))
-            running.add(task)
-            task.add_done_callback(running.discard)
+                if stat.S_ISDIR(os.stat(name, dir_fd=job_fd, follow_symlinks=False).st_mode):
+                    shutil.rmtree(name, dir_fd=job_fd)
+                else:
+                    os.unlink(name, dir_fd=job_fd)
+    finally:
+        os.close(job_fd)
+
+
+async def serve(spool: Path, stop: asyncio.Event) -> None:
+    """Claims and runs the spool's ready jobs one at a time until ``stop``; before each
+    claim, every finished job is emptied (the isolation rule, the module docstring)."""
+    while not stop.is_set():
+        jobs = sorted((spool / JOBS).glob("*"))
+        ready = [
+            job
+            for job in jobs
+            if not (job / DONE).exists()
+            and not (job / BOX).exists()
+            and not (job / TAKEN).exists()
+            and not (job / TAKEN).is_symlink()
+        ]
+        if ready:
+            for job in jobs:
+                if (job / DONE).exists():
+                    _wipe(job)
+            await run_job(ready[0], spool)
+            continue
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), SPOOL_POLL)
-    for task in running:
-        task.cancel()
-    await asyncio.gather(*running, return_exceptions=True)
 
 
-async def _main(spool: Path, concurrency: int) -> None:
+async def _main(spool: Path) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
-    logger.info("intake sandbox serving %s, %d at once", spool, concurrency)
-    await serve(spool, concurrency, stop)
+    logger.info("intake sandbox serving %s, one check at a time", spool)
+    await serve(spool, stop)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -288,10 +307,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     forbid_dumping()
     spool = Path(os.environ.get("SCADBUDDY_INTAKE_WORK_DIR", "/tmp"))
-    concurrency = int(os.environ.get("SCADBUDDY_INTAKE_CONCURRENCY", "2"))
-    if not 1 <= concurrency <= 16:
-        logger.error("SCADBUDDY_INTAKE_CONCURRENCY must be between 1 and 16")
-        return 2
     refused = probe_isolation(spool)
     if refused is not None:
         logger.error(
@@ -300,7 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             refused[:300],
         )
         return 3
-    asyncio.run(_main(spool, concurrency))
+    asyncio.run(_main(spool))
     return 0
 
 

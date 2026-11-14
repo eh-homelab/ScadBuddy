@@ -419,8 +419,16 @@ reach the worker's sockets.
 
 **The child's sandbox.** These layers keep a parser exploit away from the worker's
 credential and from other customers' files (`intake_worker/hardening.py`, `confine.py`,
-`runner.py`, `sandbox.py`). The design rule: a step that cannot be taken stops the check,
-it never runs weaker.
+`runner.py`, `sandbox.py`). Two design rules:
+
+- **Fail closed.** A step that cannot be taken stops the check; it never runs weaker.
+- **The isolation rule: one tenant per pod.** A pod holds one customer's file at any
+  moment. The sandbox container runs one check at a time, fixed and not configurable, and
+  empties every finished job before it claims the next (`sandbox._wipe`); the worker takes
+  one check at a time too (`max_concurrent_activities=1`). So while a parse runs, no other
+  customer's file or process exists in the pod for an exploit to reach, whatever it
+  escapes. Throughput comes from replicas of the intake Deployment, never from checks at
+  once in one pod.
 
 - The worker makes itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`), before it
   reads its proof, so no process of its user can `ptrace` it or read its
@@ -439,22 +447,32 @@ it never runs weaker.
 - Each parse starts through a small launcher, `confine.py` (standard library only, run
   with `-I -S`, so it is single-threaded), which confines itself and then `execv`s the
   parser in place:
-  1. `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS)` with its own uid and gid mapped
-     to themselves: a network namespace with only a loopback device that is down
+  0. `prctl(PR_SET_DUMPABLE, 0)` first, lifted only for the three writes of its id maps
+     (a non-dumpable process's `/proc` files belong to root, which the new user namespace
+     does not map, so it could not open them);
+  1. `unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWPID)` with its own uid
+     and gid mapped to themselves: a network namespace with only a loopback device that is down
      ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)),
      and a mount namespace where an empty tmpfs (mode 0) covers the spool and the job's box
      is bind-mounted onto `<spool>/box` inside it, the process's new working directory
      ([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
      The bind matters: a working directory left below the covered spool still reached a
      sibling job by `../../<job>`, which the cover alone does not stop (found by
-     `test_a_confined_child_reaches_only_its_own_box`, 2026-11-14);
+     `test_a_confined_child_reaches_only_its_own_box`, 2026-11-14). It then forks the
+     parser as PID 1 of the new PID namespace, which covers `/proc` with an empty tmpfs:
+     the parser sees no process, its launcher included
+     ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)).
+     No fresh `/proc` is mounted: a container's masked `/proc` paths make the kernel
+     refuse one in a user namespace, and the parser needs none. The launcher reaps the
+     parser and exits with its code;
   2. `prctl(PR_SET_NO_NEW_PRIVS, 1)`;
   3. a seccomp filter that answers `EPERM` to `mount`, `umount2`, `pivot_root`, `chroot`,
      the new mount API, `unshare`, `setns`, `clone` with a namespace flag, `ptrace`,
-     `keyctl`, `add_key`, `request_key`, `bpf`, `perf_event_open` and `userfaultfd`, and
+     `process_vm_readv`, `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd`,
+     `pidfd_send_signal`, `keyctl`, `add_key`, `request_key`, `bpf`, `perf_event_open` and `userfaultfd`, and
      `ENOSYS` to `clone3` and `io_uring_setup`
      ([seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html));
-  4. `execv` of the parser. The creator of a user namespace holds every capability inside
+  4. `execv` of the parser in the forked PID 1 (the launcher takes steps 2 and 3 too). The creator of a user namespace holds every capability inside
      it, enough to unmount the cover; an `execve` by a uid that is not 0 in the namespace
      clears them all ([capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html)),
      so the parser runs with none. The launcher refuses root with `--strict`.
@@ -462,8 +480,13 @@ it never runs weaker.
   Measured on WSL2 (Linux 6.6.87.2), 2026-11-14, by `tests/intake_worker/test_runner.py`:
   the parser's `CapEff` and `CapPrm` are 0, `NoNewPrivs` 1, `Seccomp` 2; `umount2` of the
   cover, `mount`, `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` each fail with
-  `EPERM`; a connect to a host loopback listener fails; the spool's other jobs are
-  unreachable by absolute path and by `..`.
+  `EPERM`; the parser is PID 1 and `/proc` lists nothing; `process_vm_readv`,
+  `process_vm_writev`, `kcmp`, `pidfd_open`, `pidfd_getfd` and `pidfd_send_signal` fail
+  with `EPERM`; a connect to a host loopback listener fails; the spool's other jobs are
+  unreachable by absolute path and by `..`. CI proves the same on every run: shard 1 of
+  `backend-pytest` runs `tests/intake_worker/test_runner.py` as uid 10001 in a container
+  unconfined by seccomp and AppArmor, with the runner's AppArmor user-namespace
+  restriction lifted and `SCADBUDDY_REQUIRE_CONFINEMENT=1`, where a refused step fails.
 - It fails closed. The sandbox runs the launcher with `--strict`, where any refused step
   exits 126 and no parse runs; at start it runs the launcher once (`probe_isolation`), and
   where that is refused it logs why and exits 3 without serving a job. The pod then
@@ -500,10 +523,9 @@ it never runs weaker.
 
 - A kernel bug reachable from the parser's allowed syscalls escapes everything above;
   only a sandboxed kernel (gVisor, Kata) removes that.
-- The sandbox process itself (trusted code, not the parser) reads every waiting job. A
-  parser that escaped its confinement through such a bug would run as the sandbox's user
-  and could read the jobs then waiting, the customers' files of the same minutes. The
-  hand-over rename keeps jobs out of its reach only until they are handed over.
+- A parser that escaped through such a bug runs as the sandbox's user, which can read
+  the spool. By the isolation rule the spool then holds no other customer's file: the
+  worker hands over one job at a time and the sandbox empties each finished job first.
 - The two containers share the pod's network namespace. The parser has a namespace of its
   own (fail closed), so this matters only after an escape; then the pod's NetworkPolicy
   (DNS, the CRUD port, Temporal and the bucket host only) bounds what it reaches, and it
