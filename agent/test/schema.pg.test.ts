@@ -77,10 +77,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
       try {
         expect(await waiting.ready()).toBe(false)
         expect(errors[0]).toBeInstanceOf(MigrationsPendingError)
+        expect(waiting.waitingForMigrations()).toBe(true)
         // Nothing made the agent's tables: it never migrates.
         expect(await db.sql`SELECT to_regclass('ai_sessions') AS t`).toEqual([{ t: null }])
         await migrate(db.sql)
         expect(await waiting.ready()).toBe(true)
+        expect(waiting.waitingForMigrations()).toBe(false)
       } finally {
         await waiting.close()
       }

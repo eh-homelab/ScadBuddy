@@ -303,7 +303,7 @@ const pluginForwarder = await PluginForwarder.start({
 await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
-const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
+const pluginSessionMark = database ? database.untilReady().then(() => startMark(database.sql)) : undefined
 // #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
 // #5494: exchanged for its proof when one is configured, falling back to the view while the
 // agent has a database (an old backend answers the exchange 404); otherwise read from the view.
@@ -460,7 +460,7 @@ const workspaceBytesStatus = workspace
       return workspaceBytes.status
     }
   : undefined
-// Once migrations have applied and the backend answers: say where the files go (once, the cause
+// Once migrations have applied (however long the API takes, `untilReady`) and the backend answers: say where the files go (once, the cause
 // when refused), and move the files written before #4789 (or while the backend kept no blobs) to
 // blobs; what is left is retried at the next start. The API pod's sidecar can start before the
 // backend container answers (#5868): until /healthz answers this waits with back-off
@@ -468,9 +468,8 @@ const workspaceBytesStatus = workspace
 // answer for another reason (#5889); writes and reads ask the backend each time and need no wait.
 if (role.http && database && workspace && workspaceBytesStatus) {
   void database
-    .ready()
-    .then(async (ready) => {
-      if (!ready) return
+    .untilReady()
+    .then(async () => {
       await untilBackendAnswers(() => workspaceBlobStore.backend(), {
         kind: (err) => (err instanceof WorkspaceBlobError ? err.unreachableKind : undefined),
         log: (message) => console.log(`workspace files: ${message}`),
@@ -514,12 +513,8 @@ const packagesLoadCheck = pluginPackages ? packageLoadCheck(pluginPackages, pack
 // turn does not wait on a whole repository's fetch (#4217).
 if (database && pluginPackages) {
   void database
-    .ready()
-    .then(async (ok) => {
-      if (!ok) {
-        console.warn('plugin package warm-up skipped: the database is not ready; the first turn fetches instead')
-        return
-      }
+    .untilReady()
+    .then(async () => {
       for (const problem of await warmPackages(pluginPackages, packageInstaller)) {
         console.warn('plugin package warm-up:', problem)
       }
@@ -564,9 +559,8 @@ if (database && !dataKeys) console.warn('sessions: no secret key, so no session 
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
 if (role.http && database && dataKeys) {
   void database
-    .ready()
-    .then(async (ready) => {
-      if (!ready) return
+    .untilReady()
+    .then(async () => {
       const { sealed, deleted } = await sealBackfill(database.sql, dataKeys)
       if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
     })
@@ -708,10 +702,8 @@ const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, i
 // The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
 if (role.http && database && commandKinds.length > 0) {
   void database
-    .ready()
-    .then(async (ok) => {
-      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
-    })
+    .untilReady()
+    .then(() => upsertActivityKinds(database.sql, activityKindsOf(commandKinds)))
     .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
 }
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
@@ -1223,7 +1215,7 @@ const pushDispatcher =
     : undefined
 if (pushDispatcher && database) {
   pendingChanges?.subscribe(() => pushDispatcher.wake())
-  void database.ready().then((ok) => ok && pushDispatcher.wake())
+  void database.untilReady().then(() => pushDispatcher.wake())
 }
 
 const app = !role.http
@@ -1293,7 +1285,7 @@ const app = !role.http
     tools: ALL_TOOLS,
     resources,
     services: toolServices,
-    // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
+    // Tokens live in `ai_mcp_tokens` (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,

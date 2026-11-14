@@ -936,7 +936,7 @@ export function titleFrom(prompt: string): string {
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
  * creator-or-offered filter is served by the ai_sessions_owner,
- * ai_sessions_creator (db/migrations/20260928T0107Z_sessions.sql) and
+ * ai_sessions_creator (backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql) and
  * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes.
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {

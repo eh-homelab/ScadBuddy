@@ -17,6 +17,7 @@ export type AiStatus =
   | 'unavailable (database unreachable)'
   | 'unavailable (database migrations failed)'
   | 'unavailable (database timed out)'
+  | 'unavailable (waiting for the API to apply the database migrations)'
   | `disabled (no key-encryption key: ${string})`
   | 'disabled (no Claude credential)'
   | 'unavailable (stored credential was sealed with a different key-encryption key)'
@@ -61,6 +62,10 @@ export async function aiStatus(
   // answer well inside its own timeout regardless.
   const timeoutMs = deps.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS
   const ready = await within(deps.database.ready(), timeoutMs)
+  // The API applies the agent's migrations (#5299): while it has not, say so, not a timeout.
+  if (ready !== true && deps.database.waitingForMigrations?.()) {
+    return { ai: 'unavailable (waiting for the API to apply the database migrations)', credential: 'unknown' }
+  }
   if (ready === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
   if (!ready) return { ai: 'unavailable (database migrations failed)', credential: 'unknown' }
   let list

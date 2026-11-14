@@ -13,7 +13,7 @@ import { redact } from '../secrets.js'
 // (https://modelcontextprotocol.io/specification/2025-06-18/server/tools,
 // "Security Considerations").
 //
-// One append-only table, `ai_audit` (db/migrations/20260928T0950Z_audit.sql;
+// One append-only table, `ai_audit` (backend/scadbuddy/migrations_agent/20260928T0950Z_audit.sql;
 // triggers refuse UPDATE, TRUNCATE and any DELETE but the retention sweep's).
 // What is recorded, and by whom:
 //

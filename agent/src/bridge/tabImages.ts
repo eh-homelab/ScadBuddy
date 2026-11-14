@@ -57,7 +57,7 @@ export class MemoryTabImageStore implements TabImageStore {
   }
 }
 
-/** `ai_tab_images` (db/migrations/20261101T1813Z_tab_images.sql), shared by every replica. */
+/** `ai_tab_images` (backend/scadbuddy/migrations_agent/20261101T1813Z_tab_images.sql), shared by every replica. */
 export class PostgresTabImageStore implements TabImageStore {
   readonly #sql: Sql
 

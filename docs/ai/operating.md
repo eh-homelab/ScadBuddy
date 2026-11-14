@@ -677,6 +677,7 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   | `disabled (no database)` | `SCADBUDDY_DATABASE_URL` unset |
   | `unavailable (database unreachable)` | Ping failed, or the credential read threw |
   | `unavailable (database migrations failed)` | `ready()` returned false |
+  | `unavailable (waiting for the API to apply the database migrations)` | `ai_migrations` lacks a file this build expects: the API has not migrated yet (#5299) |
   | `unavailable (database timed out)` | `ready()` or the credential read took longer than 2 s (`DEFAULT_HEALTH_TIMEOUT_MS`) |
   | `disabled (no key-encryption key: <reason>)` | See §3.2 |
   | `disabled (no Claude credential)` | No row saved |
@@ -923,8 +924,8 @@ The agent owns its `ai_*` tables (spec §9); the API applies their migrations
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
   hash, the review, the approval and the enabled flag. See §9.
 
-The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
-(the comment on `MIGRATION_LOCK` in `migrations.ts`).
+The agent's migration advisory lock key is "SCADAGNT", distinct from the backend's
+"SCADBDDY" (`AGENT_MIGRATION_LOCK` in `backend/scadbuddy/render/agent_migrations.py`).
 
 The agent also reads the backend's flow tables, which the backend migrates. Its
 database role needs `UPDATE` on `workflow_runs`, not only `SELECT`: every flow tool call

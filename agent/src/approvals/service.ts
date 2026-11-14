@@ -23,7 +23,7 @@ import { type SessionFiles, type WorkspaceRef, withWorkspaceSize } from '../work
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
-// Postgres (`ai_approvals`, db/migrations/*_approvals.sql), so any replica can
+// Postgres (`ai_approvals`, backend/scadbuddy/migrations_agent/*_approvals.sql), so any replica can
 // decide one and a pending one survives a restart.
 //
 // WHO ASKS. An outward call over /mcp (#251's prepare/confirm, below). A session's

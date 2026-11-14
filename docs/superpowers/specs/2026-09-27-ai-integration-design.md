@@ -997,8 +997,9 @@ example).
 
 ## 9. Persistence and credentials
 
-All AI state lives in the #241 database, in `ai_*` tables owned and migrated by the
-agent service:
+All AI state lives in the #241 database, in `ai_*` tables owned by the agent service.
+Since #5299 the API applies their migrations at its start
+(`backend/scadbuddy/render/agent_migrations.py`), and the agent waits for them:
 
 - Claude credentials (encrypted);
 - MCP auth mode, tokens (hashed), and OIDC configuration;

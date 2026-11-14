@@ -38,7 +38,7 @@ export type Probe = () => Promise<boolean>
  */
 export interface AppDeps {
   /** Undefined when SCADBUDDY_DATABASE_URL is unset. */
-  database: { ping: Probe; ready: Probe } | undefined
+  database: { ping: Probe; ready: Probe; waitingForMigrations?: () => boolean } | undefined
   backend: Probe
   /** The key-encryption key, or why there is none (secrets.ts `loadKek`). */
   kek: KekStatus

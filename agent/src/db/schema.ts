@@ -37,6 +37,8 @@ export type AwaitMigrationsOptions = {
   intervalMs?: number
   /** Where the wait says it is waiting: once per wait, and never when the ledger is complete. */
   log?: (line: string) => void
+  /** Told at each read whether files are still missing (`Database.waitingForMigrations`). */
+  onWaiting?: (waiting: boolean) => void
 }
 
 export const DEFAULT_AWAIT_ATTEMPTS = 30
@@ -74,6 +76,7 @@ export async function awaitMigrations(
         )
       }
     }
+    options.onWaiting?.(missing.length > 0)
     if (missing.length === 0) return
     if (attempt === 1) {
       log(

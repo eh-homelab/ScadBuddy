@@ -1905,7 +1905,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   retried on the next call, #5299), the key is loaded and a Claude credential is
   saved. Otherwise `ai` names the first missing piece; each database step is
   bounded (2 s), so an API that has not migrated yet shows as
-  `"unavailable (database timed out)"` instead of a hung probe. An edited,
+  `"unavailable (waiting for the API to apply the database migrations)"`, and any
+  other stuck step as `"unavailable (database timed out)"`, instead of a hung probe. An edited,
   already-applied migration stops the API at start, and the agent, with a
   message naming it (each file's sha256 is recorded).
 - The Claude credentials (Anthropic API keys, Claude Code OAuth tokens from

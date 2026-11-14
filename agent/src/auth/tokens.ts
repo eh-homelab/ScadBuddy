@@ -11,11 +11,11 @@ import { type Principal, type Tier, tiersUpTo } from './principal.js'
 // `sessions_approve` / `sessions_deny` tools (src/tools/sessions.ts), never its
 // own (approvals/service.ts `authorize`). Off by default; only an `outward`
 // token can hold it (checked here, in the route, and by the table's CHECK,
-// db/migrations/20260929T0249Z_mcp_token_approval_grant.sql).
+// backend/scadbuddy/migrations_agent/20260929T0249Z_mcp_token_approval_grant.sql).
 //
 // Persistence is Postgres only (spec §9: "All AI state lives in the #241
 // database, in `ai_*` tables"): `PostgresTokenStore` over `ai_mcp_tokens`
-// (db/migrations/20260928T0734Z_mcp_tokens.sql). There is no file or in-memory
+// (backend/scadbuddy/migrations_agent/20260928T0734Z_mcp_tokens.sql). There is no file or in-memory
 // fallback. With no database configured, main.ts wires `FailClosedTokenStore`
 // and /mcp answers 503 "AI disabled: no database" before any token is looked
 // at (app.ts); tests use test/support/memoryTokens.ts.

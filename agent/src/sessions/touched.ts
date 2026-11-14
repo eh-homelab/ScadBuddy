@@ -6,7 +6,7 @@ import { unwrapUntrusted } from '../safety/untrusted.js'
 
 // What a session touched (#931): every resource a session's tool calls
 // created, changed or deleted, one `ai_session_resources` row each
-// (db/migrations/20261001T1824Z_session_resources.sql).
+// (backend/scadbuddy/migrations_agent/20261001T1824Z_session_resources.sql).
 //
 // Derived inline, per tool call, from the call's parsed input and its result
 // (tools/registry.ts runToolWithOutcome, for any call that carries a

@@ -222,7 +222,11 @@ opens every one and seals it again byte for byte).
     (#491)", #5299 D6), and `ready()` (`src/db.ts`) waits, at most 30 reads 1 s apart a
     call, logging once, until `ai_migrations` holds every file in
     `src/db/expected-migrations.json` (`src/db/schema.ts` `awaitMigrations`; a row with
-    other SQL than listed is `MigrationChecksumError`, and `main.ts` exits on it). The
+    other SQL than listed is `MigrationChecksumError`, and `main.ts` exits on it). Work a
+    process does once at start waits for `untilReady()`, which calls `ready()` again with
+    back-off until it is true, so an API that migrates late drops none of it; meanwhile
+    `/healthz` says `unavailable (waiting for the API to apply the database migrations)`
+    (`waitingForMigrations`). The
     tests make their schemas with the agent's old runner, `test/support/migrations.ts`
     (`test/support/postgres.ts` `migrateSchema`, the `schema` option of
     `connectDatabase`), and `test/schema.test.ts` checks the list against both runners. Secrets are

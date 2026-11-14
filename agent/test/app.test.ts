@@ -376,6 +376,16 @@ describe('/healthz is bounded (review of #354, finding 3)', () => {
     expect(performance.now() - started).toBeLessThan(1500)
   })
 
+  it("says it is waiting for the API's migrations rather than timed out (#5299)", async () => {
+    const waiting = { ping: up, ready: never, waitingForMigrations: () => true }
+    const { body } = await health(createApp(deps({ database: waiting, healthTimeoutMs: 50 })))
+    expect(body).toMatchObject({ ai: "unavailable (waiting for the API to apply the database migrations)", credential: 'unknown' })
+    const gaveUp = { ping: up, ready: down, waitingForMigrations: () => true }
+    expect((await health(createApp(deps({ database: gaveUp })))).body.ai).toBe(
+      'unavailable (waiting for the API to apply the database migrations)',
+    )
+  })
+
   it('reports a hung credential read as unavailable instead of hanging', async () => {
     const credentials = new MemoryCredentials()
     credentials.hang = new Promise(() => {})

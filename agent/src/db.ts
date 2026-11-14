@@ -22,6 +22,15 @@ export type Database = {
    */
   ready(): Promise<boolean>
   /**
+   * Resolves at the first `ready()` that is true, calling it again with back-off until then
+   * (`makeUntilReady`). For work a process does once at start: the API may take longer than one
+   * `ready()` to apply the agent's migrations (#5299), and such work must not be dropped on that
+   * first false. Never rejects.
+   */
+  untilReady(): Promise<void>
+  /** Whether the last read of `ai_migrations` found files this build expects missing: the API has not migrated yet (#5299). */
+  waitingForMigrations(): boolean
+  /**
    * Connections of their own for session advisory locks held across slow work (a plugin's
    * connection test, #4994), so a held lock never takes one of `sql`'s connections. `close` ends them.
    */
@@ -185,6 +194,23 @@ export function makeReady(attempt: () => Promise<unknown>, onError?: (err: unkno
   }
 }
 
+/** `ready()` again, `firstDelayMs` after a false and doubling to `maxDelayMs`, until it is true; one wait shared by every caller. */
+export function makeUntilReady(
+  ready: () => Promise<boolean>,
+  { firstDelayMs = 1_000, maxDelayMs = 30_000 }: { firstDelayMs?: number; maxDelayMs?: number } = {},
+): () => Promise<void> {
+  let waiting: Promise<void> | undefined
+  return () =>
+    (waiting ??= (async () => {
+      let delay = firstDelayMs
+      while (!(await ready())) {
+        // Unref'd: a process stopping does not wait for its database to come up.
+        await new Promise((resolve) => setTimeout(resolve, delay).unref())
+        delay = Math.min(delay * 2, maxDelayMs)
+      }
+    })())
+}
+
 /** The stores' pool. Small on purpose: health pings hold at most one connection (makePing), and the credential and settings stores issue short single queries. */
 export const SQL_CONNECTIONS = 4
 
@@ -229,18 +255,24 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     query.catch(() => {})
     return query
   })
+  let waiting = false
+  const ready = makeReady(async () => {
+    await (options.schema
+      ? options.schema(sql)
+      : awaitMigrations(sql, undefined, { ...options.awaitMigrations, onWaiting: (now) => (waiting = now) }))
+    // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
+    // waits or fails its own calls, and says which.
+    await grantBackendRoles(sql).catch((error: unknown) => {
+      console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    await options.afterMigrate?.(sql)
+  }, options.onMigrationError)
   return {
     sql,
     ping,
-    ready: makeReady(async () => {
-      await (options.schema ? options.schema(sql) : awaitMigrations(sql, undefined, options.awaitMigrations))
-      // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
-      // waits or fails its own calls, and says which.
-      await grantBackendRoles(sql).catch((error: unknown) => {
-        console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
-      })
-      await options.afterMigrate?.(sql)
-    }, options.onMigrationError),
+    ready,
+    untilReady: makeUntilReady(ready),
+    waitingForMigrations: () => waiting,
     locks,
     async close() {
       await Promise.all([sql.end({ timeout: 5 }), locks.end()])
