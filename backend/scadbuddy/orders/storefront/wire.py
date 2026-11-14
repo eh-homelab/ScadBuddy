@@ -50,7 +50,9 @@ EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*\d+\s*\)", re.IGNORECASE)
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
     """What the customer reads for parameter ``name``: the listing's own ``label``, else
-    the template's ``caption`` without its extruder note, else the name (#6137)."""
+    the template's ``caption`` without its extruder note, else the name (#6137). The back
+    office's preview applies the same rule (`frontend/src/storefront/params.ts`
+    `shownLabel`): change both together."""
     if label:
         return label
     if caption:

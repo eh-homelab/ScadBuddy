@@ -90,3 +90,19 @@ export function keepOffered(listing: Listing, values: Readonly<Record<string, Pa
   }
   return kept
 }
+
+/** A colour's extruder note, "(extruder 2)": the shop's detail, never the customer's. */
+const EXTRUDER_NOTE = /\s*\(\s*extruder\s*\d+\s*\)/gi
+
+/**
+ * What the customer reads for parameter `name`: the listing's own `label`, else the
+ * template's `caption` without its extruder note, else the name (#6137). The back office's
+ * preview uses it; the public page reads the label the backend made by the same rule
+ * (`backend/scadbuddy/orders/storefront/wire.py` `shown_label`): change both together.
+ */
+export function shownLabel(name: string, label: string | null | undefined, caption: string | null | undefined): string {
+  if (label) return label
+  if (caption) return caption.replace(EXTRUDER_NOTE, ' ').split(/\s+/).filter(Boolean).join(' ') || caption
+  return name
+}
+
