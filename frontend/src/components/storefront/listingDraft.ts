@@ -133,10 +133,12 @@ export function defaultsFor(
     }
   }
   // A locked support colour needs its filament on the listing, or publish refuses it
-  // (`listing_colour_unknown`); one the price book has exactly is added (#6140 review).
+  // (`listing_colour_unknown`); one the price book has exactly, with a density so the
+  // estimate can price it, is added (#6140 review). Any other stays a `colourProblems` entry.
+  const priced = filaments.filter((filament) => filament.density_g_cm3 != null)
   const support = shown
     .filter((param) => param.type === 'color' && isSupport(param))
-    .flatMap((param) => filamentOf(valueOf(param), filaments) ?? [])
+    .flatMap((param) => filamentOf(valueOf(param), priced) ?? [])
     .filter((filament) => !offered.includes(filament))
   return { params, fixed, colours: [...offered, ...new Set(support)].map((filament) => filament.id) }
 }
@@ -241,14 +243,11 @@ function filamentColours(draft: ListingDraft, filaments: readonly Filament[]): s
 }
 
 /**
- * The body the page saves: a support parameter is never offered (`isSupport`; one an older
- * listing offers is locked at its default), and each offered colour parameter takes the
- * listing filaments' colours but a colour only a support parameter uses. That colour's
- * filament stays in `colours`: publish checks every locked colour against the listing's
- * filaments (backend `checked_fixed`, 422 `listing_colour_unknown`), and the support colour
- * is locked.
+ * `draft`'s bounds with every support parameter locked at its default, and the colours only a
+ * support parameter uses: no offered colour takes them (`listingInput`), and the editor marks
+ * their filaments as for supports only (`isSupportOnly`).
  */
-export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
+function withoutSupport(draft: ListingDraft, schema: CustomizerSchema | undefined) {
   const byName = new Map((schema?.parameters ?? []).map((param) => [param.name, param]))
   const fixed = { ...draft.fixed }
   const params: Record<string, ListingBound> = {}
@@ -266,6 +265,24 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
     .filter(isSupport)
     .map(valueOf)
     .filter((colour) => !colourParams.some((param) => !isSupport(param) && sameColour(valueOf(param), colour)))
+  return { byName, params, fixed, supportOnly }
+}
+
+/** Whether `filament`'s colour is one only a support parameter uses: on the listing for publish's check, never offered to a customer. */
+export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: CustomizerSchema | undefined): boolean {
+  return withoutSupport(draft, schema).supportOnly.some((colour) => sameColour(colour, filament.colour))
+}
+
+/**
+ * The body the page saves: a support parameter is never offered (`isSupport`; one an older
+ * listing offers is locked at its default), and each offered colour parameter takes the
+ * listing filaments' colours but a colour only a support parameter uses. That colour's
+ * filament stays in `colours`: publish checks every locked colour against the listing's
+ * filaments (backend `checked_fixed`, 422 `listing_colour_unknown`), and the support colour
+ * is locked.
+ */
+export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
+  const { byName, params, fixed, supportOnly } = withoutSupport(draft, schema)
   const colours = filamentColours(draft, filaments).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const [name, bound] of Object.entries(params)) {
     // A colour's choices are the filaments'; its own label stays (#6137).

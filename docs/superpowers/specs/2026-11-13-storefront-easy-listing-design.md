@@ -113,8 +113,11 @@ filaments into the parameters and filaments, and `sellMedia` picks the pictures:
     switch says why, a save locks one an older listing offers, and a support colour neither
     picks the design's material nor becomes a colour on offer: a colour only a support
     setting uses is left out of every offered colour's choices. Its filament still joins the
-    listing when the price book has that colour exactly, because publish checks every locked
-    colour against the listing's filaments (`listing_colour_unknown`).
+    listing when the price book has that colour exactly, with a density, because publish
+    checks every locked colour against the listing's filaments (`listing_colour_unknown`);
+    the editor marks that filament "for supports only, not offered" (`isSupportOnly`). One
+    with no density is not added (the estimate could not price it): it stays a colour with
+    no filament (`colourProblems`).
 - Colours on offer (`offeredFilaments`): every price-book filament with a density (one priced
   by weight) of the design's material, which is the material of the first filament whose
   colour one of the colour values is, compared case aside as publish compares them; every

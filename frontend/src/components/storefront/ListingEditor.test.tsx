@@ -105,6 +105,20 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.getByText('Support settings are yours: a customer never sees them.')).toBeInTheDocument()
   })
 
+  it('marks the filament a support colour alone uses as not offered (#6140 review)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#F5F5DC' }],
+    }
+    const pva = { ...filament('f-pva', '#F5F5DC', 'Natural'), material: 'PVA' }
+    renderPage(<Harness seen={[]} schema={schema} filaments={[RED, BLUE, CORAL, pva]} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    // The smart defaults put it on the listing, so publish takes the locked support colour.
+    expect(within(colours).getByRole('checkbox', { name: 'PVA Natural' })).toBeChecked()
+    expect(within(colours).getByText('PVA Natural').closest('label')).toHaveTextContent('(for supports only, not offered)')
+    expect(within(colours).getByText('PLA Ocean').closest('label')).not.toHaveTextContent('for supports only')
+  })
+
   it('gives an offered colour the listing filaments’ colours when it is saved', () => {
     const draft: ListingDraft = {
       ...emptyDraft('name-keychain', COMMIT),

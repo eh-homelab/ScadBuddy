@@ -78,10 +78,17 @@ describe('defaultsFor (#6131): the smart defaults', () => {
       filaments: Filament[]
       values: Record<string, string | number | boolean>
       expected: { params: unknown; fixed: unknown; colours: string[] }
+      /** The params the save sends for those defaults (`listingInput`), where the vector pins them. */
+      input?: unknown
     }[]
     expect(vectors.length).toBeGreaterThan(0)
     for (const vector of vectors) {
-      expect(defaultsFor(vector.schema, vector.filaments, vector.values), vector.name).toEqual(vector.expected)
+      const defaults = defaultsFor(vector.schema, vector.filaments, vector.values)
+      expect(defaults, vector.name).toEqual(vector.expected)
+      if (vector.input !== undefined) {
+        const draft = { ...emptyDraft('m', 'c'.repeat(40)), ...defaults }
+        expect(listingInput(draft, vector.schema, vector.filaments).params, vector.name).toEqual(vector.input)
+      }
     }
   })
 })

@@ -108,8 +108,12 @@ export function StorefrontPage() {
   const versions = useAsync(() => (slug ? api.listVersions(slug) : Promise.resolve([])), [slug])
   const schema = useAsync(() => (slug && commit ? api.getSchema(slug, commit) : Promise.resolve(undefined)), [slug, commit])
   const filaments = useMemo(() => book.data?.filaments ?? [], [book.data])
-  /** Whether the schema and the price book a saved body is built from are in: until then a saved listing reads as unchanged (#6140 review). */
-  const loaded = schema.data !== undefined && (book.data !== undefined || book.error !== undefined)
+  /**
+   * Whether the schema and the price book a saved body is built from are in, or failed: until
+   * then a saved listing reads as unchanged (#6140 review). A failed one is compared without
+   * it, so an edit still reads as unsaved.
+   */
+  const loaded = (schema.data !== undefined || schema.error !== undefined) && (book.data !== undefined || book.error !== undefined)
   const media = useMemo(() => models.data?.find((model) => model.slug === slug)?.media ?? [], [models.data, slug])
 
   // A new listing starts on the first template, at its current version; the smart defaults

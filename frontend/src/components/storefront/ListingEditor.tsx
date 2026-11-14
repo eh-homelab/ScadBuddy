@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, emptyDraft, fixColour, isSupport, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -469,6 +469,9 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
                       />
                       <Swatch colour={filament.colour} />
                       {name}
+                      {offersColour && isSupportOnly(filament, draft, schema) && (
+                        <span className="text-xs text-muted-foreground">(for supports only, not offered)</span>
+                      )}
                     </label>
                   </li>
                 )
