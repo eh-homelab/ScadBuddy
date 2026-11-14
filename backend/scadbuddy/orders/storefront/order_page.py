@@ -557,7 +557,10 @@ async def _item(
                 can_answer=revision is newest
                 and revision.answer is None
                 and open_item
-                and not rows.order.on_hold,
+                and not rows.order.on_hold
+                # A `together` item's accepted design accepts its quote too, which the
+                # gate refuses while a purchase is pending (review of #6200).
+                and not (item.approval == "together" and rows.purchase_pending),
                 pictures=pictures,
                 colours=[
                     CustomerColour(

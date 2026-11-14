@@ -930,6 +930,33 @@ def test_the_edge_refuses_six_things_to_buy_before_the_crud_call(
     assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '{"url": "https://parts.example.com/\\ud83d"}',
+        '{"url": "https://parts.example.com/x", "note": "\\udc00"}',
+    ],
+)
+def test_the_edge_refuses_a_lone_surrogate_in_a_thing_to_buy(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    entry: str,
+) -> None:
+    """Review of #6200: text UTF-8 cannot carry is 422 ``link_invalid`` with its index,
+    never a 5xx from the forwarded part's encode."""
+    links = '[{"url": "https://parts.example.com/ok"}, ' + entry + "]"
+    r = edge.post(
+        "/api/store/v1/draft/requests",
+        data={"text": "A hook", "purchase_links": links},
+        files=[("files", ("a.png", PNG, "image/png"))],
+        headers={"Origin": PUBLIC_URL, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}link_invalid"
+    assert r.json()["index"] == 1
+    assert not [c for c in crud_mock.calls if "/draft/requests" in str(c.request.url)]
+
+
 def test_the_edge_refuses_an_oversized_file_before_the_crud_call(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811

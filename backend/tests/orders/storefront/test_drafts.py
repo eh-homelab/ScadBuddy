@@ -787,6 +787,8 @@ def test_a_design_request_takes_at_most_five_things_to_buy(asks: CrudCaller) -> 
         (json.dumps([{"url": "https://parts.example.com/x", "note": "n" * 501}]), "link_invalid"),
         (json.dumps([{"url": "https://parts.example.com/" + "x" * 2048}]), "link_invalid"),
         (json.dumps([{"url": "https://parts.example.com/x", "price": 1}]), "link_invalid"),
+        ('[{"url": "https://parts.example.com/\\ud83d"}]', "link_invalid"),
+        ('[{"url": "https://parts.example.com/x", "note": "\\udc00"}]', "link_invalid"),
         ("not json", "draft_body_invalid"),
         (json.dumps({"url": "https://parts.example.com/x"}), "draft_body_invalid"),
     ],

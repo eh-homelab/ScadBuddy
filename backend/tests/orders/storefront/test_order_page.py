@@ -792,6 +792,29 @@ def test_a_pending_purchase_offers_no_accept(api: TestClient, crud: CrudCaller) 
     assert made.reader.view().json()["items"][0]["quote"]["can_accept"] is True
 
 
+def test_a_pending_purchase_offers_no_answer_on_a_together_item(
+    api: TestClient, crud: CrudCaller
+) -> None:
+    """Review of #6200: on a `together` item an accepted design accepts the quote too,
+    which the gate refuses while a purchase is pending, so the page offers no answer."""
+    made = make_order(api, crud)
+    [item] = items_of(api, made)
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is True
+    [source] = rows(
+        api,
+        "INSERT INTO order_item_sources (order_id, item_id, position, kind, purpose, url,"
+        " link_type, status) VALUES (%s, %s, 0, 'link', 'purchase',"
+        " 'https://parts.example.com/x', 'manual', 'pending') RETURNING id",
+        made.order.id,
+        item.id,
+    )
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is False
+    refused = made.reader.answer(newest(api, item).id, "accepted", key="k1")
+    assert refused.status_code == 409 and slug(refused) == "purchase_pending"
+    _orders(api).lifecycle.decline_purchase(made.order.id, source["id"], "", BY)
+    assert made.reader.view().json()["items"][0]["revisions"][-1]["can_answer"] is True
+
+
 # -- cancel ------------------------------------------------------------------------------
 
 
