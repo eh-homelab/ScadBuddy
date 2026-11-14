@@ -35,6 +35,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
+from scadbuddy.library.meshes import MAX_MESH_TRIANGLES
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import (
@@ -459,9 +460,10 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
 #: The most triangles an author's file may hold, every covered plate's together, for its
 #: covers to be redrawn (:func:`_recoloured_covers`). The file is untrusted and the read
 #: budget's default sets no triangle limit (``read_max_triangles`` 0), so this bounds the
-#: parse and the rasteriser on its own: at most about 200 MB of vertex and face arrays.
-#: The prod file of #6170 holds 24,540.
-COVER_MAX_TRIANGLES = 2_000_000
+#: parse and the rasteriser on its own, at the library's mesh cap
+#: (:data:`~scadbuddy.library.meshes.MAX_MESH_TRIANGLES`). A file past it keeps its
+#: covers and still prints. The prod file of #6170 holds 24,540.
+COVER_MAX_TRIANGLES = MAX_MESH_TRIANGLES
 
 
 def _recoloured_covers(payload: bytes, colours: Sequence[str] | None) -> bytes:

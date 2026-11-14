@@ -18,6 +18,7 @@ from scadbuddy.render.bambu3mf import (
     TooManyTrianglesError,
     write_bambu_3mf,
 )
+from scadbuddy.render.geometry import MeshBudget, parts_from_3mf
 from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
@@ -143,3 +144,18 @@ def test_a_file_past_the_triangle_budget_is_refused(tmp_path: Path) -> None:
     with pytest.raises(TooManyTrianglesError):
         recolour_3mf(payload, ["#00C000", "#FF9425"], max_triangles=20)
     recolour_3mf(payload, ["#00C000", "#FF9425"], max_triangles=24)
+
+
+def test_the_vertex_budget_is_shared_across_objects(tmp_path: Path) -> None:
+    """Each object's parse is capped at the vertices the budget has left, not at a fresh
+    allowance: the plate's two boxes are the same size, so a budget a little over one
+    box's vertices reads the first and refuses the second (#6172 review)."""
+    payload = _written(tmp_path)
+    whole = MeshBudget(10**6)
+    parts_from_3mf(io.BytesIO(payload), 1, budget=whole)
+    both = 3 * 10**6 - whole.vertices
+    assert whole.triangles == 10**6 - 24
+    tight = MeshBudget(10**6)
+    tight.vertices = both // 2 + 1
+    with pytest.raises(TooManyTrianglesError):
+        parts_from_3mf(io.BytesIO(payload), 1, budget=tight)

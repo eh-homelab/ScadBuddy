@@ -21,7 +21,7 @@ from scadbuddy.render.bambu3mf import (
     laid_out_plates,
     rezipped,
 )
-from scadbuddy.render.geometry import parts_from_3mf
+from scadbuddy.render.geometry import MeshBudget, parts_from_3mf
 from scadbuddy.render.split import normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 
@@ -38,8 +38,10 @@ def recolour_3mf(
     it does not change copied as its compressed bytes (:func:`rezipped`, #3679). An
     author's ``plate_no_light_<n>.png`` is replaced by the lit cover. With
     ``max_triangles``, the meshes read for the covers, every plate's together, may hold
-    at most that many triangles: past it, :class:`TooManyTrianglesError`, raised as the
-    parse reaches it, so an untrusted file cannot make the read unbounded.
+    at most that many triangles, and three vertices for each, counted as parsed (one
+    :class:`~scadbuddy.render.geometry.MeshBudget`): past it,
+    :class:`TooManyTrianglesError`, raised as the parse reaches it, so an untrusted file
+    cannot make the read unbounded.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
@@ -57,11 +59,9 @@ def recolour_3mf(
         # Read from the recoloured archive, in memory: that is what gives each part its
         # new colour through its extruder number.
         recoloured = io.BytesIO(rezipped(payload, changed))
-        left = max_triangles
+        budget = None if max_triangles is None else MeshBudget(max_triangles)
         for index in covered:
-            parts = parts_from_3mf(recoloured, index, max_triangles=left)
-            if left is not None:
-                left -= sum(len(part.mesh.faces) for part in parts)
+            parts = parts_from_3mf(recoloured, index, budget=budget)
             drawn = render_plate_thumbnails(parts)
             changed.update(
                 zip(
