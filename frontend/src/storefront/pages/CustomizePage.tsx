@@ -39,8 +39,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Whether a render has ended. A done one ends once it names its preview: until the shop
+ * has its files at hand it names none, and the page reads it again (#6120).
+ */
 function terminal(render: StoreRender): boolean {
+  if (render.status === 'done') return render.preview_url !== null
   return render.status !== 'pending' && render.status !== 'running'
+}
+
+/** What the viewer is shown of a render: a done one with no preview yet as still running. */
+function onScreen(render: StoreRender): StoreRender {
+  return render.status === 'done' && render.preview_url === null ? { ...render, status: 'running' } : render
 }
 
 /** A poll that failed for a reason that passes: the network, a limit, a busy shop. */
@@ -233,7 +243,7 @@ export function CustomizePage({
       try {
         next = await store.render(next.id)
         if (!live()) return null
-        setJob(next)
+        setJob(onScreen(next))
         delay = Math.min(delay * 2, timing.maxMs)
       } catch (caught) {
         if (!passing(caught)) throw caught
@@ -279,7 +289,7 @@ export function CustomizePage({
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
       renderKey.current.done()
       if (!live()) return
-      setJob(first)
+      setJob(onScreen(first))
       const done = await follow(first, live)
       if (!live() || done === null) return
       if (done.status !== 'done') {
