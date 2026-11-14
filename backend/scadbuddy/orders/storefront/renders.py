@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
@@ -156,11 +157,14 @@ _fetches: dict[str, asyncio.Task[None]] = {}
 #: the fetch. Bounded; a job that falls out is only fetched (from the cache) again.
 _ready: OrderedDict[str, None] = OrderedDict()
 READY_KEPT: Final = 4096
-#: Each job's failed fetches in a row. Past `FETCH_TRIES`, its files are taken as lost:
-#: the status names the preview, whose read then says so at once (404), rather than the
-#: page polling a render that can never show.
-_failed: dict[str, int] = {}
+#: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
+#: its files are taken as lost for the status only: it names the preview, whose read then
+#: says so at once (404), rather than the page polling a render that can never show. The
+#: estimate never takes lost files as there (`files_ready`). A count older than
+#: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
+_failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
 FETCH_TRIES: Final = 3
+FAILED_FOR: Final = 600.0
 
 
 def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
@@ -169,7 +173,11 @@ def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
     if task.exception() is not None:
-        _failed[job_id] = _failed.get(job_id, 0) + 1
+        count, first = _failures(job_id)
+        _failed[job_id] = (count + 1, first if count else time.monotonic())
+        _failed.move_to_end(job_id)
+        while len(_failed) > READY_KEPT:
+            _failed.popitem(last=False)
         logger.warning("a render's files could not be fetched", exc_info=task.exception())
         return
     _failed.pop(job_id, None)
@@ -179,13 +187,28 @@ def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
         _ready.popitem(last=False)
 
 
+def _failures(job_id: str) -> tuple[int, float]:
+    """The job's failed fetches in a row and when the first failed; none once they are
+    older than `FAILED_FOR`."""
+    count, first = _failed.get(job_id, (0, 0.0))
+    if count and time.monotonic() - first > FAILED_FOR:
+        _failed.pop(job_id, None)
+        return 0, 0.0
+    return count, first
+
+
+def files_lost(job_id: str) -> bool:
+    """Whether the job's fetch failed `FETCH_TRIES` times in a row, lately."""
+    return _failures(job_id)[0] >= FETCH_TRIES
+
+
 async def files_ready(state: AppState, job: Job) -> bool:
     """Whether the done ``job``'s files are in this process's cache: starts their fetch
     (`materialize_result`) when none runs, and waits on it at most `READY_WAIT` seconds.
     The fetch runs on when the wait ends, so the page's next poll finds it done. A job
-    fetched before answers at once, and so does one whose fetch failed `FETCH_TRIES`
-    times: its preview read then says the files are gone."""
-    if job.id in _ready or _failed.get(job.id, 0) >= FETCH_TRIES:
+    fetched before answers at once. Only a fetch that succeeded is ready: the estimate
+    never analyses, and so never records, files that are not here."""
+    if job.id in _ready:
         return True
     task = _fetches.get(job.id)
     if task is None:
@@ -199,8 +222,15 @@ async def files_ready(state: AppState, job: Job) -> bool:
 async def shown_render(state: AppState, job: Job) -> StoreRender:
     """`store_render` of ``job``, its preview named only once its files are fetched
     (#6120): the preview request then streams at once, and the page polls the status
-    until it is. A fetch that failed is tried again on the next poll."""
-    ready = job.state != "done" or job.result is None or await files_ready(state, job)
+    until it is. A fetch that failed is tried again on the next poll; once it failed
+    `FETCH_TRIES` times lately, the preview is named all the same, so its read says the
+    files are gone rather than the page polling to its limit."""
+    ready = (
+        job.state != "done"
+        or job.result is None
+        or await files_ready(state, job)
+        or files_lost(job.id)
+    )
     return store_render(job, ready=ready)
 
 
