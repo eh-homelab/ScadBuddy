@@ -6,7 +6,7 @@ import { DurableUnavailable, type RespondArgs, type RespondOutcome } from '../ga
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
-import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads } from './backendReads.js'
+import { type FlowRunReads, type ParentHopCursor, SqlFlowRunReads, STILL_WAITING_BATCH } from './backendReads.js'
 import { childReasoning, childStep, FlowQueue, ownStep, type QueueStep } from './queue.js'
 import { SessionError } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -409,13 +409,23 @@ export class Escalations {
    * hop only moves up), so the answer cannot go stale before the delete.
    */
   async #prune(): Promise<void> {
-    const held = (await this.#deps.sql<{ request_id: string }[]>`SELECT request_id FROM ai_escalation_deliveries`).map((r) => r.request_id)
-    if (held.length === 0) return
-    const waiting = await this.#reads.stillAtParentHop(held)
-    // A deployment without flows has no `workflow_runs`, and so no records either.
-    if (waiting === undefined) return
-    const gone = held.filter((id) => !waiting.has(id))
-    if (gone.length) await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${gone})`
+    // A batch at a time, by request id: memory and each ask stay bounded however many there are.
+    let after = ''
+    for (;;) {
+      const held = (
+        await this.#deps.sql<{ request_id: string }[]>`
+          SELECT request_id FROM ai_escalation_deliveries WHERE request_id > ${after}
+           ORDER BY request_id LIMIT ${STILL_WAITING_BATCH}`
+      ).map((r) => r.request_id)
+      if (held.length === 0) return
+      const waiting = await this.#reads.stillAtParentHop(held)
+      // A deployment without flows has no `workflow_runs`, and so no records either.
+      if (waiting === undefined) return
+      const gone = held.filter((id) => !waiting.has(id))
+      if (gone.length) await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${gone})`
+      if (held.length < STILL_WAITING_BATCH) return
+      after = held.at(-1)!
+    }
   }
 
   /** A run's own calls at hop `parent`, from the backend's projection, not yet sent. */
