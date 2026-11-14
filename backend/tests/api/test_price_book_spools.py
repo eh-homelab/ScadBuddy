@@ -403,3 +403,53 @@ def test_a_group_keeps_the_linked_record_of_its_colour(client: TestClient) -> No
     [row] = client.post(IMPORT).json()["rows"]
 
     assert (row["filament_id"], row["spool_ids"]) == (made["#0000FF"], [1, 2, 3])
+
+
+@respx.mock
+def test_two_records_whose_spools_swap_colours_both_move_in_one_import(
+    client: TestClient,
+) -> None:
+    """#6211 review: A (#111111) and B (#222222), whose spools swap colours in Bambuddy,
+    both move in one import, with no duplicate and no `colour_taken`."""
+    configure(client)
+    no_density_sources()
+    one = {"rgba": "111111FF", "color_name": "Dark"}
+    two = {"rgba": "222222FF", "color_name": "Darker"}
+    _inventory(spool(1, **one, cost_per_kg=20), spool(2, **two, cost_per_kg=20))
+    made = {r["colour"]: r["filament_id"] for r in client.post(IMPORT).json()["rows"]}
+
+    _inventory(spool(1, **two, cost_per_kg=20), spool(2, **one, cost_per_kg=20))
+    rows = client.post(IMPORT).json()["rows"]
+
+    assert [(r["filament_id"], r["action"], r["reason"]) for r in rows] == [
+        (made["#222222"], "updated", None),
+        (made["#111111"], "updated", None),
+    ]
+    book = {f["id"]: f["colour"] for f in client.get(BOOK).json()["filaments"]}
+    assert book == {made["#111111"]: "#222222", made["#222222"]: "#111111"}
+    assert client.post(IMPORT).json()["rows"][0]["action"] == "unchanged"
+
+
+@respx.mock
+def test_a_record_held_by_a_hand_set_colour_holds_the_chain_behind_it(
+    client: TestClient,
+) -> None:
+    """#6211 review: a record whose new colour a hand-set record holds keeps its look,
+    and so does a record that would move onto its colour."""
+    configure(client)
+    no_density_sources()
+    one = {"rgba": "111111FF", "color_name": "Dark"}
+    two = {"rgba": "222222FF", "color_name": "Darker"}
+    three = {"rgba": "333333FF", "color_name": "Darkest"}
+    _inventory(spool(1, **one, cost_per_kg=20), spool(2, **two, cost_per_kg=20))
+    made = {r["colour"]: r["filament_id"] for r in client.post(IMPORT).json()["rows"]}
+    kept = add_filament(client, colour="#333333", colour_name="Mine", cost_per_kg="5")
+
+    # Spool 1 takes the hand-set record's colour; spool 2 takes spool 1's old one.
+    _inventory(spool(1, **three, cost_per_kg=20), spool(2, **one, cost_per_kg=20))
+    rows = {r["filament_id"]: r for r in client.post(IMPORT).json()["rows"]}
+
+    assert rows[made["#111111"]]["reason"] == "colour_taken"
+    assert rows[made["#222222"]]["reason"] == "colour_taken"
+    book = {f["id"]: f["colour"] for f in client.get(BOOK).json()["filaments"]}
+    assert book == {made["#111111"]: "#111111", made["#222222"]: "#222222", kept["id"]: "#333333"}

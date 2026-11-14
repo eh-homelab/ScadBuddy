@@ -1405,14 +1405,22 @@ each row by its id and the values it must still have, so the file is a no-op els
   (`spool_import.py` `_matches`, in three passes over every group, so the groups' order
   never decides: a record linked to a group whose RGB its spools had, then a record linked
   to any group's spools, then a record by colour (`_by_colour`); a spool link always wins
-  over a colour. `_write_order` writes the matched groups first, each time one whose RGB
-  no other record holds now, so a record that moves to a colour another record is leaving
-  waits for it; then the new groups. A group whose RGB is another record's colour is
-  skipped `colour_taken`). The migration sets no link
-  (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two prod
-  stand-ins for clear spools (ids and colours pinned in it) get `colour_source` `manual` and
-  `spool_colour` `#000000`, so the import finds them by their spools' `#000000`. The next
-  import links every other record by its own `colour`. An item
+  over a colour. `_movers` picks the matched `import` records whose colour changes and
+  whose new RGB no staying record of their names holds (a record held back stays too,
+  until none changes); the import parks them out of the identity index
+  (`OrderStore.park_filaments`, `archived_at` set inside its transaction) and puts each
+  back with its new colour (`set_import_look` `unpark`), so a chain or a swap of colours
+  settles in one import. A matched record held back keeps its whole look with
+  `colour_taken`. The matched groups are written before the new ones, and a new group
+  whose RGB is another record's colour is skipped `colour_taken`). The migration sets no
+  link (`spool_colour` NULL, `spool_ids` empty) on every existing record but two: the two
+  prod stand-ins for clear spools (ids and colours pinned in it) get `colour_source`
+  `manual` and `spool_colour` `#000000`, so the import finds them by their spools'
+  `#000000`. The next import links every other record by its own `colour`. Until that
+  first import after the deploy, a record with no link is found only by its own colour:
+  change its colour by hand before then, and the import makes a second record of its
+  spools' colour. So run "Import from spools" once after the deploy, before any colour
+  edit (#6211 review). An item
   print's spools are matched the same way (`orders/spools.py` `_of`, the store's
   `spool_links`), so a hand-set colour still finds its spools.
 - A customer's own models (#6133, spec 2026-11-13; migration

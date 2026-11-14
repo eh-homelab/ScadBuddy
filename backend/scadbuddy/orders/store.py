@@ -935,6 +935,19 @@ class OrderStore:
         ).fetchall()
         return [ImportRecord(**row) for row in rows]
 
+    def park_filaments(self, conn: Conn, filament_ids: Sequence[str]) -> None:
+        """Take records out of the identity index (``archived_at`` set) inside ``conn``'s
+        transaction, so the spool import can move their colours in any order, a swap
+        included (#6211 review). The import puts each back with
+        :meth:`set_import_look`'s ``unpark`` before it commits; no other transaction sees
+        them parked."""
+        if filament_ids:
+            conn.execute(
+                "UPDATE filaments SET archived_at = now() WHERE id = ANY(%s)"
+                " AND archived_at IS NULL",
+                (list(filament_ids),),
+            )
+
     def spool_links(self, filament_ids: Sequence[str]) -> dict[str, SpoolLink]:
         """Each record's :class:`SpoolLink`, by id; an id with no record is left out."""
         if not filament_ids:
@@ -957,15 +970,19 @@ class OrderStore:
         look: dict[str, Any],
         spool_colour: str,
         spool_ids: Sequence[int],
+        unpark: bool = False,
     ) -> None:
         """The import's colour, alpha, stops and effect in ``look`` (any of them; none
-        for a record whose colour a person set) and its link to its spools (#6209).
+        for a record whose colour a person set) and its link to its spools (#6209);
+        ``unpark`` puts a record :meth:`park_filaments` took out back in the book.
         ``updated_at`` moves only when ``look`` changes something."""
         fields: dict[str, Any] = {
             **{name: look[name] for name in _LOOK if name in look},
             "spool_colour": spool_colour,
             "spool_ids": list(spool_ids),
         }
+        if unpark:
+            fields["archived_at"] = None
         try:
             # A savepoint, so the import's transaction can still read which record holds
             # the colour, a record this run made included.

@@ -19,7 +19,7 @@ takes :func:`density_for`'s; a record no spool of the inventory matches has no s
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Literal
@@ -154,35 +154,37 @@ def _matches(groups: list[SpoolGroup], records: list[ImportRecord]) -> dict[int,
     return matched
 
 
-def _write_order(
+def _movers(
     groups: list[SpoolGroup], matched: dict[int, ImportRecord], records: list[ImportRecord]
-) -> Iterator[int]:
-    """The order :func:`import_spools` writes the groups in (#6211 review): the matched
-    groups first, each time one whose RGB no other record of its names holds now, so a
-    record that moves to a colour another record is leaving waits for it; then the new
-    groups, which check ``colour_taken`` against the colours the run gave. ``records`` is
-    read live: the import updates it as it writes. Only a true swap of two records'
-    colours is left: the first written keeps its look until the next import. The rows
-    keep the groups' order."""
-    pending = [i for i in range(len(groups)) if i in matched]
-    while pending:
-        free = next(
-            (
-                i
-                for i in pending
-                if not any(
-                    r.id != matched[i].id
-                    and _names(r.material, r.subtype, r.brand)
-                    == _names(groups[i].material, groups[i].subtype, groups[i].brand)
-                    and r.colour.upper() == groups[i].colour
-                    for r in records
-                )
-            ),
-            pending[0],
-        )
-        pending.remove(free)
-        yield free
-    yield from (i for i in range(len(groups)) if i not in matched)
+) -> set[str]:
+    """The matched records whose colour the import changes in this run (#6211 review): each
+    ``import`` record whose group's RGB differs from its colour, unless a record that stays
+    (one not moving, ``manual`` or not matched) holds that RGB among its names. A record
+    held back stays too, so its colour may hold back another, until none changes. The
+    movers' new colours are distinct and none is a staying record's, so they can all move
+    at once, a chain or a swap of colours included (:func:`import_spools` parks them
+    first)."""
+    target = {r.id: groups[i].colour for i, r in matched.items()}
+    movers = {
+        r.id
+        for r in matched.values()
+        if r.colour_source == "import" and r.colour.upper() != target[r.id]
+    }
+    held = True
+    while held:
+        held = False
+        for record in matched.values():
+            if record.id in movers and any(
+                other.id != record.id
+                and other.id not in movers
+                and _names(other.material, other.subtype, other.brand)
+                == _names(record.material, record.subtype, record.brand)
+                and other.colour.upper() == target[record.id]
+                for other in records
+            ):
+                movers.discard(record.id)
+                held = True
+    return movers
 
 
 def _look(group: SpoolGroup, colour: str) -> dict[str, object]:
@@ -207,7 +209,13 @@ def import_spools(
     with store.transaction() as conn:
         records = store.import_records(conn)
         matched = _matches(groups, records)
-        for index in _write_order(groups, matched, records):
+        movers = _movers(groups, matched, records)
+        # Out of the identity index until each takes its new colour, so a swap or a chain
+        # of colours never collides on the way (`_movers`).
+        store.park_filaments(conn, sorted(movers))
+        # The matched groups first, so a new group checks `taken` against the colours the
+        # run gave; the rows keep the groups' order.
+        for index in sorted(range(len(groups)), key=lambda i: i not in matched):
             group = groups[index]
             spool_ids = [spool_id for spool_id, _ in group.spools]
             priced = [(i, p) for i, raw in group.spools if (p := _price(raw)) is not None]
@@ -283,9 +291,10 @@ def import_spools(
             assert current is not None
             previous = Decimal(current.cost_per_kg)
             found = None if current.density_g_cm3 is not None else resolve(group, densities)
-            # A record whose colour cannot become the group's keeps its whole look, so it
-            # never takes one filament's RGB with another's alpha or effect.
-            keep_look = taken and current.colour.upper() != colour
+            # A record whose colour cannot become the group's (a staying record holds it,
+            # `_movers`) keeps its whole look, so it never takes one filament's RGB with
+            # another's alpha or effect.
+            keep_look = record.id not in movers and current.colour.upper() != colour
             wanted = _look(group, colour)
             look = (
                 {
@@ -301,7 +310,12 @@ def import_spools(
                 else {}
             )
             store.set_import_look(
-                conn, record.id, look=look, spool_colour=colour, spool_ids=spool_ids
+                conn,
+                record.id,
+                look=look,
+                spool_colour=colour,
+                spool_ids=spool_ids,
+                unpark=record.id in movers,
             )
             # Later groups of this run check `taken` against the colour it has now.
             records[records.index(record)] = replace(
