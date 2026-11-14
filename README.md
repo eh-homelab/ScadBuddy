@@ -1116,9 +1116,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
   and `…/render/geometry`, reads and writes the blob index for it, through
   `…/render/blob-index` (it may store, mark or delete only a render job's own pieces, and
-  read only those, the library pieces Arrange lays out, snapshots, fonts and uploads;
-  every other key is the API's: the API drops or forgets a copy the worker cannot read,
-  through `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`),
+  read only those, the library pieces Arrange lays out, snapshots, fonts and uploads; it
+  may touch only its pieces, the library pieces and snapshots; every other key is the
+  API's: the API drops or forgets a copy the worker cannot read, through
+  `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
+  forgets a library piece only when its own read finds the object gone or altered),
   and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or

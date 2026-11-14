@@ -77,7 +77,7 @@ controls.
 
 | Untrusted code | Where it runs | Its guard | Can it reach SQL? |
 |---|---|---|---|
-| A template's `pipeline/` Python | the render worker pod, a child of the worker, same uid 10001 (`scadbuddy-render.yaml:121`) | an environment allowlist (`backend/scadbuddy/workflows/template_process.py:107`), its own process group (`:138`), a kill on timeout (`:149`, `:51`). No seccomp or Landlock rule; only the pod's egress policy (`networkpolicy-render.yaml`) limits its network. | No. The render pod holds no database secret and no KEK, and its egress policy names no Postgres peer (`networkpolicy-render.yaml`; measured 2026-11-14). What a process with the worker's uid can still reach (it can usually read `/proc/<ppid>/environ` and the worker's memory) is the worker's 15-minute `crud.render` credential, the S3 keys and the Bambuddy render key, never the full Bambuddy key (`api/crud_render.py` `withheld`, #5298 final review). With the credential it can call only the render CRUD routes, and through the blob index it can write only a render job's own pieces (`RENDER_KEY`). #5296 moves template Python out of the worker's pod. |
+| A template's `pipeline/` Python | the render worker pod, a child of the worker, same uid 10001 (`scadbuddy-render.yaml:121`) | an environment allowlist (`backend/scadbuddy/workflows/template_process.py:107`), its own process group (`:138`), a kill on timeout (`:149`, `:51`). No seccomp or Landlock rule; only the pod's egress policy (`networkpolicy-render.yaml`) limits its network. | No. The render pod holds no database secret and no KEK, and its egress policy names no Postgres peer (`networkpolicy-render.yaml`; measured 2026-11-14). What a process with the worker's uid can still reach (it can usually read `/proc/<ppid>/environ` and the worker's memory) is the worker's 15-minute `crud.render` credential, the S3 keys and the Bambuddy render key, never the full Bambuddy key (`api/crud_render.py` `withheld`, #5298 final review). With the credential it can call only the render CRUD routes, and through the blob index it can write only a render job's own pieces (`RENDER_KEY`), touch only those, the library objects and snapshots, and forget a library object only when the API cannot read it either. Every render job writes into one key space, so it can still overwrite another template's pieces or another job's outputs (Known gaps 8). With the S3 keys it can overwrite or delete any object in the bucket. #5296 moves template Python out of the worker's pod. |
 | OpenSCAD source | the render worker pod; the API pod (the editor's parse check, the schema export, preset writes) | a Landlock filesystem ruleset (`backend/scadbuddy/render/confinement.py:3-17`, `render/sandbox.py`). No network rule. | Low. The language has no socket call. In the API pod it runs with the uid of a process that holds the owner secret; the render pod holds none. |
 | `openscad-lsp` | the API pod (`backend/scadbuddy/library/lsp.py`) | seccomp: no socket except `AF_UNIX` (`backend/scadbuddy/editor/nonet.py:3-6`) | No TCP. It shares a uid with the API, which holds the owner secret. |
 | Claude Code and its tools | the agent worker pods, a child of the agent | tiers in `canUseTool` and a `PreToolUse` hook; file tools confined to the session directory, except that `Read` and `Grep` may also reach the session's own `tool-results` directory in the Claude Code config dir (#5542) (`agent/src/harness/confine.ts`); Bash and PowerShell `off` in the pod (`agent/src/access/nativeBuiltins.ts`); where the deployment sets `SCADBUDDY_SANDBOX_*`, the session's own Bash and PowerShell run in a sandbox pod of its own with no secret (#5864, `docs/ai/security.md`); the model credential behind a loopback gateway (`agent/src/gateway/server.ts`) | Only with Bash on. The agent's environment holds the owner database URL and the KEK path (`scadbuddy-agent-worker.yaml:102-121`). |
@@ -96,7 +96,7 @@ controls.
 | The agent on 8081 (settings, approvals, sockets) | the same front doors | an Origin and Host allowlist, which a TCP peer can forge (`agent/src/routes/guard.ts:48-49`) | The browser principal approves any outward call (`agent/src/approvals/service.ts:719`). #5297. |
 | Postgres `scadbuddy-db` on 5432 | any pod in the cluster | passwords; of the pods with an egress policy, only the agent worker's and agent-durable's admit Postgres: the render, print and projects pods' policies name no Postgres peer (measured 2026-11-14) | No NetworkPolicy selects the CNPG pods (checked live). Any pod can try to log in. eh-homelab/clusters#3182. |
 | Temporal frontend on 7233 | pods named in its ingress policy (clusters `networkpolicy-temporal-v2-frontend.yaml`) | that policy; payloads of `session-*` and `flow-*` workflows sealed per subject | No mTLS (clusters `temporal-cluster-v2.yaml:237`). A pod in the list is a full client. |
-| S3 (DO Spaces) | the slicer, through presigned URLs | the slicer holds no store secret | None found. |
+| S3 (DO Spaces) | the API and the render worker, with the store's S3 keys (the render worker gets them from the API's CRUD route); the slicer, through presigned URLs | the slicer holds no store secret; the keys reach no other pod | The keys open the whole bucket: template Python in the render pod can reach them (see "Where untrusted code runs") and overwrite or delete any object, every service's. #5296. |
 
 ## What each pod holds
 
@@ -130,13 +130,20 @@ settings trust the whole pod CIDR: `SCADBUDDY_TRUSTED_PROXIES` and
 2. The agent and the API run SQL on each other's tables, through cross grants.
 3. Template Python shares a pod and a uid with the render worker, so it can reach the
    worker's `crud.render` credential, the S3 keys and the Bambuddy render key (not
-   tested). The pod holds no database secret, and its egress policy names no Postgres
-   peer. #5296.
+   tested). With the S3 keys it can overwrite or delete any object in the bucket. The
+   pod holds no database secret, and its egress policy names no Postgres peer. #5296.
 4. An `allow_refused` plugin package can read the owner URL and the KEK.
 5. The API runs in `off`, so `/api/v1/internal/*` and the agent's 8081 routes are open to
    any pod that reaches them.
 6. Postgres has no ingress policy. The API pod has no egress policy.
 7. agent-durable runs no worker but still mounts the owner URL and the KEK.
+8. All render jobs share one key space in the blob index. A piece's key is computable
+   from its template, revision and parameters (`workflows/models.py` `piece_key`), so a
+   render credential can overwrite another template's pieces, or another job's
+   `output-` files, with bytes of its own (`RENDER_KEY` admits every render job's key).
+   This predates #5298, which only kept the credential to render keys. A follow-up must
+   bind each write to the job that holds the key; #5296 removes the main way template
+   code reaches the credential.
 
 ## The target and the order of work
 
