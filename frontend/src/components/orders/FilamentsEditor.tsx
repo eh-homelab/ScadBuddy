@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '../../api/client'
 import type { DensityFillRow, Filament, FilamentInput, SpoolImportRow } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
+import { displayHex, swatchStyle } from '../../lib/filamentSwatch'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -28,7 +29,7 @@ function draftOf(filament: Filament): Draft {
     subtype: filament.subtype ?? '',
     brand: filament.brand ?? '',
     colour_name: filament.colour_name ?? '',
-    colour: filament.colour,
+    colour: displayHex(filament.colour, filament.alpha),
     cost_per_kg: filament.cost_per_kg,
     density_g_cm3: filament.density_g_cm3 ?? '',
   }
@@ -37,7 +38,8 @@ function draftOf(filament: Filament): Draft {
 /** The body a draft makes: an empty optional field is null, the decimals as typed. */
 function bodyOf(draft: Draft): FilamentInput | string {
   if (!draft.material.trim()) return 'Enter the material, such as PLA.'
-  if (!/^#[0-9a-fA-F]{6}$/.test(draft.colour.trim())) return 'Enter the colour as #RRGGBB.'
+  const colour = draft.colour.trim()
+  if (!/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(colour)) return 'Enter the colour as #RRGGBB, or #RRGGBBAA for a translucent filament.'
   if (!DECIMAL.test(draft.cost_per_kg.trim())) return 'Enter the cost per kilogram, such as 25.50.'
   if (draft.density_g_cm3.trim() && !DECIMAL.test(draft.density_g_cm3.trim())) return 'Enter the density in g/cm³, such as 1.24, or leave it empty.'
   const optional = (text: string) => (text.trim() ? text.trim() : null)
@@ -46,7 +48,9 @@ function bodyOf(draft: Draft): FilamentInput | string {
     subtype: optional(draft.subtype),
     brand: optional(draft.brand),
     colour_name: optional(draft.colour_name),
-    colour: draft.colour.trim(),
+    // #6209: `colour` stays #RRGGBB for the render; the alpha byte goes beside it.
+    colour: colour.slice(0, 7),
+    alpha: colour.length === 9 ? parseInt(colour.slice(7), 16) : 255,
     cost_per_kg: draft.cost_per_kg.trim(),
     density_g_cm3: optional(draft.density_g_cm3),
   }
@@ -62,6 +66,7 @@ const REASONS: Record<NonNullable<SpoolImportRow['reason']>, string> = {
   no_colour: 'its spools have only a colour name, no colour',
   no_price: 'none of its spools has a price',
   too_long: 'a name is longer than a filament record takes (100 characters)',
+  colour_taken: 'another filament of it has its colour, set by hand',
 }
 
 /** One line of an import's answer: what happened to a filament, and the spread of its spools' prices. */
@@ -183,13 +188,25 @@ export function FilamentsEditor() {
       className: 'break-words',
       cell: (f) => (
         <span className="inline-flex items-center gap-2">
-          <span aria-hidden="true" className="inline-block size-3 shrink-0 rounded-sm border" style={{ background: f.colour }} />
+          <span aria-hidden="true" data-testid="filament-swatch" className="inline-block size-3 shrink-0 rounded-sm border" style={swatchStyle(f)} />
           {filamentLabel(f)}
           {f.archived_at && <span className="text-xs text-muted-foreground">Archived</span>}
         </span>
       ),
     },
-    { key: 'colour', header: 'Colour', className: 'font-mono text-xs', cell: (f) => f.colour },
+    {
+      key: 'colour',
+      header: 'Colour',
+      className: 'text-xs',
+      cell: (f) => (
+        <span className="inline-flex flex-col">
+          <span className="font-mono">{displayHex(f.colour, f.alpha)}</span>
+          {(f.effect || f.colour_source === 'manual') && (
+            <span className="text-muted-foreground">{[f.effect, f.colour_source === 'manual' && 'set by hand'].filter(Boolean).join(', ')}</span>
+          )}
+        </span>
+      ),
+    },
     { key: 'cost', header: 'Cost per kg', className: 'sb-num', cell: (f) => f.cost_per_kg },
     {
       key: 'density',
@@ -222,6 +239,18 @@ export function FilamentsEditor() {
             >
               Edit
             </Button>
+            {f.colour_source === 'manual' && book.data?.spool_import && (
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void act(() => api.updateFilament(f.id, { colour_source: 'import' }))}
+                aria-label={`Use the spool colour for ${filamentLabel(f)}`}
+                title="The next Import from spools sets its colour from the spools"
+              >
+                Use spool colour
+              </Button>
+            )}
             <Button size="xs" variant="ghost" disabled={busy} onClick={() => void act(() => api.archiveFilament(f.id))} aria-label={`Archive ${filamentLabel(f)}`}>
               Archive
             </Button>
@@ -305,7 +334,7 @@ export function FilamentsEditor() {
         {field('subtype', 'Subtype', { placeholder: 'Basic' })}
         {field('brand', 'Brand', { placeholder: 'Bambu' })}
         {field('colour_name', 'Colour name', { width: 'w-36', placeholder: 'Jade White' })}
-        {field('colour', 'Colour', { width: 'w-24', placeholder: '#FFFFFF' })}
+        {field('colour', 'Colour', { width: 'w-28', placeholder: '#FFFFFF' })}
         {field('cost_per_kg', 'Cost per kg', { width: 'w-24', placeholder: '25.50', inputMode: 'decimal' })}
         {field('density_g_cm3', 'Density g/cm³', { width: 'w-24', placeholder: '1.24', inputMode: 'decimal' })}
         <Button type="submit" size="sm" disabled={busy}>

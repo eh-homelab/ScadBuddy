@@ -143,3 +143,53 @@ def test_the_exponent_is_on_the_order_and_the_book(client: TestClient) -> None:
         listed = client.get("/api/v1/orders").json()["items"]
         assert next(o for o in listed if o["id"] == order["id"])["minor_exponent"] == exponent
         assert client.get(BOOK).json()["minor_exponent"] == exponent
+
+
+def test_a_filament_keeps_its_alpha_stops_and_effect(client: TestClient) -> None:
+    """#6209: ``colour`` stays ``#RRGGBB``; ``alpha``, ``extra_colours`` and ``effect``
+    carry what Bambuddy keeps beside it. A filament a person adds is ``manual``."""
+    plain = add_filament(client)
+    assert (plain["alpha"], plain["extra_colours"], plain["effect"]) == (255, [], None)
+    assert plain["colour_source"] == "manual"
+
+    clear = add_filament(
+        client,
+        colour_name="Clear",
+        colour="#000000",
+        alpha=0,
+        extra_colours=["#ff0000", "#00FF0080"],
+        effect="translucent",
+    )
+    assert (clear["colour"], clear["alpha"]) == ("#000000", 0)
+    assert clear["extra_colours"] == ["#FF0000", "#00FF0080"]
+    assert clear["effect"] == "translucent"
+
+    for bad in (
+        {"alpha": 256},
+        {"alpha": -1},
+        {"extra_colours": ["#FFFFFF"] * 9},
+        {"extra_colours": ["#FFF"]},
+        {"effect": "shiny"},
+        {"colour": "#00000000"},
+        {"colour_source": "import"},
+    ):
+        refused = client.post(f"{BOOK}/filaments", json={**PLA, "colour": "#123456", **bad})
+        assert refused.status_code == 422, bad
+
+
+def test_a_colour_edit_is_manual_and_can_be_handed_back(client: TestClient) -> None:
+    """#6209: a look sent that differs from the record's makes its colour ``manual``; the
+    same look sent back, as the editor's save does, keeps its source; ``colour_source``
+    ``import`` hands the colour back to the spool import."""
+    made = add_filament(client)
+    url = f"{BOOK}/filaments/{made['id']}"
+    handed = client.patch(url, json={"colour_source": "import"}).json()
+    assert handed["colour_source"] == "import"
+    same = client.patch(url, json={"colour": "#ffffff", "alpha": 255, "cost_per_kg": "3"}).json()
+    assert same["colour_source"] == "import"
+    for look in ({"alpha": 128}, {"colour": "#EEEEEE"}, {"effect": "silk"}):
+        client.patch(url, json={"colour_source": "import"})
+        edited = client.patch(url, json=look).json()
+        assert edited["colour_source"] == "manual", look
+    stops = client.patch(url, json={"extra_colours": ["#010203"]}).json()
+    assert stops["extra_colours"] == ["#010203"]

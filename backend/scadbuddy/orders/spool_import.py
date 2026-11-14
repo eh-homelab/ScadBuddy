@@ -1,9 +1,11 @@
 """Filament records imported from spools (#4253, spec 2026-10-18 §8.3, Ruling 3).
 
 One record per filament the inventory holds (``integrations.SpoolGroup``), matched to
-the book by the record's identity (material, subtype, brand and colour, upper-cased, as
-``filaments_identity`` and ``_filament_key`` both are): a new record when the book has
-none, else its ``cost_per_kg`` set to the most recent priced spool's (the highest id).
+the book by its link to the group's spools, else by material, subtype, brand and the
+spools' RGB (#6209, :func:`_match`; the colour alone would make a second record of one a
+person recoloured): a new record when the book has none, else its ``cost_per_kg`` set to
+the most recent priced spool's (the highest id). A record takes the spools' colour,
+alpha, stops and effect unless a person set them (``colour_source`` ``manual``).
 It runs on click only: a quote reads the book, never Bambuddy, so a quote is the same
 with Bambuddy down. A group known only by its colour's name, or with no priced spool, is
 reported and left alone: a record needs a ``#RRGGBB`` and a price.
@@ -29,7 +31,7 @@ from scadbuddy.orders.models import (
     SpoolImport,
     SpoolImportRow,
 )
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.store import ImportRecord, OrderStore
 
 #: ``filaments.cost_per_kg``'s ``numeric(12,4)``.
 PLACES = Decimal("0.0001")
@@ -63,14 +65,52 @@ def _identity(
     )
 
 
+def _names(material: str, subtype: str | None, brand: str | None) -> tuple[str, str, str]:
+    return _identity(material, subtype, brand, None)[:3]
+
+
+def _match(
+    group: SpoolGroup, colour: str, records: list[ImportRecord], claimed: set[str]
+) -> ImportRecord | None:
+    """The record of ``group`` (#6209): the one linked to any of its spools, else the one
+    of its material, subtype and brand whose spools had its RGB at the last import, else
+    one with no other spools' RGB whose colour is its RGB. A record already taken by
+    another group of this import is never matched again."""
+    open_ = [r for r in records if r.id not in claimed]
+    ids = {spool_id for spool_id, _ in group.spools}
+    linked = [r for r in open_ if ids & set(r.spool_ids)]
+    if linked:
+        return max(linked, key=lambda r: len(ids & set(r.spool_ids)))
+    names = _names(group.material, group.subtype, group.brand)
+    same = [r for r in open_ if _names(r.material, r.subtype, r.brand) == names]
+    return next((r for r in same if r.spool_colour == colour), None) or next(
+        (r for r in same if r.colour.upper() == colour and r.spool_colour in (None, colour)),
+        None,
+    )
+
+
+def _look(group: SpoolGroup, colour: str) -> dict[str, object]:
+    return {
+        "colour": colour,
+        "alpha": group.alpha,
+        "extra_colours": group.extra_colours,
+        "effect": group.effect,
+    }
+
+
 def import_spools(
     store: OrderStore, groups: list[SpoolGroup], densities: DensityTable | None = None
 ) -> SpoolImport:
     """Make or update one record per group, in one transaction, filling an empty
     density by :func:`~scadbuddy.orders.density.resolve` (``densities`` is the image's
-    vendor presets, ``None`` without them). Blocking: call it in a thread."""
+    vendor presets, ``None`` without them). A record is matched by :func:`_match`, so a
+    colour a person changed makes no second record; it takes the group's colour, alpha,
+    stops and effect unless a person set them (``colour_source`` ``manual``, #6209), and
+    keeps the link to the group's spools. Blocking: call it in a thread."""
     rows: list[SpoolImportRow] = []
     with store.transaction() as conn:
+        records = store.import_records(conn)
+        claimed: set[str] = set()
         for group in groups:
             spool_ids = [spool_id for spool_id, _ in group.spools]
             priced = [(i, p) for i, raw in group.spools if (p := _price(raw)) is not None]
@@ -82,6 +122,9 @@ def import_spools(
                 brand=group.brand,
                 colour_name=group.colour_name,
                 colour=group.colour,
+                alpha=group.alpha,
+                extra_colours=group.extra_colours,
+                effect=group.effect,
                 spool_ids=spool_ids,
                 min_cost_per_kg=_text(min(prices)) if len(prices) > 1 else None,
                 max_cost_per_kg=_text(max(prices)) if len(prices) > 1 else None,
@@ -96,11 +139,23 @@ def import_spools(
             if any(name is not None and len(name) > MAX_NAME for name in names):
                 rows.append(row.model_copy(update={"reason": "too_long"}))
                 continue
+            colour = group.colour
             price = max(priced)[1]
-            existing_id = store.existing_filament(
-                conn, group.material, group.subtype, group.brand, group.colour
+            record = _match(group, colour, records, claimed)
+            # The colour the group would take is a colour another record of its names
+            # holds (one a person set): a second record, or the change, would break the
+            # identity index.
+            group_names = _names(group.material, group.subtype, group.brand)
+            taken = any(
+                r is not record
+                and _names(r.material, r.subtype, r.brand) == group_names
+                and r.colour.upper() == colour
+                for r in records
             )
-            if existing_id is None:
+            if record is None:
+                if taken:
+                    rows.append(row.model_copy(update={"reason": "colour_taken"}))
+                    continue
                 found = resolve(group, densities)
                 made = store.insert_filament(
                     FilamentInput(
@@ -108,18 +163,26 @@ def import_spools(
                         subtype=group.subtype,
                         brand=group.brand,
                         colour_name=group.colour_name,
-                        colour=group.colour,
+                        colour=colour,
                         cost_per_kg=_text(price),
                         density_g_cm3=None if found is None else found.density_g_cm3,
+                        alpha=group.alpha,
+                        extra_colours=group.extra_colours,
+                        effect=group.effect,
                     ),
                     conn=conn,
                     density_profile=None if found is None else found.profile,
+                    colour_source="import",
+                    spool_colour=colour,
+                    spool_ids=spool_ids,
                 )
+                claimed.add(made.id)
                 rows.append(
                     row.model_copy(
                         update={
                             "action": "created",
                             "filament_id": made.id,
+                            "colour_source": "import",
                             "cost_per_kg": made.cost_per_kg,
                             "density_g_cm3": made.density_g_cm3,
                             "density_profile": made.density_profile,
@@ -127,12 +190,38 @@ def import_spools(
                     )
                 )
                 continue
-            current = store.filament(existing_id, conn=conn, lock=True)
+            claimed.add(record.id)
+            current = store.filament(record.id, conn=conn)
             assert current is not None
             previous = Decimal(current.cost_per_kg)
             found = None if current.density_g_cm3 is not None else resolve(group, densities)
+            wanted = _look(group, colour)
+            if taken:
+                del wanted["colour"]
+            look = (
+                {
+                    name: value
+                    for name, value in wanted.items()
+                    if (
+                        str(value) != current.colour.upper()
+                        if name == "colour"
+                        else value != getattr(current, name)
+                    )
+                }
+                if current.colour_source == "import"
+                else {}
+            )
+            store.set_import_look(
+                conn, record.id, look=look, spool_colour=colour, spool_ids=spool_ids
+            )
+            shown = current.model_copy(update=look)
             update: dict[str, object] = {
-                "filament_id": existing_id,
+                "filament_id": record.id,
+                "colour": shown.colour,
+                "alpha": shown.alpha,
+                "extra_colours": shown.extra_colours,
+                "effect": shown.effect,
+                "colour_source": shown.colour_source,
                 "cost_per_kg": _text(price),
                 "previous_cost_per_kg": current.cost_per_kg,
                 "density_g_cm3": current.density_g_cm3,
@@ -145,15 +234,16 @@ def import_spools(
                 patch["density_g_cm3"] = found.density_g_cm3
                 update["density_g_cm3"] = found.density_g_cm3
                 update["density_profile"] = found.profile
-            if not patch:
+            if not patch and not look:
                 rows.append(row.model_copy(update={**update, "action": "unchanged"}))
                 continue
-            store.update_filament(
-                existing_id,
-                FilamentPatch(**patch),
-                conn=conn,
-                density_profile=None if found is None else found.profile,
-            )
+            if patch:
+                store.update_filament(
+                    record.id,
+                    FilamentPatch.model_validate(patch),
+                    conn=conn,
+                    density_profile=None if found is None else found.profile,
+                )
             rows.append(row.model_copy(update={**update, "action": "updated"}))
     return SpoolImport(rows=rows)
 

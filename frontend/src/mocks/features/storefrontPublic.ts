@@ -27,8 +27,8 @@ const STORAGE_KEY = 'sb-mock-storefront-draft'
 
 export const KEYCHAIN_ID = 'l1'
 export const TAG_ID = 'l2'
-const BLUE = { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA' }
-const ORANGE = { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA' }
+const BLUE = { id: 'f-blue', colour: '#1B6CA8', colour_name: 'Ocean blue', material: 'PLA', alpha: 255, extra_colours: [], effect: null }
+const ORANGE = { id: 'f-orange', colour: '#E8532F', colour_name: 'Signal orange', material: 'PLA', alpha: 255, extra_colours: [], effect: null }
 
 export const KEYCHAIN: Listing = {
   id: KEYCHAIN_ID,

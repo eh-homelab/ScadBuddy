@@ -1386,6 +1386,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   by a subtype's name. A density read Bambuddy refuses leaves the density
   empty and fails nothing. `filaments.density_profile` keeps where it came from; a
   person's density clears it. An estimate reads only the record's own density.
+  A record's whole colour (#6209, migration `20261114T1607Z_filaments_alpha_effect.sql`):
+  `colour` stays `#RRGGBB` (the render splits parts by it; a clear filament is its RGB with
+  `alpha` 0), beside `alpha`, `extra_colours` (at most 8 stops) and `effect` (Bambuddy's
+  `effect_type` set), all on `Filament` and the storefront's `PublicFilament`.
+  `colour_source` is `import` or `manual`: a look sent by a person that differs from the
+  record's makes it `manual`, and the import never sets a `manual` record's look;
+  `colour_source: "import"` in a PATCH hands it back. The import matches a record by its
+  link to the group's spools (`spool_ids`), else by material, subtype, brand and the spools'
+  RGB (`spool_colour`, then `colour`), never by a colour a person set, so it makes no
+  duplicate (`spool_import.py` `_match`; a group whose RGB is another record's hand-set
+  colour is skipped `colour_taken`).
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

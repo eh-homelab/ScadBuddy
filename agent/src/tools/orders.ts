@@ -629,6 +629,22 @@ const filamentFields = {
   colour: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   cost_per_kg: decimal.optional().describe('In the shop\'s currency'),
   density_g_cm3: decimal.nullable().optional().describe('g/cm³, for the rough estimate'),
+  // #6209: what Bambuddy keeps beside the RGB; `colour` stays #RRGGBB for the render.
+  alpha: z.number().int().min(0).max(255).optional().describe('The alpha byte: 255 opaque, below it translucent (a clear filament is its RGB with alpha 0)'),
+  extra_colours: z
+    .array(z.string().regex(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/))
+    .max(8)
+    .optional()
+    .describe('A multi-colour filament\'s stops, #RRGGBB or #RRGGBBAA'),
+  effect: z
+    .enum(['sparkle', 'wood', 'marble', 'glow', 'matte', 'silk', 'galaxy', 'rainbow', 'metal', 'translucent', 'gradient', 'dual-color', 'tri-color', 'multicolor'])
+    .nullable()
+    .optional()
+    .describe("Bambuddy's swatch effect"),
+  colour_source: z
+    .literal('import')
+    .optional()
+    .describe('Edit only: hand the colour back to the spool import, which sets it at its next run. A colour, alpha, stops or effect changed here marks it set by hand'),
 }
 /** The print dialog's choices (`PrintChoices`): what the item is sliced with. */
 const printChoices = z
@@ -2634,7 +2650,9 @@ export const orderTools: Tool[] = [
       "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
       '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
       "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
-      'differ. A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
+      'differ. A record keeps its link to its spools, so a colour set by hand makes no second record; the import sets ' +
+      "a record's colour, alpha, stops and effect only while its `colour_source` is `import`. " +
+      'A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
       "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
     input: z.object({}),
     risk: 'write',

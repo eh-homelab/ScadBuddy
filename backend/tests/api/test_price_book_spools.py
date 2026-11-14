@@ -141,3 +141,101 @@ def test_a_quote_never_reads_the_spools(client: TestClient) -> None:
     inventory = respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
     assert client.get(BOOK).status_code == 200
     assert not inventory.called
+
+
+def _inventory(*spools: dict[str, Any]) -> None:
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=list(spools)))
+
+
+CLEAR = {"subtype": "Translucent", "color_name": "Clear", "rgba": "00000000"}
+
+
+@respx.mock
+def test_a_clear_spool_keeps_its_alpha_stops_and_effect(client: TestClient) -> None:
+    """#6209: a clear spool is ``#000000`` with alpha 0, not black; the stops and the
+    effect come too, and the record's colour is the import's."""
+    configure(client)
+    no_density_sources()
+    _inventory(
+        spool(3, **CLEAR, effect_type="translucent", cost_per_kg=20),
+        spool(4, color_name="Aurora", extra_colors="7f3696,3a8fd2ff", cost_per_kg=26),
+    )
+
+    rows = {tuple(r["spool_ids"]): r for r in client.post(IMPORT).json()["rows"]}
+
+    clear = rows[(3,)]
+    assert (clear["action"], clear["colour"], clear["alpha"], clear["effect"]) == (
+        "created",
+        "#000000",
+        0,
+        "translucent",
+    )
+    assert clear["colour_source"] == "import"
+    assert rows[(4,)]["extra_colours"] == ["#7F3696", "#3A8FD2FF"]
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    made = book[clear["filament_id"]]
+    assert (made["colour"], made["alpha"], made["effect"], made["colour_source"]) == (
+        "#000000",
+        0,
+        "translucent",
+        "import",
+    )
+    assert book[rows[(4,)]["filament_id"]]["extra_colours"] == ["#7F3696", "#3A8FD2FF"]
+
+
+@respx.mock
+def test_a_persons_colour_is_kept_and_never_duplicated(client: TestClient) -> None:
+    """#6209: a colour a person edits is ``manual``; the next import matches the record by
+    its spools (then by the spools' RGB), keeps that colour, and makes no second record."""
+    configure(client)
+    no_density_sources()
+    _inventory(spool(3, **CLEAR, cost_per_kg=20))
+    made = client.post(IMPORT).json()["rows"][0]
+    url = f"{BOOK}/filaments/{made['filament_id']}"
+    edited = client.patch(url, json={"colour": "#EEF3F4", "alpha": 255}).json()
+    assert edited["colour_source"] == "manual"
+
+    # The same spool, a new price: matched by the spool link.
+    _inventory(spool(3, **CLEAR, effect_type="translucent", cost_per_kg=22))
+    again = client.post(IMPORT).json()["rows"][0]
+    assert (again["action"], again["filament_id"]) == ("updated", made["filament_id"])
+    assert (again["colour"], again["alpha"], again["colour_source"]) == ("#EEF3F4", 255, "manual")
+
+    # A new spool of it, the old one gone: matched by the spools' RGB.
+    _inventory(spool(9, **CLEAR, cost_per_kg=23))
+    newer = client.post(IMPORT).json()["rows"][0]
+    assert (newer["action"], newer["filament_id"]) == ("updated", made["filament_id"])
+
+    book = client.get(BOOK).json()["filaments"]
+    assert [(f["id"], f["colour"], f["alpha"], f["cost_per_kg"]) for f in book] == [
+        (made["filament_id"], "#EEF3F4", 255, "23")
+    ]
+
+    # Another filament whose RGB is the colour the person set: skipped, not a duplicate.
+    other = {**CLEAR, "rgba": "EEF3F4FF"}
+    _inventory(spool(9, **CLEAR, cost_per_kg=23), spool(10, **other, cost_per_kg=5))
+    rows = {tuple(r["spool_ids"]): r for r in client.post(IMPORT).json()["rows"]}
+    assert (rows[(10,)]["action"], rows[(10,)]["reason"]) == ("skipped", "colour_taken")
+    assert len(client.get(BOOK).json()["filaments"]) == 1
+
+
+@respx.mock
+def test_the_import_fills_the_look_of_an_imported_record(client: TestClient) -> None:
+    """#6209: the backfill. A record whose colour is the import's takes the spool's alpha,
+    stops and effect on the next import; handing a colour back (``colour_source``
+    ``import``) lets it."""
+    configure(client)
+    no_density_sources()
+    old = add_filament(client, subtype="Translucent", colour_name="Clear", colour="#000000")
+    client.patch(f"{BOOK}/filaments/{old['id']}", json={"colour_source": "import"})
+    _inventory(spool(3, **CLEAR, effect_type="translucent", cost_per_kg=old["cost_per_kg"]))
+
+    row = client.post(IMPORT).json()["rows"][0]
+
+    assert (row["action"], row["filament_id"], row["alpha"], row["effect"]) == (
+        "updated",
+        old["id"],
+        0,
+        "translucent",
+    )
+    assert client.post(IMPORT).json()["rows"][0]["action"] == "unchanged"

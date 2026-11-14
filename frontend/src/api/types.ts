@@ -505,7 +505,7 @@ export type ShippingOption = Schemas['ShippingOption']
  * places, the backend's (ISO 4217) and never `Intl`'s. */
 export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
-export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
+export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3' | 'alpha'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
 /** #4625 (order operations spec 2026-11-07 §6) — a registry printer's machine rate: its
  * inputs (null with no profile) and the rate they give now, with each part of the sum. */
