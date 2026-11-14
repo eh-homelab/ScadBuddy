@@ -139,18 +139,19 @@ async def content(
     request: pytest.FixtureRequest, tmp_path: Path, pool: Pool
 ) -> AsyncIterator[ContentStore]:
     """A content store over a directory, then over moto's S3, then the render worker's:
-    over a directory, its index the API's CRUD routes (`RemoteBlobIndex`, #5298)."""
+    over a directory, its index the API's CRUD routes for a render job's keys and every
+    read it makes (`WorkerViewIndex`, #5298); the API writes every other key."""
     with ExitStack() as stack:
         if request.param == "local":
             store = local_content(tmp_path / "remote", pool)
         elif request.param == "s3":
             store = s3_content(request.getfixturevalue("s3"), pool)
         else:
-            from tests.crud.crud_support import threaded_render_index
+            from tests.crud.crud_support import threaded_worker_index
 
             store = ContentStore(
                 LocalContentBackend(tmp_path / "remote"),
-                stack.enter_context(threaded_render_index(pool)),
+                stack.enter_context(threaded_worker_index(pool)),
             )
         try:
             yield store

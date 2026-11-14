@@ -116,8 +116,9 @@ class SettingsView(BaseModel):
     #: As saved (comma-separated); the first is where Bambuddy links point (#775).
     bambuddy_web_urls: str | None = None
     has_render_api_key: bool = False
-    #: True while render workers would hold the full key (spec §9): a key is stored and
-    #: no render key is. The Settings page shows a persistent warning.
+    #: True while a key is stored and no render key is (spec §9): standalone render
+    #: workers then get no Bambuddy key, and a render inside the API process uses the
+    #: full one. The Settings page shows a persistent warning.
     render_key_fallback: bool = False
     store_backend: StoreBackend = "local"
     library_backend: LibraryBackend = "bambuddy"

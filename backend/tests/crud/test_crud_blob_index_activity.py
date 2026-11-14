@@ -25,6 +25,9 @@ from tests.support.temporal import temporal_client
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
+#: A render key (`api/crud_render.py` `RENDER_KEY`).
+K = "e" * 64
+
 
 def _ref(name: str) -> BlobRef:
     return BlobRef(sha256=name * 64, kind="piece", backend="bambuddy", backend_id=name, size=1)
@@ -43,7 +46,7 @@ class PutTwice:
         attempt = activity.info().attempt
         ref = _ref("b") if attempt == 1 else _ref(second)
         self.answers[attempt] = await asyncio.to_thread(
-            self.index.put, "k", ref, slug="demo", meta={}
+            self.index.put, K, ref, slug="demo", meta={}
         )
         if attempt == 1:
             raise RuntimeError("failed after the write")
@@ -90,7 +93,7 @@ async def test_a_retried_activity_attempts_write_under_its_ordinal_key(
     pool: Pool, second: str, previous: str, named: str, ledger: int
 ) -> None:
     sql = BlobIndex(pool)
-    sql.put("k", _ref("a"), slug="demo", meta={})
+    sql.put(K, _ref("a"), slug="demo", meta={})
     queue = f"t-{uuid.uuid4().hex[:8]}"
     async with (
         served_render_crud(pool, unavailable_budget=2) as crud,
@@ -116,6 +119,6 @@ async def test_a_retried_activity_attempts_write_under_its_ordinal_key(
         finally:
             remote.close()
     assert activities.answers == {1: _ref("a"), 2: _ref(previous)}
-    row = sql.get("k")
+    row = sql.get(K)
     assert row is not None and row.ref == _ref(named)
     assert _ledger(pool) == ledger
