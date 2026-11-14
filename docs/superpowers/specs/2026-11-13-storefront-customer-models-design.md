@@ -851,6 +851,27 @@ A `deposit` request is not gated (the owner's decision): submit opens it before 
 price a purchase. The customer's view sets `can_accept` false while the gate is on and shows
 "Purchase pending: the shop is pricing <n> thing(s) to buy for you."
 
+**As built (PR 3, #6133).** `record_purchase(order_id, source_id, body, by)` also takes
+the order id, for its lock. Record, update and decline work only while the order is
+`draft` or `quoted` (`purchase_locked` after, so record too); a second record of a
+recorded link with the same amount and cost kind, and a second decline, write nothing; a
+second record that differs is 409 `purchase_recorded` (a change is the update); a record of a `not_needed` link is
+409 `purchase_not_pending`, an update of a link not recorded 409
+`purchase_not_recorded`. A cost entry with a `purchase:` source cannot be added by hand
+either (`purchase_cost_linked`). The routes are `GET /orders/{id}/purchases`, `POST
+…/purchases/{source}/record`, `PATCH …/purchases/{source}` and `POST
+…/purchases/{source}/decline`, with no `Idempotency-Key`: the cost entry's `purchase:`
+source and the link's state make a repeat safe. The agent also gets `order_purchases`
+(read), which lists the links' ids that the three write tools take. A design request
+sends its things to buy as the multipart part `purchase_links` (a JSON list of `{url,
+note}`). The fee settings are env-seeded and live, as `orders_tax_percent` is. The
+`purchase_pending` problem names the pending links in `sources` and their items in
+`items`. The gate counts only links of items not cancelled: a cancelled item's link
+stops nothing until the item is reopened. A change to a fee setting reprices an order's
+`handling` row only at that order's next record, update or decline. Sources:
+`backend/scadbuddy/orders/lifecycle.py`, `api/order_purchases.py`,
+`storefront/uploads.py`; `backend/tests/orders/test_purchases.py`.
+
 ### 10.5 What the customer sees
 
 `CustomerOrderView` and `ORDER_VIEW_FIELDS` gain:

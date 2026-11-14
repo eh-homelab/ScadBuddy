@@ -1027,6 +1027,9 @@ export const settingsDefaults = {
   // #5281 — auto tax, the deposit policy and the shipping options, at the backend's defaults.
   orders_tax_percent: '0',
   orders_tax_shipping: false,
+  // #6133 — the handling fee for bought items, at the backend's defaults (none).
+  orders_purchase_fee_flat_minor: 0,
+  orders_purchase_fee_percent: '0',
   orders_deposit_policy: [],
   storefront_shipping_options: [],
   storefront_payment_instructions: null,

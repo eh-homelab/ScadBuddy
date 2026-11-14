@@ -269,6 +269,9 @@ class _Rows:
     instructions: str | None
     #: The price book's colour names, by filament id.
     colour_names: dict[str, str | None]
+    #: Whether a thing to buy is still `pending` (#6133, spec 2026-11-13 §10.4): no accept
+    #: is offered until the shop prices it.
+    purchase_pending: bool = False
 
 
 def _picture(attachment: Attachment) -> bool:
@@ -324,6 +327,7 @@ def _read(conn: Conn, orders: OrdersComponent, order_id: str) -> _Rows:
         colour_names={
             f.id: f.colour_name for f in store.filaments(include_archived=True, conn=conn)
         },
+        purchase_pending=bool(store.pending_purchases(conn, order_id)),
     )
 
 
@@ -408,7 +412,11 @@ def _quote(item: OrderItem, rows: _Rows, revisions: list[Revision]) -> CustomerQ
     named = by_id.get(quote.revision_id) if quote.revision_id else (before[-1] if before else None)
     if revisions and (named is None or named.sent_at is None):
         return None
-    open_order = rows.order.status in ("draft", "quoted") and not rows.order.on_hold
+    open_order = (
+        rows.order.status in ("draft", "quoted")
+        and not rows.order.on_hold
+        and not rows.purchase_pending
+    )
     # Accepting follows `Lifecycle.accept_quote`: a quote that names no design is
     # accepted against the item's current design, which a `design_first` item needs
     # accepted first, so the page never offers an accept the lifecycle refuses.
@@ -620,6 +628,8 @@ _REFUSALS: Final[dict[str, str]] = {
     "order_not_cancellable": "This order can no longer be cancelled.",
     "order_on_hold": "The shop has paused this order. Ask the shop about it.",
     "payment_in_flight": "A payment is being confirmed. Try again once it is.",
+    # #6133 (spec 2026-11-13 §10.4): the shop prices what it buys for the order first.
+    "purchase_pending": "The shop is pricing things to buy for you. Try again once it has.",
 }
 _NOT_FOUND: Final = frozenset({"revision_not_found", "quote_not_found", "item_not_found"})
 

@@ -452,7 +452,12 @@ async def add_request(request: Request, crud: Crud, visitor_id: Visitor, client:
     try:
         upload.release()
         return await crud.add_request(
-            upload.text, upload.files, key=key, visitor_id=visitor_id, client=client
+            upload.text,
+            upload.files,
+            key=key,
+            visitor_id=visitor_id,
+            client=client,
+            purchase_links=upload.purchase_links,
         )
     except CrudUnavailableError as error:
         if error.problem.get("type") == UPLOADS_BUSY:

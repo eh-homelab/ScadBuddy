@@ -24,6 +24,7 @@ checks it.
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, Final
@@ -36,8 +37,10 @@ from starlette.datastructures import UploadFile
 from scadbuddy.auth.service_auth import ExchangeSettings, ServiceAuth, exchange_source
 from scadbuddy.crud.client import CrudClient, CrudStream, Upload, wait_for_areas
 from scadbuddy.crud.wire import PREFIX
+from scadbuddy.storefront.uploads import PurchaseLinkAsk
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    PURCHASE_LINKS_FIELD,
     SESSION_HEADER,
     TURNSTILE_VERIFY_SECONDS,
     VISITOR_HEADER,
@@ -73,11 +76,28 @@ UPLOAD_TIMEOUT: Final = httpx.Timeout(connect=5.0, read=300.0, write=300.0, pool
 _CHUNK: Final = 1 << 20
 
 
-async def _multipart(boundary: str, text: str, files: Sequence[UploadFile]) -> AsyncIterator[bytes]:
-    """The request as multipart, each file read from its start in a thread."""
+async def _multipart(
+    boundary: str,
+    text: str,
+    files: Sequence[UploadFile],
+    purchase_links: Sequence[PurchaseLinkAsk] = (),
+) -> AsyncIterator[bytes]:
+    """The request as multipart, each file read from its start in a thread. The things to
+    buy (#6133), when there are any, go as the JSON the edge read them as."""
     dash = f"--{boundary}\r\n".encode()
     yield dash + b'Content-Disposition: form-data; name="text"\r\n\r\n'
     yield text.encode() + b"\r\n"
+    if purchase_links:
+        # UTF-8, not ASCII escapes: `ensure_ascii` writes a character outside the BMP as a
+        # surrogate pair, 12 bytes, past `MAX_PURCHASE_LINKS_BYTES` (review of #6200).
+        links = json.dumps(
+            [link.model_dump() for link in purchase_links],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        disposition = f'Content-Disposition: form-data; name="{PURCHASE_LINKS_FIELD}"\r\n\r\n'
+        yield dash + disposition.encode()
+        yield links.encode() + b"\r\n"
     for upload in files:
         name = escape_filename(upload.filename or "file")
         yield (
@@ -301,9 +321,11 @@ class StorefrontCrud:
         key: str,
         visitor_id: str,
         client: str,
+        purchase_links: Sequence[PurchaseLinkAsk] = (),
     ) -> Any:
-        """``POST …/storefront/draft/requests``: ``text`` and each spooled file, as
-        multipart made as it is sent, each file read a chunk at a time in a thread. Its
+        """``POST …/storefront/draft/requests``: ``text``, the things to buy (#6133) and
+        each spooled file, as multipart made as it is sent, each file read a chunk at a
+        time in a thread. Its
         body cannot be sent twice, so it is sent once (`UPLOAD_TIMEOUT`), never retried:
         a failure raises `CrudUnavailableError` at once."""
         boundary = secrets.token_hex(16)
@@ -315,7 +337,7 @@ class StorefrontCrud:
             timeout=UPLOAD_TIMEOUT,
             upload=Upload(
                 f"multipart/form-data; boundary={boundary}",
-                _multipart(boundary, text, files),
+                _multipart(boundary, text, files, purchase_links),
             ),
         )
         return response.json()
