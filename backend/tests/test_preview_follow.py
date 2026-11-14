@@ -352,6 +352,8 @@ async def cancel_a_claim_and_read_again(
         if seen and not follows._claiming:
             break
         await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the cancelled claim did not settle")
 
 
 async def test_a_read_cancelled_while_it_claims_releases_the_claim() -> None:
@@ -471,6 +473,49 @@ def test_a_failed_statement_on_a_live_connection_starts_the_back_off_too(
     claims = PgFollowClaims("postgresql://nobody@db/nothing", clock=lambda: now[0])
     assert claims.claim("native:7:x") is True
     assert len(opened) == 1
+    assert opened[0].closed
+    assert claims.open_connections() == 0
+    now[0] += claims_module.CONNECT_BACKOFF - 1
+    assert claims.claim("native:8:x") is True
+    assert len(opened) == 1
+    now[0] += 1
+    assert claims.claim("native:8:x") is True
+    assert len(opened) == 2
+    claims.close()
+
+
+class ReleaseFailsConnection:
+    """A connection that takes a lock, then fails the release, as one whose server went."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def execute(self, sql: str, *_: object) -> ReleaseFailsConnection:
+        if "unlock" in sql:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return self
+
+    def fetchone(self) -> tuple[bool]:
+        return (True,)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_failed_release_starts_the_back_off_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6174: the failed release drops the connection, as a failed claim does, so the next
+    claim waits for the back-off and does not connect under the lock at once."""
+    opened: list[ReleaseFailsConnection] = []
+
+    def connect(conninfo: str, **_: object) -> ReleaseFailsConnection:
+        opened.append(ReleaseFailsConnection())
+        return opened[-1]
+
+    monkeypatch.setattr(psycopg, "connect", connect)
+    now = [100.0]
+    claims = PgFollowClaims("postgresql://nobody@db/nothing", clock=lambda: now[0])
+    assert claims.claim("native:7:x") is True
+    claims.release("native:7:x")
     assert opened[0].closed
     assert claims.open_connections() == 0
     now[0] += claims_module.CONNECT_BACKOFF - 1

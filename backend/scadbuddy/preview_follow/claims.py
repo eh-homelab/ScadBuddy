@@ -17,7 +17,7 @@ Closing the connection ends every lock on it, so a process that stops frees its 
 
 A claim whose connection fails answers that this process follows the slice: the dialog
 then hears of its changes, at worst twice while Postgres cannot be reached. After a failed
-claim, the claims answer the same with no connect for `CONNECT_BACKOFF` seconds, so
+claim or release, the claims answer the same with no connect for `CONNECT_BACKOFF` seconds, so
 during an outage reads of new slices do not queue behind each other's connects, each up
 to `CONNECT_TIMEOUT` seconds (#6162). A lock lost with its connection lets another
 replica follow the slice too, until one follow ends.
@@ -129,6 +129,8 @@ class PgFollowClaims:
                 # Closing the connection frees the lock, and every other one on it.
                 logger.warning("a background slice's follow could not be released", exc_info=True)
                 self._drop()
+                # #6174: as after a failed claim, the next claim does not connect at once.
+                self._retry_at = self._clock() + CONNECT_BACKOFF
 
     def close(self) -> None:
         with self._lock:
