@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// ModelPrintChoices what the print dialog last chose for one model (#78). “printer“ is the registry printer it printed on (#5167). “printer_id“ is not stored: a load gives the Bambuddy printer that “printer“ links, and a save of a “printer_id“ with no “printer“ keeps the registry printer that links it. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. “part_settings“ are its slicer settings per filament slot (#5627, “bambuddy/part_settings.py“), a model's or a library file's (#5628). Kept per model or file only, never at the print options' global or printer scope, since a slot number means one file's colour. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
+// ModelPrintChoices what the print dialog last chose for one model (#78). “printer“ is the registry printer it printed on (#5167). “printer_id“ is not stored: a load gives the Bambuddy printer that “printer“ links, and a save of a “printer_id“ with no “printer“ keeps the registry printer that links it. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. “part_settings“ are its slicer settings per filament slot (#5627, “bambuddy/part_settings.py“), a model's or a library file's (#5628). Kept per model or file only, never at the print options' global or printer scope, since a slot number means one file's colour. “process_overrides“ are its "Slicer settings" (#2998, “bambuddy/process_overrides.py“): any Bambu Studio process key, kept in the stored jsonb with the rest, so no migration. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 type ModelPrintChoices struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
@@ -25,6 +25,8 @@ type ModelPrintChoices struct {
 	printer_id ModelPrintChoices_ModelPrintChoices_printer_idable
 	// The process_name property
 	process_name ModelPrintChoices_ModelPrintChoices_process_nameable
+	// The process_overrides property
+	process_overrides i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	// The tier property
 	tier ModelPrintChoices_ModelPrintChoices_tierable
 }
@@ -604,6 +606,16 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["process_overrides"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.CreateUntypedNodeFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProcessOverrides(val.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable))
+		}
+		return nil
+	}
 	res["tier"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_tierFromDiscriminatorValue)
 		if err != nil {
@@ -657,6 +669,12 @@ func (m *ModelPrintChoices) GetPrintSequence() ModelPrintChoices_ModelPrintChoic
 // returns a ModelPrintChoices_ModelPrintChoices_process_nameable when successful
 func (m *ModelPrintChoices) GetProcessName() ModelPrintChoices_ModelPrintChoices_process_nameable {
 	return m.process_name
+}
+
+// GetProcessOverrides gets the process_overrides property value. The process_overrides property
+// returns a UntypedNodeable when successful
+func (m *ModelPrintChoices) GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable {
+	return m.process_overrides
 }
 
 // GetTier gets the tier property value. The tier property
@@ -722,6 +740,12 @@ func (m *ModelPrintChoices) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 		}
 	}
 	{
+		err := writer.WriteObjectValue("process_overrides", m.GetProcessOverrides())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("tier", m.GetTier())
 		if err != nil {
 			return err
@@ -776,6 +800,11 @@ func (m *ModelPrintChoices) SetProcessName(value ModelPrintChoices_ModelPrintCho
 	m.process_name = value
 }
 
+// SetProcessOverrides sets the process_overrides property value. The process_overrides property
+func (m *ModelPrintChoices) SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable) {
+	m.process_overrides = value
+}
+
 // SetTier sets the tier property value. The tier property
 func (m *ModelPrintChoices) SetTier(value ModelPrintChoices_ModelPrintChoices_tierable) {
 	m.tier = value
@@ -791,6 +820,7 @@ type ModelPrintChoicesable interface {
 	GetPrinterId() ModelPrintChoices_ModelPrintChoices_printer_idable
 	GetPrintSequence() ModelPrintChoices_ModelPrintChoices_print_sequenceable
 	GetProcessName() ModelPrintChoices_ModelPrintChoices_process_nameable
+	GetProcessOverrides() i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable
 	GetTier() ModelPrintChoices_ModelPrintChoices_tierable
 	SetFilamentPlan(value []SlotChoiceable)
 	SetNozzles(value []NozzleChoiceable)
@@ -799,5 +829,6 @@ type ModelPrintChoicesable interface {
 	SetPrinterId(value ModelPrintChoices_ModelPrintChoices_printer_idable)
 	SetPrintSequence(value ModelPrintChoices_ModelPrintChoices_print_sequenceable)
 	SetProcessName(value ModelPrintChoices_ModelPrintChoices_process_nameable)
+	SetProcessOverrides(value i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.UntypedNodeable)
 	SetTier(value ModelPrintChoices_ModelPrintChoices_tierable)
 }
