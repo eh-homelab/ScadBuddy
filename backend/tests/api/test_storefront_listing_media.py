@@ -133,6 +133,8 @@ def test_a_video_is_refused_the_storefront_shows_images_only(
     answer = _set(client, listing, [video["id"]])
     assert answer.status_code == 422, answer.text
     assert answer.json()["type"] == STOREFRONT_PROBLEMS + "listing_media_not_image"
+    assert answer.json()["name"] == video["id"]
+    assert "pictures_saved" not in answer.json()
 
 
 def test_a_stale_read_and_a_missing_listing_are_refused(
@@ -160,6 +162,8 @@ def test_a_republish_the_stored_listing_fails_is_refused_and_the_last_publish_st
     answer = _set(client, listing, [second])
     assert answer.status_code == 422, answer.text
     assert answer.json()["type"] == STOREFRONT_PROBLEMS + "listing_colour_unknown"
+    # The client is told the pictures landed although the republish was refused.
+    assert answer.json()["pictures_saved"] is True
 
     after = client.get(f"{LISTINGS}/{listing['id']}").json()
     # The new pictures are kept; the public site still shows the last publish.

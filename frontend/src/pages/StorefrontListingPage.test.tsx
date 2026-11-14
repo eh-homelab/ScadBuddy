@@ -4,7 +4,7 @@ import { Route, Routes, useLocation, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { MediaView, StorefrontListing } from '../api/types'
-import { resetMockState } from '../mocks/handlers'
+import { resetMockState, setMockMedia } from '../mocks/handlers'
 import { keychainSchema, versionIds } from '../mocks/fixtures'
 import { FILAMENT_PETG, FILAMENT_PLA } from '../mocks/features/orders/state'
 import { server } from '../mocks/server'
@@ -504,6 +504,25 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       renderStorefront(`/storefront?listing=${listing.id}`)
       expect(await screen.findByLabelText('Title')).toHaveValue('From the assistant')
     })
+  })
+
+  it('lists every picture the listing holds, so what it shows is what Save draft sends (#6213)', async () => {
+    const keychain = (await api.getModel(KEYCHAIN)).media ?? []
+    const video: MediaView = { id: 'd4e5f6a1b2c3', file: 'd4e5f6a1b2c3.mp4', kind: 'video', caption: 'Clip', poster: null, missing: false, readonly: false, content_type: 'video/mp4', size: 24 }
+    setMockMedia(KEYCHAIN, [...keychain, video])
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', media_ids: [video.id, 'thumbnail', '0123456789ab'] })
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+
+    await waitFor(() => expect(screen.getAllByTestId('listing-picture').map((row) => row.textContent)).toEqual([
+      expect.stringContaining('A video'),
+      expect.stringContaining('thumbnail.png'),
+      expect.stringContaining('Not in the design’s media'),
+    ]))
+    await user.click(screen.getByRole('button', { name: 'Remove Clip' }))
+    await user.click(screen.getByRole('button', { name: 'Remove 0123456789ab' }))
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(async () => expect((await api.storefrontListing(listing.id)).media_ids).toEqual(['thumbnail']))
+    expect(screen.getAllByTestId('listing-picture')).toHaveLength(1)
   })
 
   it('keeps the edits made while a picture uploads, and adds the picture to them (#6213)', async () => {

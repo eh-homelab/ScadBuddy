@@ -66,6 +66,29 @@ describe('ListingPictures (#6213)', () => {
     expect(seen.at(-1)).toEqual(['b2c3d4e5f6a1', 'c3d4e5f6a1b2'])
   })
 
+  it('lists every id the draft holds, saying which are no image the store can show', async () => {
+    const media = (await api.getModel(GALLERY_SLUG)).media ?? []
+    const missing: MediaView = { ...media[0]!, id: 'e5f6a1b2c3d4', file: 'e5f6a1b2c3d4.png', caption: 'Lost', missing: true }
+    const seen: string[][] = []
+    const { user } = renderPage(<Harness media={[...media, missing]} start={['d4e5f6a1b2c3', 'a1b2c3d4e5f6', 'e5f6a1b2c3d4', '0123456789ab']} live={null} seen={seen} />)
+    const rows = screen.getAllByTestId('listing-picture')
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('A video: the store shows it as a video.'),
+      expect.not.stringContaining('Remove it.'),
+      expect.stringContaining('Its file is missing: publish refuses it.'),
+      expect.stringContaining('Not in the design’s media: publish refuses it.'),
+    ])
+    await user.click(screen.getByRole('button', { name: 'Remove Printing on an H2C' }))
+    await user.click(screen.getByRole('button', { name: 'Remove 0123456789ab' }))
+    expect(seen.at(-1)).toEqual(['a1b2c3d4e5f6', 'e5f6a1b2c3d4'])
+  })
+
+  it('calls no id gone while the design’s media is still read', () => {
+    renderPage(<ListingPictures slug={GALLERY_SLUG} media={[]} mediaState="loading" chosen={['a1b2c3d4e5f6']} live={null} onChange={() => undefined} onUploaded={() => undefined} />)
+    expect(screen.getByTestId('listing-picture')).toHaveTextContent('Reading the design’s media…')
+    expect(screen.queryByText(/publish refuses it/)).not.toBeInTheDocument()
+  })
+
   it('marks each picture live or not yet', async () => {
     const media = (await api.getModel(GALLERY_SLUG)).media ?? []
     renderPage(<Harness media={media} start={['a1b2c3d4e5f6', 'b2c3d4e5f6a1']} live={['a1b2c3d4e5f6']} seen={[]} />)

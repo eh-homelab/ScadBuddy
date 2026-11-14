@@ -24,33 +24,45 @@ function same(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
- * What a refused save did, told from the listing read again after it. `PUT …/media` writes
- * the pictures before it publishes a published listing again, so a refusal may come after
- * the write: the pictures are saved, and the store shows the last publish.
+ * What a refused save did. The route says so itself: a refusal after the pictures were
+ * written carries `pictures_saved: true` (a published listing whose republish was refused:
+ * the store shows the last publish). Any other refusal (`ApiError`) wrote nothing. Only
+ * when no answer came does the listing, read again, tell whether the pictures landed. The
+ * row is replaced by the listing as it is now whenever it can be read.
  */
 async function afterRefusal(listing: Row, sent: readonly string[], picture: string, caught: unknown): Promise<{ row: Row | null; said: string }> {
   const reason = message(caught)
-  let fresh: Row
+  let fresh: Row | null = null
   try {
     fresh = await api.storefrontListing(listing.id)
   } catch {
-    return { row: null, said: `Not confirmed: ${reason}. Open this dialog again to see the listing as it is.` }
+    // Left as it was read; the message below says what is known without it.
   }
-  if (same(fresh.media_ids, sent)) {
-    return {
-      row: fresh,
-      said: fresh.published
-        ? `Pictures saved, but not published again: ${reason}. The store shows the last published pictures until the listing is published again from its page.`
-        : `Pictures saved: ${reason}.`,
+  if (caught instanceof ApiError) {
+    const problem = caught.problem as { type?: string; name?: unknown; pictures_saved?: unknown }
+    if (problem.pictures_saved === true) {
+      return {
+        row: fresh,
+        said: `Pictures saved, but not published again: ${reason}. The store shows the last published pictures until the listing is published again from its page.`,
+      }
     }
+    if (caught.status === 409) {
+      return { row: fresh, said: fresh ? 'Not saved: changed elsewhere since it was read. It is read again; Save to try again.' : 'Not saved: changed elsewhere since it was read. Open this dialog again.' }
+    }
+    // A picture the listing named before (deleted from the design since, or a video) refuses the whole set.
+    const named = typeof problem.name === 'string' && problem.name !== picture ? problem.name : null
+    if (named && problem.type?.endsWith('/listing_media_unknown')) {
+      return { row: fresh, said: `Not saved: the listing still names a picture the design no longer has (${named}). Remove it in the listing's editor, then try again.` }
+    }
+    if (named && problem.type?.endsWith('/listing_media_not_image')) {
+      return { row: fresh, said: `Not saved: the listing also shows a video (${named}), and this dialog sets pictures only on a listing of images. Remove the video in the listing's editor, then try again.` }
+    }
+    return { row: fresh, said: `Not saved: ${reason}` }
   }
-  // A picture the listing named before, deleted from the design since, refuses the whole set.
-  const stale = caught instanceof ApiError && caught.problem.type?.endsWith('/listing_media_unknown') ? (caught.problem as { name?: unknown }).name : undefined
-  if (typeof stale === 'string' && stale !== picture) {
-    return { row: fresh, said: `Not saved: the listing still names a picture the design no longer has (${stale}). Remove it in the listing's editor, then try again.` }
-  }
-  if (caught instanceof ApiError && caught.status === 409) {
-    return { row: fresh, said: 'Changed elsewhere since it was read; read again. Save to try again.' }
+  // No answer: only the listing read again tells.
+  if (!fresh) return { row: null, said: `Not confirmed: ${reason}. Open this dialog again to see the listing as it is.` }
+  if (same(fresh.media_ids, sent)) {
+    return { row: fresh, said: `The answer was lost, but the pictures are saved. Open the listing to see whether the store shows them.` }
   }
   return { row: fresh, said: `Not saved: ${reason}` }
 }
@@ -61,8 +73,8 @@ async function afterRefusal(listing: Row, sent: readonly string[], picture: stri
  * rows carry each one's pictures and `updated_at`. Save sets each changed listing's
  * pictures (`PUT /storefront/listings/{id}/media`): the image is added last, or taken out.
  * A published listing is published again at once and stays on the store; a draft stays a
- * draft. Each listing's answer is shown beside it, and a refused save is told from the
- * listing read again (`afterRefusal`).
+ * draft. Each listing's answer is shown beside it; a refused save says whether the
+ * pictures landed (`afterRefusal`).
  */
 export function StorefrontPicture({ slug, item }: { slug: string; item: MediaView }) {
   const [open, setOpen] = useState(false)
@@ -97,11 +109,14 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
 
   const changes = (listings ?? []).filter((listing) => (wanted[listing.id] ?? false) !== listing.media_ids.includes(item.id))
 
-  function replace(row: Row) {
-    setListings((all) => (all ?? []).map((one) => (one.id === row.id ? row : one)))
+  /** `row` in place of its listing, while the read `read` is still the one shown. */
+  function replace(read: number, row: Row) {
+    if (read === reads.current) setListings((all) => (all ?? []).map((one) => (one.id === row.id ? row : one)))
   }
 
   async function save() {
+    // Answers that land after the dialog was opened again (a new read) are not applied to it.
+    const read = reads.current
     setBusy(true)
     const said: Record<string, string> = {}
     for (const listing of changes) {
@@ -109,15 +124,15 @@ export function StorefrontPicture({ slug, item }: { slug: string; item: MediaVie
       const ids = show ? [...listing.media_ids, item.id] : listing.media_ids.filter((id) => id !== item.id)
       try {
         const saved = await api.setStorefrontListingMedia(listing.id, ids, listing.updated_at)
-        replace(saved)
+        replace(read, saved)
         said[listing.id] = show ? (saved.published ? 'Added; live now.' : 'Added to the draft.') : saved.published ? 'Taken off; live now.' : 'Taken off the draft.'
       } catch (caught) {
         const told = await afterRefusal(listing, ids, item.id, caught)
-        if (told.row) replace(told.row)
+        if (told.row) replace(read, told.row)
         said[listing.id] = told.said
       }
     }
-    setResults(said)
+    if (read === reads.current) setResults(said)
     setBusy(false)
   }
 

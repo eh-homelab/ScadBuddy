@@ -243,7 +243,7 @@ export const handlers = [
     for (const mediaId of media_ids) {
       const item = media.find((m) => m.id === mediaId && !m.missing)
       if (!item) return refused(422, 'listing_media_unknown', `the template has no media '${mediaId}'`, { name: mediaId })
-      if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`)
+      if (item.kind !== 'image') return refused(422, 'listing_media_not_image', `media '${mediaId}' is a ${item.kind}, not an image`, { name: mediaId })
     }
     const at = stamp()
     const next: StorefrontListing = { ...found, media_ids, updated_at: at }
@@ -252,7 +252,7 @@ export const handlers = [
     const changed: StorefrontListing = found.published && refusal === null ? { ...next, media: publishedMedia(next), published_at: at } : next
     listings = listings.map((l) => (l.id === id ? changed : l))
     save()
-    if (refusal !== null) return refused(422, refusal, `the republish was refused: ${refusal}`)
+    if (refusal !== null) return refused(422, refusal, `the republish was refused: ${refusal}`, { pictures_saved: true })
     return HttpResponse.json(changed)
   }),
 

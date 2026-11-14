@@ -7,6 +7,22 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { sellMedia } from './listingDraft'
 
+/**
+ * What a listing picture that is no image the store can show is, said beside it; null for
+ * an image. An id the media has not been read for yet is never called gone.
+ */
+function pictureNote(id: string, item: MediaView | undefined, images: readonly string[], state: MediaState): string | null {
+  if (!item) {
+    if (state === 'loading') return 'Reading the design’s media…'
+    if (state === 'failed') return 'The design’s media could not be read.'
+    return 'Not in the design’s media: publish refuses it. Remove it.'
+  }
+  if (item.missing) return 'Its file is missing: publish refuses it. Remove it.'
+  if (item.kind === 'video') return 'A video: the store shows it as a video. Pictures you add here are images.'
+  if (!images.includes(id)) return 'Not an image file the store can show. Remove it.'
+  return null
+}
+
 /** The image types a listing's upload takes: the storefront shows images only (#6131). */
 const PICTURE_ACCEPT = 'image/png,image/jpeg,image/webp'
 
@@ -17,10 +33,14 @@ const PICTURE_ACCEPT = 'image/png,image/jpeg,image/webp'
  */
 export type LivePictures = readonly string[] | null | 'unknown'
 
+/** Whether the template's media has been read: until it has, an id is not known to be gone. */
+export type MediaState = 'loading' | 'failed' | 'ready'
+
 export interface ListingPicturesProps {
   slug: string
-  /** The template's media; only its images can be shown. */
+  /** The template's media; only its images can be added. */
   media: readonly MediaView[]
+  mediaState?: MediaState
   /** The listing's pictures (`media_ids`), in the order the customer sees them. */
   chosen: readonly string[]
   live: LivePictures
@@ -34,17 +54,18 @@ export interface ListingPicturesProps {
 }
 
 /**
- * #6213 — a listing's pictures in the editor: the ones shown, in order (Move up, Move
- * down, Remove), each marked Live when the public site shows it now; the template's other
- * images to add; and an upload, which adds the file to the template's media and to the
- * listing at once. A change is the draft's until the listing is saved or published.
+ * #6213 — a listing's pictures in the editor: every id of the draft's `media_ids`, in
+ * order (Move up, Move down, Remove), so the list is exactly what Save draft and Publish
+ * send. Each is marked Live when the public site shows it now, and one that is no image the
+ * store can show (a video, a missing file, an id the template's media lacks) says so. Then
+ * the template's other images to add, and an upload, which adds the file to the template's
+ * media and to the listing at once. A change is the draft's until the listing is saved or
+ * published.
  */
-export function ListingPictures({ slug, media, chosen, live, onChange, onUploaded }: ListingPicturesProps) {
+export function ListingPictures({ slug, media, mediaState = 'ready', chosen, live, onChange, onUploaded }: ListingPicturesProps) {
   const images = sellMedia(media)
   const byId = new Map(media.map((item) => [item.id, item]))
-  // A known item that is no image is dropped; an id the media does not hold yet (still
-  // loading, or deleted since) is kept and shown, so publish names it.
-  const shown = chosen.filter((id) => !byId.has(id) || images.includes(id))
+  const shown = [...chosen]
   const others = images.filter((id) => !chosen.includes(id))
   const [uploading, setUploading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -100,10 +121,20 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
             const item = byId.get(id)
             const name = item?.caption || item?.file || id
             const isLive = Array.isArray(live) && live.includes(id)
+            const note = pictureNote(id, item, images, mediaState)
             return (
-              <li key={id} data-testid="listing-picture" className="flex flex-wrap items-center gap-2 rounded-md border p-1.5 text-sm">
-                <img src={api.mediaUrl(slug, { id })} alt={name} className="h-10 w-14 shrink-0 rounded object-cover" />
-                <span className="min-w-0 flex-1 truncate">{name}</span>
+              <li key={`${index}-${id}`} data-testid="listing-picture" className="flex flex-wrap items-center gap-2 rounded-md border p-1.5 text-sm">
+                {item && images.includes(id) ? (
+                  <img src={api.mediaUrl(slug, { id })} alt={name} className="h-10 w-14 shrink-0 rounded object-cover" />
+                ) : (
+                  <span aria-hidden="true" className="flex h-10 w-14 shrink-0 items-center justify-center rounded bg-muted text-[10px] text-muted-foreground">
+                    {item?.kind === 'video' ? 'Video' : 'No image'}
+                  </span>
+                )}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{name}</span>
+                  {note && <span className="text-xs text-warn">{note}</span>}
+                </span>
                 {Array.isArray(live) && (isLive ? <Badge>Live</Badge> : <Badge variant="outline">Not live yet</Badge>)}
                 <Button size="sm" variant="ghost" aria-label={`Move ${name} up`} disabled={index === 0} onClick={() => move(index, index - 1)}>
                   <ArrowUpIcon />
@@ -111,7 +142,7 @@ export function ListingPictures({ slug, media, chosen, live, onChange, onUploade
                 <Button size="sm" variant="ghost" aria-label={`Move ${name} down`} disabled={index === shown.length - 1} onClick={() => move(index, index + 1)}>
                   <ArrowDownIcon />
                 </Button>
-                <Button size="sm" variant="ghost" aria-label={`Remove ${name}`} onClick={() => onChange(shown.filter((other) => other !== id))}>
+                <Button size="sm" variant="ghost" aria-label={`Remove ${name}`} onClick={() => onChange(shown.filter((_other, at) => at !== index))}>
                   <XIcon />
                 </Button>
               </li>

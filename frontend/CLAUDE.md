@@ -122,7 +122,8 @@ same way, `vite.config.ts`).
   `/storefront?listing=<id>` and `?sell=…` addresses redirect to it. Mocks
   `src/mocks/features/storefront.ts`; e2e `e2e/storefront-admin.spec.ts` seeds 2,000
   listings into the mock's `sessionStorage`.
-  Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` orders,
+  Pictures (#6213): the editor's `components/storefront/ListingPictures.tsx` lists every
+  id of the draft's `media_ids` (a video, a missing file or an unknown id says so), orders,
   removes and adds a listing's images, uploads one into the template's media, and marks
   each one Live from the listing's published `media` (`media_id`; a listing published
   before that was kept says to publish again, never matched by place). A template's Media

@@ -897,7 +897,9 @@ def _check_pictures(core: Core, slug: str, media_ids: Sequence[str]) -> None:
             ) from None
         if view.kind != "image":
             raise _unprocessable(
-                "listing_media_not_image", f"media {media_id!r} is a {view.kind}, not an image"
+                "listing_media_not_image",
+                f"media {media_id!r} is a {view.kind}, not an image",
+                name=media_id,
             )
 
 
@@ -915,17 +917,35 @@ async def change_media(
     when that publish is refused, the pictures are kept and the public site shows what
     was last published (the listing's ``media``, each with its ``media_id``) until the
     next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
-    of `_check_pictures`, and those of `publish`."""
+    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
+    were written says so with the extension ``pictures_saved: true`` (any failure of the
+    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
+    client never has to guess whether its change landed."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
+    # The cheap check first: a stale read is refused before any media is read.
+    if listing.updated_at != expected_updated_at:
+        raise _changed(listing_id)
     await asyncio.to_thread(_check_pictures, core, listing.slug, media_ids)
     changed = await asyncio.to_thread(
         store.set_media, listing_id, media_ids, expected_updated_at=expected_updated_at
     )
     if not changed.published:
         return changed
-    return await publish(core, store, listing_id)
+    try:
+        return await publish(core, store, listing_id)
+    except ApiError as refused:
+        refused.extensions["pictures_saved"] = True
+        raise
+    except Exception as error:
+        raise problem(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "listing_republish_failed",
+            "the pictures were saved, but publishing the listing again failed;"
+            " the store shows the last published pictures",
+            pictures_saved=True,
+        ) from error
 
 
 async def unpublish(store: ListingStore, listing_id: str) -> Listing:

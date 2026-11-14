@@ -77,7 +77,7 @@ describe('StorefrontPicture (#6213)', () => {
     await api.setStorefrontListingMedia(listing.id, ['a1b2c3d4e5f6'], listing.updated_at)
 
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
-    expect(await within(dialog).findByText(/Changed elsewhere since it was read/)).toBeInTheDocument()
+    expect(await within(dialog).findByText(/Not saved: changed elsewhere since it was read/)).toBeInTheDocument()
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     expect(await within(dialog).findByText('Added to the draft.')).toBeInTheDocument()
@@ -118,6 +118,15 @@ describe('StorefrontPicture (#6213)', () => {
     await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
     expect(await within(dialog).findByText(/still names a picture the design no longer has \(0123456789ab\)/)).toBeInTheDocument()
+  })
+
+  it('names a video the listing already shows when it refuses the set', async () => {
+    const item = await image()
+    await api.createStorefrontListing(body('Coaster', ['d4e5f6a1b2c3']))
+    const { user, dialog } = await open(item)
+    await user.click(await within(dialog).findByRole('checkbox', { name: 'Show on Coaster' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByText(/^Not saved: the listing also shows a video \(d4e5f6a1b2c3\)/)).toBeInTheDocument()
   })
 
   it('says when the design has more listings than the dialog shows', async () => {

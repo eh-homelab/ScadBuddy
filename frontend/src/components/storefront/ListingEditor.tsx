@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { colourProblems, emptyDraft, fixColour, isSupport, isSupportOnly, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
-import { ListingPictures, type LivePictures } from './ListingPictures'
+import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -31,6 +31,8 @@ export interface ListingEditorProps {
   media: readonly MediaView[]
   /** #6213 — the pictures the public site shows now (`LivePictures`). */
   live?: LivePictures
+  /** #6213 — whether `media` has been read yet. */
+  mediaState?: MediaState
   /**
    * #6213 — a picture uploaded in the editor: the template as it left it and the new
    * image's id, which the page adds to the listing as it is when the upload ends.
@@ -378,7 +380,7 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, onPictureUploaded }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offered = params.filter((param) => draft.params[param.name])
@@ -413,6 +415,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         <ListingPictures
           slug={draft.slug}
           media={media}
+          mediaState={mediaState}
           chosen={draft.media_ids}
           live={live}
           onChange={(media_ids) => onChange({ ...draft, media_ids })}

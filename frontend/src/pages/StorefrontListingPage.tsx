@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
-import type { StorefrontListing, StorefrontListingInput } from '../api/types'
+import type { ModelSummary, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
 import type { LivePictures } from '../components/storefront/ListingPictures'
 import { defaultsFor, draftOf, emptyDraft, listingInput, previewListing, savedKey, sellMedia, storedKey, unsaveable, type ListingDraft } from '../components/storefront/listingDraft'
@@ -100,6 +100,11 @@ export function StorefrontListingPage() {
   const back = (location.state as BackState | null)?.back ?? ''
   const listPath = `/storefront${back}`
   const models = useAsync(() => api.listModels(), [])
+  /** The newest templates read, for an answer that lands after renders it did not see (an upload's). */
+  const latestModels = useRef(models.data)
+  useEffect(() => {
+    latestModels.current = models.data
+  }, [models.data])
   const book = useAsync(() => api.priceBook(), [])
   const [open, setOpen] = useState<Open | null>(() => (routeId === 'new' ? fresh() : null))
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -257,12 +262,15 @@ export function StorefrontListingPage() {
   }
 
   /**
-   * #6213 — a picture uploaded in the editor of `key`'s opening: added to that listing as
-   * it is now (edits, saves and publishes may have landed while it uploaded), and the
-   * templates read again so the editor shows it.
+   * #6213 — a picture uploaded in the editor of `key`'s opening: the template as the upload
+   * left it put in the newest templates read (so the editor knows the new image at once),
+   * and the id added to that listing as it is now (edits, saves and publishes may have
+   * landed while it uploaded).
    */
-  function pictureUploaded(key: symbol, id: string) {
-    models.refresh()
+  function pictureUploaded(key: symbol, model: ModelSummary, id: string) {
+    const current = latestModels.current
+    if (current) models.setData(current.map((m) => (m.slug === model.slug ? model : m)), { supersede: true })
+    else models.refresh()
     whileOpen(key, (cur) => {
       if (cur.draft.media_ids.includes(id)) return cur
       edited.current = true
@@ -441,7 +449,8 @@ export function StorefrontListingPage() {
                 filaments={filaments}
                 media={media}
                 live={open.live}
-                onPictureUploaded={(_model, id) => pictureUploaded(open.key, id)}
+                mediaState={models.error ? 'failed' : models.data ? 'ready' : 'loading'}
+                onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
               />
             </section>
 

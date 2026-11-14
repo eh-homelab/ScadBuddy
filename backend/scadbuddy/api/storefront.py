@@ -149,9 +149,9 @@ async def set_listing_media(
     to show them, and nothing else changed. A draft stays a draft; a published listing
     is published again at once and stays live. 409 ``listing_changed`` unless
     ``updated_at`` is the listing's; 422 ``listing_media_unknown``,
-    ``listing_media_not_image`` or ``listing_media_duplicate``; a republish refused
-    answers as ``POST …/publish`` does, with the pictures kept and the public site
-    showing what was last published."""
+    ``listing_media_not_image`` or ``listing_media_duplicate`` (``name`` is the id); a
+    republish refused answers as ``POST …/publish`` does, with ``pictures_saved: true``:
+    the pictures are kept and the public site shows what was last published."""
     return await change_media(
         state, orders.listings, listing_id, body.media_ids, expected_updated_at=body.updated_at
     )
