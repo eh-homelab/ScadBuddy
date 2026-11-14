@@ -544,7 +544,7 @@ Per-step specifics are in each task's **Rolling deploy** line.
 
 **Files:** Create `api/crud_render.py`, `crud/render.py` (`RemoteRenderSettingsSource`, same API as `store/bambuddy.py:113-178`); modify `worker.py:246-249`, `render/worker_role.py` (drop `render_settings`); test `tests/crud/test_crud_render_settings.py`.
 
-**Interfaces:** `GET /api/v1/internal/crud/render/settings` → `RenderStoreSettings` with the opened render key (or the fallback full key, `library/settings_store.py:1383`) and S3 keys (D8). Area `settings`.
+**Interfaces:** `GET /api/v1/internal/crud/render/settings` → `RenderStoreSettings` with the opened render key (or the fallback full key, `library/settings_store.py:1383`) and S3 keys (D8). Area `settings`. *Amended 2026-11-14 (#5298 final review):* the route no longer answers the fallback full key; with no render key saved it answers no Bambuddy key (`api/crud_render.py` `withheld`).
 
 - [x] **Step 1:** Tests: answer equals `load_render_store_settings`; `no-store` header; the log line names the fields released, not values; a `print` credential is 403.
 - [x] **Step 2:** Implement; the worker reads settings through the route; the 30 s TTL and "keep the last good" behaviour stay (`store/bambuddy.py:134-152`).
