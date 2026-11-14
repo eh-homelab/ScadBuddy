@@ -112,14 +112,23 @@ class CrudUnavailableError(Exception):
     """The route is missing, answers 5xx or cannot be reached, past the budget. Retryable.
     ``failure`` is the last try's (`Failure`); `passes` says whether it is one that
     passes (`PASSING`), unlike a route's 5xx or a read timeout. ``problem`` is the last
-    try's 5xx problem document, empty when it had none or no answer came."""
+    try's 5xx problem document, empty when it had none or no answer came. ``maybe_sent``
+    says whether ANY try of the call failed with ``transport`` (the request went out and
+    its answer was lost, so the write may have run), whatever the last try's failure; by
+    default it is whether ``failure`` is ``transport``."""
 
     def __init__(
-        self, message: str, failure: Failure, problem: dict[str, Any] | None = None
+        self,
+        message: str,
+        failure: Failure,
+        problem: dict[str, Any] | None = None,
+        *,
+        maybe_sent: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.failure = failure
         self.problem = problem or {}
+        self.maybe_sent = failure == "transport" if maybe_sent is None else maybe_sent
 
     @property
     def passes(self) -> bool:
@@ -180,6 +189,8 @@ class _Call:
         self.last = "no attempt"
         self.failure: Failure = "unreached"
         self.problem: dict[str, Any] = {}
+        #: Whether any try failed with ``transport``: sent, and its answer lost.
+        self.maybe_sent = False
 
     def observe(self, outcome: Outcome, started: float) -> None:
         metrics = self._owner._metrics
@@ -229,6 +240,7 @@ class _Call:
         self.problem = {}
         unreached = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
         self.failure = "unreached" if unreached else "transport"
+        self.maybe_sent = self.maybe_sent or not unreached
         self.observe("transport", started)
 
     def delay(self) -> float:
@@ -236,7 +248,10 @@ class _Call:
         remaining = self._deadline - self._owner._clock()
         if remaining <= 0:
             raise CrudUnavailableError(
-                f"CRUD route unavailable: {self.last}", self.failure, self.problem
+                f"CRUD route unavailable: {self.last}",
+                self.failure,
+                self.problem,
+                maybe_sent=self.maybe_sent,
             )
         wait = float(min(self._owner._backoff * 2**self._attempt, BACKOFF_MAX, remaining))
         self._attempt += 1

@@ -19,6 +19,7 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.rack.rank import Usage
 from scadbuddy.rack.usage import (
     RACK_PICKS_FALLBACK,
@@ -27,6 +28,7 @@ from scadbuddy.rack.usage import (
     RACK_SETTLE_READ_FALLBACK,
     RACK_STORE_FALLBACKS,
     PickedHotend,
+    error_facts,
     record_seen,
     record_settled,
     save_picks,
@@ -242,3 +244,38 @@ def test_the_guard_covers_the_store_fallbacks_and_expects_only_infrastructure() 
     for message in sorted(RACK_STORE_FALLBACKS - {RACK_SETTLE_FALLBACK}):
         records = [record(message, name) for name in bambuddy]
         assert foreign_rack_errors(records) == list(bambuddy), message
+
+
+@pytest.mark.parametrize("message", sorted(RACK_STORE_FALLBACKS | {RACK_USAGE_FALLBACK}))
+def test_the_guard_expects_a_crud_outage_but_not_a_crud_bug(message: str) -> None:
+    """#5298 Task 30: on the print worker a rack store call is a CRUD call. An API out of
+    reach, one that did not answer, or its database out of reach is an outage; a missing
+    route, a route's 5xx, a refused credential and any refusal (a 4xx) are bugs."""
+
+    def record(error: Exception) -> logging.LogRecord:
+        made = logging.LogRecord("x", logging.WARNING, __file__, 1, message, (), None)
+        for name, value in error_facts(error).items():
+            setattr(made, name, value)
+        return made
+
+    outages = [
+        CrudUnavailableError("down", "unreached"),
+        CrudUnavailableError("down", "transport"),
+        CrudUnavailableError("down", "database_unavailable"),
+    ]
+    assert foreign_rack_errors([record(error) for error in outages]) == []
+    bugs = [
+        CrudUnavailableError("down", "route_missing"),
+        CrudUnavailableError("down", "unavailable"),
+        CrudUnavailableError("down", "reexchange"),
+    ]
+    assert foreign_rack_errors([record(error) for error in bugs]) == ["CrudUnavailableError"] * 3
+    refused = CrudRefusedError(422, {"type": "x"})
+    assert foreign_rack_errors([record(refused)]) == ["CrudRefusedError"]
+
+
+def test_a_crud_failure_is_logged_by_its_word_only() -> None:
+    """Spec §7: the logged facts are the type and the fixed ``failure`` word, never text."""
+    error = CrudUnavailableError("CRUD route unavailable: TEST-HOTEND-17", "transport")
+    assert error_facts(error) == {"error": "CrudUnavailableError", "failure": "transport"}
+    assert error_facts(KeyError("TEST-HOTEND-17")) == {"error": "KeyError"}

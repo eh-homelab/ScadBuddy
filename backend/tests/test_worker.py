@@ -2278,6 +2278,7 @@ WORKER_OWN = {
         "scadbuddy_build_info",
         "scadbuddy_print_follows_running",
         "scadbuddy_rack_watch_settle_failed",
+        "scadbuddy_printer_watch_write_failed",
         "scadbuddy_event_loop_lag_seconds",
     },
     "projects": {

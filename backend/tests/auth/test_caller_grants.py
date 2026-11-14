@@ -193,6 +193,11 @@ def test_a_worker_on_its_own_role_opens_and_writes_no_operation(
                 "printer_bed_types",
                 "activity",
                 "project_print_targets",
+                # Its rack hotends' usage (#5298 Task 30).
+                "rack_nozzle_seen",
+                "rack_nozzle_picks",
+                "rack_nozzle_pick_spools",
+                "rack_nozzle_prints",
             ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))

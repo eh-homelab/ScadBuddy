@@ -476,7 +476,10 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `crud.print` only, `no-store`, never logged; a report's write (`advance`, which answers
   the print it ended and the one it started, the nudge's start) and a virtual printer's
   sync take an `Idempotency-Key`; its KEK still unseals a virtual printer's request and
-  signs a LAN print's transfer tokens), and it
+  signs a LAN print's transfer tokens), and its rack hotends' usage (`RemoteRackUsage`, a
+  `RackUsageStore` with no pool, area `rack`, #5298 Task 30: a LAN start's picks are one
+  route and one transaction on the API; every write but `seen` takes an
+  `Idempotency-Key`; `spool_history` is the API's), and it
   does not LISTEN, so it keeps no `RecentRuns`; every
   workflow on it AUTO_UPGRADE (`print_deployment`'s default, #2066; `FollowPrint` names
   it itself as `VersionedFollowPrint`, since an unversioned worker refuses a versioning

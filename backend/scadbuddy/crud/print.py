@@ -31,6 +31,24 @@ refuses the methods only the API calls (`PRINTERS_API_ONLY`), `link_bambuddy` am
 `RemoteLanImports` records a LAN-only printer's job the print watcher read (#4699 phase
 4); sent again, the first record answers.
 
+`RemoteRackUsage` is `rack/usage.py` `RackUsageStore` (Q27, #5298 Task 30) for the
+methods the print worker calls: the hotends a run sees, their usage, a Bambuddy run's
+picks, the follow's settle of its archives, a LAN start's picks and the settles of a LAN
+start, from the follow (`lan_settle_hook`), ``lan_wait`` and the printer's watch. It holds
+no pool. A LAN start's picks replace an earlier pick of that start (deletes and inserts),
+so they are one route, one transaction on the API (plan D6). ``seen`` is natural. Every
+other write answers the rows it wrote, which a resend would not repeat, so each takes an
+``Idempotency-Key``. A queue item's picks and a run's settle (`settle_lan`, whose body a
+retried attempt sends again unchanged) take `WriteKeys` ``rack`` inside an activity: a
+retried attempt's same write answers as the lost one did, and one whose body differs is
+refused 422 and sent again under a new key, as `RemoteBlobIndex` does. The others take a
+new UUID per call, which the client sends again on its retries: a LAN start's picks,
+which a retried attempt ranks again (the newer pick must replace the earlier one, never
+replay it), a settled archive's rows, whose body carries the settle's ``now()``, and the
+watch's `settle_lan_ended`, whose one long activity repeats `WriteKeys`' keys across
+attempts. The watch's call is bounded by `WATCH_CALL_BUDGET`. ``spool_history`` is the
+API's (the rack usage route).
+
 `RemoteReprints` records the queue item ScadBuddy's reprint queued (#3741), so the Prints
 page marks it; sent again, the first record stays.
 
@@ -128,6 +146,8 @@ from scadbuddy.printers.store import (
     VirtualOutcome,
     printer_uuid,
 )
+from scadbuddy.rack.rank import Usage
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 
 logger = logging.getLogger(__name__)
 
@@ -995,6 +1015,18 @@ PRINTERS_COMPOSED = ("require", "ensure_bambuddy")
 _refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
 
 
+#: The retry budget of each CRUD call the printer watch makes between two heartbeats (a
+#: report's `put` or `touch`, a start's `settle_lan_ended`), and each try's timeout. A
+#: call ends within about their sum (a try started just before the budget ends runs its
+#: timeout), so a report's write and its settle take at most about 8 s, well inside the
+#: watch's 30 s heartbeat timeout (`workflows/printer_watch.py` `WATCH_HEARTBEAT`) with
+#: its 10 s quiet wait (`HEARD_EVERY`). Each is advisory there: a report not written is
+#: written at the next quiet tick, and a missed settle is closed by ``lan_wait``, the
+#: run's follow or the pick's age.
+WATCH_CALL_BUDGET = 2.0
+WATCH_CALL_TIMEOUT = 2.0
+
+
 def _report(printer_id: str) -> str:
     return f"{BASE}/reports/{quote(printer_id, safe='')}"
 
@@ -1007,7 +1039,9 @@ class RemoteReports(PrinterReportStore):
     of its own, a new UUID, which the client sends again on each retry: the route
     answers a resend the first write's end and start. The watch writes from one
     loop for as long as its connection lasts, so an activity's ordinal would not name
-    one write. `touch` is natural: it never moves ``seen_at`` back."""
+    one write. `touch` is natural: it never moves ``seen_at`` back. Only the watch writes
+    (`advance`, `touch`), between two of its heartbeats, so each write is bounded by
+    `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, not the client's own budget."""
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
@@ -1016,17 +1050,36 @@ class RemoteReports(PrinterReportStore):
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         raise ApiOnlyError("PrinterReportStore.pool is the API's; the worker has none")
 
-    def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
-        return self.advance(printer_id, report, seen_at).ended
+    def put(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> PrintEnd | None:
+        return self.advance(printer_id, report, seen_at, idempotency_key=idempotency_key).ended
 
-    def advance(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> Advance:
+    def advance(
+        self,
+        printer_id: str,
+        report: dict[str, Any],
+        seen_at: datetime,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Advance:
+        """``idempotency_key`` names the write across calls: the watch sends a report whose
+        answer was lost again under the same key, so the route answers the end and the
+        start the first write showed (`printers/watch.py`). None is a new key."""
         if printer_uuid(printer_id) is None:
             return Advance()
         answer = self._client.request(
             "PUT",
             _report(printer_id),
             json={"report": report, "seen_at": seen_at.isoformat()},
-            idempotency_key=uuid.uuid4().hex,
+            idempotency_key=idempotency_key or uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         ).json()
         ended = answer["ended"]
         return Advance(
@@ -1037,7 +1090,11 @@ class RemoteReports(PrinterReportStore):
         if printer_uuid(printer_id) is None:
             return
         self._client.request(
-            "POST", f"{_report(printer_id)}/touch", json={"seen_at": seen_at.isoformat()}
+            "POST",
+            f"{_report(printer_id)}/touch",
+            json={"seen_at": seen_at.isoformat()},
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
         )
 
     def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
@@ -1052,6 +1109,194 @@ class RemoteReports(PrinterReportStore):
             printer_id: (seen["report"], datetime.fromisoformat(seen["seen_at"]))
             for printer_id, seen in body.items()
         }
+
+
+#: The `RackUsageStore` methods only the API calls: the rack usage route's spool history
+#: (`api/printing.py`), and the ``*_in`` writes, which run on the API's connection.
+RACK_API_ONLY = (
+    "spool_history",
+    "record_picks_in",
+    "record_prints_in",
+    "record_lan_picks_in",
+    "settle_lan_in",
+    "settle_lan_ended_in",
+)
+
+
+def _unique(values: Iterable[Any]) -> list[Any]:
+    return sorted({value for value in values if value})
+
+
+class RemoteRackUsage(RackUsageStore):
+    """`RackUsageStore` (Q27) over ``…/print/rack`` (area ``rack``, #5298 Task 30). Async,
+    as the SQL store is. No pool and no migration: the API owns the tables."""
+
+    def __init__(self, client: CrudClient) -> None:
+        self._client = client
+        self._keys = WriteKeys("rack")
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        raise ApiOnlyError("RackUsageStore.pool is the API's; the worker has none")
+
+    def close(self) -> None:
+        """Nothing to close: the CRUD client is the worker's."""
+
+    async def _keyed(self, path: str, body: Any) -> Any:
+        """A write that answers the rows it wrote, under `WriteKeys`' key. A key an
+        earlier attempt of this activity spent on another write is refused 422, and this
+        write is sent again under a new one."""
+        url = f"{BASE}/rack{path}"
+        try:
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=self._keys.next()
+            )
+        except CrudRefusedError as error:
+            if error.status != 422 or error.problem.get("type") != KEY_PROBLEM:
+                raise
+            response = await self._client.request(
+                "POST", url, json=body, idempotency_key=uuid.uuid4().hex
+            )
+        return response.json()
+
+    async def _ids(self, path: str, ids: Iterable[int]) -> set[int]:
+        unique = sorted(set(ids))
+        if not unique:
+            return set()
+        url = f"{BASE}/rack{path}?{urlencode({'id': unique}, doseq=True)}"
+        return {int(found) for found in (await self._client.request("GET", url)).json()}
+
+    async def seen(self, printer: str | None, serials: Iterable[str]) -> None:
+        """Natural: an upsert by serial."""
+        unique = _unique(serials)
+        if unique:
+            await self._client.request(
+                "POST", f"{BASE}/rack/seen", json={"printer": printer, "serials": unique}
+            )
+
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        """A ``POST`` read: the serials stay out of the URL, so out of access logs (spec
+        §7)."""
+        unique = _unique(serials)
+        if not unique:
+            return {}
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/usage", json={"serials": unique}
+        )
+        return {
+            serial: Usage(
+                prints=row["prints"],
+                print_seconds=row["print_seconds"],
+                grams=row["grams"],
+                first_seen_at=_when(row["first_seen_at"]),
+                pending=row["pending"],
+                last_used_at=_when(row["last_used_at"]),
+            )
+            for serial, row in response.json().items()
+        }
+
+    async def record_picks(
+        self,
+        queue_item_id: int,
+        printer: str | None,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "queue_item_id": queue_item_id,
+            "printer": printer,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+            "copies": copies,
+        }
+        return int((await self._keyed("/picks", body))["written"])
+
+    async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/picked", queue_item_ids)
+
+    async def recorded_archives(self, archive_ids: Iterable[int]) -> set[int]:
+        return await self._ids("/recorded-archives", archive_ids)
+
+    async def record_prints(
+        self,
+        *,
+        archive_id: int,
+        queue_item_id: int,
+        settled_at: datetime,
+        print_seconds: int | None,
+        grams: float | None,
+    ) -> int:
+        body = {
+            "archive_id": archive_id,
+            "queue_item_id": queue_item_id,
+            "settled_at": settled_at.isoformat(),
+            "print_seconds": print_seconds,
+            "grams": grams,
+        }
+        # A new UUID per call, which the client sends again on its retries: the body
+        # carries the settle's ``now()``, so a retried attempt's write is never the same
+        # request and an activity's key would only cost a 422 round trip.
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/prints", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
+
+    async def record_lan_picks(
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer: str | None,
+        picks: Sequence[PickedHotend],
+    ) -> int:
+        if not picks:
+            return 0
+        body = {
+            "run_id": run_id,
+            "subtask_name": subtask_name,
+            "printer": printer,
+            "picks": [pick.model_dump(mode="json") for pick in picks],
+        }
+        response = await self._client.request(
+            "POST", f"{BASE}/rack/lan-picks", json=body, idempotency_key=uuid.uuid4().hex
+        )
+        return int(response.json()["written"])
+
+    async def settle_lan(
+        self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+    ) -> int:
+        body = {"run_id": run_id, "subtask_name": subtask_name, "timed": timed}
+        return int((await self._keyed("/settle-lan", body))["written"])
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        body = {
+            "printer": printer,
+            "subtask_name": subtask_name,
+            "ended_at": ended_at.isoformat(),
+            "timed": timed,
+        }
+        # Only the watch calls this, between two heartbeats: a new UUID per call (its one
+        # long activity repeats `WriteKeys`' keys across attempts), sent again on the
+        # client's retries within `WATCH_CALL_BUDGET`.
+        response = await self._client.request(
+            "POST",
+            f"{BASE}/rack/settle-lan-ended",
+            json=body,
+            idempotency_key=uuid.uuid4().hex,
+            timeout=WATCH_CALL_TIMEOUT,
+            budget=WATCH_CALL_BUDGET,
+        )
+        return int(response.json()["written"])
+
+
+def _when(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+_refuse(RemoteRackUsage, "RackUsageStore", RACK_API_ONLY)
 
 
 #: How long one event's post may take, retries included (`RemoteEvents._drain`).

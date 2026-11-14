@@ -195,6 +195,7 @@ from scadbuddy.rack.rank import (
 from scadbuddy.rack.usage import (
     PickedHotend,
     RackUsage,
+    error_facts,
     group_spools,
     record_seen,
     save_picks,
@@ -926,7 +927,7 @@ async def _usage_or_empty(
     except Exception as exc:
         logger.warning(
             RACK_USAGE_FALLBACK,
-            extra={"printer_id": printer_id, "error": type(exc).__name__},
+            extra={"printer_id": printer_id, **error_facts(exc)},
         )
         return {}
 

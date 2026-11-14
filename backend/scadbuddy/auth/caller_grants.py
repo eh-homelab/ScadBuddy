@@ -46,10 +46,11 @@ _READ = ("SELECT",)
 #: printer registry, LAN reports and access codes go through the API's CRUD routes too
 #: (`crud/print.py` `RemotePrinterStore`, `RemoteReports`, #5298 Task 29). So a printer
 #: merge (`printers/store.py` `_merge`) runs on the API alone, and the worker writes none
-#: of the tables `PRINTER_REFERENCES` names for it. An existing role keeps what it held of
-#: `printers`, `printer_reports`, `settings`, `printer_bed_types`, `activity` and
-#: `project_print_targets`, and the merge's UPDATE and DELETE of `tray_spool_links`, until
-#: the revoke. Never add a table here for a merge.
+#: of the tables `PRINTER_REFERENCES` names for it. Its rack hotends' usage goes through
+#: them as well (`RemoteRackUsage`, #5298 Task 30). An existing role keeps what it held of
+#: `printers`, `printer_reports`, `settings`, `printer_bed_types`, `activity`,
+#: `project_print_targets` and the four `rack_nozzle_*` tables, and the merge's UPDATE and
+#: DELETE of `tray_spool_links`, until the revoke. Never add a table here for a merge.
 PRINT_GRANTS: Grants = {
     # Whether the API has migrated (`wait_until_ready`).
     "scadbuddy_migrations": _READ,
@@ -63,11 +64,6 @@ PRINT_GRANTS: Grants = {
     # A native run's slice (`slicing/store.py` `start`) and held presets.
     "native_slices": ("SELECT", "INSERT", "UPDATE"),
     "held_local_presets": _READ,
-    # The rack's nozzles (`rack/usage.py`).
-    "rack_nozzle_seen": ("SELECT", "INSERT", "UPDATE"),
-    "rack_nozzle_picks": _ALL,
-    "rack_nozzle_pick_spools": ("SELECT", "INSERT", "DELETE"),
-    "rack_nozzle_prints": ("SELECT", "INSERT"),
     # Spools: the overlay's recache and a native run's uses (`spools/`).
     "physical_spools": ("SELECT", "INSERT", "UPDATE"),
     "spool_provider_records": ("SELECT", "INSERT", "DELETE"),

@@ -77,6 +77,16 @@ takes it for ``token`` (waiting on the API up to ``wait_s``, at most 25 s) or an
 Each is natural on the token. An upload's record that names a lease is written only
 while that lease holds, else 409 ``lease-lost``.
 
+The rack hotends' usage (Q27, area ``rack``, #5298 Task 30) is `rack/usage.py`
+`RackUsageStore`'s, for `RemoteRackUsage`: ``…/rack/seen`` (natural, an upsert by
+serial), the reads ``…/rack/usage`` (a ``POST``, so the hotends' serials stay out of the
+URL), ``…/rack/picked`` and ``…/rack/recorded-archives``, and the writes ``…/rack/picks``,
+``…/rack/prints``, ``…/rack/lan-picks``, ``…/rack/settle-lan`` and
+``…/rack/settle-lan-ended``. Each of those answers the rows it wrote, which a resend
+would not repeat, so each takes an ``Idempotency-Key`` and runs with its ledger row in
+one transaction. A LAN start's picks delete the earlier pick's rows and insert the new
+ones: that is one route, one transaction here (plan D6), never several calls.
+
 An event the worker posts is logged once by its id, and NOTIFYed only when logged
 (`PgNotifyEventBus.publish_once`). The worker may post only the kinds it publishes
 outside a transaction (`EVENT_KINDS`); any other is a 403, so it cannot announce what
@@ -167,6 +177,8 @@ from scadbuddy.printers.store import (
     VirtualOutcome,
     printer_uuid,
 )
+from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.rack.usage import PickedHotend, RackUsageStore
 
 logger = logging.getLogger(__name__)
 
@@ -1326,3 +1338,230 @@ async def forget_folderless(project_id: int, uploads: UploadsDep) -> None:
 )
 async def touch_destination(body: Touch, uploads: UploadsDep) -> None:
     await uploads.touch_destination(body.kind, body.target_id)
+
+
+# -- the rack hotends' usage (Q27, area ``rack``, #5298 Task 30) -------------------------
+
+
+#: The most serials one rack call takes. A rack holds six hotends (`rack/rank.py`
+#: `POSITIONS`, positions 1-6) and the callers send one rack's at a time; 64 is far above
+#: that, and bounds the ``IN`` list a buggy caller could send.
+RACK_SERIALS_MAX = 64
+#: The longest serial taken: a hotend's serial is a short code.
+RACK_SERIAL_CHARS = 128
+RackSerial = Annotated[str, Field(max_length=RACK_SERIAL_CHARS)]
+
+
+class RackSeen(BaseModel):
+    #: The registry printer (#5167); none for a printer the registry does not hold.
+    printer: UUID | None = None
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
+
+
+class RackSerials(BaseModel):
+    serials: list[RackSerial] = Field(max_length=RACK_SERIALS_MAX)
+
+
+class RackUsageRow(BaseModel):
+    """`rack/rank.py` `Usage`."""
+
+    prints: int
+    print_seconds: int
+    grams: float
+    first_seen_at: datetime | None
+    pending: int
+    last_used_at: datetime | None
+
+
+class RackPicks(BaseModel):
+    queue_item_id: int
+    printer: UUID | None = None
+    picks: list[PickedHotend]
+    copies: int = 1
+
+
+class RackPrints(BaseModel):
+    archive_id: int
+    queue_item_id: int
+    settled_at: datetime
+    print_seconds: int | None = None
+    grams: float | None = None
+
+
+class RackLanPicks(BaseModel):
+    run_id: str
+    subtask_name: str
+    printer: UUID | None = None
+    #: A start with no attributable pick saves none (`save_lan_picks`), so none is sent.
+    picks: list[PickedHotend] = Field(min_length=1)
+
+
+class RackSettleLan(BaseModel):
+    run_id: str
+    subtask_name: str | None = None
+    timed: bool = True
+
+
+class RackSettleLanEnded(BaseModel):
+    printer: UUID
+    subtask_name: str
+    ended_at: datetime
+    timed: bool = True
+
+
+class RackWritten(BaseModel):
+    #: The rows the write wrote; a resend under its key answers the first write's.
+    written: int
+
+
+RACK_PICKS_ROUTE = "POST /rack/picks"
+RACK_PRINTS_ROUTE = "POST /rack/prints"
+RACK_LAN_PICKS_ROUTE = "POST /rack/lan-picks"
+RACK_SETTLE_LAN_ROUTE = "POST /rack/settle-lan"
+RACK_SETTLE_LAN_ENDED_ROUTE = "POST /rack/settle-lan-ended"
+
+
+async def _rack_once(
+    rack: RackUsageStore,
+    key: str | None,
+    route: str,
+    body: BaseModel,
+    write: Callable[[Connection[DictRow]], int],
+) -> RackWritten:
+    """``write`` once per ``Idempotency-Key``, with its ledger row in its transaction on
+    the rack store's pool (plan D5): a resend answers the rows the first write wrote."""
+    required = required_key(key)
+
+    def once() -> Any:
+        return _once_on(
+            rack.pool,
+            required,
+            route,
+            body.model_dump(mode="json"),
+            lambda conn: {"written": write(conn)},
+        )
+
+    return RackWritten.model_validate(await asyncio.to_thread(once))
+
+
+@router.post("/rack/seen", name="crud_print_rack_seen", status_code=status.HTTP_204_NO_CONTENT)
+async def rack_seen(body: RackSeen, rack: RackUsageDep) -> None:
+    """Natural: an upsert by serial, which never moves ``first_seen_at``."""
+    printer = None if body.printer is None else str(body.printer)
+    await rack.seen(printer, body.serials)
+
+
+@router.post("/rack/usage", name="crud_print_rack_usage")
+async def rack_usage(body: RackSerials, rack: RackUsageDep) -> dict[str, RackUsageRow]:
+    """A read, sent as a ``POST`` so the serials stay out of the URL (spec §7)."""
+    usage = await rack.usage(body.serials)
+    return {
+        serial: RackUsageRow.model_validate(dataclasses.asdict(used))
+        for serial, used in usage.items()
+    }
+
+
+@router.get("/rack/picked", name="crud_print_rack_picked")
+async def rack_picked(
+    rack: RackUsageDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await rack.picked_items(id))
+
+
+@router.get("/rack/recorded-archives", name="crud_print_rack_recorded_archives")
+async def rack_recorded_archives(
+    rack: RackUsageDep, id: Annotated[list[int], Query(default_factory=list)]
+) -> list[int]:
+    return sorted(await rack.recorded_archives(id))
+
+
+@router.post("/rack/picks", name="crud_print_rack_picks")
+async def rack_picks(
+    body: RackPicks, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A Bambuddy queue item's picks and their spools, in one transaction. ``ON CONFLICT
+    DO NOTHING`` keeps the state, but the answer counts the rows written, so once per
+    ``Idempotency-Key``."""
+    printer = None if body.printer is None else str(body.printer)
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_PICKS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_picks_in(
+            conn, body.queue_item_id, printer, body.picks, body.copies
+        ),
+    )
+
+
+@router.post("/rack/prints", name="crud_print_rack_prints")
+async def rack_prints(
+    body: RackPrints, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A settled archive's print rows: once per ``Idempotency-Key``, as `rack_picks`."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_PRINTS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_prints_in(
+            conn,
+            body.archive_id,
+            body.queue_item_id,
+            body.settled_at,
+            body.print_seconds,
+            body.grams,
+        ),
+    )
+
+
+@router.post("/rack/lan-picks", name="crud_print_rack_lan_picks")
+async def rack_lan_picks(
+    body: RackLanPicks, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN start's picks: the earlier pick's rows deleted and the new ones inserted in
+    one transaction on the API, with the ledger row (plans D5, D6). Once per
+    ``Idempotency-Key``: a resend after a lost answer neither moves ``picked_at`` nor
+    writes again."""
+    printer = None if body.printer is None else str(body.printer)
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_LAN_PICKS_ROUTE,
+        body,
+        lambda conn: RackUsageStore.record_lan_picks_in(
+            conn, body.run_id, body.subtask_name, printer, body.picks
+        ),
+    )
+
+
+@router.post("/rack/settle-lan", name="crud_print_rack_settle_lan")
+async def rack_settle_lan(
+    body: RackSettleLan, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN run's open picks settled, as `RackUsageStore.settle_lan`: once per
+    ``Idempotency-Key``."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_SETTLE_LAN_ROUTE,
+        body,
+        lambda conn: RackUsageStore.settle_lan_in(conn, body.run_id, body.subtask_name, body.timed),
+    )
+
+
+@router.post("/rack/settle-lan-ended", name="crud_print_rack_settle_lan_ended")
+async def rack_settle_lan_ended(
+    body: RackSettleLanEnded, rack: RackUsageDep, idempotency_key: MaybeIdempotencyKey = None
+) -> RackWritten:
+    """A LAN start's open picks settled as its printer's report ends it, as
+    `RackUsageStore.settle_lan_ended`: once per ``Idempotency-Key``."""
+    return await _rack_once(
+        rack,
+        idempotency_key,
+        RACK_SETTLE_LAN_ENDED_ROUTE,
+        body,
+        lambda conn: RackUsageStore.settle_lan_ended_in(
+            conn, str(body.printer), body.subtask_name, body.ended_at, body.timed
+        ),
+    )
