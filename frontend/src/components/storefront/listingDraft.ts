@@ -355,16 +355,16 @@ export function previewListing(
   mediaUrl: (item: MediaView) => string,
 ): PublicListing {
   const input = listingInput(draft, schema, filaments)
-  const colours = filamentColours(draft, filaments)
   const params: Record<string, PublicParam> = {}
   for (const param of schema?.parameters ?? []) {
     const bound = input.params?.[param.name]
     if (!bound) continue
-    // What an unpicked render takes (`effective_default`): the listing's, else the template's;
-    // a colour's only while a listing filament has it.
+    // What an unpicked render takes (`effective_default`): the listing's, else the template's.
+    // A choice shows it only while it is one of its choices, as `_public_param` does: a
+    // colour's are the listing filaments' colours, support-only ones left out (#6144).
     const start = bound.default ?? param.initial ?? null
     const shownDefault =
-      param.type !== 'color' || (typeof start === 'string' && colours.some((colour) => colour.toLowerCase() === start.toLowerCase()))
+      bound.kind !== 'choice' || bound.choices.some((choice) => (param.type === 'color' ? sameColour(choice, start) : choice === start))
         ? start
         : null
     const placeholder = bound.kind === 'text' && typeof start === 'string' && start.trim() ? start : null

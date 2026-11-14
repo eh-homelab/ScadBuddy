@@ -248,6 +248,9 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(shown.line).toMatchObject({ default: 'Ada', placeholder: 'Ada' })
     const elsewhere = previewListing({ ...draft, colours: [] }, schema, [RED], [], () => '').params
     expect(elsewhere.body_color!.default).toBeNull()
+    // A choice default outside its choices (a listing saved before #6144) shows none.
+    const stale = previewListing({ ...draft, params: { ...draft.params, shape: { kind: 'choice', choices: ['square'] } } }, schema, [RED], [], () => '').params
+    expect(stale.shape!.default).toBeNull()
   })
 
   it('locks a numeric select at one of its options, as a number', async () => {

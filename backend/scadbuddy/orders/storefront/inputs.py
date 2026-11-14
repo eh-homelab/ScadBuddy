@@ -3,7 +3,8 @@ line item's reference built from the listing's snapshot (plan point 2).
 
 `listing_values` never trusts the edge: it checks each asked value against the
 listing's bound, not only against the schema. A parameter the visitor does not ask for
-takes its schema default, checked the same way. Every parameter the listing does not
+takes the listing's ``default``, else its schema default (`effective_default`, #6144),
+checked the same way. Every parameter the listing does not
 offer takes the value publish captured in the snapshot (``ListingSnapshot.fixed``: the
 shop's locks and the commit's defaults), and asking for it is refused, even with that
 same value.
