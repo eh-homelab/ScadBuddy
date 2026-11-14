@@ -295,8 +295,8 @@ def test_the_start_takes_back_the_print_workers_role(
     API's start takes back everything `scadbuddy_print` held as an older API left it (the
     34 tables, the sequence it inserted with, its credential view, the schema and a row
     policy), a second start does nothing, and the role can then be dropped. A role of
-    its own stands in for it: the `scadbuddy_*` roles are cluster-wide, and a test
-    cluster has none (`tests/auth/test_caller_grants.py`)."""
+    its own stands in for it: the `scadbuddy_*` roles are cluster-wide and shared by
+    every test database, so this test never makes or revokes the real one."""
     assert "scadbuddy_print" in RETIRED_ROLES
     stand_in = f"print_{uuid.uuid4().hex[:12]}"
     conn.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(stand_in)))
