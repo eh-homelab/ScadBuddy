@@ -877,6 +877,13 @@ class FilamentPatch(BaseModel):
     density_g_cm3: Density | None = None
 
 
+class FallbackDensity(BaseModel):
+    """A density from the slicer's profiles (#6136) and the preset it came from."""
+
+    density_g_cm3: str
+    profile: str
+
+
 class Filament(BaseModel):
     """A filament record, its decimals as strings on the wire (§3.6)."""
 
@@ -888,6 +895,13 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
+    #: The slicer preset ``density_g_cm3`` was read from (#6136, `orders/density.py`), by
+    #: the spool import or "Fill densities"; ``None`` for a density a person set.
+    density_profile: str | None = None
+    #: Only on the price book's read, for a record with no density: what an estimate
+    #: weighs it with instead, and the preset that gives it. ``None`` there means no
+    #: source gives one, so an estimate of it is refused.
+    fallback_density: FallbackDensity | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -952,6 +966,35 @@ class SpoolImportRow(BaseModel):
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
     spool_ids: list[int]
+    #: The record's density after the import (#6136): its own, or the one the import
+    #: read from the slicer's profiles when it had none.
+    density_g_cm3: str | None = None
+    #: The preset the import read ``density_g_cm3`` from this time; ``None`` when it
+    #: kept the record's own, or found none.
+    density_profile: str | None = None
+
+
+class DensityFillRow(BaseModel):
+    """One record of the book that had no density, and what filled it (#6136)."""
+
+    filament_id: str
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    colour: str
+    #: The density written; ``None`` when no source gives one, so the record still has
+    #: none and an estimate of it is refused.
+    density_g_cm3: str | None = None
+    #: The slicer preset it was read from.
+    density_profile: str | None = None
+
+
+class DensityFill(BaseModel):
+    """`POST /orders/price-book/fill-densities`: one row per record that had no
+    density, in the book's order."""
+
+    rows: list[DensityFillRow]
 
 
 class SpoolImport(BaseModel):

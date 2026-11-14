@@ -66,9 +66,10 @@ from scadbuddy.orders.costs import (
     order_costs,
     order_margins,
 )
+from scadbuddy.orders.density import used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
-from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
+from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, SpoolGroup, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilLine,
     FulfilmentInput,
@@ -93,6 +94,7 @@ from scadbuddy.orders.models import (
     ChargeInput,
     CostEntry,
     CostEntryInput,
+    DensityFill,
     Filament,
     FilamentInput,
     FilamentPatch,
@@ -144,6 +146,7 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
+from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import (
     UNSET,
@@ -919,16 +922,41 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
     the most recent priced spool's ``cost_per_kg``; a row's ``min_cost_per_kg`` and
     ``max_cost_per_kg`` show the spread when its spools' prices differ. A filament known
     only by its colour's name, or with no priced spool, is ``skipped`` with its
-    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). 409 ``not_linked``
-    without a Bambuddy URL."""
+    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). A record with no
+    density gets the slicer profile's (#6136): the spools' ``slicer_filament``, else its
+    material, subtype and brand; a density a record has is never changed. 409
+    ``not_linked`` without a Bambuddy URL."""
     try:
         groups = await orders.integrations.spool_groups()
     except NotLinkedError:
         raise not_linked() from None
+    densities = await asyncio.to_thread(orders.densities)
     try:
-        return await asyncio.to_thread(import_spools_into, orders.store, groups)
+        return await asyncio.to_thread(import_spools_into, orders.store, groups, densities)
     except FilamentExistsError as error:
         raise _filament_exists(error) from None
+
+
+@router.post(
+    "/price-book/fill-densities",
+    response_model=DensityFill,
+    summary="Fill the empty densities of the price book from the slicer's profiles",
+)
+async def fill_densities(orders: OrdersDep) -> DensityFill:
+    """Every record not archived with no density gets the slicer profile's (#6136,
+    `orders/density.py`): the ``slicer_filament`` of Bambuddy's spools of its identity
+    when a Bambuddy is linked and answers, else its material, subtype and brand. One row
+    per such record; a row with no ``density_g_cm3`` is one no source covers, which
+    still has none. A density a record has is never changed."""
+    groups: list[SpoolGroup] = []
+    if orders.integrations.linked:
+        try:
+            groups = await orders.integrations.spool_groups()
+        except ApiError as error:
+            # Bambuddy down still fills from the names.
+            logger.warning("fill densities: Bambuddy's spools were not read: %s", error.detail)
+    densities = await asyncio.to_thread(orders.densities)
+    return await asyncio.to_thread(fill_densities_in, orders.store, densities, groups)
 
 
 # -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------
@@ -940,19 +968,29 @@ async def estimate(
 ) -> OrderEstimate:
     """The output's parts' enclosed volumes over every plate, times the filament's
     density and the ``rough_estimate_factor`` for walls, infill and purge (§5.3). A
-    read: nothing is recorded. 404 for an unknown output or filament, 422
-    ``filament_density`` for a filament with no density."""
+    filament with no density is weighed with the slicer profile's for its material,
+    subtype and brand (#6136); ``densities`` says which density was used. A read:
+    nothing is recorded. 404 for an unknown output or filament, 422
+    ``filament_density`` for a filament with no density from any source."""
     check_path(output_id, filament_id)
     record = await asyncio.to_thread(orders.store.filament, filament_id)
     if record is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
-    if record.density_g_cm3 is None:
+    densities = await asyncio.to_thread(orders.densities)
+    try:
+        used_density(record, densities)
+    except ValueError as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"filament {filament_id} has no density, so there is no estimate",
+            str(error),
             type_=PROBLEMS + "filament_density",
-            errors=[{"loc": ["query", "filament_id"], "msg": "the filament has no density"}],
-        )
+            errors=[
+                {
+                    "loc": ["query", "filament_id"],
+                    "msg": "the filament has no density, and no slicer profile gives one",
+                }
+            ],
+        ) from None
     await asyncio.to_thread(require_output, outputs, output_id)
 
     def measured() -> list[EstimatedPart]:
@@ -984,7 +1022,7 @@ async def estimate(
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
     currency, _, factor = await asyncio.to_thread(orders.price_book.policy)
-    return filament_estimate(parts, record, currency=currency, factor=factor)
+    return filament_estimate(parts, record, currency=currency, factor=factor, densities=densities)
 
 
 @router.get(

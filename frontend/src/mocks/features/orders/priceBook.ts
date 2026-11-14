@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw'
-import type { ArchiveQuoteRequest, Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
+import type { ArchiveQuoteRequest, DensityFillRow, FallbackDensity, Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
 import { mockSettings, setMockSettings } from '../../handlers'
 import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
@@ -34,6 +34,33 @@ function policy(): PricingPolicy {
   }
 }
 
+/**
+ * A few of the slicer profiles' densities (#6136, backend `orders/density.py`, measured on
+ * Bambu Studio v02.08.02.61's BBL tree): the vendor family of the material and subtype
+ * (Bambu's Dual and Tri Color PLA are its Silk), else `Generic` for another maker's
+ * material. A Bambu subtype with no family has no source.
+ */
+const MOCK_PROFILES: Record<string, FallbackDensity> = {
+  'BAMBU|PLA|BASIC': { density_g_cm3: '1.26', profile: 'Bambu PLA Basic @base' },
+  'BAMBU|PLA|SILK': { density_g_cm3: '1.32', profile: 'Bambu PLA Silk @base' },
+  'BAMBU|PLA|DUAL COLOR': { density_g_cm3: '1.32', profile: 'Bambu PLA Silk @base' },
+  'BAMBU|PLA|TRI COLOR': { density_g_cm3: '1.32', profile: 'Bambu PLA Silk @base' },
+  'BAMBU|PETG|BASIC': { density_g_cm3: '1.25', profile: 'Bambu PETG Basic @base' },
+  'GENERIC|PLA': { density_g_cm3: '1.24', profile: 'Generic PLA @base' },
+  'GENERIC|PETG': { density_g_cm3: '1.27', profile: 'Generic PETG @base' },
+}
+
+export function mockProfile(f: { material: string; subtype?: string | null; brand?: string | null }): FallbackDensity | null {
+  const subtype = (f.subtype ?? '').trim().toUpperCase()
+  const material = f.material.trim().toUpperCase()
+  if ((f.brand ?? '').trim().toUpperCase().startsWith('BAMBU')) return MOCK_PROFILES[`BAMBU|${material}|${subtype}`] ?? null
+  return MOCK_PROFILES[`GENERIC|${material}`] ?? null
+}
+
+function withFallback(f: Filament): Filament {
+  return { ...f, fallback_density: f.density_g_cm3 ? null : mockProfile(f) }
+}
+
 function book(includeArchived = false): PriceBook {
   const currency = mockSettings().orders_currency
   return {
@@ -41,7 +68,7 @@ function book(includeArchived = false): PriceBook {
     minor_exponent: minorExponent(currency),
     policy: policy(),
     rough_estimate_factor: mockSettings().rough_estimate_factor,
-    filaments: state.filaments.filter((f) => includeArchived || !f.archived_at),
+    filaments: state.filaments.filter((f) => includeArchived || !f.archived_at).map(withFallback),
     spool_import: Boolean(mockSettings().bambuddy_url),
   }
 }
@@ -76,6 +103,7 @@ function importSpools(): SpoolImportRow[] {
     if (priced.length === 0) return [{ ...row, reason: 'no_price' }]
     const cost = String(priced.at(-1)?.cost_per_kg)
     const found = state.filaments.find((f) => !f.archived_at && identity(f) === identity({ material: row.material, subtype: row.subtype ?? null, brand: row.brand ?? null, colour }))
+    const profile = mockProfile(row)
     if (!found) {
       const made: Filament = {
         id: newId('f'),
@@ -85,18 +113,21 @@ function importSpools(): SpoolImportRow[] {
         colour_name: row.colour_name ?? null,
         colour,
         cost_per_kg: cost,
-        density_g_cm3: null,
+        density_g_cm3: profile?.density_g_cm3 ?? null,
+        density_profile: profile?.profile ?? null,
         archived_at: null,
         created_at: now(),
         updated_at: now(),
       }
       state.filaments.push(made)
-      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost }]
+      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost, density_g_cm3: made.density_g_cm3, density_profile: made.density_profile }]
     }
     const previous = found.cost_per_kg
-    const action = Number(previous) === Number(cost) ? 'unchanged' : 'updated'
+    const fill = found.density_g_cm3 ? null : mockProfile(found)
+    const action = Number(previous) === Number(cost) && !fill ? 'unchanged' : 'updated'
     if (action === 'updated') Object.assign(found, { cost_per_kg: cost, updated_at: now() })
-    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous }]
+    if (fill) Object.assign(found, { density_g_cm3: fill.density_g_cm3, density_profile: fill.profile })
+    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous, density_g_cm3: found.density_g_cm3, density_profile: fill?.profile ?? null }]
   })
 }
 
@@ -234,6 +265,16 @@ export const handlers = [
       return problem(request, 409, 'Bambuddy is not linked: set its URL in Settings to import spools', PROBLEMS + 'not_linked')
     }
     return HttpResponse.json({ rows: importSpools() })
+  }),
+  http.post(`${base}/price-book/fill-densities`, () => {
+    const rows = state.filaments
+      .filter((f) => !f.archived_at && !f.density_g_cm3)
+      .map((f): DensityFillRow => {
+        const found = mockProfile(f)
+        if (found) Object.assign(f, { density_g_cm3: found.density_g_cm3, density_profile: found.profile, updated_at: now() })
+        return { filament_id: f.id, material: f.material, subtype: f.subtype, brand: f.brand, colour_name: f.colour_name, colour: f.colour, density_g_cm3: found?.density_g_cm3 ?? null, density_profile: found?.profile ?? null }
+      })
+    return HttpResponse.json({ rows })
   }),
   http.post(`${base}/price-book/filaments`, async ({ request }) => {
     const body = (await request.json()) as FilamentInput
@@ -468,14 +509,16 @@ export const handlers = [
     if (!outputId || !filamentId) return fieldProblem(request, outputId ? 'filament_id' : 'output_id', 'Field required')
     const record = state.filaments.find((f) => f.id === filamentId)
     if (!record) return problem(request, 404, `no filament '${filamentId}'`)
-    if (!record.density_g_cm3) {
-      return problem(request, 422, `filament ${filamentId} has no density, so there is no estimate`, PROBLEMS + 'filament_density')
+    const profile = record.density_g_cm3 ? null : mockProfile(record)
+    const density = record.density_g_cm3 ?? profile?.density_g_cm3
+    if (!density) {
+      return problem(request, 422, `filament ${filamentId} has no density, and no slicer profile matches its material, subtype and brand, so there is no estimate`, PROBLEMS + 'filament_density')
     }
     const currency = mockSettings().orders_currency
     const exponent = minorExponent(currency)
     const factor = mockSettings().rough_estimate_factor
     // One closed part of 8 cm3: the mock measures no 3MF.
-    const grams = Math.round(8 * Number(record.density_g_cm3) * Number(factor) * 100) / 100
+    const grams = Math.round(8 * Number(density) * Number(factor) * 100) / 100
     const answer: OrderEstimate = {
       estimate: true,
       grams: grams.toFixed(2),
@@ -485,6 +528,7 @@ export const handlers = [
       factor,
       parts: [{ plate: 1, part: 1, name: 'Color 1', colour: '#F9D72C', volume_mm3: 8000 }],
       unknown_parts: 0,
+      densities: [{ filament_id: record.id, density_g_cm3: density, source: profile ? 'profile' : 'book', profile: profile?.profile ?? record.density_profile ?? null }],
     }
     return HttpResponse.json(answer)
   }),

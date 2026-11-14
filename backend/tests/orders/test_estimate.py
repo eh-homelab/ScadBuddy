@@ -12,12 +12,21 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from scadbuddy.orders.estimate import EstimatedPart, StoreEstimate, part_volumes, rough_estimate
+from scadbuddy.orders.density import DensityTable
+from scadbuddy.orders.estimate import (
+    EstimatedPart,
+    StoreEstimate,
+    filament_estimate,
+    part_volumes,
+    rough_estimate,
+)
 from scadbuddy.orders.models import Filament, PricingPolicy
 from scadbuddy.orders.pricing import Plate, PlateFilament, PricingError, price
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.storefront.routes import ESTIMATE_FIELDS
+from tests.orders.test_density import PROFILES
 
 NOW = datetime(2026, 11, 8, tzinfo=UTC)
 POLICY = PricingPolicy(
@@ -43,6 +52,11 @@ def filament(fid: str, colour: str, cost: str, density: str | None = "1.24") -> 
 
 RED = filament("red", "#FF0000", "25.50")
 BLUE = filament("blue", "#0000FF", "20")
+
+
+@pytest.fixture
+def table() -> DensityTable:
+    return DensityTable.build(Profiles(PROFILES))
 
 
 def unsliced() -> list[Plate]:
@@ -92,6 +106,45 @@ def test_a_filament_with_no_density_has_no_estimate() -> None:
     with pytest.raises(ValueError, match="density"):
         rough_estimate(
             [part(1, 1, "#FF0000", 1000.0)], lambda _c: plain, POLICY, currency="USD", factor="1"
+        )
+
+
+def test_a_filament_with_no_density_takes_its_profiles(table: DensityTable) -> None:
+    """#6136: a Bambu PLA Basic record with no density weighs at Bambu PLA Basic's 1.26,
+    and the estimate says so; one with its own density keeps it."""
+    basic = filament("basic", "#FF0000", "20", density=None).model_copy(
+        update={"subtype": "Basic", "brand": "Bambu Lab"}
+    )
+    by_colour = {"#ff0000": basic, "#0000ff": BLUE}
+    est = rough_estimate(
+        [part(1, 1, "#FF0000", 10000.0), part(1, 2, "#0000FF", 10000.0)],
+        lambda c: by_colour[c.casefold()],
+        POLICY,
+        currency="USD",
+        factor="1",
+        densities=table,
+    )
+    # 10 cm3 x 1.26 + 10 cm3 x 1.24.
+    assert est.grams == "25.00"
+    assert [(d.filament_id, d.density_g_cm3, d.source, d.profile) for d in est.densities] == [
+        ("basic", "1.26", "profile", "Bambu PLA Basic @base"),
+        ("blue", "1.24", "book", None),
+    ]
+    alone = filament_estimate(
+        [part(1, 1, "#FF0000", 10000.0)], basic, currency="USD", factor="1", densities=table
+    )
+    assert (alone.grams, alone.densities[0].source) == ("12.60", "profile")
+    # A visitor never reads which density, as before.
+    assert "densities" not in est.public().model_dump()
+
+
+def test_no_source_still_has_no_estimate(table: DensityTable) -> None:
+    tri = filament("tri", "#FF0000", "20", density=None).model_copy(
+        update={"subtype": "Galaxy", "brand": "Bambu Lab"}
+    )
+    with pytest.raises(ValueError, match="no slicer profile"):
+        filament_estimate(
+            [part(1, 1, "#FF0000", 1.0)], tri, currency="USD", factor="1", densities=table
         )
 
 

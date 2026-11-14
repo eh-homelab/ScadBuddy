@@ -42,6 +42,10 @@ class SpoolGroup(BaseModel):
     #: ``(spool id, cost_per_kg)`` of each spool, by id; a spool with no price has
     #: ``None``. A higher id is a spool Bambuddy recorded later.
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
+    #: The Bambu Studio ``filament_id`` of the most recent spool that names one
+    #: (Bambuddy's ``slicer_filament``, ``GFA00``), which gives a record its density
+    #: (#6136, `orders/density.py`); ``None`` when no spool names one.
+    slicer_filament: str | None = None
 
 
 class ShelfSpool(BaseModel):

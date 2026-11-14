@@ -7,14 +7,22 @@ none, else its ``cost_per_kg`` set to the most recent priced spool's (the highes
 It runs on click only: a quote reads the book, never Bambuddy, so a quote is the same
 with Bambuddy down. A group known only by its colour's name, or with no priced spool, is
 reported and left alone: a record needs a ``#RRGGBB`` and a price.
+
+A record with no density gets one from the slicer's profiles (#6136,
+`orders/density.py`): the group's ``slicer_filament``, else its names. A density a
+record has is never changed. :func:`fill_densities` does the same for every record of
+the book with none, the ones no spool holds too (``POST …/price-book/fill-densities``).
 """
 
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
+from scadbuddy.orders.density import DensityTable, ProfileDensity
 from scadbuddy.orders.integrations import SpoolGroup
 from scadbuddy.orders.models import (
+    DensityFill,
+    DensityFillRow,
     FilamentInput,
     FilamentPatch,
     SpoolImport,
@@ -43,9 +51,29 @@ def _text(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
-def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
-    """Make or update one record per group, in one transaction. Blocking: call it in a
-    thread."""
+def _identity(
+    material: str, subtype: str | None, brand: str | None, colour: str | None
+) -> tuple[str, str, str, str]:
+    return (
+        material.strip().upper(),
+        (subtype or "").strip().upper(),
+        (brand or "").strip().upper(),
+        (colour or "").upper(),
+    )
+
+
+def _lookup(densities: DensityTable | None, group: SpoolGroup) -> ProfileDensity | None:
+    if densities is None:
+        return None
+    return densities.lookup(group.material, group.subtype, group.brand, group.slicer_filament)
+
+
+def import_spools(
+    store: OrderStore, groups: list[SpoolGroup], densities: DensityTable | None = None
+) -> SpoolImport:
+    """Make or update one record per group, in one transaction, filling an empty
+    density from ``densities`` (none without the slicer's profiles). Blocking: call it
+    in a thread."""
     rows: list[SpoolImportRow] = []
     with store.transaction() as conn:
         for group in groups:
@@ -78,6 +106,7 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                 conn, group.material, group.subtype, group.brand, group.colour
             )
             if existing_id is None:
+                found = _lookup(densities, group)
                 made = store.insert_filament(
                     FilamentInput(
                         material=group.material,
@@ -86,8 +115,10 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                         colour_name=group.colour_name,
                         colour=group.colour,
                         cost_per_kg=_text(price),
+                        density_g_cm3=None if found is None else found.density_g_cm3,
                     ),
                     conn=conn,
+                    density_profile=None if found is None else found.profile,
                 )
                 rows.append(
                     row.model_copy(
@@ -95,6 +126,8 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                             "action": "created",
                             "filament_id": made.id,
                             "cost_per_kg": made.cost_per_kg,
+                            "density_g_cm3": made.density_g_cm3,
+                            "density_profile": made.density_profile,
                         }
                     )
                 )
@@ -102,14 +135,76 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
             current = store.filament(existing_id, conn=conn)
             assert current is not None
             previous = Decimal(current.cost_per_kg)
+            found = None if current.density_g_cm3 is not None else _lookup(densities, group)
             update: dict[str, object] = {
                 "filament_id": existing_id,
                 "cost_per_kg": _text(price),
                 "previous_cost_per_kg": current.cost_per_kg,
+                "density_g_cm3": current.density_g_cm3,
             }
-            if previous == price:
+            patch: dict[str, str] = {}
+            if previous != price:
+                patch["cost_per_kg"] = _text(price)
+            if found is not None:
+                patch["density_g_cm3"] = found.density_g_cm3
+                update["density_g_cm3"] = found.density_g_cm3
+                update["density_profile"] = found.profile
+            if not patch:
                 rows.append(row.model_copy(update={**update, "action": "unchanged"}))
                 continue
-            store.update_filament(existing_id, FilamentPatch(cost_per_kg=_text(price)), conn=conn)
+            store.update_filament(
+                existing_id,
+                FilamentPatch(**patch),
+                conn=conn,
+                density_profile=None if found is None else found.profile,
+            )
             rows.append(row.model_copy(update={**update, "action": "updated"}))
     return SpoolImport(rows=rows)
+
+
+def fill_densities(
+    store: OrderStore, densities: DensityTable | None, groups: list[SpoolGroup]
+) -> DensityFill:
+    """Every record of the book with no density, filled from ``densities`` where a
+    source gives one: the ``slicer_filament`` of the spools of its identity in
+    ``groups`` (empty without a Bambuddy), else its names. One row per such record; a
+    row with no density is one no source covers. Never changes a density a record has.
+    Blocking: call it in a thread."""
+    by_identity = {
+        _identity(g.material, g.subtype, g.brand, g.colour): g.slicer_filament
+        for g in groups
+        if g.colour is not None
+    }
+    rows: list[DensityFillRow] = []
+    with store.transaction() as conn:
+        for record in store.filaments(conn=conn):
+            if record.density_g_cm3 is not None:
+                continue
+            key = _identity(record.material, record.subtype, record.brand, record.colour)
+            found = (
+                None
+                if densities is None
+                else densities.lookup(
+                    record.material, record.subtype, record.brand, by_identity.get(key)
+                )
+            )
+            if found is not None:
+                store.update_filament(
+                    record.id,
+                    FilamentPatch(density_g_cm3=found.density_g_cm3),
+                    conn=conn,
+                    density_profile=found.profile,
+                )
+            rows.append(
+                DensityFillRow(
+                    filament_id=record.id,
+                    material=record.material,
+                    subtype=record.subtype,
+                    brand=record.brand,
+                    colour_name=record.colour_name,
+                    colour=record.colour,
+                    density_g_cm3=None if found is None else found.density_g_cm3,
+                    density_profile=None if found is None else found.profile,
+                )
+            )
+    return DensityFill(rows=rows)

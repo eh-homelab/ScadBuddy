@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { Filament, FilamentInput, SpoolImportRow } from '../../api/types'
+import type { DensityFillRow, Filament, FilamentInput, SpoolImportRow } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -70,7 +70,23 @@ function importLine(row: SpoolImportRow): string {
   if (row.action === 'skipped') return `${name}: skipped, ${row.reason ? REASONS[row.reason] : 'nothing to import'}`
   const price = row.action === 'updated' ? `${row.previous_cost_per_kg} → ${row.cost_per_kg}` : row.cost_per_kg
   const spread = row.min_cost_per_kg && row.max_cost_per_kg ? ` (spools priced ${row.min_cost_per_kg} to ${row.max_cost_per_kg}; the newest spool's price)` : ''
-  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}`
+  const density = row.density_profile ? `; density ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : ''
+  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}${density}`
+}
+
+/**
+ * Where a record's density came from, or what an estimate uses instead (#6136): never a
+ * bare empty cell. The slicer profile is Bambu Studio's preset for the filament.
+ */
+export function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile' | 'fallback_density'>): { text: string; missing: boolean } {
+  if (f.density_g_cm3) return { text: f.density_profile ? `${f.density_g_cm3} g/cm³ (from ${f.density_profile})` : `${f.density_g_cm3} g/cm³`, missing: false }
+  if (f.fallback_density) return { text: `Not set: estimates use ${f.fallback_density.density_g_cm3} g/cm³ (${f.fallback_density.profile})`, missing: false }
+  return { text: 'Not set, and no slicer profile matches: no estimate', missing: true }
+}
+
+function fillLine(row: DensityFillRow): string {
+  const name = filamentLabel(row) || row.material
+  return row.density_g_cm3 ? `${name}: ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: no slicer profile matches; enter its density`
 }
 
 /**
@@ -81,6 +97,8 @@ function importLine(row: SpoolImportRow): string {
  * with an Unarchive that brings the same record back (#4977). With Bambuddy linked
  * (`spool_import`), "Import from spools" makes or updates one record per filament of its
  * spool inventory, on click only: a quote never reads Bambuddy (#4253, spec §8.3).
+ * Each density says where it came from, or what an estimate uses instead; "Fill
+ * densities" writes the slicer profile's into every empty one (#6136).
  */
 export function FilamentsEditor() {
   const [showArchived, setShowArchived] = useState(false)
@@ -90,7 +108,9 @@ export function FilamentsEditor() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [imported, setImported] = useState<SpoolImportRow[] | null>(null)
+  const [filled, setFilled] = useState<DensityFillRow[] | null>(null)
   const filaments = book.data?.filaments ?? []
+  const emptyDensities = filaments.some((f) => !f.archived_at && !f.density_g_cm3)
 
   async function act(action: () => Promise<unknown>) {
     setBusy(true)
@@ -113,6 +133,19 @@ export function FilamentsEditor() {
     setError(null)
     try {
       setImported((await api.importSpools()).rows)
+      book.refresh()
+    } catch (err) {
+      setError(refusalText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function fillDensities() {
+    setBusy(true)
+    setError(null)
+    try {
+      setFilled((await api.fillDensities()).rows)
       book.refresh()
     } catch (err) {
       setError(refusalText(err))
@@ -159,7 +192,14 @@ export function FilamentsEditor() {
     },
     { key: 'colour', header: 'Colour', className: 'font-mono text-xs', cell: (f) => f.colour },
     { key: 'cost', header: 'Cost per kg', className: 'sb-num', cell: (f) => f.cost_per_kg },
-    { key: 'density', header: 'Density', className: 'sb-num', cell: (f) => (f.density_g_cm3 ? `${f.density_g_cm3} g/cm³` : '—') },
+    {
+      key: 'density',
+      header: 'Density',
+      cell: (f) => {
+        const { text, missing } = densityText(f)
+        return <span className={missing ? 'text-xs text-warn' : f.density_g_cm3 ? 'sb-num' : 'text-xs text-muted-foreground'}>{text}</span>
+      },
+    },
     {
       key: 'actions',
       header: <span className="sr-only">Actions</span>,
@@ -195,11 +235,18 @@ export function FilamentsEditor() {
     <section className="flex flex-col gap-2" aria-label="Filaments">
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-medium">Filaments</h4>
-        {book.data?.spool_import && (
-          <Button size="xs" variant="outline" disabled={busy} onClick={() => void importSpools()}>
-            Import from spools
-          </Button>
-        )}
+        <span className="inline-flex gap-1">
+          {emptyDensities && (
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => void fillDensities()}>
+              Fill densities
+            </Button>
+          )}
+          {book.data?.spool_import && (
+            <Button size="xs" variant="outline" disabled={busy} onClick={() => void importSpools()}>
+              Import from spools
+            </Button>
+          )}
+        </span>
       </div>
       <p className="text-xs text-muted-foreground">
         What a kilogram of each filament costs, in {book.data?.currency ?? 'the orders currency'}. A slice quote prices each colour at the filament it names; archiving one hides it from new quotes until it is unarchived.
@@ -212,6 +259,19 @@ export function FilamentsEditor() {
         <p role="alert" className="text-[13px] text-warn">
           The price book could not be read: {book.error.message}
         </p>
+      )}
+      {filled && (
+        <div role="status" aria-label="Density fill" className="text-xs text-muted-foreground">
+          {filled.length === 0 ? (
+            <p>Every filament has a density.</p>
+          ) : (
+            <ul className="list-disc pl-4">
+              {filled.map((row) => (
+                <li key={row.filament_id}>{fillLine(row)}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {imported && (
         <div role="status" aria-label="Spool import" className="text-xs text-muted-foreground">

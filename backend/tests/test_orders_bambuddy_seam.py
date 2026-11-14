@@ -114,6 +114,23 @@ def test_spools_group_by_filament_key() -> None:
     assert by_ids[(5,)].spools == [(5, 20.0)]
 
 
+def test_a_group_carries_its_newest_spools_slicer_filament() -> None:
+    """#6136: the preset id gives the record its density; a spool that names none is
+    passed over."""
+    groups = spool_groups(
+        [
+            _spool(2, rgba="FFFFFFFF", slicer_filament="GFA05"),
+            _spool(6, rgba="FFFFFFFF", slicer_filament="GFA00"),
+            _spool(8, rgba="FFFFFFFF", slicer_filament=" "),
+            _spool(5, material="PETG", rgba="00AE42FF"),
+        ]
+    )
+    assert [(g.material, g.slicer_filament) for g in groups] == [
+        ("PETG", None),
+        ("PLA", "GFA00"),
+    ]
+
+
 def test_spools_of_one_record_are_one_group() -> None:
     """#5159 review: the alpha byte and a 6-digit spelling land on one ``#RRGGBB`` record,
     so they are one group, priced once from the newest priced spool."""

@@ -138,7 +138,7 @@ class FilamentExistsError(ValueError):
 _CUSTOMER = "id, display_name, company, notes, tags, created_at, updated_at, archived_at"
 _FILAMENT = (
     "id, material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3,"
-    " archived_at, created_at, updated_at"
+    " density_profile, archived_at, created_at, updated_at"
 )
 _CONTACT = 'id, kind, value, label, "primary", position'
 _ADDRESS = (
@@ -744,9 +744,16 @@ class OrderStore:
         ).fetchone()
         return None if row is None else str(row["id"])
 
-    def insert_filament(self, body: FilamentInput, *, conn: Conn | None = None) -> Filament:
+    def insert_filament(
+        self,
+        body: FilamentInput,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
+    ) -> Filament:
         """A new record; :class:`FilamentExistsError` for an identity a record in the book
-        holds (an archived one frees its identity: the index is partial)."""
+        holds (an archived one frees its identity: the index is partial).
+        ``density_profile`` names the slicer preset its density was read from (#6136)."""
         values = (
             body.material,
             body.subtype,
@@ -755,12 +762,14 @@ class OrderStore:
             body.colour,
             Decimal(body.cost_per_kg),
             None if body.density_g_cm3 is None else Decimal(body.density_g_cm3),
+            None if body.density_g_cm3 is None else density_profile,
         )
         try:
             with self._write(conn) as c:
                 row = c.execute(
                     "INSERT INTO filaments (material, subtype, brand, colour_name, colour,"
-                    " cost_per_kg, density_g_cm3) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    " cost_per_kg, density_g_cm3, density_profile)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
                     f" RETURNING {_FILAMENT}",
                     values,
                 ).fetchone()
@@ -777,9 +786,17 @@ class OrderStore:
         raise FilamentExistsError(existing or "")
 
     def update_filament(
-        self, filament_id: str, patch: FilamentPatch, *, conn: Conn | None = None
+        self,
+        filament_id: str,
+        patch: FilamentPatch,
+        *,
+        conn: Conn | None = None,
+        density_profile: str | None = None,
     ) -> Filament | None:
-        """The fields ``patch`` sends; ``None`` for no such record."""
+        """The fields ``patch`` sends; ``None`` for no such record. A density sent that
+        differs from the record's is a person's (``density_profile`` cleared), unless
+        ``density_profile`` names the slicer preset it was read from (#6136); the same
+        density sent back, as the editor's save does, keeps its preset."""
         sent = patch.model_fields_set
         fields: dict[str, Any] = {}
         for name in ("material", "colour", "cost_per_kg"):
@@ -794,6 +811,18 @@ class OrderStore:
                 )
         try:
             with self._write(conn) as c:
+                if "density_g_cm3" in sent:
+                    density = fields["density_g_cm3"]
+                    fields["density_profile"] = None if density is None else density_profile
+                    if density_profile is None and density is not None:
+                        # A preset's density sent back unchanged keeps its preset.
+                        was = c.execute(
+                            "SELECT density_g_cm3, density_profile FROM filaments"
+                            " WHERE id = %s FOR UPDATE",
+                            (filament_id,),
+                        ).fetchone()
+                        if was is not None and was["density_g_cm3"] == density:
+                            fields["density_profile"] = was["density_profile"]
                 row = _update(c, "filaments", filament_id, fields, _FILAMENT)
         except errors.UniqueViolation:
             current = self.filament(filament_id)

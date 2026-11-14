@@ -95,6 +95,10 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
                 colour_name=(latest.color_name or "").strip() or None,
                 colour=_colour(latest.rgba),
                 spools=[(s.id, s.cost_per_kg) for s in rows],
+                slicer_filament=next(
+                    (f for s in reversed(rows) if (f := (s.slicer_filament or "").strip())),
+                    None,
+                ),
             )
         )
     return out
