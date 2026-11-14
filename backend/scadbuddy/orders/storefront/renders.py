@@ -238,13 +238,20 @@ async def checked_choice(
     try:
         values = listing_values(listing, body.values, filaments)
         picked = checked_picks(listing, values, body.picks, filaments)
-        check_one_material(listing, values, picked, filaments)
         resolved = listing_reference(listing, values, body.colours, filaments=filaments)
         if render_colours is not None and picked:
             colours = await render_colours(resolved.reference.render_key)
             if colours:
                 chosen = slots_from_picks(body.colours, picked, colours)
                 resolved = listing_reference(listing, values, chosen, filaments=filaments)
+        # The final slot map counts too: a slot may name a filament no pick does.
+        check_one_material(
+            listing,
+            values,
+            picked,
+            filaments,
+            slots=[s.filament_id for s in resolved.colours if s.filament_id],
+        )
     except MixedMaterialError:
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

@@ -253,10 +253,13 @@ def check_one_material(
     values: Mapping[str, ParamValue],
     picked: Mapping[str, Filament],
     filaments: Mapping[str, Filament],
+    *,
+    slots: Collection[str] = (),
 ) -> None:
     """For a ``one_material`` listing, `MixedMaterialError` unless one material (casefolded)
-    holds every pick and, for each offered colour parameter with no pick, a listing filament
-    of its value's colour (#6152). Any other listing passes."""
+    holds every pick, every filament of ``slots`` (the render's slot map, filament ids)
+    and, for each offered colour parameter with no pick, a listing filament of its value's
+    colour (#6152). Any other listing passes."""
     if not listing.one_material:
         return
     by_name = {p.name: p for p in _snapshot(listing).schema_.parameters}
@@ -278,6 +281,14 @@ def check_one_material(
         materials = these if materials is None else materials & these
         if not materials:
             raise MixedMaterialError(f"{listing.id!r}: {name!r} takes another material")
+    for filament_id in slots:
+        filament = filaments.get(filament_id)
+        if filament is None:
+            continue  # `listing_reference` refuses it.
+        these = {filament.material.casefold()}
+        materials = these if materials is None else materials & these
+        if not materials:
+            raise MixedMaterialError(f"{listing.id!r}: slot filament {filament_id!r} mixes")
 
 
 def slots_from_picks(

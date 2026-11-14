@@ -488,3 +488,14 @@ def test_picks_are_bounded() -> None:
     with pytest.raises(ValidationError):
         RenderBody.model_validate({**body, "picks": {str(n): "f" for n in range(201)}})
     assert RenderBody.model_validate(body).picks == {}
+
+
+def test_one_material_counts_the_slot_filaments_too(listing: Listing) -> None:
+    """A slot map names filaments too: on a ``one_material`` listing a PETG slot beside
+    PLA picks mixes, as a PETG pick would (#6152)."""
+    two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
+    values = listing_values(two, {}, WITH_RED_TOO)
+    picks = {"colour": WITH_RED_TOO[PLA_RED]}
+    with pytest.raises(MixedMaterialError):
+        check_one_material(two, values, picks, WITH_RED_TOO, slots=[PETG_RED])
+    check_one_material(two, values, picks, WITH_RED_TOO, slots=[PLA_RED, PLA_BLUE])
