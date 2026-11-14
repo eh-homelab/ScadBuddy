@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
-import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
+import { type Attributes, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
 import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
@@ -435,6 +435,61 @@ async function runAsActivity(
   const { workflowExecution, activityId } = context.info
   const toolUseId = activityId.startsWith('tool-') ? activityId.slice('tool-'.length) : activityId
   const flow = flowOf(workflowExecution?.workflowId)
+  if (flow === undefined) return runCall(tool, input, deps, lookup, toolUseId, undefined, undefined)
+  // A flow run's call is no session's ToolCall, so it gets its `agent.tool/<name>` span here (#6123).
+  return flowCallSpan(tool.name, flowCallAttributes(tool.name, flow, toolUseId, context.info.taskQueue, tool.risk), (span) =>
+    runCall(tool, input, deps, lookup, toolUseId, flow, span),
+  )
+}
+
+/** What a call sets on its `agent.tool/<name>` span: its tier and its outcome. */
+export type CallSpan = { setAttribute(key: string, value: string): void }
+
+/**
+ * A flow run's call under its `agent.tool/<name>` span (#6123). A call that throws before
+ * it names an outcome (its run gone, an unknown server) reads `error`, so the dashboard's
+ * outcome column has one for every call.
+ */
+export function flowCallSpan<T>(tool: string, attributes: Attributes, run: (span: CallSpan) => Promise<T>): Promise<T> {
+  return withSpan(`agent.tool/${tool}`, { attributes }, async (span) => {
+    let named = false
+    const call: CallSpan = {
+      setAttribute: (key, value) => {
+        if (key === 'scadbuddy.outcome') named = true
+        span.setAttribute(key, value)
+      },
+    }
+    try {
+      return await run(call)
+    } catch (err) {
+      if (!named) span.setAttribute('scadbuddy.outcome', 'error')
+      throw err
+    }
+  })
+}
+
+/** A flow run's `agent.tool/<name>` attributes: the run and its call, and the queue it ran on. */
+export function flowCallAttributes(tool: string, flow: string, toolUseId: string, taskQueue: string, tier?: string): Attributes {
+  return {
+    'scadbuddy.tool': tool,
+    'scadbuddy.flow_run_id': flow,
+    'scadbuddy.tool_use_id': toolUseId,
+    'scadbuddy.task_queue': taskQueue,
+    ...(tier === undefined ? {} : { 'scadbuddy.tier': tier }),
+  }
+}
+
+async function runCall(
+  tool: Tool,
+  input: unknown,
+  deps: ToolActivityDeps,
+  lookup: (name: string) => Tool | undefined,
+  toolUseId: string,
+  flow: string | undefined,
+  span: CallSpan | undefined,
+): Promise<unknown> {
+  const context = Context.current()
+  const { workflowExecution } = context.info
   let caller: Caller
   if (flow !== undefined) {
     caller = await flowCaller(tool, flow, deps, toolUseId)
@@ -450,7 +505,9 @@ async function runAsActivity(
     flow,
     signal: context.cancellationSignal,
     heartbeat: (details) => context.heartbeat(details),
+    span,
   })
+  span?.setAttribute('scadbuddy.outcome', run.outcome)
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
   if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
@@ -467,6 +524,8 @@ type GatedRun = {
   describedAs?: string
   /** ToolContext.callKey: the call's Idempotency-Key. */
   callKey?: string
+  /** The call's `agent.tool/<name>` span, given the tier it ran at and a refusal's outcome. */
+  span?: CallSpan | undefined
 }
 
 /**
@@ -497,7 +556,9 @@ async function runGated(
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
   const effective = await effectiveTool(tool, deps.services, input)
+  call.span?.setAttribute('scadbuddy.tier', effective.risk)
   const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
+    call.span?.setAttribute('scadbuddy.outcome', outcome)
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()
     await deps.audit?.record({

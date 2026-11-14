@@ -168,7 +168,10 @@ opens every one and seals it again byte for byte).
   `agent.turn.spawn` (`warm.outcome`), `agent.turn.release`, the turn's span of each call with
   `scadbuddy.eager` (above), and each ToolCall's
   `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
-  charts; and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
+  charts; a flow run's call (a `flow-<id>` workflow's ScadBuddy tool or `turn:` activity) has the
+  same `agent.tool/<name>` span, with `scadbuddy.flow_run_id`, `scadbuddy.tool_use_id`,
+  `scadbuddy.tier` (once known), `scadbuddy.outcome` and `scadbuddy.task_queue` (#6123; a call that
+  throws before it names an outcome reads `error`, `flowCallSpan`); and a browser call to another replica's tab, `agent.bridge.call` (`bridge/relay.ts`),
   whose `scadbuddy.bridge.task_timeouts` counts its BridgeCall's workflow tasks that timed out
   (Temporal started them and never delivered them, #5939), read from the history (once the workflow
   closes) for an aborted call and for one that took at least `BRIDGE_WORKFLOW_TASK_TIMEOUT_MS`,

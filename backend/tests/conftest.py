@@ -498,7 +498,12 @@ if "%%LISTING%%" in text and out is not None and out.endswith(".param"):
          "options": [{"name": "Round", "value": "round"},
                      {"name": "Square", "value": "square"}]},
     ]
-    if "trim =" in text:
+    if "%%TWO_COLOURS%%" in text:
+        # A second colour a customer picks (#6152: one material across colours).
+        parameters.append(
+            {"name": "trim", "type": "string", "initial": "#FF0000", "group": "Main"}
+        )
+    elif "trim =" in text:
         parameters.append(
             {"name": "trim", "type": "string", "initial": "#00FF00", "group": "Hidden"}
         )
