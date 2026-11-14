@@ -7,15 +7,17 @@ uploads' ``assets`` rows (R19-R21), for `RemoteAssetRows`, and the library lease
 holds and install slots (R22-R24), for `RemoteCheckoutLeases` and `RemoteInstallSlots`.
 
 The settings answer holds secrets in plaintext, released only to ``crud.render`` (plan D8): the
-render key (or the full key while no render key is saved) and the S3 keys. The CRUD
-router answers ``Cache-Control: no-store``, and each answer is logged with the secrets it
-released and the credential it released them to, never their values.
+render key and the S3 keys. While no render key is saved it holds no Bambuddy key: the
+full key is never released to the pod that runs template Python (#5298 final review). The
+CRUD router answers ``Cache-Control: no-store``, and each answer is logged with the
+secrets it released and the credential it released them to, never their values.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime
@@ -83,20 +85,33 @@ REUSE_LOST = "reuse-lost"
 #: An index write Postgres picked as a deadlock's victim on every try:
 #: `crud/render.py` `DEADLOCK`.
 DEADLOCK = "deadlock"
-#: A blob-index write (put, swap, mark, delete, stale delete) of a key only the API
-#: writes: a 403.
+#: A blob-index write (put, swap, mark, delete, stale delete) of a key that is not a
+#: render job's or of a row of another kind, a hold of a key no render job holds, or a
+#: read of a key or kind the render worker does not read: a 403.
 API_OWNED_KEY = "api-owned-key"
-#: The index keys only the API writes: an upload's copy (`store/assets.py` `asset_key`,
-#: whose meta an adopt writes the upload's row from), a font family's
-#: (`store/fonts.py` `font_key`), a template revision's snapshot
-#: (`store/snapshots.py` `snapshot_key`) and a slicer's input or output (kind ``slice``,
-#: written only by the API's `SliceWorkflow` activities and `api/internal_blobs.py`; the
-#: print worker's read URL is minted for a ``slice-`` key with `SLICED_OUTPUT_META`, so a
-#: render credential must not put or mark one, #5298 Task 32). The render worker reads and
-#: touches them and writes none of them: a copy it cannot read, the API drops (an
-#: upload's, ``POST …/assets/{id}/drop-copy``) or forgets (a font's or snapshot's,
-#: ``POST …/blob-index/{key}/forget-copy``) for it.
-API_OWNED_PREFIXES = ("asset-", "font-", "src-", "slice-")
+#: The index keys a render job writes, every one of kind ``piece`` (`store/cache.py`
+#: `CachedBlobStore._publish`): a piece's (`workflows/models.py` `piece_key`, 64 hex), a
+#: template call's emitted files (`workflows/template_process.py` `template_out_key`) and
+#: an output's files (`workflows/outputs.py` `output_key`, with the 32-hex job id
+#: `render_accept` mints). An allowlist, not a denylist (#5298 final review): `store_blobs`
+#: holds every service's keys (a print library file's, an agent workspace's, a customer's
+#: files, a listing's media, a slicer's input and output, an upload's copy, a font's, a
+#: template revision's snapshot), and template ``pipeline/`` Python, which runs in the
+#: render pod, can reach a render credential. Every other key is the API's: a copy the
+#: worker cannot read, the API drops (an upload's, ``POST …/assets/{id}/drop-copy``) or
+#: forgets (a font's or snapshot's, ``POST …/blob-index/{key}/forget-copy``) for it.
+RENDER_KEY = re.compile(r"[0-9a-f]{64}|act-[0-9a-f]{40}|output-[0-9a-f]{32}-[0-9]+")
+#: The one kind a render job writes.
+RENDER_KIND = "piece"
+#: The keys a render job holds (`RemoteBlobRefs`: `render_finish`'s blob keys,
+#: `TemplateActivities._hold`, an output's files): its own, and a library file's object
+#: that Arrange lays out (`bambuddy/library_objects.py` `piece_key`, stored by the API).
+HELD_KEY = re.compile(rf"{RENDER_KEY.pattern}|lib3-[0-9a-f]{{48}}-[0-9]+")
+#: Beside the keys it holds, the render worker reads a template revision's snapshot
+#: (`SnapshotStore`), a font family's copy (`FontMirror`) and an upload's (`RemoteAssets`).
+READ_PREFIXES = ("src-", "font-", "asset-")
+#: The kinds it lists (`FontMirror.sync`) or finds by SHA-256 (`ContentStore.put`).
+READ_KINDS = frozenset({"piece", "snapshot", "font", "asset"})
 #: The owned keys a worker may have the API forget (the row only): `FontMirror.sync` and
 #: `SnapshotStore.materialize` forget a copy they cannot read, so the API stores it again.
 FORGETTABLE_PREFIXES = ("font-", "src-")
@@ -140,20 +155,36 @@ def released(current: RenderStoreSettings) -> list[str]:
     """The names of the secrets in ``current``, for the log."""
     names = []
     if current.api_key is not None:
-        names.append("bambuddy_api_key" if current.key_is_fallback else "bambuddy_render_api_key")
+        names.append("bambuddy_render_api_key")
     if current.s3 is not None:
         names += ["store_s3_access_key_id", "store_s3_secret_access_key"]
     return names
 
 
+def withheld(current: RenderStoreSettings) -> RenderStoreSettings:
+    """``current`` without the full Bambuddy key it falls back to while no render key is
+    saved. ``key_is_fallback`` stays true, so the worker's Bambuddy store can say that it
+    needs ``bambuddy_render_api_key`` (`store/bambuddy.py` `render_target`)."""
+    if not current.key_is_fallback:
+        return current
+    return current.model_copy(update={"api_key": None})
+
+
 @router.get("/settings", name="crud_render_settings")
 async def render_settings(request: Request, state: StateDep) -> RenderStoreSettings:
-    current = await asyncio.to_thread(
+    loaded = await asyncio.to_thread(
         load_render_store_settings, state.settings_store.pool, state.settings
     )
+    current = withheld(loaded)
     # The guard admitted only a render `Service`.
     principal = caller_of(request.scope)
     assert isinstance(principal, Service)
+    if current is not loaded:
+        logger.warning(
+            "withheld the full Bambuddy key from service credential %s: no"
+            " bambuddy_render_api_key is saved, so the render worker gets no Bambuddy key",
+            principal.credential_id,
+        )
     logger.info(
         "released the render settings to service credential %s, secrets: %s",
         principal.credential_id,
@@ -310,7 +341,15 @@ class Geometry(BaseModel):
 async def add_blob_ref(body: BlobRef, state: StateDep) -> None:
     """R11: hold ``key`` for a render job. The worker holds blobs for its jobs only, so
     any other holder kind is a 403 and a holder that is no render job a 404: a render
-    credential cannot pin blobs under another holder."""
+    credential cannot pin blobs under another holder. A key no render job holds
+    (`HELD_KEY`) is a 403 ``api-owned-key``: a render credential cannot keep a deleted
+    customer's file, or any other service's blob, from the sweep."""
+    if not HELD_KEY.fullmatch(body.key):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            f"A render job does not hold {body.key!r}.",
+            reason=API_OWNED_KEY,
+        )
     if body.holder_kind != "job":
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
@@ -359,9 +398,11 @@ async def forget_geometry(geometry_key: str, state: StateDep, piece_key: str = Q
 # row it took), so each takes an ``Idempotency-Key`` (a 428 without one) and writes its
 # ledger row in the index write's transaction, inside the deadlock retry, so a victim
 # rolls back whole and is tried again whole. A key or object id may hold slashes. A put,
-# swap, mark, delete or stale delete of a key only the API writes (`API_OWNED_PREFIXES`)
-# is a 403; a touch of one is allowed (`SnapshotStore` touches the snapshot it renders
-# from, so the sweep keeps it).
+# swap, mark, delete or stale delete is a 403 unless every key is a render job's
+# (`RENDER_KEY`), the ref it writes is a ``piece`` and no row it finds is of another kind;
+# a read is a 403 for a key or kind the worker does not read (`HELD_KEY`,
+# `READ_PREFIXES`, `READ_KINDS`). A touch of any key is allowed (`SnapshotStore` touches
+# the snapshot it renders from, so the sweep keeps it).
 
 
 class IndexPut(BaseModel):
@@ -435,17 +476,55 @@ def _indexed(
         raise ApiError(status.HTTP_409_CONFLICT, str(error), reason=DEADLOCK) from None
 
 
-def _worker_writable(*keys: str) -> None:
-    """Refuse a write of a key only the API writes (`API_OWNED_PREFIXES`): a render
-    credential could otherwise forge an upload's metadata for an adopt, or a font's or
-    snapshot's object for another render, or drop a row and leave its object untracked."""
-    owned = sorted(key for key in keys if key.startswith(API_OWNED_PREFIXES))
-    if owned:
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            f"The render worker does not store {owned[0]!r}: only the API writes that key.",
-            reason=API_OWNED_KEY,
+def _owned(what: str) -> ApiError:
+    return ApiError(status.HTTP_403_FORBIDDEN, what, reason=API_OWNED_KEY)
+
+
+def _worker_writable(*keys: str, ref: IndexedRef | None = None) -> None:
+    """Refuse a write of any key that is not a render job's (`RENDER_KEY`), or of a ref
+    that is not a ``piece``: a render credential could otherwise point a print library
+    file's key at its own 3MF, forge an upload's metadata for an adopt, or drop another
+    service's row and leave its object untracked."""
+    foreign = sorted(key for key in keys if not RENDER_KEY.fullmatch(key))
+    if foreign:
+        raise _owned(f"The render worker does not store {foreign[0]!r}: the API writes that key.")
+    if ref is not None and ref.kind != RENDER_KIND:
+        raise _owned(f"The render worker stores pieces only, not a {ref.kind!r}.")
+
+
+def _only_pieces(conn: Connection[DictRow], keys: list[str]) -> None:
+    """In the write's transaction: refuse when a row of ``keys`` holds another kind than a
+    piece. No render key names one today; this keeps it so."""
+    row = conn.execute(
+        "SELECT key, kind FROM store_blobs WHERE key = ANY(%s) AND kind <> %s ORDER BY key LIMIT 1",
+        (keys, RENDER_KIND),
+    ).fetchone()
+    if row is not None:
+        raise _owned(
+            f"{row['key']!r} holds a {row['kind']!r}: the render worker writes pieces only."
         )
+
+
+def _kept_piece(stat: BlobStat | IndexedRef | None) -> None:
+    """Refuse, so the transaction rolls back, a write whose row (read under its lock) held
+    another kind than a piece."""
+    ref = stat.ref if isinstance(stat, BlobStat) else stat
+    if ref is not None and ref.kind != RENDER_KIND:
+        raise _owned(f"The row held a {ref.kind!r}: the render worker writes pieces only.")
+
+
+def _worker_readable(key: str) -> None:
+    """Refuse a read of a key the render worker never reads: another service's row tells
+    its file's name and scope."""
+    if not (HELD_KEY.fullmatch(key) or key.startswith(READ_PREFIXES)):
+        raise _owned(f"The render worker does not read {key!r}.")
+
+
+def _worker_kinds(kinds: list[str] | None) -> None:
+    """Refuse a listing or a find of a kind the render worker never reads; any kind
+    (none named) too."""
+    if kinds is None or not set(kinds) <= READ_KINDS:
+        raise _owned(f"The render worker reads only {sorted(READ_KINDS)}.")
 
 
 def _json(model: BaseModel | None) -> dict[str, Any] | None:
@@ -472,7 +551,9 @@ async def index_stats(
     slug: str | None = None,
     backend: str | None = None,
 ) -> list[BlobStat]:
-    """R13: the rows by kind (any, without one), template and backend."""
+    """R13: the rows by kind, template and backend. Only the kinds the worker reads
+    (`READ_KINDS`), named: any other, or none, is a 403 ``api-owned-key``."""
+    _worker_kinds(kind)
     return await asyncio.to_thread(_index(state).stats, kind, slug, backend=backend)
 
 
@@ -480,7 +561,9 @@ async def index_stats(
 async def index_by_sha(
     state: StateDep, sha256: str = Query(), kind: str = Query(), backend: str = Query()
 ) -> IndexedRef | None:
-    """R13: an object already stored with these bytes, or null."""
+    """R13: an object already stored with these bytes, or null. A kind the worker does
+    not read is a 403 ``api-owned-key``."""
+    _worker_kinds([kind])
     return await asyncio.to_thread(_index(state).by_sha, sha256, kind, backend)
 
 
@@ -500,8 +583,15 @@ async def index_mark(
     body: IndexMark, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> None:
     """R15: merge ``meta`` into the rows of ``keys`` on ``backend`` untouched since
-    ``cutoff``. A key only the API writes is a 403 ``api-owned-key``."""
+    ``cutoff``. A key that is not a render job's, or a row of another kind than a piece,
+    is a 403 ``api-owned-key``."""
     _worker_writable(*body.keys)
+
+    def mark(index: BlobIndex, conn: Connection[DictRow]) -> None:
+        BlobIndex.mark_in(conn, body.keys, backend=body.backend, cutoff=body.cutoff, meta=body.meta)
+        # After `mark_in`, which locked the rows it matched: a refusal rolls it back.
+        _only_pieces(conn, body.keys)
+
     await asyncio.to_thread(
         _indexed,
         state,
@@ -509,15 +599,15 @@ async def index_mark(
         idempotency_key,
         "POST /blob-index/mark",
         body.model_dump(mode="json"),
-        lambda index, conn: BlobIndex.mark_in(
-            conn, body.keys, backend=body.backend, cutoff=body.cutoff, meta=body.meta
-        ),
+        mark,
     )
 
 
 @router.get("/blob-index/{key:path}", name="crud_render_index_get")
 async def index_get(key: str, state: StateDep) -> BlobStat | None:
-    """R13: ``key``'s row, or null."""
+    """R13: ``key``'s row, or null. A key the worker does not read is a 403
+    ``api-owned-key``."""
+    _worker_readable(key)
     return await asyncio.to_thread(_index(state).get, key)
 
 
@@ -526,9 +616,19 @@ async def index_put(
     key: str, body: IndexPut, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> Previous:
     """R14: point ``key`` at ``ref``; ``previous``, what it named before. A reuse of an
-    object freed first is a 409 ``reuse-lost`` with nothing written; a key only the API
-    writes, a 403 ``api-owned-key``."""
-    _worker_writable(key)
+    object freed first is a 409 ``reuse-lost`` with nothing written; a key that is not a
+    render job's, or a ref or row of another kind than a piece, a 403 ``api-owned-key``."""
+    _worker_writable(key, ref=body.ref)
+
+    def put(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
+        _only_pieces(conn, [key])
+        previous = index.put_in(
+            conn, key, body.ref, slug=body.slug, meta=body.meta, reuse=body.reuse
+        )
+        # Read under the row's lock: a refusal rolls the put back.
+        _kept_piece(previous)
+        return {"previous": _json(previous)}
+
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -536,11 +636,7 @@ async def index_put(
         idempotency_key,
         "PUT /blob-index/{key}",
         {"key": key, **body.model_dump(mode="json")},
-        lambda index, conn: {
-            "previous": _json(
-                index.put_in(conn, key, body.ref, slug=body.slug, meta=body.meta, reuse=body.reuse)
-            )
-        },
+        put,
     )
     return Previous.model_validate(answer)
 
@@ -550,8 +646,24 @@ async def index_swap(
     key: str, body: IndexSwap, state: StateDep, idempotency_key: MaybeIdempotencyKey = None
 ) -> Swapped:
     """R14: point ``key`` at ``ref`` only if it still names ``expected`` (null: no row).
-    A key only the API writes is a 403 ``api-owned-key``."""
-    _worker_writable(key)
+    A key that is not a render job's, or a ref or row of another kind than a piece, is a
+    403 ``api-owned-key``. The row's kind is read in the swap's transaction, before it: a
+    swap that names ``expected`` then rewrites only a row that still names that object."""
+    _worker_writable(key, ref=body.ref)
+
+    def swap(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any]:
+        _only_pieces(conn, [key])
+        swapped = index.swap_in(
+            conn,
+            key,
+            body.ref,
+            expected=body.expected,
+            slug=body.slug,
+            meta=body.meta,
+            reuse=body.reuse,
+        )
+        return {"swapped": swapped}
+
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -559,17 +671,7 @@ async def index_swap(
         idempotency_key,
         "POST /blob-index/{key}/swap",
         {"key": key, **body.model_dump(mode="json")},
-        lambda index, conn: {
-            "swapped": index.swap_in(
-                conn,
-                key,
-                body.ref,
-                expected=body.expected,
-                slug=body.slug,
-                meta=body.meta,
-                reuse=body.reuse,
-            )
-        },
+        swap,
     )
     return Swapped.model_validate(answer)
 
@@ -604,8 +706,16 @@ async def index_delete_stale(
     backend: str | None = None,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> BlobStat | None:
-    """R15: drop ``key``'s row if untouched since ``before``; the row taken, or null."""
+    """R15: drop ``key``'s row if untouched since ``before``; the row taken, or null. A
+    key that is not a render job's, or a row of another kind than a piece, is a 403
+    ``api-owned-key``."""
     _worker_writable(key)
+
+    def delete(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any] | None:
+        taken = BlobIndex.delete_if_stale_in(conn, key, before, backend=backend)
+        _kept_piece(taken)
+        return _json(taken)
+
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -613,7 +723,7 @@ async def index_delete_stale(
         idempotency_key,
         "DELETE /blob-index/{key}/stale",
         {"key": key, "before": before.isoformat(), "backend": backend},
-        lambda index, conn: _json(BlobIndex.delete_if_stale_in(conn, key, before, backend=backend)),
+        delete,
     )
     return None if answer is None else BlobStat.model_validate(answer)
 
@@ -625,8 +735,16 @@ async def index_delete(
     backend: str | None = None,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> BlobStat | None:
-    """R15: drop ``key``'s row (with ``backend``, only a row on it); the row, or null."""
+    """R15: drop ``key``'s row (with ``backend``, only a row on it); the row, or null. A
+    key that is not a render job's, or a row of another kind than a piece, is a 403
+    ``api-owned-key``."""
     _worker_writable(key)
+
+    def delete(index: BlobIndex, conn: Connection[DictRow]) -> dict[str, Any] | None:
+        taken = BlobIndex.delete_in(conn, key, backend=backend)
+        _kept_piece(taken)
+        return _json(taken)
+
     answer = await asyncio.to_thread(
         _indexed,
         state,
@@ -634,7 +752,7 @@ async def index_delete(
         idempotency_key,
         "DELETE /blob-index/{key}",
         {"key": key, "backend": backend},
-        lambda index, conn: _json(BlobIndex.delete_in(conn, key, backend=backend)),
+        delete,
     )
     return None if answer is None else BlobStat.model_validate(answer)
 

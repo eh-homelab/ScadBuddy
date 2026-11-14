@@ -1112,6 +1112,11 @@ async def run_worker(
             logger.info("stopped before the API answered this worker's store settings")
             return
         current = reading.result()
+        if current.store_backend == "bambuddy" and current.key_is_fallback:
+            logger.error(
+                "the API withholds the full Bambuddy key and no bambuddy_render_api_key is"
+                " saved: renders on the Bambuddy store fail until one is"
+            )
         # Called from the activities' threads (`asyncio.to_thread`), so blocking; one
         # client for the seven, closed with ``jobs``.
         remote = crud.blocking()

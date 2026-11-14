@@ -29,6 +29,10 @@ from tests.support.store import store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
+#: Render keys (`api/crud_render.py` `RENDER_KEY`): the only keys a render credential
+#: writes.
+K, K1, K2 = "e" * 64, "1" * 64, "2" * 64
+
 
 @pytest.fixture
 def pool(pg_conninfo: str) -> Iterator[Pool]:
@@ -75,19 +79,19 @@ async def test_a_put_resent_with_its_key_answers_the_first_previous(
     """The second send is a retry after a lost answer: it answers the object the first
     send replaced, not the one it stored, and writes nothing more."""
     sql = BlobIndex(pool)
-    sql.put("k", _ref("a"), slug="demo", meta={})
+    sql.put(K, _ref("a"), slug="demo", meta={})
     key = uuid.uuid4().hex
 
     def send() -> Any:
         return client.request(
-            "PUT", f"{BASE}/blob-index/k", json=_wire(_ref("b")), idempotency_key=key
+            "PUT", f"{BASE}/blob-index/{K}", json=_wire(_ref("b")), idempotency_key=key
         ).json()
 
     first = await asyncio.to_thread(send)
     again = await asyncio.to_thread(send)
     assert first == {"previous": _ref("a").model_dump(mode="json")}
     assert again == first
-    named = sql.get("k")
+    named = sql.get(K)
     assert named is not None and named.ref == _ref("b")
     assert _ledger(pool) == 1
 
@@ -96,30 +100,30 @@ async def test_a_put_without_a_key_is_a_428_and_writes_nothing(
     client: CrudSyncClient, pool: Pool
 ) -> None:
     for method, path, body in (
-        ("PUT", "/blob-index/k", _wire(_ref("b"))),
-        ("POST", "/blob-index/k/swap", {**_wire(_ref("b")), "expected": None}),
-        ("DELETE", "/blob-index/k", None),
-        ("DELETE", "/blob-index/k/stale?before=2026-01-01T00:00:00Z", None),
+        ("PUT", f"/blob-index/{K}", _wire(_ref("b"))),
+        ("POST", f"/blob-index/{K}/swap", {**_wire(_ref("b")), "expected": None}),
+        ("DELETE", f"/blob-index/{K}", None),
+        ("DELETE", f"/blob-index/{K}/stale?before=2026-01-01T00:00:00Z", None),
         (
             "POST",
             "/blob-index/mark",
-            {"keys": ["k"], "backend": "bambuddy", "cutoff": "2026-01-01T00:00:00Z", "meta": {}},
+            {"keys": [K], "backend": "bambuddy", "cutoff": "2026-01-01T00:00:00Z", "meta": {}},
         ),
     ):
         with pytest.raises(CrudRefusedError) as refused:
             await asyncio.to_thread(client.request, method, f"{BASE}{path}", json=body)
         assert refused.value.status == 428, (method, path)
-    assert BlobIndex(pool).get("k") is None
+    assert BlobIndex(pool).get(K) is None
     assert _ledger(pool) == 0
 
 
 async def test_the_worker_put_answers_the_replaced_object(
     index: RemoteBlobIndex, pool: Pool
 ) -> None:
-    assert await asyncio.to_thread(index.put, "k", _ref("a"), slug="demo", meta={"x": 1}) is None
-    previous = await asyncio.to_thread(index.put, "k", _ref("b"), slug="demo", meta={})
+    assert await asyncio.to_thread(index.put, K, _ref("a"), slug="demo", meta={"x": 1}) is None
+    previous = await asyncio.to_thread(index.put, K, _ref("b"), slug="demo", meta={})
     assert previous == _ref("a")
-    named = BlobIndex(pool).get("k")
+    named = BlobIndex(pool).get(K)
     assert named is not None and named.ref == _ref("b")
 
 
@@ -129,12 +133,12 @@ async def test_a_reuse_of_a_freed_object_raises_reuse_lost_on_the_worker(
     """`ReuseLostError` is a 409 ``reuse-lost`` and the same error again on the worker,
     so `ContentStore` uploads its own copy; nothing is written or recorded."""
     with pytest.raises(ReuseLostError):
-        await asyncio.to_thread(index.put, "k", _ref("gone"), slug="demo", meta={}, reuse=True)
+        await asyncio.to_thread(index.put, K, _ref("gone"), slug="demo", meta={}, reuse=True)
     with pytest.raises(ReuseLostError):
         await asyncio.to_thread(
-            index.swap, "k", _ref("gone"), expected=None, slug="demo", meta={}, reuse=True
+            index.swap, K, _ref("gone"), expected=None, slug="demo", meta={}, reuse=True
         )
-    assert BlobIndex(pool).get("k") is None
+    assert BlobIndex(pool).get(K) is None
     assert _ledger(pool) == 0
 
 
@@ -144,7 +148,7 @@ async def test_a_deadlock_retried_in_the_api_records_only_the_write_that_landed(
     """The API's deadlock retry wraps the ledger row too: a victim's half (its row
     written, then broken) rolls back whole, and the retry answers the true previous."""
     sql = BlobIndex(pool)
-    sql.put("k", _ref("a"), slug="demo", meta={})
+    sql.put(K, _ref("a"), slug="demo", meta={})
     put_in = BlobIndex.put_in
     calls = 0
 
@@ -157,7 +161,7 @@ async def test_a_deadlock_retried_in_the_api_records_only_the_write_that_landed(
         return answer
 
     monkeypatch.setattr(BlobIndex, "put_in", once_a_victim)
-    previous = await asyncio.to_thread(index.put, "k", _ref("b"), slug="demo", meta={})
+    previous = await asyncio.to_thread(index.put, K, _ref("b"), slug="demo", meta={})
     assert calls == 2
     assert previous == _ref("a")
     assert _ledger(pool) == 1
@@ -173,7 +177,7 @@ async def test_a_deadlock_the_api_gave_up_on_is_a_deadlock_on_the_worker(
 
     monkeypatch.setattr(BlobIndex, "put_in", victim)
     with pytest.raises(DeadlockDetected):
-        await asyncio.to_thread(index.put, "k", _ref("b"), slug="demo", meta={})
+        await asyncio.to_thread(index.put, K, _ref("b"), slug="demo", meta={})
     assert _ledger(pool) == 0
 
 
@@ -203,13 +207,13 @@ async def test_puts_swapping_objects_between_two_keys_both_finish(
     sql = BlobIndex(pool)
     p, o = _ref("1"), _ref("2")
     for _ in range(10):
-        sql.put("k1", p, slug="demo", meta={})
-        sql.put("k2", o, slug="demo", meta={})
+        sql.put(K1, p, slug="demo", meta={})
+        sql.put(K2, o, slug="demo", meta={})
         start = threading.Barrier(2)
         results: dict[str, str] = {}
         await asyncio.gather(
-            asyncio.to_thread(_racing_put, index, start, results, "k1", o),
-            asyncio.to_thread(_racing_put, index, start, results, "k2", p),
+            asyncio.to_thread(_racing_put, index, start, results, K1, o),
+            asyncio.to_thread(_racing_put, index, start, results, K2, p),
         )
         assert set(results.values()) <= {"ok", "lost"}, results
         assert "ok" in results.values()
@@ -219,14 +223,14 @@ async def test_puts_swapping_objects_between_two_keys_both_finish(
 
 
 async def test_swap_is_a_compare_and_swap(index: RemoteBlobIndex, pool: Pool) -> None:
-    assert await asyncio.to_thread(index.swap, "k", _ref("a"), expected=None, slug="demo", meta={})
+    assert await asyncio.to_thread(index.swap, K, _ref("a"), expected=None, slug="demo", meta={})
     assert not await asyncio.to_thread(
-        index.swap, "k", _ref("b"), expected=None, slug="demo", meta={}
+        index.swap, K, _ref("b"), expected=None, slug="demo", meta={}
     )
     assert await asyncio.to_thread(
-        index.swap, "k", _ref("b"), expected=_ref("a").sha256, slug="demo", meta={}
+        index.swap, K, _ref("b"), expected=_ref("a").sha256, slug="demo", meta={}
     )
-    named = BlobIndex(pool).get("k")
+    named = BlobIndex(pool).get(K)
     assert named is not None and named.ref == _ref("b")
 
 
@@ -234,22 +238,22 @@ async def test_a_delete_answers_the_row_and_resent_answers_it_again(
     client: CrudSyncClient, index: RemoteBlobIndex, pool: Pool
 ) -> None:
     sql = BlobIndex(pool)
-    sql.put("k", _ref("a"), slug="demo", meta={"m": 1})
-    stat = sql.get("k")
+    sql.put(K, _ref("a"), slug="demo", meta={"m": 1})
+    stat = sql.get(K)
     key = uuid.uuid4().hex
 
     def send() -> Any:
         return client.request(
-            "DELETE", f"{BASE}/blob-index/k?backend=bambuddy", idempotency_key=key
+            "DELETE", f"{BASE}/blob-index/{K}?backend=bambuddy", idempotency_key=key
         ).json()
 
     first = await asyncio.to_thread(send)
     assert first is not None and first["ref"] == _ref("a").model_dump(mode="json")
     assert await asyncio.to_thread(send) == first
-    sql.put("k", _ref("b", backend="s3"), slug="demo", meta={})
+    sql.put(K, _ref("b", backend="s3"), slug="demo", meta={})
     # Another backend's row stays.
-    assert await asyncio.to_thread(index.delete, "k", backend="bambuddy") is None
-    gone = await asyncio.to_thread(index.delete, "k")
+    assert await asyncio.to_thread(index.delete, K, backend="bambuddy") is None
+    gone = await asyncio.to_thread(index.delete, K)
     assert gone is not None and gone.ref == _ref("b", backend="s3")
     assert stat is not None and stat.meta == {"m": 1}
 
@@ -258,31 +262,30 @@ async def test_delete_if_stale_takes_only_a_row_untouched_since_the_cutoff(
     index: RemoteBlobIndex, pool: Pool
 ) -> None:
     sql = BlobIndex(pool)
-    sql.put("k", _ref("a"), slug="demo", meta={})
+    sql.put(K, _ref("a"), slug="demo", meta={})
     before = sql.now() - timedelta(seconds=60)
-    assert await asyncio.to_thread(index.delete_if_stale, "k", before) is None
+    assert await asyncio.to_thread(index.delete_if_stale, K, before) is None
     cutoff = await asyncio.to_thread(index.now)
-    stat = await asyncio.to_thread(index.delete_if_stale, "k", cutoff, backend="bambuddy")
-    assert stat is not None and stat.key == "k" and stat.ref == _ref("a")
-    assert sql.get("k") is None
+    stat = await asyncio.to_thread(index.delete_if_stale, K, cutoff, backend="bambuddy")
+    assert stat is not None and stat.key == K and stat.ref == _ref("a")
+    assert sql.get(K) is None
 
 
 async def test_mark_merges_meta_into_the_stale_rows_only_and_touch_unmarks_none(
     index: RemoteBlobIndex, pool: Pool
 ) -> None:
     sql = BlobIndex(pool)
-    for key in ("a", "b"):
-        sql.put(key, _ref(key), slug="demo", meta={"x": 1})
+    a, b, c = ("a" * 64, "b" * 64, "c" * 64)
+    for key in (a, b):
+        sql.put(key, _ref(key[0]), slug="demo", meta={"x": 1})
     cutoff = await asyncio.to_thread(index.now)
-    sql.put("c", _ref("c"), slug="demo", meta={"x": 1})
-    await asyncio.to_thread(
-        index.mark, ["a", "b", "c"], backend="bambuddy", cutoff=cutoff, swept=True
-    )
-    await asyncio.to_thread(index.touch, "a")
-    marked = {key: (stat.meta if (stat := sql.get(key)) else None) for key in "abc"}
-    assert marked == {"a": {"x": 1, "swept": True}, "b": {"x": 1, "swept": True}, "c": {"x": 1}}
-    a = sql.get("a")
-    assert a is not None and a.touched_at > cutoff
+    sql.put(c, _ref("c"), slug="demo", meta={"x": 1})
+    await asyncio.to_thread(index.mark, [a, b, c], backend="bambuddy", cutoff=cutoff, swept=True)
+    await asyncio.to_thread(index.touch, a)
+    marked = {key: (stat.meta if (stat := sql.get(key)) else None) for key in (a, b, c)}
+    assert marked == {a: {"x": 1, "swept": True}, b: {"x": 1, "swept": True}, c: {"x": 1}}
+    touched = sql.get(a)
+    assert touched is not None and touched.touched_at > cutoff
 
 
 # -- the reads (R13, R16) ------------------------------------------------------
@@ -290,10 +293,10 @@ async def test_mark_merges_meta_into_the_stale_rows_only_and_touch_unmarks_none(
 
 async def test_the_reads_answer_as_the_sql_index(index: RemoteBlobIndex, pool: Pool) -> None:
     sql = BlobIndex(pool)
-    assert await asyncio.to_thread(index.get, "piece/one") is None
-    sql.put("piece/one", _ref("a"), slug="demo", meta={"n": [1, 2]})
-    sql.put("two", _ref("b", backend="s3"), slug="other", meta={})
-    assert await asyncio.to_thread(index.get, "piece/one") == sql.get("piece/one")
+    assert await asyncio.to_thread(index.get, K) is None
+    sql.put(K, _ref("a"), slug="demo", meta={"n": [1, 2]})
+    sql.put(K2, _ref("b", backend="s3"), slug="other", meta={})
+    assert await asyncio.to_thread(index.get, K) == sql.get(K)
     assert await asyncio.to_thread(index.by_sha, "a" * 64, "piece", "bambuddy") == _ref("a")
     assert await asyncio.to_thread(index.by_sha, "a" * 64, "piece", "s3") is None
     assert await asyncio.to_thread(index.shares_backend_id, "bambuddy", "id-a")
@@ -302,10 +305,10 @@ async def test_the_reads_answer_as_the_sql_index(index: RemoteBlobIndex, pool: P
     assert not await asyncio.to_thread(index.recorded, "s3", "id-a")
     assert await asyncio.to_thread(index.usage, "bambuddy") == sql.usage("bambuddy")
     for kinds, slug, backend in (
-        (None, None, None),
+        (["piece"], None, None),
         (["piece"], None, "s3"),
         (["asset"], None, None),
-        (None, "demo", None),
+        (["piece", "font"], "demo", None),
     ):
         assert await asyncio.to_thread(index.stats, kinds, slug, backend=backend) == sql.stats(
             kinds, slug, backend=backend
@@ -318,7 +321,7 @@ async def test_a_backend_id_with_slashes_is_one_path_part(
 ) -> None:
     """Local and S3 object ids hold slashes (`kind/sha`)."""
     ref = BlobRef(sha256="c" * 64, kind="piece", backend="s3", backend_id="t/piece/cc", size=1)
-    BlobIndex(pool).put("k", ref, slug=None, meta={})
+    BlobIndex(pool).put(K, ref, slug=None, meta={})
     assert await asyncio.to_thread(index.shares_backend_id, "s3", "t/piece/cc")
     assert await asyncio.to_thread(index.recorded, "s3", "t/piece/cc")
 
@@ -369,36 +372,54 @@ async def test_a_retried_attempt_writing_another_body_under_its_key_writes_anew(
     info = SimpleNamespace(workflow_id="wf", workflow_run_id="run", activity_id="7", attempt=1)
     monkeypatch.setattr(activity, "in_activity", lambda: True)
     monkeypatch.setattr(activity, "info", lambda: info)
-    assert await asyncio.to_thread(index.put, "k", _ref("a"), slug="demo", meta={}) is None
+    assert await asyncio.to_thread(index.put, K, _ref("a"), slug="demo", meta={}) is None
     info.attempt = 2
-    previous = await asyncio.to_thread(index.put, "k", _ref("b"), slug="demo", meta={})
+    previous = await asyncio.to_thread(index.put, K, _ref("b"), slug="demo", meta={})
     assert previous == _ref("a")
-    named = BlobIndex(pool).get("k")
+    named = BlobIndex(pool).get(K)
     assert named is not None and named.ref == _ref("b")
 
 
-# -- keys only the API writes (#5298 Task 18) ---------------------------------------
+# -- keys only the API writes (#5298 Task 18, final review C1, M1) -----------------
+
+#: A key of every other service's rows in `store_blobs`, and of the API's own: the render
+#: credential writes none of them.
+FOREIGN_KEYS = [
+    "library-file-1",
+    "workspace-" + "a" * 64,
+    "customer-file-" + "a" * 64,
+    "request-file-" + "a" * 64,
+    "customer-preview-" + "a" * 64,
+    "listing-media-" + "a" * 64,
+    "slice-" + "c" * 64,
+    "asset-" + "a" * 64,
+    "font-dejavu",
+    "src-demo-abc",
+    "quote-" + "a" * 64,
+    "lib3-" + "a" * 48 + "-0",
+    "k",
+]
 
 
-@pytest.mark.parametrize(
-    "key", ["asset-" + "a" * 64, "font-dejavu", "src-demo-abc", "slice-" + "c" * 64]
-)
-async def test_the_worker_cannot_store_a_key_only_the_api_writes(
+@pytest.mark.parametrize("key", FOREIGN_KEYS)
+async def test_the_worker_cannot_store_a_key_that_is_not_a_render_jobs(
     index: RemoteBlobIndex, pool: Pool, key: str
 ) -> None:
-    """An upload's copy is what an adopt writes the upload's row from: a render
-    credential that could store one could forge the row. Fonts and snapshots are the
-    API's too, and so are a slicer's inputs and outputs (#5298 Task 32: a marked
-    ``slice-`` key gets the print worker a read URL). Nor may it delete one: a delete
-    whose object release then failed would leave the object untracked, the row's restore
-    being a write too. A touch is allowed; a font's or snapshot's forget goes to the
-    API's ``forget-copy``."""
+    """An allowlist, not a denylist: template Python in the render pod can reach the
+    render credential, and with a put of ``library-file-<id>`` naming its own 3MF it
+    would get its file sliced and printed; with a delete of ``workspace-<sha>`` it would
+    drop an agent's file. An upload's copy is what an adopt writes the upload's row from,
+    and a marked ``slice-`` key gets the print worker a read URL. Nor may it delete one:
+    a delete whose object release then failed would leave the object untracked. A touch
+    is allowed; a font's or snapshot's forget goes to the API's ``forget-copy``."""
     sql = BlobIndex(pool)
     sql.put(key, _ref("b"), slug=None, meta={"name": "real"})
     for write in (
         lambda: index.put(key, _ref("a"), slug=None, meta={"name": "forged"}),
         lambda: index.swap(key, _ref("a"), expected=None, slug=None, meta={}),
+        lambda: index.swap(key, _ref("a"), expected=_ref("b").sha256, slug=None, meta={}),
         lambda: index.mark([key], backend="bambuddy", cutoff=sql.now(), name="forged"),
+        lambda: index.mark([K, key], backend="bambuddy", cutoff=sql.now(), name="forged"),
         lambda: index.delete(key, backend="bambuddy"),
         lambda: index.delete_if_stale(key, sql.now(), backend="bambuddy"),
     ):
@@ -409,18 +430,130 @@ async def test_the_worker_cannot_store_a_key_only_the_api_writes(
     held = sql.get(key)
     assert held is not None and held.meta == {"name": "real"} and held.ref == _ref("b")
     await asyncio.to_thread(index.touch, key)
-    if key.startswith(("asset-", "slice-")):
-        # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only; a slice
-        # blob is the API's sweep's.
-        with pytest.raises(CrudRefusedError) as refused:
-            await asyncio.to_thread(index.delete, key)
-        assert refused.value.status == 403
-        assert sql.get(key) is not None
-    else:
+    if key.startswith(("font-", "src-")):
         forgotten = await asyncio.to_thread(index.delete, key)  # through ``forget-copy``
         assert forgotten is not None and forgotten.ref == _ref("b")
         assert sql.get(key) is None
         assert await asyncio.to_thread(index.delete, key) is None  # natural
+    else:
+        # An upload's copy is dropped through ``…/assets/{id}/drop-copy`` only; every
+        # other key is its service's, and the API's sweep's.
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(index.delete, key)
+        assert refused.value.status == 403
+        assert sql.get(key) is not None
+
+
+@pytest.mark.parametrize("key", [K, "act-" + "a" * 40, "output-" + "0123456789abcdef" * 2 + "-3"])
+async def test_the_worker_stores_and_drops_a_render_jobs_pieces(
+    index: RemoteBlobIndex, pool: Pool, key: str
+) -> None:
+    """A piece's key, a template call's emitted files and an output's files."""
+    sql = BlobIndex(pool)
+    assert await asyncio.to_thread(index.put, key, _ref("a"), slug="demo", meta={}) is None
+    assert await asyncio.to_thread(
+        index.swap, key, _ref("b"), expected=_ref("a").sha256, slug="demo", meta={}
+    )
+    await asyncio.to_thread(index.mark, [key], backend="bambuddy", cutoff=sql.now(), swept=True)
+    held = await asyncio.to_thread(index.get, key)
+    assert held is not None and held.ref == _ref("b") and held.meta == {"swept": True}
+    gone = await asyncio.to_thread(index.delete, key)
+    assert gone is not None and gone.ref == _ref("b")
+
+
+async def test_a_render_key_naming_another_kind_is_refused(
+    index: RemoteBlobIndex, pool: Pool
+) -> None:
+    """No render key names another kind than a piece today; if one ever did, the render
+    credential must not repoint, mark or drop it: refused, and nothing written."""
+    sql = BlobIndex(pool)
+    other = BlobRef(sha256="d" * 64, kind="slice", backend="bambuddy", backend_id="id-d", size=4)
+    sql.put(K, other, slug=None, meta={"name": "real"})
+    for write in (
+        lambda: index.put(K, _ref("a"), slug=None, meta={}),
+        lambda: index.swap(K, _ref("a"), expected=other.sha256, slug=None, meta={}),
+        lambda: index.swap(K, _ref("a"), expected=None, slug=None, meta={}),
+        lambda: index.mark([K], backend="bambuddy", cutoff=sql.now(), name="forged"),
+        lambda: index.delete(K, backend="bambuddy"),
+        lambda: index.delete(K),
+        lambda: index.delete_if_stale(K, sql.now(), backend="bambuddy"),
+    ):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(write)
+        assert refused.value.status == 403
+        assert refused.value.problem["reason"] == "api-owned-key"
+    held = sql.get(K)
+    assert held is not None and held.ref == other and held.meta == {"name": "real"}
+    assert _ledger(pool) == 0
+
+
+async def test_a_ref_of_another_kind_is_refused(index: RemoteBlobIndex, pool: Pool) -> None:
+    """The render worker stores pieces only."""
+    other = BlobRef(sha256="d" * 64, kind="slice", backend="bambuddy", backend_id="id-d", size=4)
+    for write in (
+        lambda: index.put(K, other, slug=None, meta={}),
+        lambda: index.swap(K, other, expected=None, slug=None, meta={}),
+    ):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(write)
+        assert refused.value.status == 403
+    assert BlobIndex(pool).get(K) is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "library-file-1",
+        "workspace-" + "a" * 64,
+        "customer-file-" + "a" * 64,
+        "request-file-" + "a" * 64,
+        "customer-preview-" + "a" * 64,
+        "listing-media-" + "a" * 64,
+        "slice-" + "c" * 64,
+    ],
+)
+async def test_the_worker_cannot_read_another_services_row(
+    index: RemoteBlobIndex, pool: Pool, key: str
+) -> None:
+    """A row's meta and slug tell a customer file's name and an attachment's scope."""
+    BlobIndex(pool).put(key, _ref("b"), slug="secret", meta={"name": "customer.3mf"})
+    with pytest.raises(CrudRefusedError) as refused:
+        await asyncio.to_thread(index.get, key)
+    assert refused.value.status == 403
+    assert refused.value.problem["reason"] == "api-owned-key"
+    assert "customer.3mf" not in str(refused.value.problem)
+
+
+async def test_the_worker_reads_what_it_renders_from(index: RemoteBlobIndex, pool: Pool) -> None:
+    """Its pieces, a library file's object Arrange lays out, a snapshot, a font and an
+    upload's copy."""
+    sql = BlobIndex(pool)
+    for key in (
+        K,
+        "lib3-" + "a" * 48 + "-0",
+        "src-demo-abc",
+        "font-dejavu",
+        "asset-" + "a" * 64,
+    ):
+        sql.put(key, _ref("b"), slug=None, meta={})
+        assert await asyncio.to_thread(index.get, key) == sql.get(key)
+
+
+async def test_the_worker_lists_and_finds_only_the_kinds_it_reads(
+    index: RemoteBlobIndex,
+) -> None:
+    for read in (
+        lambda: index.stats(None),
+        lambda: index.stats(["piece", "slice"]),
+        lambda: index.stats(["workspace"]),
+        lambda: index.by_sha("a" * 64, "library-file", "bambuddy"),
+        lambda: index.by_sha("a" * 64, "customer-file", "bambuddy"),
+    ):
+        with pytest.raises(CrudRefusedError) as refused:
+            await asyncio.to_thread(read)
+        assert refused.value.status == 403
+    assert await asyncio.to_thread(index.stats, ["font"]) == []
+    assert await asyncio.to_thread(index.by_sha, "a" * 64, "piece", "bambuddy") is None
 
 
 async def test_forget_copy_takes_only_a_fonts_or_snapshots_key(client: CrudSyncClient) -> None:
