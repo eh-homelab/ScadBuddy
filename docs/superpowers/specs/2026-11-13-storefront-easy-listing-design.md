@@ -78,7 +78,7 @@ One action, three places:
 The Storefront page reads `sell`, builds the listing (§4) and opens it in the editor unsaved,
 with the live preview beside it. Nothing is written until the person presses Publish (or Save
 draft). The parameter is removed from the address once read, so a reload does not make a
-second listing. `?listing=<id>` opens a saved listing (the assistant's link, §6).
+second listing. `?listing=<id>` opens a saved listing; since #6157 it redirects to the editor at `/storefront/listings/<id>`, the assistant's link (§6).
 
 ## 4. The filled-in listing
 
@@ -170,7 +170,7 @@ In `agent/src/tools/storefront.ts`, over the existing back-office routes:
   `title`. It reads what the page reads, builds the listing with the same rules as §4 (the
   agent's own copy of `defaultsFor`, checked against the shared vectors), and creates it
   unpublished. It answers the listing id, the colours with no filament, the render-time note
-  and the page link `/storefront?listing=<id>`.
+  and the page link `/storefront/listings/<id>` (the editor, #6157).
 - `storefront_listing_publish` (tier `outward`): `{listing_id}`. It publishes, so it waits for
   the owner's approval in the UI like every outward tool.
 
