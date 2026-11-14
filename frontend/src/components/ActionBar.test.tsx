@@ -95,6 +95,12 @@ describe("Generate's menu", () => {
     expect(screen.getByRole('menuitem', { name: /Sell on storefront/ })).toHaveAttribute('href', `/storefront?sell=job%3A${job.id}`)
   })
 
+  it('offers no "Sell on storefront…" while the values on screen differ from the render (#6140 review)', async () => {
+    const { user } = setup(false, job, undefined, { upToDate: false })
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    expect(screen.queryByRole('menuitem', { name: /Sell on storefront/ })).toBeNull()
+  })
+
   it('offers "Add to order…" once an output exists, opening its dialog (#4249)', async () => {
     const { user, unmount } = setup()
     await user.click(screen.getByRole('button', { name: 'More to generate' }))

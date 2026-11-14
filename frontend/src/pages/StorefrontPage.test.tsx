@@ -511,6 +511,22 @@ describe('StorefrontPage (#5282)', () => {
       expect(screen.getByLabelText('Title')).toHaveValue('Mine')
     })
 
+    it('opens the assistant’s link over an untouched blank new listing (#6140 review)', async () => {
+      const listing = await seed('Linked')
+      const { user } = renderPage(
+        <>
+          <StorefrontPage />
+          <GoTo to={`/storefront?listing=${listing.id}`} />
+        </>,
+        { route: '/storefront' },
+      )
+      await user.click(await screen.findByRole('button', { name: 'New listing' }))
+      await screen.findByLabelText('Title')
+      await user.click(screen.getByRole('button', { name: 'Go' }))
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Linked'))
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
     it('warns that saving a published listing takes it off the store', async () => {
       const listing = await seed('Live')
       await api.publishStorefrontListing(listing.id)

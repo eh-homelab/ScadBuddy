@@ -644,7 +644,7 @@ export function ActionBar({
             : undefined
         }
         onOrder={output ? () => setOrderOpen(true) : undefined}
-        sellTo={job ? sellPath({ job: job.id }) : undefined}
+        sellTo={ready && job ? sellPath({ job: job.id }) : undefined}
       />
       {blockedReason && (
         <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-xs text-destructive">

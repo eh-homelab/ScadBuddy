@@ -189,12 +189,16 @@ function wordPattern(word: string): RegExp {
 /**
  * #6131 — the names of the colours a customer can choose that `title` holds (whole words,
  * case aside). The owner's rule: a colour the customer picks never goes in a listing's
- * title ("Owl Pencil Cup – Navy" was refused). Every listing filament's colour is a choice of
- * each offered colour, so all their names count while the listing offers any colour.
+ * title ("Owl Pencil Cup – Navy" was refused). The names are those of the colours the saved
+ * body offers (`listingInput`'s choices): every listing filament's colour but one only a
+ * support setting uses, which no customer can choose.
  */
 export function titleColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
-  if (!shownParams(schema).some((param) => param.type === 'color' && draft.params[param.name])) return []
-  const names = filaments.flatMap((filament) => (draft.colours.includes(filament.id) && filament.colour_name ? [filament.colour_name] : []))
+  const offered = Object.values(listingInput(draft, schema, filaments).params ?? {}).flatMap((bound) => (bound.kind === 'choice' ? bound.choices : []))
+  if (offered.length === 0) return []
+  const names = filaments.flatMap((filament) =>
+    draft.colours.includes(filament.id) && filament.colour_name && offered.some((colour) => sameColour(colour, filament.colour)) ? [filament.colour_name] : [],
+  )
   return [...new Set(names)].filter((name) => wordPattern(name).test(draft.title))
 }
 
@@ -204,8 +208,9 @@ export function withoutWords(title: string, words: readonly string[]): string {
   for (const word of words) next = next.replace(new RegExp(wordPattern(word).source, 'giu'), '')
   return next
     .replace(/\(\s*\)|\[\s*\]/g, '')
-    .replace(/\s*([,–—-])\s*(?=[,–—-]|$)/g, '')
-    .replace(/^\s*[,–—-]\s*/, '')
+    .replace(/[,–—/:|·-]\s*(?=[,–—/:|·-])/g, '')
+    .replace(/\s*[,–—/:|·-]\s*$/, '')
+    .replace(/^\s*[,–—/:|·-]\s*/, '')
     .replace(/\s+,/g, ',')
     .replace(/\s{2,}/g, ' ')
     .trim()
@@ -231,7 +236,10 @@ function filamentColours(draft: ListingDraft, filaments: readonly Filament[]): s
 /**
  * The body the page saves: a support parameter is never offered (`isSupport`; one an older
  * listing offers is locked at its default), and each offered colour parameter takes the
- * listing filaments' colours but a colour only a support parameter uses.
+ * listing filaments' colours but a colour only a support parameter uses. That colour's
+ * filament stays in `colours`: publish checks every locked colour against the listing's
+ * filaments (backend `checked_fixed`, 422 `listing_colour_unknown`), and the support colour
+ * is locked.
  */
 export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
   const byName = new Map((schema?.parameters ?? []).map((param) => [param.name, param]))

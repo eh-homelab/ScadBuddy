@@ -136,6 +136,13 @@ describe('a colour the customer chooses stays out of the title (#6131)', () => {
     expect(withoutWords('Owl Pencil Cup – Navy', ['Navy'])).toBe('Owl Pencil Cup')
     expect(withoutWords('Navy Owl (Coral)', ['Navy', 'Coral'])).toBe('Owl')
     expect(withoutWords('Owl, navy, large', ['Navy'])).toBe('Owl, large')
+    // #6140 review: a slash, a colon, a bar or a middle dot is a separator too.
+    expect(withoutWords('Owl Cup / Navy', ['Navy'])).toBe('Owl Cup')
+    expect(withoutWords('Owl Cup: Navy', ['Navy'])).toBe('Owl Cup')
+    expect(withoutWords('Navy | Owl Cup', ['Navy'])).toBe('Owl Cup')
+    expect(withoutWords('Owl Cup · Navy · Large', ['Navy'])).toBe('Owl Cup · Large')
+    // One that joins two words stays.
+    expect(withoutWords('Owl Cup 1/2 Navy', ['Navy'])).toBe('Owl Cup 1/2')
   })
 })
 
@@ -161,6 +168,20 @@ describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
     const body = listingInput(draft, schema, [BLUE, CORAL])
     expect(body.params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8'] } })
     expect(body.fixed).toEqual({ support_colour: '#E8532F', supports: true })
+    // The support colour's filament stays on the listing: publish checks a locked colour
+    // against the listing's filaments (`checked_fixed`, `listing_colour_unknown`).
+    expect(body.colours).toEqual([BLUE.id, CORAL.id])
+  })
+
+  it('leaves a colour only a support setting uses in the title: no customer can choose it (#6140 review)', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: `Tag ${CORAL.colour_name} ${BLUE.colour_name}`,
+      params: { body: { kind: 'choice', choices: [] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, CORAL.id],
+    }
+    expect(titleColours(draft, schema, [BLUE, CORAL])).toEqual([BLUE.colour_name])
   })
 })
 

@@ -36,6 +36,11 @@ interface Open {
   filled: boolean
   /** What "Sell on storefront" said to know before publishing (a version taken instead, a slow render). */
   notes: string[]
+  /**
+   * Whether a new listing holds the person's work: an edit, or what "Sell on storefront"
+   * filled in. An untouched blank one is dropped for a link without asking (#6140 review).
+   */
+  edited: boolean
 }
 
 /** How many listings were opened on this page: each opening's key is named by its number. */
@@ -49,12 +54,12 @@ function newKey(): symbol {
 
 /** A new listing: blank, or the one "Sell on storefront" filled in. */
 function fresh(sold?: SellListing): Open {
-  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [] }
+  return { key: newKey(), id: null, updatedAt: null, published: false, draft: sold?.draft ?? emptyDraft(), saved: null, filled: sold !== undefined, notes: sold?.notes ?? [], edited: sold !== undefined }
 }
 
 function opened(listing: StorefrontListing, key: symbol = newKey()): Open {
   const draft = draftOf(listing)
-  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [] }
+  return { key, id: listing.id, updatedAt: listing.updated_at, published: listing.published, draft, saved: storedKey(listing), filled: true, notes: [], edited: false }
 }
 
 /** What page-wide actions (the order, the design-request switch) are busy and refused under. */
@@ -160,8 +165,8 @@ export function StorefrontPage() {
       .catch((caught: unknown) => setError({ key: PAGE, text: `Could not fill in the listing: ${message(caught)}` }))
       .finally(() => setSelling(false))
   }, [sell, models.data, book.data, book.error, setSearch])
-  /** Whether the open listing holds what a save would write and has not: a new one always does. */
-  const unsaved = open !== null && (open.id === null || open.saved !== savedKey(listingInput(open.draft, schema.data, filaments)))
+  /** Whether the open listing holds what a save would write and has not: a new one once the person edited it, or "Sell on storefront" filled it in. */
+  const unsaved = open !== null && (open.id === null ? open.edited : open.saved !== savedKey(listingInput(open.draft, schema.data, filaments)))
   useEffect(() => {
     if (!listingParam || !listings.data) return
     const id = listingParam
@@ -214,7 +219,7 @@ export function StorefrontPage() {
   function changed(next: ListingDraft) {
     if (!open) return
     // Another template's defaults fill in once its schema loads.
-    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug })
+    setOpen({ ...open, draft: next, filled: open.filled && next.slug === open.draft.slug, edited: true })
   }
 
   /** `run` as `key`'s action: busy while it runs, and its refusal kept as `key`'s. */
