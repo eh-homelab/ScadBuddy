@@ -1,12 +1,15 @@
-"""A filament's density from the slicer's profiles (#6136, `orders/density.py`)."""
+"""A filament's density from Bambuddy's link to its slicer preset (#6136,
+`orders/density.py`)."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from scadbuddy.orders.density import DensityTable, ProfileDensity, density_table
+from scadbuddy.orders.density import DensityTable, ProfileDensity, density_table, resolve
+from scadbuddy.orders.integrations import LocalDensity, SpoolGroup
 from scadbuddy.slicing.profiles import Profiles
 
 #: A small BBL tree laid out as the image's: `@base` presets, per-printer children, an
@@ -19,65 +22,64 @@ def table() -> DensityTable:
     return DensityTable.build(Profiles(PROFILES))
 
 
-def test_the_vendors_family_of_the_material_and_subtype(table: DensityTable) -> None:
-    # The `@base` preset's density, not a printer's own override (H2C's 1.30).
-    assert table.lookup("PLA", "Basic", "Bambu Lab") == ProfileDensity(
-        "1.26", "Bambu PLA Basic @base"
-    )
-    assert table.lookup("petg", "translucent", "bambu lab") == ProfileDensity(
-        "1.25", "Bambu PETG Translucent @base"
-    )
+def group(**fields: Any) -> SpoolGroup:
+    return SpoolGroup(material="PLA", subtype="Tri Color", brand="Bambu Lab", **fields)
 
 
-def test_a_family_with_no_subtype_and_a_value_from_an_include(table: DensityTable) -> None:
+def test_a_filament_id_gives_its_base_presets_density(table: DensityTable) -> None:
+    # The `@base` preset's, not a printer's own override (H2C's 1.30).
+    assert table.for_preset("GFA00") == ProfileDensity("1.26", "Bambu PLA Basic @base")
     # No `@base`: the one density its presets share, which here an `include` gives.
-    assert table.lookup("PETG-CF", None, "Bambu Lab") == ProfileDensity(
-        "1.29", "Bambu PETG-CF @BBL X1C"
+    assert table.for_preset("GFG50") == ProfileDensity("1.29", "Bambu PETG-CF @BBL X1C")
+
+
+def test_a_setting_id_gives_that_presets_density(table: DensityTable) -> None:
+    assert table.for_preset("GFSA00_99") == ProfileDensity("1.3", "Bambu PLA Basic @BBL H2C")
+    assert table.for_preset("GFSA05") == ProfileDensity("1.32", "Bambu PLA Silk @BBL X1C")
+
+
+def test_presets_that_disagree_or_an_unknown_id_give_none(table: DensityTable) -> None:
+    assert table.for_preset("GFG99") is None
+    assert table.for_preset("OFDSrzZ8") is None
+
+
+def test_the_spools_preset_id_comes_first(table: DensityTable) -> None:
+    """A Tri Color spool names Bambu PLA Silk: its name is never read."""
+    assert resolve(
+        group(slicer_filament="GFA05", k_profile_settings=["GFSA00"], tray_info_idx="GFA00"),
+        table,
+    ) == ProfileDensity("1.32", "Bambu PLA Silk @base (spool preset GFA05)")
+
+
+def test_then_a_k_profile_then_the_tray(table: DensityTable) -> None:
+    assert resolve(
+        group(slicer_filament="OFDSrzZ8", k_profile_settings=["nope", "GFSA05"]), table
+    ) == ProfileDensity("1.32", "Bambu PLA Silk @BBL X1C (K-profile preset GFSA05)")
+    assert resolve(group(tray_info_idx="GFA00"), table) == ProfileDensity(
+        "1.26", "Bambu PLA Basic @base (AMS tray preset GFA00)"
     )
 
 
-def test_a_subtype_with_no_preset_of_its_brand_gives_none(table: DensityTable) -> None:
-    """Never another family's value, and never the Generic one for a brand the tree has."""
-    assert table.lookup("PLA", "Galaxy", "Bambu Lab") is None
-
-
-def test_bambus_dual_and_tri_color_are_its_silk(table: DensityTable) -> None:
-    """Its "PLA Silk Multi-Color", sliced with Bambu PLA Silk (`SUBTYPE_FAMILIES`)."""
-    for subtype in ("Dual Color", "tri color"):
-        assert table.lookup("PLA", subtype, "Bambu Lab") == ProfileDensity(
-            "1.32", "Bambu PLA Silk @base"
-        )
-    # Only for Bambu's own.
-    assert table.lookup("PLA", "Tri Color", "Inland") == ProfileDensity("1.24", "Generic PLA @base")
-
-
-def test_the_spools_slicer_filament_comes_first(table: DensityTable) -> None:
-    """A spool whose preset is Bambu PLA Silk (`GFA05`) takes that density."""
-    assert table.lookup("PLA", "Galaxy", "Bambu Lab", "GFA05") == ProfileDensity(
-        "1.32", "Bambu PLA Silk @base"
-    )
-    # An id the tree lacks falls back to the names.
-    assert table.lookup("PLA", "Basic", "Bambu Lab", "OFDSrzZ8") == ProfileDensity(
-        "1.26", "Bambu PLA Basic @base"
+def test_a_local_preset_gives_its_own_density(table: DensityTable) -> None:
+    local = LocalDensity(name="Cookiecad PETG Magic @H2C", density_g_cm3="1.275")
+    assert resolve(group(slicer_filament="2", local_preset=local), table) == ProfileDensity(
+        "1.275", "Bambuddy local preset Cookiecad PETG Magic @H2C (spool preset 2)"
     )
 
 
-def test_another_makers_filament_takes_the_generic_family(table: DensityTable) -> None:
-    assert table.lookup("PLA", "Silk", "Insignia") == ProfileDensity(
-        "1.21", "Generic PLA Silk @base"
+def test_the_catalogue_only_after_every_preset(table: DensityTable) -> None:
+    assert resolve(group(slicer_filament="GFA00", catalogue_density="1.2"), table) == (
+        ProfileDensity("1.26", "Bambu PLA Basic @base (spool preset GFA00)")
     )
-    # A subtype the Generic presets do not name (Basic, Plus, Glow) is the material's.
-    assert table.lookup("PLA", "Basic", "Inland") == ProfileDensity("1.24", "Generic PLA @base")
-    assert table.lookup("PLA", "Glow", "Inland") == ProfileDensity("1.24", "Generic PLA @base")
-    assert table.lookup("PLA", None, None) == ProfileDensity("1.24", "Generic PLA @base")
+    assert resolve(group(slicer_filament="GFG99", catalogue_density="1.2"), table) == (
+        ProfileDensity("1.2", "Bambuddy filament catalogue")
+    )
 
 
-def test_a_family_whose_presets_disagree_gives_none(table: DensityTable) -> None:
-    assert table.lookup("PETG", "Basic", "Insignia") is None
-
-
-def test_a_material_the_tree_lacks_gives_none(table: DensityTable) -> None:
-    assert table.lookup("PEEK", None, "Insignia") is None
+def test_no_source_gives_none(table: DensityTable) -> None:
+    assert resolve(group(), table) is None
+    # Without the image's tree only Bambuddy's own densities count.
+    assert resolve(group(slicer_filament="GFA05"), None) is None
 
 
 def test_the_table_is_built_once_per_tree(tmp_path: Path) -> None:

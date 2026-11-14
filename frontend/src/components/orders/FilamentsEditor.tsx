@@ -75,18 +75,17 @@ function importLine(row: SpoolImportRow): string {
 }
 
 /**
- * Where a record's density came from, or what an estimate uses instead (#6136): never a
- * bare empty cell. The slicer profile is Bambu Studio's preset for the filament.
+ * Where a record's density came from (#6136): the preset Bambuddy linked it to, or a
+ * person. An empty one says that an estimate of it is refused, never a bare dash.
  */
-export function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile' | 'fallback_density'>): { text: string; missing: boolean } {
-  if (f.density_g_cm3) return { text: f.density_profile ? `${f.density_g_cm3} g/cm³ (from ${f.density_profile})` : `${f.density_g_cm3} g/cm³`, missing: false }
-  if (f.fallback_density) return { text: `Not set: estimates use ${f.fallback_density.density_g_cm3} g/cm³ (${f.fallback_density.profile})`, missing: false }
-  return { text: 'Not set, and no slicer profile matches: no estimate', missing: true }
+function densityText(f: Pick<Filament, 'density_g_cm3' | 'density_profile'>): { text: string; missing: boolean } {
+  if (f.density_g_cm3) return { text: f.density_profile ? `${f.density_g_cm3} g/cm³, from ${f.density_profile}` : `${f.density_g_cm3} g/cm³`, missing: false }
+  return { text: 'Not set: no estimate', missing: true }
 }
 
 function fillLine(row: DensityFillRow): string {
   const name = filamentLabel(row) || row.material
-  return row.density_g_cm3 ? `${name}: ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: no slicer profile matches; enter its density`
+  return row.density_g_cm3 ? `${name}: ${row.density_g_cm3} g/cm³ from ${row.density_profile}` : `${name}: Bambuddy links no preset or density to it; enter its density`
 }
 
 /**
@@ -97,8 +96,8 @@ function fillLine(row: DensityFillRow): string {
  * with an Unarchive that brings the same record back (#4977). With Bambuddy linked
  * (`spool_import`), "Import from spools" makes or updates one record per filament of its
  * spool inventory, on click only: a quote never reads Bambuddy (#4253, spec §8.3).
- * Each density says where it came from, or what an estimate uses instead; "Fill
- * densities" writes the slicer profile's into every empty one (#6136).
+ * Each density says where it came from; "Fill densities" writes into every empty one
+ * the density Bambuddy's link to the slicer preset gives (#6136).
  */
 export function FilamentsEditor() {
   const [showArchived, setShowArchived] = useState(false)
@@ -197,7 +196,7 @@ export function FilamentsEditor() {
       header: 'Density',
       cell: (f) => {
         const { text, missing } = densityText(f)
-        return <span className={missing ? 'text-xs text-warn' : f.density_g_cm3 ? 'sb-num' : 'text-xs text-muted-foreground'}>{text}</span>
+        return <span className={missing ? 'text-xs text-warn' : 'sb-num'}>{text}</span>
       },
     },
     {
@@ -236,7 +235,7 @@ export function FilamentsEditor() {
       <div className="flex items-center justify-between gap-2">
         <h4 className="text-sm font-medium">Filaments</h4>
         <span className="inline-flex gap-1">
-          {emptyDensities && (
+          {emptyDensities && book.data?.spool_import && (
             <Button size="xs" variant="outline" disabled={busy} onClick={() => void fillDensities()}>
               Fill densities
             </Button>

@@ -5,11 +5,8 @@ the estimate price with the same book."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.density import DensityTable, fallback
 from scadbuddy.orders.models import PriceBook, PricingPolicy
 from scadbuddy.orders.store import OrderStore
 
@@ -21,14 +18,11 @@ class PriceBookReader:
         store: OrderStore,
         *,
         spool_import: bool = False,
-        densities: Callable[[], DensityTable | None] = lambda: None,
     ) -> None:
         self.settings = settings
         self.store = store
         #: Whether the integrations seam links a Bambuddy (§8.3, #4253).
         self.spool_import = spool_import
-        #: The slicer profiles' densities (#6136), for each record's fallback.
-        self.densities = densities
 
     def policy(self) -> tuple[str, PricingPolicy, str]:
         """``orders_currency``, the policy and ``rough_estimate_factor``, as stored now."""
@@ -44,19 +38,13 @@ class PriceBookReader:
 
     def snapshot(self, *, include_archived: bool = False) -> PriceBook:
         """The book in one read; ``include_archived`` adds the archived filaments, for
-        the editor that unarchives them (#4977). A record with no density carries its
-        ``fallback_density`` (#6136). Blocking: call it in a thread."""
+        the editor that unarchives them (#4977). Blocking: call it in a thread."""
         currency, policy, factor = self.policy()
-        table = self.densities()
-        filaments = [
-            record.model_copy(update={"fallback_density": fallback(record, table)})
-            for record in self.store.filaments(include_archived=include_archived)
-        ]
         return PriceBook(
             currency=currency,
             minor_exponent=minor_exponent(currency),
             policy=policy,
             rough_estimate_factor=factor,
-            filaments=filaments,
+            filaments=self.store.filaments(include_archived=include_archived),
             spool_import=self.spool_import,
         )

@@ -534,7 +534,6 @@ export type PriceBook = Schemas['PriceBook']
 export type SpoolImport = Schemas['SpoolImport']
 export type DensityFill = Schemas['DensityFill']
 export type DensityFillRow = Schemas['DensityFillRow']
-export type FallbackDensity = Schemas['FallbackDensity']
 export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0); with `inputs` or `commit`, a new design first

@@ -119,7 +119,7 @@ class OrdersComponent:
         return self._integrations[1]
 
     def densities(self) -> DensityTable | None:
-        """The slicer profiles' densities (#6136, `orders/density.py`), built once per
+        """The image's vendor presets by id (#6136, `orders/density.py`), built once per
         process; ``None`` without the image's tree. Blocking: call it in a thread."""
         return density_table(self.core.settings.slicer_profiles_dir)
 
@@ -130,7 +130,6 @@ class OrdersComponent:
             self.core.settings_store,
             self.store,
             spool_import=self.integrations.linked,
-            densities=self.densities,
         )
 
     def rules(self) -> OrderRules:

@@ -877,13 +877,6 @@ class FilamentPatch(BaseModel):
     density_g_cm3: Density | None = None
 
 
-class FallbackDensity(BaseModel):
-    """A density from the slicer's profiles (#6136) and the preset it came from."""
-
-    density_g_cm3: str
-    profile: str
-
-
 class Filament(BaseModel):
     """A filament record, its decimals as strings on the wire (§3.6)."""
 
@@ -895,13 +888,10 @@ class Filament(BaseModel):
     colour: str
     cost_per_kg: str
     density_g_cm3: str | None
-    #: The slicer preset ``density_g_cm3`` was read from (#6136, `orders/density.py`), by
-    #: the spool import or "Fill densities"; ``None`` for a density a person set.
+    #: Where ``density_g_cm3`` came from when the spool import or "Fill densities" read
+    #: it from Bambuddy's link to the slicer preset (#6136, `orders/density.py`): the
+    #: preset and the id that named it. ``None`` for a density a person set, or none.
     density_profile: str | None = None
-    #: Only on the price book's read, for a record with no density: what an estimate
-    #: weighs it with instead, and the preset that gives it. ``None`` there means no
-    #: source gives one, so an estimate of it is refused.
-    fallback_density: FallbackDensity | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -967,10 +957,10 @@ class SpoolImportRow(BaseModel):
     max_cost_per_kg: str | None = None
     spool_ids: list[int]
     #: The record's density after the import (#6136): its own, or the one the import
-    #: read from the slicer's profiles when it had none.
+    #: read through Bambuddy when it had none.
     density_g_cm3: str | None = None
-    #: The preset the import read ``density_g_cm3`` from this time; ``None`` when it
-    #: kept the record's own, or found none.
+    #: Where the import read ``density_g_cm3`` from this time; ``None`` when it kept
+    #: the record's own, or found none.
     density_profile: str | None = None
 
 
@@ -986,7 +976,7 @@ class DensityFillRow(BaseModel):
     #: The density written; ``None`` when no source gives one, so the record still has
     #: none and an estimate of it is refused.
     density_g_cm3: str | None = None
-    #: The slicer preset it was read from.
+    #: Where it was read from.
     density_profile: str | None = None
 
 

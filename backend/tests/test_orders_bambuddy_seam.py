@@ -10,11 +10,11 @@ from typing import Any, cast
 
 import pytest
 
-from scadbuddy.bambuddy.models import Spool
+from scadbuddy.bambuddy.models import CatalogFilament, Spool
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders import bambuddy as orders_bambuddy
 from scadbuddy.orders.bambuddy import BambuddyIntegrations, spool_groups
-from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError, choose
+from scadbuddy.orders.integrations import NOT_LINKED, LocalDensity, NotLinkedError, choose
 
 ORDERS = Path(orders_bambuddy.__file__).parent
 CLIENT = "scadbuddy.bambuddy.client"
@@ -114,21 +114,55 @@ def test_spools_group_by_filament_key() -> None:
     assert by_ids[(5,)].spools == [(5, 20.0)]
 
 
-def test_a_group_carries_its_newest_spools_slicer_filament() -> None:
-    """#6136: the preset id gives the record its density; a spool that names none is
-    passed over."""
+def _entry(entry_id: int, kind: str, brand: str, colour: str, density: float) -> CatalogFilament:
+    return CatalogFilament(
+        id=entry_id,
+        name=f"{brand} {kind}",
+        type=kind,
+        brand=brand,
+        color_hex=colour,
+        density=density,
+    )
+
+
+def test_a_group_carries_what_gives_its_density() -> None:
+    """#6136: the newest spool's preset id, every K-profile's, the tray's, the local
+    preset its id names and the catalogue's one density of its material, brand and
+    colour; never a name."""
     groups = spool_groups(
         [
-            _spool(2, rgba="FFFFFFFF", slicer_filament="GFA05"),
-            _spool(6, rgba="FFFFFFFF", slicer_filament="GFA00"),
+            _spool(2, rgba="FFFFFFFF", slicer_filament="7", k_profiles=[{"setting_id": "GFSA05"}]),
+            _spool(6, rgba="FFFFFFFF", k_profiles=[{"setting_id": "GFSA00"}, {}]),
             _spool(8, rgba="FFFFFFFF", slicer_filament=" "),
-            _spool(5, material="PETG", rgba="00AE42FF"),
-        ]
+            _spool(5, material="PETG", brand="Insignia", rgba="00AE42FF"),
+            _spool(9, material="PETG", brand="Insignia", rgba="000000FF"),
+        ],
+        local={"7": LocalDensity(name="My PLA", density_g_cm3="1.25")},
+        trays={5: "GFG99"},
+        catalogue=[
+            CatalogFilament(
+                id=1, name="x", type="petg", brand="insignia", color_hex="#00ae42", density=1.27
+            ),
+            CatalogFilament(
+                id=2, name="y", type="PETG", brand="Insignia", color_hex="#000000", density=1.27
+            ),
+            CatalogFilament(
+                id=3, name="z", type="PETG", brand="Insignia", color_hex="#000000", density=1.3
+            ),
+        ],
     )
-    assert [(g.material, g.slicer_filament) for g in groups] == [
-        ("PETG", None),
-        ("PLA", "GFA00"),
-    ]
+    by_ids = {tuple(spool_id for spool_id, _ in g.spools): g for g in groups}
+    white = by_ids[(2, 6, 8)]
+    assert (white.slicer_filament, white.k_profile_settings, white.tray_info_idx) == (
+        "7",
+        ["GFSA00", "GFSA05"],
+        None,
+    )
+    assert white.local_preset == LocalDensity(name="My PLA", density_g_cm3="1.25")
+    green = by_ids[(5,)]
+    assert (green.tray_info_idx, green.catalogue_density) == ("GFG99", "1.27")
+    # Two catalogue entries of one colour that disagree give none.
+    assert by_ids[(9,)].catalogue_density is None
 
 
 def test_spools_of_one_record_are_one_group() -> None:

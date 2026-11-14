@@ -150,6 +150,12 @@ def _trays(status: PrinterStatus) -> list[tuple[int, AmsTray]]:
     return found
 
 
+def tray_at(status: PrinterStatus, ams_id: int, tray_id: int) -> AmsTray | None:
+    """The tray an assignment's ``ams_id`` and ``tray_id`` name, the external holders
+    included (their trays 0 and 1)."""
+    return next((t for unit, t in _trays(status) if unit == ams_id and t.id == tray_id), None)
+
+
 def close_spools(
     spools: Iterable[SpoolOption], material: str, colour: str | None
 ) -> list[SpoolOption]:

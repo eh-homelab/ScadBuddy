@@ -17,7 +17,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.density import DensityTable, UsedDensity, used_density
+from scadbuddy.orders.density import UsedDensity, used_density
 from scadbuddy.orders.models import Filament, Money, PricingPolicy, QuoteLine
 from scadbuddy.orders.pricing import Plate, PlateFilament, estimate_grams, price, to_minor
 from scadbuddy.render.geometry import analyze_3mf
@@ -118,12 +118,10 @@ def filament_estimate(
     *,
     currency: str,
     factor: str,
-    densities: DensityTable | None = None,
 ) -> OrderEstimate:
     """Every part at one filament (the back office's estimate), weighed with its
-    density, else the slicer profile's for it (`orders/density.py` `used_density`).
-    ``ValueError`` when neither gives one."""
-    used = used_density(record, densities)
+    density. ``ValueError`` for a filament with no density."""
+    used = used_density(record)
     grams = estimate_grams(
         [part.volume_mm3 for part in parts if part.volume_mm3 is not None],
         used.density_g_cm3,
@@ -149,13 +147,11 @@ def rough_estimate(
     currency: str,
     factor: str,
     quantity: int = 1,
-    densities: DensityTable | None = None,
 ) -> RoughEstimate:
     """Each part's grams at the filament ``filament_for`` gives for its colour, priced
     under ``policy`` as a quote is but with no machine time: a filament line per
-    filament, a setup line per plate, labour, markup and rounding. Each filament is
-    weighed as :func:`filament_estimate` weighs it; ``ValueError`` for one with no
-    density from any source."""
+    filament, a setup line per plate, labour, markup and rounding. ``ValueError`` for a
+    filament with no density."""
     slots: dict[str, int] = {}
     records: dict[int, Filament] = {}
     volumes: dict[tuple[int, int], list[float]] = {}
@@ -165,7 +161,7 @@ def rough_estimate(
         slot = slots.setdefault(record.id, len(slots) + 1)
         records[slot] = record
         if slot not in used:
-            used[slot] = used_density(record, densities)
+            used[slot] = used_density(record)
         if part.volume_mm3 is not None:
             volumes.setdefault((part.plate, slot), []).append(part.volume_mm3)
     plates: list[Plate] = []

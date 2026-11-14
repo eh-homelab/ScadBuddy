@@ -603,7 +603,7 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     """The rough price of the visitor's done render. 404 ``render_not_found`` as
     `owned_job` says; 422 ``estimate_unavailable`` for a job not done, a 3MF that cannot
     be analysed (or not within ``render_timeout``), a colour no listing filament has,
-    or a filament with no density from its record or the slicer's profiles (#6136)."""
+    or a filament with no density."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -615,7 +615,6 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     filaments = await asyncio.to_thread(_filaments, orders)
     currency, policy, factor = await asyncio.to_thread(orders.price_book.policy)
     by_colour = _filament_for(listing, filaments, owned.colours, list(job.result.colors))
-    densities = await asyncio.to_thread(orders.densities)
     try:
         return rough_estimate(
             parts,
@@ -623,7 +622,6 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
             policy,
             currency=currency,
             factor=factor,
-            densities=densities,
         ).public()
     except (KeyError, ValueError):
         logger.warning("a render could not be priced", exc_info=True)
