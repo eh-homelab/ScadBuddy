@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import type { OrderCharge, OrderTotals } from '../../api/types'
 import { formatMoney } from '../../lib/money'
 
-const KIND_TEXT: Record<OrderCharge['kind'], string> = { shipping: 'Shipping', discount: 'Discount', fee: 'Fee', tax: 'Tax' }
+const KIND_TEXT: Record<OrderCharge['kind'], string> = { shipping: 'Shipping', discount: 'Discount', fee: 'Fee', tax: 'Tax', purchase: 'Bought for the customer', handling: 'Handling' }
 
 /** One line of the summary: its label, an optional badge beside it, and its amount. */
 function SummaryRow({ label, badge, amount, className = 'text-muted-foreground', amountClassName = '' }: { label: string; badge?: ReactNode; amount: string; className?: string; amountClassName?: string }) {

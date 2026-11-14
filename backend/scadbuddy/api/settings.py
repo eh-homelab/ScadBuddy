@@ -157,6 +157,10 @@ class SettingsView(BaseModel):
     #: in its base.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    #: The handling fee for bought items (#6133): a flat amount per recorded purchase, in
+    #: the shop's minor units, and a percent of their sum.
+    orders_purchase_fee_flat_minor: int = 0
+    orders_purchase_fee_percent: str = "0"
     #: The shop's money rules (#5281), stored only: the deposit policy, the shipping
     #: options and how a customer pays by hand. An empty list is none.
     orders_deposit_policy: list[DepositRule] = Field(default_factory=list)

@@ -210,6 +210,12 @@ class Settings(BaseSettings):
     # none. A typed tax charge wins over it.
     orders_tax_percent: str = "0"
     orders_tax_shipping: bool = False
+    # The handling fee for bought items (#6133, spec 2026-11-13 §10.3): a flat amount per
+    # recorded purchase in the shop's minor units (`SCADBUDDY_ORDERS_PURCHASE_FEE_FLAT_MINOR`)
+    # and a percent of their sum, 0 to 100 with at most two decimals
+    # (`SCADBUDDY_ORDERS_PURCHASE_FEE_PERCENT`). Both 0 by default: no fee.
+    orders_purchase_fee_flat_minor: int = Field(default=0, ge=0, le=1_000_000_000)
+    orders_purchase_fee_percent: str = "0"
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
@@ -398,6 +404,19 @@ class Settings(BaseSettings):
         text = decimal_string(value, env_var("orders_tax_percent"))
         if Decimal(text) >= 100:
             raise ValueError(f"{env_var('orders_tax_percent')} must be less than 100")
+        return text
+
+    @field_validator("orders_purchase_fee_percent")
+    @classmethod
+    def _purchase_fee_percent(cls, value: str) -> str:
+        label = env_var("orders_purchase_fee_percent")
+        text = decimal_string(value, label)
+        number = Decimal(text)
+        if number > 100:
+            raise ValueError(f"{label} must be at most 100")
+        exponent = number.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -2:
+            raise ValueError(f"{label} has at most two decimals")
         return text
 
     @field_validator("store_s3_prefix")
@@ -1054,6 +1073,9 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read from the store by each recompute of an order's auto tax (#5281).
         "orders_tax_percent": "live",
         "orders_tax_shipping": "live",
+        # Read from the store by each recorded, changed or declined purchase (#6133).
+        "orders_purchase_fee_flat_minor": "live",
+        "orders_purchase_fee_percent": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
         # Read from the store by each print run's plan; a run keeps what it read.

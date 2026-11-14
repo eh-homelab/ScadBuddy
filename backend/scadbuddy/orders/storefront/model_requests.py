@@ -51,7 +51,7 @@ from scadbuddy.orders.storefront.wire import (
     UploadSlotsBody,
 )
 from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, staging_key
-from scadbuddy.storefront.uploads import checked_text
+from scadbuddy.storefront.uploads import PurchaseLinkAsk, checked_text
 from scadbuddy.storefront.wire import (
     MAX_MODEL_REQUEST_BYTES,
     MAX_PRINT_LINKS,
@@ -328,6 +328,49 @@ def _checked_links(body: ModelRequestBody) -> list[_Link]:
     return links
 
 
+def checked_purchase_links(asks: Sequence[PurchaseLinkAsk]) -> list[_Link]:
+    """A design request's things to buy (#6133, spec 2026-11-13 §10.1), each held to the
+    text rules as an own-model request's link is (`checked_link`; 422 ``link_invalid``
+    with ``index``) and stored as a ``manual`` purchase link with its note trimmed. The
+    count (`MAX_PURCHASE_LINKS`) and the note's length were checked as the body was read
+    (`storefront/uploads.py` `checked_purchase_links`)."""
+    links = []
+    for index, ask in enumerate(asks):
+        try:
+            url = checked_link(ask.url)
+        except LinkInvalidError as error:
+            raise _unprocessable("link_invalid", str(error), index=index) from None
+        found, canonical = link_type(url, "purchase")
+        links.append(_Link(url, "purchase", found, canonical, ask.note.strip()))
+    if len(links) > MAX_PURCHASE_LINKS:
+        raise _unprocessable("too_many_links", f"Send at most {MAX_PURCHASE_LINKS} things to buy.")
+    return links
+
+
+def insert_links(
+    conn: Any, order_id: str, item_id: str, links: Sequence[_Link], position: int = 0
+) -> None:
+    """One `order_item_sources` row per link of the request item ``item_id``, from
+    ``position`` on: a purchase link `pending`, a print link as `_print_status` says."""
+    for offset, link in enumerate(links):
+        conn.execute(
+            "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
+            " purpose, url, link_type, canonical, note, status)"
+            " VALUES (%s, %s, %s, 'link', %s, %s, %s, %s, %s, %s)",
+            (
+                order_id,
+                item_id,
+                position + offset,
+                link.purpose,
+                link.url,
+                link.link_type,
+                link.canonical,
+                link.note,
+                "pending" if link.purpose == "purchase" else _print_status(link),
+            ),
+        )
+
+
 def _checked_note(note: str) -> str:
     """The note as plain text (`checked_text`), or empty."""
     return checked_text(note) if note.strip() else ""
@@ -474,24 +517,7 @@ async def add_model_request(
                     ),
                 )
                 position += 1
-            for link in links:
-                conn.execute(
-                    "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
-                    " purpose, url, link_type, canonical, note, status)"
-                    " VALUES (%s, %s, %s, 'link', %s, %s, %s, %s, %s, %s)",
-                    (
-                        draft.id,
-                        item.id,
-                        position,
-                        link.purpose,
-                        link.url,
-                        link.link_type,
-                        link.canonical,
-                        link.note,
-                        "pending" if link.purpose == "purchase" else _print_status(link),
-                    ),
-                )
-                position += 1
+            insert_links(conn, draft.id, item.id, links, position)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, [item]))
