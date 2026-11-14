@@ -3,7 +3,8 @@ line item's reference built from the listing's snapshot (plan point 2).
 
 `listing_values` never trusts the edge: it checks each asked value against the
 listing's bound, not only against the schema. A parameter the visitor does not ask for
-takes its schema default, checked the same way. Every parameter the listing does not
+takes the listing's ``default``, else its schema default (`effective_default`, #6144),
+checked the same way. Every parameter the listing does not
 offer takes the value publish captured in the snapshot (``ListingSnapshot.fixed``: the
 shop's locks and the commit's defaults), and asking for it is refused, even with that
 same value.
@@ -64,7 +65,7 @@ def _offered_colours(listing: Listing, filaments: Mapping[str, Filament]) -> set
     return {filaments[f].colour.casefold() for f in listing.colours if f in filaments}
 
 
-def _same(choice: ParamValue, value: ParamValue) -> bool:
+def same_value(choice: ParamValue, value: ParamValue) -> bool:
     """Equal in type and value: ``True`` is not ``1``."""
     return isinstance(choice, bool) == isinstance(value, bool) and choice == value
 
@@ -92,7 +93,13 @@ def _number_reason(
     return None
 
 
-def _reason(
+def effective_default(parameter: Parameter, bound: ParamBound) -> ParamValue | None:
+    """What a render of an offered parameter takes while the customer picks none: the
+    listing's ``default``, else the template's (#6144)."""
+    return bound.default if bound.default is not None else parameter.initial
+
+
+def value_reason(
     parameter: Parameter, bound: ParamBound, value: ParamValue, colours: Collection[str]
 ) -> InputReason | None:
     """Why ``value`` is outside ``bound``, or None when the listing allows it."""
@@ -112,7 +119,7 @@ def _reason(
                 isinstance(c, str) and c.casefold() == value.casefold() for c in bound.choices
             )
         else:
-            allowed = any(_same(choice, value) for choice in bound.choices)
+            allowed = any(same_value(choice, value) for choice in bound.choices)
         reason = None if allowed else "choice"
     else:
         assert isinstance(bound, TextBound)
@@ -156,11 +163,11 @@ def listing_values(
             raise InputOutsideListingError(name, "unknown")
         if name in asked:
             value = asked[name]
-        elif parameter.initial is not None:
-            value = parameter.initial
+        elif (effective := effective_default(parameter, bound)) is not None:
+            value = effective
         else:
             continue
-        reason = _reason(parameter, bound, value, colours)
+        reason = value_reason(parameter, bound, value, colours)
         if reason is not None:
             raise InputOutsideListingError(name, reason)
         values[name] = value

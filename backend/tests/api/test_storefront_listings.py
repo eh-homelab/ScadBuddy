@@ -192,6 +192,32 @@ def test_publish_snapshots_the_schema_and_holds_the_source(
         # A locked colour is a listing filament's, set or defaulted.
         ({"fixed": {"colour": "#00FF00"}}, "listing_colour_unknown"),
         ({"colours": []}, "listing_colour_unknown"),
+        # #6144: what an unpicked render takes must be allowed: the listing's default,
+        # else the template's.
+        (
+            {
+                "params": {
+                    "colour": {"kind": "choice", "choices": ["#ff0000"], "default": "#00FF00"}
+                }
+            },
+            "listing_colour_unknown",
+        ),
+        (
+            {"params": {"width": {"kind": "number", "min": 60, "max": 80, "step": 1}}},
+            "listing_default_invalid",
+        ),
+        (
+            {
+                "params": {
+                    "width": {"kind": "number", "min": 20, "max": 80, "step": 1, "default": 90}
+                }
+            },
+            "listing_default_invalid",
+        ),
+        (
+            {"params": {"shape": {"kind": "choice", "choices": ["square"]}}},
+            "listing_default_invalid",
+        ),
     ],
 )
 def test_a_listing_its_commit_does_not_back_is_refused(
@@ -213,6 +239,22 @@ def test_a_colour_parameter_offers_the_listings_filaments(
 ) -> None:
     body = listing_body(
         template, pla_red, params={"colour": {"kind": "choice", "choices": ["#ff0000"]}}
+    )
+    assert publish(client, create(client, body)["id"])["published"] is True
+
+
+def test_a_listing_default_lets_it_offer_what_the_template_starts_outside(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    """#6144: the template starts at 50 and "round"; the listing offers 60 to 80 and
+    "square" only, each with a default of its own."""
+    body = listing_body(
+        template,
+        pla_red,
+        params={
+            "width": {"kind": "number", "min": 60, "max": 80, "step": 1, "default": 70},
+            "shape": {"kind": "choice", "choices": ["square"], "default": "square"},
+        },
     )
     assert publish(client, create(client, body)["id"])["published"] is True
 

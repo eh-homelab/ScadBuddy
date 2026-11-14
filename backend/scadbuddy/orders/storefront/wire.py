@@ -90,6 +90,10 @@ class _Bound(BaseModel):
         ]
         | None
     ) = None
+    #: The value a render takes while the customer picks none, in place of the template's
+    #: own default (#6144). Publish refuses one outside the bound; for a colour, one that
+    #: is not a listing filament's colour.
+    default: ParamValue | None = None
 
 
 class NumberBound(_Bound):
@@ -290,8 +294,9 @@ class PublicChoice(ChoiceBound, _Shown):
 
 class PublicText(TextBound, _Shown):
     label: str
-    #: The template's default text, which the design uses when the field is left blank
-    #: (#6137); null when it has none.
+    #: The value a render takes when the field is left blank (`effective_default`: the
+    #: listing's default, else the template's, #6137, #6144); null when it has none or it
+    #: is blank.
     placeholder: str | None = None
 
 
