@@ -300,6 +300,7 @@ import type {
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
   VirtualPrinterDiagnostic,
+  ProfileOptions,
 } from './types'
 import type {
   McpAuthSetting,
@@ -3285,6 +3286,10 @@ export const api = {
     settingsInFlight = undefined
     return request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) })
   },
+
+  /** #6153 — the price book's materials, and the spools the print dialog offers on `printer`. */
+  storefrontSliceOptions: (printer?: string) =>
+    request<ProfileOptions>(`/storefront/slice-profile/options${printer ? `?printer=${encodeURIComponent(printer)}` : ''}`),
 
   getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 

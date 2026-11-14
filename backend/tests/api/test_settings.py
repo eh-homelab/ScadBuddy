@@ -28,6 +28,8 @@ from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.money import NO_RULES, DepositRule, ShippingOption
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.workflows.client import connect, connect_lazily
 from scadbuddy.workflows.commands import TemporalRefusedError
 from tests.api.conftest import read_stored
@@ -71,6 +73,7 @@ DEFAULTS: dict[str, object] = {
     "orders_deposit_policy": [],
     "storefront_shipping_options": [],
     "storefront_payment_instructions": None,
+    "storefront_slice_profile": None,
     "lan_require_plate_clear": False,
     "git_remote_url": None,
     "git_remote_username": None,
@@ -886,6 +889,72 @@ def test_the_storefront_settings_are_written_through_put(client: TestClient) -> 
     }
     body = client.put("/api/v1/settings", json=sent).json()
     assert {name: body[name] for name in sent} == sent
+
+
+def test_the_slice_concurrency_is_bounded_and_live(client: TestClient) -> None:
+    """#6153: the storefront's slices at once, 1 by default, 1 to 4."""
+    body = client.get("/api/v1/settings").json()
+    assert body["storefront_slices_concurrent"] == 1
+    assert body["applies"]["storefront_slices_concurrent"] == "live"
+    for value in (0, 5):
+        refused = client.put("/api/v1/settings", json={"storefront_slices_concurrent": value})
+        assert refused.status_code == 422
+    saved = client.put("/api/v1/settings", json={"storefront_slices_concurrent": 3})
+    assert saved.json()["storefront_slices_concurrent"] == 3
+
+
+def _profile_printer(client: TestClient) -> str:
+    store = _state(client).components.get(PRINTERS).store
+    return store.create(PrinterCreate(serial="01P00A0000000AA", name="Garage")).id
+
+
+@respx.mock
+def test_profile_with_unknown_spool_is_422(client: TestClient) -> None:
+    """#6153: each spool of the shop slice profile is one the print dialog offers on its
+    printer; here Bambuddy's inventory, as the printer runs on Bambuddy's path."""
+    printer = _profile_printer(client)
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
+    respx.get("https://bambuddy.test/api/v1/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[{"id": 7, "material": "PLA"}])
+    )
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PETG": 8}}},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["errors"][0]["loc"] == [
+        "body",
+        "storefront_slice_profile",
+        "spools",
+        "petg",
+    ]
+    assert client.get("/api/v1/settings").json()["storefront_slice_profile"] is None
+
+    saved = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": printer, "spools": {"PLA": 7}}},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["storefront_slice_profile"] == {"printer": printer, "spools": {"pla": 7}}
+    cleared = client.put("/api/v1/settings", json={"storefront_slice_profile": None})
+    assert cleared.json()["storefront_slice_profile"] is None
+
+
+def test_profile_with_unknown_printer_is_422(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": "nowhere", "spools": {}}},
+    )
+    assert refused.status_code == 422
+    assert refused.json()["errors"][0]["loc"] == ["body", "storefront_slice_profile", "printer"]
+
+
+def test_profile_takes_no_support_or_process_setting(client: TestClient) -> None:
+    refused = client.put(
+        "/api/v1/settings",
+        json={"storefront_slice_profile": {"printer": "p", "spools": {}, "supports": {}}},
+    )
+    assert refused.status_code == 422
 
 
 def test_the_storefront_mail_settings_have_their_defaults(client: TestClient) -> None:

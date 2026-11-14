@@ -15,6 +15,7 @@ export type SectionId =
   | 'fonts'
   | 'git-remote'
   | 'storefront-mail'
+  | 'storefront-pricing'
   | 'preview'
   | 'diagnostics'
   | 'administration'
@@ -452,6 +453,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
       { value: 'none', label: 'None, a relay with no login' },
     ],
     help: 'STARTTLS needs a server that offers it. A login is never sent without TLS.',
+  },
+  // #6153 — the storefront's slices at once; the shop slice profile is saved on its own.
+  {
+    name: 'storefront_slices_concurrent',
+    section: 'storefront-pricing',
+    label: 'Slices at once',
+    kind: 'count',
+    help: 'How many storefront slices run at the same time, 1 to 4. The others wait.',
   },
   {
     name: 'log_level',

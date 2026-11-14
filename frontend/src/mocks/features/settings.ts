@@ -1,6 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { BambuddyStatus, Settings } from '../../api/types'
+import type { BambuddyStatus, ProfileSpool, Settings, StorefrontSliceProfile } from '../../api/types'
 import * as fixtures from '../fixtures'
+import { state as orders } from './orders/state'
+import { SPOOL_INVENTORY } from './spoolInventory'
 import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
@@ -60,6 +62,8 @@ const NULLABLE = new Set([
   'storefront_turnstile_site_key',
   'storefront_turnstile_secret',
 ])
+/** #6153 — backend `wire.py` `SUPPORT_MATERIAL`. */
+const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
 const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])
 /** #4250 — the price book's decimal strings (`core/settings.py` `decimal_string`). */
@@ -166,6 +170,12 @@ function putSettings(body: Record<string, unknown>) {
       if (name === 'storefront_shipping_options' && new Set(rows.map((o) => o.id)).size < rows.length) return refused(name, 'Value error, shipping option ids are unique')
       // The view answers an empty list for null.
       next[name] = rows
+      continue
+    }
+    // #6153 — `slice_profile.py` keeps each material casefolded.
+    if (name === 'storefront_slice_profile' && value) {
+      const profile = value as StorefrontSliceProfile
+      next[name] = { ...profile, spools: Object.fromEntries(Object.entries(profile.spools ?? {}).map(([m, id]) => [m.toLowerCase(), id])) }
       continue
     }
     if (name === 'storefront_payment_instructions' && typeof value === 'string' && value.length > 2000) return refused(name, 'String should have at most 2000 characters')
@@ -307,6 +317,26 @@ export const handlers = [
     const response = putSettings(body)
     await delay(120)
     return response
+  }),
+
+  // #6153 — the shop slice profile's choices (`api/storefront_slice.py`): the price book's
+  // materials, and Bambuddy's spools, as the mock's printers all run on Bambuddy's path.
+  http.get(`${base}/storefront/slice-profile/options`, ({ request }) => {
+    const materials = new Map<string, string>()
+    for (const f of orders.filaments) if (!f.archived_at && !materials.has(f.material.toLowerCase())) materials.set(f.material.toLowerCase(), f.material)
+    const printer = new URL(request.url).searchParams.get('printer')
+    const spools: ProfileSpool[] = printer
+      ? SPOOL_INVENTORY.filter((spool) => !spool.archived).map((spool) => ({
+          spool_id: spool.id,
+          material: spool.material,
+          colour: spool.rgba ? `#${spool.rgba.slice(0, 6)}` : null,
+          label: `${[spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ')} (#${spool.id})`,
+        }))
+      : []
+    return HttpResponse.json({
+      materials: [...materials.values()].sort((a, b) => a.localeCompare(b)).map((material) => ({ material, support: SUPPORT_MATERIAL.test(material) })),
+      spools,
+    })
   }),
 
   http.post(`${base}/settings/test`, async () => {
