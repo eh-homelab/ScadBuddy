@@ -858,23 +858,29 @@ class OrderStore:
             self._raise_exists(current.material, current.subtype, current.brand, current.colour)
         return None if row is None else _filament_of(row)
 
-    def filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+    def filament(
+        self, filament_id: str, *, conn: Conn | None = None, lock: bool = False
+    ) -> Filament | None:
+        """``lock`` (in a transaction, ``conn``) holds the row until it ends, so a write
+        decided from what was read is not lost to one in between (#6136 review)."""
         with self._read(conn) as c:
             row = c.execute(
-                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s", (filament_id,)
+                f"SELECT {_FILAMENT} FROM filaments WHERE id = %s{' FOR UPDATE' if lock else ''}",
+                (filament_id,),
             ).fetchone()
         return None if row is None else _filament_of(row)
 
     def filaments(
-        self, *, include_archived: bool = False, conn: Conn | None = None
+        self, *, include_archived: bool = False, conn: Conn | None = None, lock: bool = False
     ) -> list[Filament]:
-        """By material, brand and colour name."""
+        """By material, brand and colour name; ``lock`` as :meth:`filament`'s."""
         where = "" if include_archived else " WHERE archived_at IS NULL"
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_FILAMENT} FROM filaments{where}"
                 " ORDER BY upper(material), upper(coalesce(subtype, '')),"
                 " upper(coalesce(brand, '')), upper(coalesce(colour_name, colour)), id"
+                + (" FOR UPDATE" if lock else "")
             ).fetchall()
         return [_filament_of(row) for row in rows]
 

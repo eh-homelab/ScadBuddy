@@ -238,10 +238,22 @@ def test_no_local_or_tray_read_when_every_spool_names_a_bambu_preset(client: Tes
 def test_a_filament_added_by_hand_takes_its_spools_density(client: TestClient) -> None:
     configure(client)
     routes = bambuddy(
-        [spool(1, brand="Bambu Lab", subtype="Tri Color", rgba="00FF00FF", slicer_filament="GFA05")]
+        [
+            spool(
+                1,
+                brand="Bambu Lab",
+                subtype="Tri Color",
+                rgba="00FF00FF",
+                cost_per_kg=26,
+                slicer_filament="GFA05",
+            )
+        ]
     )
     made = tri_color(client)
     assert (made["density_g_cm3"], made["density_profile"]) == ("1.32", SILK)
+    # An import that keeps the record's density reports where it came from.
+    [kept] = client.post(IMPORT).json()["rows"]
+    assert (kept["density_g_cm3"], kept["density_profile"]) == ("1.32", SILK)
     # A density sent is the person's; no read.
     calls = routes["spools"].call_count
     own = tri_color(client, colour="#0000FF", density_g_cm3_override="1.3")
@@ -268,7 +280,8 @@ def test_the_import_goes_on_with_no_density_when_a_density_read_fails(
     )
     routes["local"].mock(return_value=httpx.Response(403))
     routes["assignments"].mock(return_value=httpx.Response(503))
-    routes["catalogue"].mock(return_value=httpx.Response(503))
+    # An answer of another shape is no density either.
+    routes["catalogue"].mock(return_value=httpx.Response(200, json=[{"density": 1.24}]))
     response = client.post(IMPORT)
     assert response.status_code == 200, response.text
     assert [(row["action"], row["density_g_cm3"]) for row in response.json()["rows"]] == [

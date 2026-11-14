@@ -20,6 +20,8 @@ from contextlib import aclosing
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pydantic import ValidationError
+
 from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
@@ -180,6 +182,11 @@ async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
         return await read
     except ApiError as error:
         logger.warning("no densities from Bambuddy's %s: %s", what, error.detail)
+        return None
+    except ValidationError as error:
+        logger.warning(
+            "no densities from Bambuddy's %s: an answer of another shape: %s", what, error
+        )
         return None
 
 

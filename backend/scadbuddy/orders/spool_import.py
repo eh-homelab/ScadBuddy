@@ -127,7 +127,7 @@ def import_spools(
                     )
                 )
                 continue
-            current = store.filament(existing_id, conn=conn)
+            current = store.filament(existing_id, conn=conn, lock=True)
             assert current is not None
             previous = Decimal(current.cost_per_kg)
             found = None if current.density_g_cm3 is not None else resolve(group, densities)
@@ -136,6 +136,7 @@ def import_spools(
                 "cost_per_kg": _text(price),
                 "previous_cost_per_kg": current.cost_per_kg,
                 "density_g_cm3": current.density_g_cm3,
+                "density_profile": current.density_profile,
             }
             patch: dict[str, str] = {}
             if previous != price:
@@ -190,7 +191,7 @@ def fill_densities(
     Blocking: call it in a thread."""
     rows: list[DensityFillRow] = []
     with store.transaction() as conn:
-        for record in store.filaments(conn=conn):
+        for record in store.filaments(conn=conn, lock=True):
             if record.density_g_cm3 is not None:
                 continue
             found = density_for(

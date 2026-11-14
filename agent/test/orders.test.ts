@@ -983,9 +983,9 @@ describe('pricing tools (#4250)', () => {
         subtype: 'Basic',
         colour: '#FF0000',
         density_g_cm3: '1.26',
-        profile: 'Bambu PLA Basic (spool preset GFA00)',
+        density_profile: 'Bambu PLA Basic @base (spool preset GFA00)',
       },
-      { filament_id: 'f22a0000-1111-4222-8333-944455556666', material: 'PLA', subtype: 'Dual Color', colour: '#00FF00', density_g_cm3: null, profile: null },
+      { filament_id: 'f22a0000-1111-4222-8333-944455556666', material: 'PLA', subtype: 'Dual Color', colour: '#00FF00', density_g_cm3: null, density_profile: null },
     ]
     let posted = 0
     server.use(
