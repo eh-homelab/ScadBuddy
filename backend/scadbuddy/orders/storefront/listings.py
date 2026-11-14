@@ -25,8 +25,6 @@ public routes answer 503, since the fault is the operator's.
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import hashlib
 import json
 import logging
@@ -849,18 +847,16 @@ def _like_escaped(text: str) -> str:
 
 
 def listing_cursor(listing: Listing) -> str:
-    """The public list's cursor after ``listing``: its position and id, base64url."""
-    raw = json.dumps([listing.position, listing.id], separators=(",", ":"))
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    """The public list's cursor after ``listing``: its position and id, as hex of JSON."""
+    return json.dumps([listing.position, listing.id], separators=(",", ":")).encode().hex()
 
 
 def cursor_after(cursor: str) -> tuple[int, str]:
     """The position and id a `listing_cursor` names; 422 ``listing_cursor_invalid`` for
     any other text."""
     try:
-        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
-        position, listing_id = json.loads(raw)
-    except (binascii.Error, UnicodeDecodeError, ValueError, TypeError):
+        position, listing_id = json.loads(bytes.fromhex(cursor))
+    except (UnicodeDecodeError, ValueError, TypeError):
         position = listing_id = None
     if (
         not isinstance(position, int)
@@ -884,6 +880,8 @@ async def public_card(
     assert listing.snapshot is not None
     colours = {filaments[i].colour.casefold() for i in listing.colours if i in filaments}
     by_name = {p.name: p for p in listing.snapshot.schema_.parameters}
+    # As the page's `colourGone` (`frontend/src/storefront/params.ts`): a colour with no
+    # filament left cannot be ordered.
     available = True
     for name, bound in listing.params.items():
         shown = _public_param(name, bound, by_name, colours)

@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
+import { Link, useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { KEYCHAIN, TAG, card, listingsPage } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
@@ -72,5 +73,38 @@ describe('ListingsPage', () => {
     await user.clear(screen.getByLabelText('Search designs'))
     await user.type(screen.getByLabelText('Search designs'), 'zzz')
     expect(await screen.findByText('No design matches “zzz”.')).toBeInTheDocument()
+  })
+
+  it('leaves a search the visitor left by the shop’s mark', async () => {
+    function Where() {
+      return <output data-testid="where">{useLocation().search}</output>
+    }
+    const { user } = renderPage(
+      <>
+        <Link to="/">Print shop</Link>
+        <Where />
+        <ListingsPage debounceMs={20} />
+      </>,
+    )
+    await screen.findByRole('heading', { name: 'Luggage tag' })
+    await user.type(screen.getByLabelText('Search designs'), 'key')
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('?q=key'))
+    await user.click(screen.getByRole('link', { name: 'Print shop' }))
+    await screen.findByRole('heading', { name: 'Luggage tag' })
+    expect(screen.getByLabelText('Search designs')).toHaveValue('')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(screen.getByTestId('where')).toHaveTextContent(/^$/)
+  })
+
+  it('cuts a search longer than the edge takes', async () => {
+    const asked: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/store/v1/listings') asked.push(url.searchParams.get('q') ?? '')
+    })
+    renderPage(<ListingsPage />, { route: `/?q=${'k'.repeat(150)}` })
+    await screen.findByText(/No design matches/)
+    server.events.removeAllListeners()
+    expect(asked).toEqual(['k'.repeat(100)])
   })
 })

@@ -4,6 +4,8 @@ import { errorText, store, type ListingCard } from '../api/client'
 
 /** How long the page waits after the last key before it searches. */
 const SEARCH_DEBOUNCE_MS = 300
+/** The longest search the edge takes (`LISTINGS_MAX_QUERY`): a longer `?q=` is cut. */
+const MAX_QUERY = 100
 
 /**
  * `/`: the shop's published listings, a page of cards at a time (#6154), and "Ask for a
@@ -12,8 +14,11 @@ const SEARCH_DEBOUNCE_MS = 300
  */
 export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?: number }) {
   const [params, setParams] = useSearchParams()
-  const query = params.get('q') ?? ''
+  const query = (params.get('q') ?? '').trim().slice(0, MAX_QUERY)
   const [typed, setTyped] = useState(query)
+  /** The search this page last put in the address: any other came from outside it. */
+  const wrote = useRef(query)
+  const [loading, setLoading] = useState(true)
   const [cards, setCards] = useState<ListingCard[]>()
   const [next, setNext] = useState<string | null>(null)
   const [requestsEnabled, setRequestsEnabled] = useState(false)
@@ -25,15 +30,26 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
   useEffect(() => {
     let live = true
     shownQuery.current = query
+    // A search from outside the box (the shop's mark, Back): the box shows it.
+    if (query !== wrote.current) {
+      wrote.current = query
+      setTyped(query)
+    }
     setError(null)
+    setLoading(true)
     store.listings({ q: query }).then(
       (answer) => {
         if (!live) return
         setCards(answer.listings)
         setNext(answer.next_cursor)
         setRequestsEnabled(answer.requests_enabled)
+        setLoading(false)
       },
-      (caught: unknown) => live && setError(errorText(caught)),
+      (caught: unknown) => {
+        if (!live) return
+        setError(errorText(caught))
+        setLoading(false)
+      },
     )
     return () => {
       live = false
@@ -43,6 +59,7 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
   useEffect(() => {
     if (typed.trim() === query) return
     const timer = setTimeout(() => {
+      wrote.current = typed.trim()
       setParams(typed.trim() ? { q: typed.trim() } : {}, { replace: true })
     }, debounceMs)
     return () => clearTimeout(timer)
@@ -79,7 +96,7 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
           className="sf-input"
           type="search"
           value={typed}
-          maxLength={100}
+          maxLength={MAX_QUERY}
           placeholder="Keychain, sign, name…"
           onChange={(event) => setTyped(event.target.value)}
         />
@@ -89,8 +106,8 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
           {error}
         </p>
       )}
-      {!cards && !error && <p className="sf-hint">Loading the designs…</p>}
-      {cards && cards.length === 0 && (
+      {loading && !error && <p className="sf-hint">{cards ? 'Searching…' : 'Loading the designs…'}</p>}
+      {cards && cards.length === 0 && !loading && (
         <p className="sf-lead">{query ? `No design matches “${query}”.` : 'There is nothing for sale yet.'}</p>
       )}
       {cards && cards.length > 0 && (

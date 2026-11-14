@@ -207,12 +207,12 @@ def test_the_edge_sends_on_a_page_and_search_of_the_listings(
     """#6154: ``cursor``, ``limit`` and ``q`` reach the CRUD side URL-encoded, and nothing
     else the visitor put in the query does."""
     with TestClient(create_app(load()), client=CLIENT) as c:
-        r = c.get("/api/store/v1/listings", params={"q": "a&b=c", "cursor": "WzBd", "x": "1"})
+        r = c.get("/api/store/v1/listings", params={"q": "a&b=c", "cursor": "5b305d", "x": "1"})
         assert r.status_code == 200, r.text
         refused = c.get("/api/store/v1/listings", params={"limit": "49"})
         assert refused.status_code == 422
     sent = crud_mock["listings"].calls.last.request
-    assert dict(sent.url.params) == {"cursor": "WzBd", "q": "a&b=c"}
+    assert dict(sent.url.params) == {"cursor": "5b305d", "q": "a&b=c"}
     assert crud_mock["listings"].call_count == 1
 
 

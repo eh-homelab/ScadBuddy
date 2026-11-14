@@ -176,7 +176,16 @@ def test_the_public_list_searches_titles_and_takes_wildcards_literally(
     assert crud.get("/listings?q=_").json()["listings"] == []
 
 
-@pytest.mark.parametrize("cursor", ["x", "WzEsMl0", "WyJhIiwiYiJd", "W3RydWUsIjAwIl0"])
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "x",
+        "5b312c20325d",
+        "5b2261222c202262225d",
+        "5b747275652c20223030225d",
+        "5b312c20226e6f742d616e2d6964225d",
+    ],
+)
 def test_a_cursor_the_shop_never_gave_is_422(crud: CrudCaller, cursor: str) -> None:
     r = crud.get(f"/listings?cursor={cursor}")
     assert r.status_code == 422, r.text
