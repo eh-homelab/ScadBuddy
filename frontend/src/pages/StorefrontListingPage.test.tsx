@@ -468,6 +468,13 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('was not opened, because another listing was opened meanwhile')
     })
 
+    it('fills the listing in when the models list fails to load, named by its slug (#6140 review)', async () => {
+      serveJob()
+      server.use(http.get('/api/v1/models', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+      renderStorefront('/storefront/listings/new?sell=job:j1')
+      await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue(KEYCHAIN))
+    })
+
     it('says why a sell address that names nothing opens nothing', async () => {
       renderStorefront('/storefront/listings/new?sell=nonsense')
       expect(await screen.findByRole('alert')).toHaveTextContent('Could not fill in the listing: Nothing to sell: "nonsense" names no render or saved output.')

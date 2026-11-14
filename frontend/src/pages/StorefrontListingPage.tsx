@@ -181,7 +181,7 @@ export function StorefrontListingPage() {
   const [selling, setSelling] = useState(false)
   const sold = useRef<string | null>(null)
   useEffect(() => {
-    if (!sell || sold.current === sell || !models.data || !(book.data || book.error)) return
+    if (!sell || sold.current === sell || !(models.data || models.error) || !(book.data || book.error)) return
     sold.current = sell
     setSearch(
       (cur) => {
@@ -196,7 +196,7 @@ export function StorefrontListingPage() {
     // Applied only while the listing open when it started is still the open one: a person
     // who opened another meanwhile keeps it (#6140 review).
     const started = openKey.current
-    sellListing(sell, book.data?.filaments ?? [], models.data)
+    sellListing(sell, book.data?.filaments ?? [], models.data ?? [])
       .then((made) => {
         if (openKey.current !== started) {
           setError('The listing from “Sell on storefront” was not opened, because another listing was opened meanwhile. Choose “Sell on storefront…” again to fill it in.')
@@ -209,7 +209,7 @@ export function StorefrontListingPage() {
       })
       .catch((caught: unknown) => setError(`Could not fill in the listing: ${message(caught)}`))
       .finally(() => setSelling(false))
-  }, [sell, models.data, book.data, book.error, setSearch, location.state])
+  }, [sell, models.data, models.error, book.data, book.error, setSearch, location.state])
 
   // A version without some of the listing's parameters: they go, or the editor could
   // neither show nor unlock them and publish would refuse the listing.
