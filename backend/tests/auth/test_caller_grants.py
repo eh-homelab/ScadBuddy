@@ -1,10 +1,12 @@
 """#5210: each caller's own role holds exactly its list (`auth/caller_grants.py`). The
-projects and print workers have none (#5298): they hold no database."""
+projects, print and render workers have none (#5298): they hold no database."""
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
@@ -14,12 +16,11 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.auth.caller_grants import GRANTS, grant_callers
+from scadbuddy.auth.caller_grants import GRANT_LOCK, GRANTS, grant_callers, grant_role
 from scadbuddy.auth.service_credentials import ROLES, VIEWS, ServiceCaller
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.render.pg_store import Migration, migrate
-from scadbuddy.render.worker_role import grant_role
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
@@ -127,9 +128,55 @@ def test_the_role_holds_its_list_and_cannot_migrate(
         pool.close()
 
 
-@pytest.mark.parametrize("caller", ["projects", "print"])
+@pytest.mark.parametrize("caller", ["projects", "print", "render"])
 def test_a_worker_with_no_database_has_no_list_and_no_role(caller: ServiceCaller) -> None:
-    """#5298: the projects and print workers hold no database; their data goes through
-    the CRUD routes, and the API takes back what their roles held (`auth/revoke.py`,
-    `tests/auth/test_revoke.py`)."""
+    """#5298: the projects, print and render workers hold no database; their data goes
+    through the CRUD routes, and the API takes back what their roles held
+    (`auth/revoke.py`, `tests/auth/test_revoke.py`)."""
     assert caller not in GRANTS and caller not in ROLES and caller not in VIEWS
+
+
+def test_a_role_that_does_not_exist_is_granted_nothing(owner: Pool) -> None:
+    with owner.connection() as conn:
+        assert grant_role(conn, f"absent_{uuid.uuid4().hex[:8]}", GRANTS["agent"]) is False
+
+
+def test_the_grant_waits_for_another_replicas_lock(
+    owner: Pool, role: str, pg_conninfo: str
+) -> None:
+    """Two API replicas starting together, or the API and the agent, grant one after the
+    other under `GRANT_LOCK`."""
+    with psycopg.connect(pg_conninfo) as other:  # not autocommit: the lock holds till commit
+        other.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
+        with ThreadPoolExecutor(1) as pool:
+            pids: list[int] = []
+
+            def grant() -> bool:
+                with owner.connection() as conn:
+                    pids.append(conn.info.backend_pid)
+                    return grant_role(conn, role, GRANTS["agent"])
+
+            def waiting() -> bool:
+                return (
+                    bool(pids)
+                    and look.execute(
+                        "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                        " AND pid = %s AND classid::bigint = %s AND objid::bigint = %s"
+                        " AND objsubid = 1",
+                        (pids[0], GRANT_LOCK >> 32, GRANT_LOCK & 0xFFFF_FFFF),
+                    ).fetchone()
+                    is not None
+                )
+
+            granting = pool.submit(grant)
+            with psycopg.connect(pg_conninfo, autocommit=True) as look:
+                deadline = time.monotonic() + 30.0
+                while not waiting():
+                    assert time.monotonic() < deadline, "the grant never waited on the lock"
+                    if granting.done():
+                        failed = granting.exception()
+                        pytest.fail(f"the grant finished without waiting: {failed or 'granted'}")
+                    time.sleep(0.05)
+            assert not granting.done()
+            other.commit()
+            assert granting.result(timeout=30.0)

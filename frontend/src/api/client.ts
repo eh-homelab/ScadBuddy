@@ -285,6 +285,7 @@ import type {
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
+  DensityFill,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -2817,6 +2818,7 @@ export const api = {
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
   importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),
+  fillDensities: () => request<DensityFill>('/orders/price-book/fill-densities', { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),

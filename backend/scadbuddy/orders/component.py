@@ -35,6 +35,7 @@ from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.builtin_flow import ensure_builtin_flow
+from scadbuddy.orders.density import DensityTable, density_table
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.machine_rate import MachineRates, MachineRateStore
@@ -117,11 +118,18 @@ class OrdersComponent:
             )
         return self._integrations[1]
 
+    def densities(self) -> DensityTable | None:
+        """The image's vendor presets by id (#6136, `orders/density.py`), built once per
+        process; ``None`` without the image's tree. Blocking: call it in a thread."""
+        return density_table(self.core.settings.slicer_profiles_dir)
+
     @property
     def price_book(self) -> PriceBookReader:
         """The book in force (#4250): the stored policy and the filament records."""
         return PriceBookReader(
-            self.core.settings_store, self.store, spool_import=self.integrations.linked
+            self.core.settings_store,
+            self.store,
+            spool_import=self.integrations.linked,
         )
 
     def rules(self) -> OrderRules:

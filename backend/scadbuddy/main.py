@@ -140,7 +140,6 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
-from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
@@ -1162,9 +1161,9 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Tasks 11 and 35), a table dropped from a caller's list
+    caller's role nothing (#5298 Tasks 11, 22 and 35), a table dropped from a caller's list
     taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
-    logged, never fatal, as `grant_at_start`."""
+    logged, never fatal."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
@@ -1990,10 +1989,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
-    # The render worker's old role, if the deployment made one, gets `RENDER_GRANTS`
-    # (#601), now empty: the worker holds no database (#5298), and the role keeps what
-    # it was granted before until #5298 Task 22 revokes it.
-    await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
     # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.

@@ -1,27 +1,22 @@
-"""The render worker's Postgres role (#601, spec 2026-09-27 §9), which the worker no
-longer uses (#5298: it holds no database, `tests/test_render_worker_nodb.py`): the API
-grants it `RENDER_GRANTS` (nothing now) at start until Task 22 revokes it, it never
-migrates, and it cannot read `settings`; and what the worker does instead goes through
-the API's CRUD routes."""
+"""What the render worker reads and writes goes through the API's CRUD routes (#5298: it
+holds no database, `tests/test_render_worker_nodb.py`; the API takes back its old role
+`scadbuddy_render` at every start, `tests/auth/test_revoke.py`): the store settings the
+`render_settings` view releases, its library leases, its uploads and its Bambuddy
+store's index and folders."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-import time
-import uuid
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import httpx
-import psycopg
 import pytest
 import respx
-from psycopg import Connection, sql
-from psycopg.conninfo import make_conninfo
+from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -47,12 +42,7 @@ from scadbuddy.library.settings_store import (
     RENDER_FIELDS,
     load_render_store_settings,
 )
-from scadbuddy.render import worker_role
-from scadbuddy.render.pg_store import Migration, migrate
-from scadbuddy.render.worker_role import (
-    grant_at_start,
-    grant_render_role,
-)
+from scadbuddy.render.pg_store import migrate
 from scadbuddy.store.assets import asset_key
 from scadbuddy.store.bambuddy import BambuddyContentBackend, BambuddyTarget
 from scadbuddy.store.content import BlobScope, ContentStore
@@ -95,42 +85,6 @@ def owner(pg_conninfo: str) -> Iterator[Pool]:
         pool.close()
 
 
-@pytest.fixture
-def role(pg_conninfo: str) -> Iterator[str]:
-    """A login role of its own, with no grants: roles are per cluster, so the name is
-    unique, and it is dropped afterwards with whatever it was granted."""
-    name = f"render_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-        conn.execute(
-            sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
-                sql.Identifier(name), sql.Literal(name)
-            )
-        )
-    try:
-        yield name
-    finally:
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(name)))
-            conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(name)))
-
-
-@pytest.fixture
-def worker_conninfo(pg_conninfo: str, role: str) -> str:
-    return make_conninfo(pg_conninfo, user=role, password=role)
-
-
-@pytest.fixture
-def granted(owner: Pool, role: str, worker_conninfo: str) -> Iterator[Pool]:
-    """A pool as the worker's role, holding exactly `RENDER_GRANTS`."""
-    with owner.connection() as conn:
-        assert grant_render_role(conn, role)
-    pool = _pool(worker_conninfo)
-    try:
-        yield pool
-    finally:
-        pool.close()
-
-
 def _put(owner: Pool, name: str, value: object) -> None:
     with owner.connection() as conn:
         conn.execute(
@@ -146,166 +100,6 @@ def _defaults(tmp_path: Path) -> Settings:
         database_url=UNUSED_DATABASE_URL,
         temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
-
-
-# ── the role's reach ──────────────────────────────────────────────────────────
-
-
-def test_the_role_cannot_read_the_settings(granted: Pool) -> None:
-    with granted.connection() as conn:
-        # The store settings come from the API's CRUD route (#5298), not the view.
-        for relation in ("settings", "render_settings"):
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                conn.execute(sql.SQL("SELECT name FROM {}").format(sql.Identifier(relation)))
-        # The job rows, their events and activity rows, the blob refs, the piece
-        # geometry, the blob index, the store's folders, the uploads' rows and the
-        # library leases, pin holds and install slots go through the API too (#5298).
-        for table in (
-            "render_jobs",
-            "events",
-            "activity",
-            "blob_refs",
-            "piece_geometry",
-            "store_blobs",
-            "store_folders",
-            "assets",
-            "library_leases",
-            "library_pin_holds",
-            "library_install_slots",
-            # Nor waits for the API's migrations: it waits for its CRUD areas.
-            "scadbuddy_migrations",
-            "operations",
-            "print_runs",
-            "saved_presets",
-            "model_print_choices",
-        ):
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
-
-
-def _granted_activity_before(owner: Pool, role: str) -> None:
-    """`activity` as a role granted before #5298 moved the job rows to the API holds it,
-    until Task 22 revokes it: `RENDER_ROWS` still holds it to its renders' rows."""
-    with owner.connection() as conn:
-        conn.execute(
-            sql.SQL("GRANT SELECT, INSERT, UPDATE ON activity TO {}").format(sql.Identifier(role))
-        )
-
-
-def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool, role: str) -> None:
-    _granted_activity_before(owner, role)
-    with owner.connection() as conn:
-        conn.execute(
-            "INSERT INTO activity (id, kind, status, title, source, source_id, principal)"
-            " VALUES ('operation:o1', 'model_import', 'running', 'Import', 'operations', 'o1',"
-            " 'token:t1')"
-        )
-    with granted.connection() as conn:
-        assert conn.execute("SELECT id FROM activity").fetchall() == []
-        conn.execute(
-            "INSERT INTO activity (id, kind, status, title, source, source_id)"
-            " VALUES ('render:r1', 'render', 'running', 'Render', 'render_jobs', 'r1')"
-        )
-        updated = conn.execute(
-            "UPDATE activity SET status = 'failed' WHERE id = 'operation:o1' RETURNING id"
-        ).fetchall()
-        assert updated == []
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            conn.execute(
-                "INSERT INTO activity (id, kind, status, title, source, source_id)"
-                " VALUES ('operation:o2', 'model_import', 'running', 'Import', 'operations', 'o2')"
-            )
-    with owner.connection() as conn:
-        rows = conn.execute("SELECT id, status FROM activity ORDER BY id").fetchall()
-    assert [(r["id"], r["status"]) for r in rows] == [
-        ("operation:o1", "running"),
-        ("render:r1", "running"),
-    ]
-
-
-def test_a_changed_row_predicate_replaces_the_old_policy(
-    owner: Pool, granted: Pool, role: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(worker_role, "RENDER_ROWS", {"activity": "id LIKE 'render:x%'"})
-    with owner.connection() as conn:
-        # af75581 named the policy without a suffix; it goes too.
-        conn.execute(
-            sql.SQL(
-                "CREATE POLICY {} ON activity AS RESTRICTIVE TO {} USING (id LIKE 'render:%')"
-            ).format(sql.Identifier(f"only_{role}"), sql.Identifier(role))
-        )
-        assert grant_render_role(conn, role)
-    _granted_activity_before(owner, role)
-    with owner.connection() as conn:
-        conn.execute(
-            "INSERT INTO activity (id, kind, status, title, source, source_id) VALUES"
-            " ('render:a1', 'render', 'running', 'A', 'render_jobs', 'a1'),"
-            " ('render:x1', 'render', 'running', 'X', 'render_jobs', 'x1')"
-        )
-        mine = [
-            r["policyname"]
-            for r in conn.execute(
-                "SELECT policyname FROM pg_policies WHERE schemaname = current_schema()"
-                " AND tablename = 'activity' AND starts_with(policyname, %s)",
-                (f"only_{role}",),
-            )
-        ]
-    assert len(mine) == 1
-    with granted.connection() as conn:
-        assert [r["id"] for r in conn.execute("SELECT id FROM activity")] == ["render:x1"]
-
-
-def test_the_grant_waits_for_another_replicas_lock(
-    owner: Pool, role: str, pg_conninfo: str
-) -> None:
-    key = worker_role.GRANT_LOCK
-    with psycopg.connect(pg_conninfo) as other:  # not autocommit: the lock holds till commit
-        other.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
-        with ThreadPoolExecutor(1) as pool:
-            pids: list[int] = []
-
-            def grant() -> bool:
-                with owner.connection() as conn:
-                    pids.append(conn.info.backend_pid)
-                    return grant_render_role(conn, role)
-
-            def waiting() -> bool:
-                return (
-                    bool(pids)
-                    and look.execute(
-                        "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-                        " AND pid = %s AND classid::bigint = %s AND objid::bigint = %s"
-                        " AND objsubid = 1",
-                        (pids[0], key >> 32, key & 0xFFFF_FFFF),
-                    ).fetchone()
-                    is not None
-                )
-
-            granting = pool.submit(grant)
-            with psycopg.connect(pg_conninfo, autocommit=True) as look:
-                deadline = time.monotonic() + 30.0
-                while not waiting():
-                    assert time.monotonic() < deadline, "the grant never waited on the lock"
-                    if granting.done():
-                        failed = granting.exception()
-                        pytest.fail(f"the grant finished without waiting: {failed or 'granted'}")
-                    time.sleep(0.05)
-            assert not granting.done()
-            other.commit()
-            assert granting.result(timeout=30.0)
-
-
-def test_the_role_cannot_migrate(granted: Pool) -> None:
-    with granted.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
-        migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))
-
-
-def test_a_role_that_does_not_exist_is_granted_nothing(owner: Pool) -> None:
-    with owner.connection() as conn:
-        assert grant_render_role(conn, f"absent_{uuid.uuid4().hex[:8]}") is False
-
-
-# ── the settings it may read ──────────────────────────────────────────────────
 
 
 def test_the_full_key_is_hidden_once_a_render_key_is_stored(owner: Pool, tmp_path: Path) -> None:
@@ -416,37 +210,12 @@ async def _the_slots_follow_the_settings(owner: Pool, deps: WorkerDeps) -> None:
     assert await slots() == (0, derived)
 
 
-def test_the_api_grants_the_role_at_start(
-    owner: Pool, role: str, worker_conninfo: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(worker_role, "RENDER_ROLE", role)
-    grant_at_start(owner)
-    pool = _pool(worker_conninfo)
-    try:
-        # `RENDER_GRANTS` is empty (#5298): the start grants the role no table.
-        with pool.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
-            conn.execute("SELECT 1 FROM render_jobs LIMIT 1")
-    finally:
-        pool.close()
-
-
-def test_a_failed_grant_does_not_stop_the_api(
-    owner: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    def refuse(*_: object, **__: object) -> bool:
-        raise psycopg.errors.InsufficientPrivilege("not the owner")
-
-    monkeypatch.setattr(worker_role, "grant_render_role", refuse)
-    grant_at_start(owner)
-    assert "could not grant the render worker's database role" in caplog.text
-
-
-# ── what a render does, as the role ───────────────────────────────────────────
+# ── what a render does, through the API ───────────────────────────────────────
 
 
 def test_leases_pins_and_install_slots_go_through_the_api(owner: Pool, tmp_path: Path) -> None:
-    """The role holds nothing on the three ``library_*`` tables (#5298): the worker's
-    leases, pin holds and install slots go through the API's CRUD routes."""
+    """The worker's leases, pin holds and install slots go through the API's CRUD routes
+    (#5298), not the three ``library_*`` tables."""
     with threaded_render_crud(owner) as client:
         leases = RemoteCheckoutLeases(client)
         token = leases.take("job-1", [tmp_path / "BOSL2" / ("c" * 40)])
@@ -460,11 +229,9 @@ def test_leases_pins_and_install_slots_go_through_the_api(owner: Pool, tmp_path:
         assert claimed is not None
 
 
-def test_uploads_are_adopted_used_and_pruned_through_the_api(
-    owner: Pool, granted: Pool, tmp_path: Path
-) -> None:
-    """The role holds nothing on `assets` (#5298): the worker's uploads keep their files
-    on its volume and their rows through the API's CRUD routes."""
+def test_uploads_are_adopted_used_and_pruned_through_the_api(owner: Pool, tmp_path: Path) -> None:
+    """The worker's uploads keep their files on its volume and their `assets` rows
+    through the API's CRUD routes (#5298)."""
     data = b'<svg xmlns="http://www.w3.org/2000/svg"/>'
     meta = AssetMeta(id=hashlib.sha256(data).hexdigest(), name="x.svg", kind="svg", size=len(data))
     # The API's copy in the blob store, whose meta the API adopts the row from.
@@ -489,11 +256,12 @@ def _folder(**values: Any) -> dict[str, Any]:
 
 
 @respx.mock
-async def test_the_bambuddy_store_works_as_the_role(
-    granted: Pool, owner: Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_the_bambuddy_store_works_with_no_pool(
+    owner: Pool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Its index and its folders through the API's CRUD routes (#5298): the API finds a
-    folder on its own render target, the one Settings names."""
+    """Its index and its folders through the API's CRUD routes (#5298), with no pool, as
+    the worker builds it: the API finds a folder on its own render target, the one
+    Settings names."""
     monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
 
     async def target() -> BambuddyTarget:
@@ -539,7 +307,7 @@ async def test_the_bambuddy_store_works_as_the_role(
         remote = crud.blocking()
         index = RemoteBlobIndex(remote)
         backend = BambuddyContentBackend(
-            target, granted, index=index, folders=RemoteStoreFolders(crud)
+            target, None, index=index, folders=RemoteStoreFolders(crud)
         )
         try:
             await _the_bambuddy_store_works(backend, ContentStore(backend, index), read_back)

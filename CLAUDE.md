@@ -42,8 +42,9 @@ service credential (PR #5211). The owner decided this on 2026-11-05.
 
 Today's code still breaks the rule: seven processes hold a Postgres secret (four once
 eh-homelab/clusters drops the render, print and projects workers', which they no longer
-use; the API revokes the roles `scadbuddy_print` and `scadbuddy_projects` at every start,
-and the agent what it granted `scadbuddy_projects`, #5298), the agent
+use; the API revokes the roles `scadbuddy_render`, `scadbuddy_print` and
+`scadbuddy_projects` at every start, and the agent what it granted `scadbuddy_projects`,
+#5298), the agent
 and the API share tables through grants, and template Python runs in the render worker's
 pod. Do the work in this order: #5298 (the workers), #5299 (the agent), #5297 (authenticate
 `/api/v1/internal/*`, then `enforce`), #5296 (untrusted code out of pods with a database

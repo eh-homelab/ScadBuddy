@@ -11,7 +11,7 @@ async function makeListing(page: Page, title: string) {
   await expect(titleField).toHaveValue('Name Keychain')
   await titleField.fill(title)
   // Its parameters load from the schema before it can be published as offered.
-  await expect(page.getByTestId('listing-preview').getByLabel('Text size')).toBeVisible()
+  await expect(page.getByTestId('listing-preview').getByLabel('Name on the tag')).toBeVisible()
   await page.getByRole('button', { name: 'Publish' }).click()
   await expect(page.getByRole('button', { name: `Edit ${title}` })).toContainText('Published')
 }
