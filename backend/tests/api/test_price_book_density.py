@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import orders as orders_api
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.orders import bambuddy as orders_bambuddy
 from scadbuddy.orders import component as orders_component
 from scadbuddy.slicing.profiles import ProfileImageError
 from tests.api.test_order_estimate import ESTIMATE, box, output_of
@@ -464,3 +465,20 @@ def test_a_printer_bambuddy_cannot_read_keeps_the_other_printers_trays(
         "Bambu PLA Basic @base (AMS tray preset GFA00)",
     )
     assert (rows[2]["action"], rows[2]["density_g_cm3"]) == ("created", None)
+
+
+@respx.mock
+def test_an_unexpected_density_read_error_is_raised_as_itself(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6186 review: an error that is not Bambuddy's refusal reaches the caller as
+    itself, not wrapped in the reads' ExceptionGroup."""
+    configure(client)
+    bambuddy([spool(1, cost_per_kg=20)])
+
+    async def broken(*args: object) -> dict[int, str]:
+        raise RuntimeError("tray read broke")
+
+    monkeypatch.setattr(orders_bambuddy, "_tray_presets", broken)
+    with pytest.raises(RuntimeError, match="tray read broke"):
+        client.post(IMPORT)
