@@ -34,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
@@ -83,6 +85,14 @@ RENDER_CANCELLED: Final = "This render was stopped. Try again."
 _PARTS: Final = TypeAdapter(list[EstimatedPart])
 #: What a visitor whose render could not start waits before it asks again.
 UNAVAILABLE_RETRY: Final = 5
+#: The longest a status or estimate request waits on work behind it (#6120): a done
+#: render's files being fetched, or its analysis. Past it the request answers "not ready
+#: yet" and the page asks again, so no request is held near Cloudflare's 100 s. The
+#: fetch state below (`_fetches`, `_ready`, `_failed`) is this process's: it assumes one
+#: API process, as today; with more, a preview read may still fetch on its own.
+READY_WAIT: Final = 3.0
+#: What the page waits before it asks again for a price that is not ready.
+PENDING_RETRY: Final = 2
 
 
 def not_found() -> ApiError:
@@ -94,6 +104,19 @@ def _unavailable(detail: str) -> ApiError:
     return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "estimate_unavailable", detail)
 
 
+def _pending() -> ApiError:
+    """429 ``estimate_pending``: the price is being worked out; ask again after
+    `PENDING_RETRY` seconds. A 4xx, so the edge's client relays it and never holds the
+    request to retry it (a 5xx it would)."""
+    return problem(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "estimate_pending",
+        "The price is not ready yet. Try again in a moment.",
+        headers={"Retry-After": str(PENDING_RETRY)},
+        retry_after=PENDING_RETRY,
+    )
+
+
 def _orders(state: AppState) -> OrdersComponent:
     orders: OrdersComponent = state.components.get(ORDERS)
     return orders
@@ -103,8 +126,9 @@ def _limits(state: AppState) -> RenderLimits:
     return RenderLimits(state.projection.pool)
 
 
-def store_render(job: Job) -> StoreRender:
-    """The visitor's view of ``job``."""
+def store_render(job: Job, *, ready: bool = True) -> StoreRender:
+    """The visitor's view of ``job``. A done job's ``preview_url`` is there only once
+    its files are ``ready`` in this process (`shown_render`)."""
     result = job.result
     error = {"failed": RENDER_FAILED, "cancelled": RENDER_CANCELLED}.get(job.state)
     stage = next((step.name for step in job.steps if step.state == "running"), None)
@@ -117,7 +141,7 @@ def store_render(job: Job) -> StoreRender:
         colors=list(result.colors) if result else None,
         preview_url=(
             f"{STOREFRONT_PREFIX}/renders/{job.id}/preview.glb"
-            if result is not None and job.state == "done"
+            if result is not None and job.state == "done" and ready
             else None
         ),
         error=error,
@@ -126,6 +150,94 @@ def store_render(job: Job) -> StoreRender:
 
 def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
     return {f.id: f for f in orders.store.filaments()}
+
+
+#: Each done job's files being fetched into this process's cache, by job id: one fetch
+#: per job, which every request for it shares and none cancels.
+_fetches: dict[str, asyncio.Task[None]] = {}
+#: The done jobs whose files this process fetched, newest last: their status reads skip
+#: the fetch. Bounded; a job that falls out is only fetched (from the cache) again.
+_ready: OrderedDict[str, None] = OrderedDict()
+READY_KEPT: Final = 4096
+#: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
+#: its files are taken as lost for the status only: it names the preview, whose read then
+#: says so at once (404), rather than the page polling a render that can never show. The
+#: estimate never takes lost files as there (`files_ready`). A count older than
+#: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
+_failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
+FETCH_TRIES: Final = 3
+FAILED_FOR: Final = 600.0
+
+
+def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
+    if _fetches.get(job_id) is task:
+        del _fetches[job_id]
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        count, first = _failures(job_id)
+        _failed[job_id] = (count + 1, first if count else time.monotonic())
+        _failed.move_to_end(job_id)
+        while len(_failed) > READY_KEPT:
+            _failed.popitem(last=False)
+        logger.warning("a render's files could not be fetched", exc_info=task.exception())
+        return
+    _failed.pop(job_id, None)
+    _ready[job_id] = None
+    _ready.move_to_end(job_id)
+    while len(_ready) > READY_KEPT:
+        _ready.popitem(last=False)
+
+
+def _failures(job_id: str) -> tuple[int, float]:
+    """The job's failed fetches in a row and when the first failed; none once they are
+    older than `FAILED_FOR`."""
+    count, first = _failed.get(job_id, (0, 0.0))
+    if count and time.monotonic() - first > FAILED_FOR:
+        _failed.pop(job_id, None)
+        return 0, 0.0
+    return count, first
+
+
+def files_lost(job_id: str) -> bool:
+    """Whether the job's fetch failed `FETCH_TRIES` times in a row, lately."""
+    return _failures(job_id)[0] >= FETCH_TRIES
+
+
+async def _fetch(state: AppState, job: Job) -> bool:
+    """Starts the fetch of the done ``job``'s files (`materialize_result`) when none
+    runs, shared by every request, and waits on it at most `READY_WAIT` seconds: whether
+    it succeeded. It runs on when the wait ends, so the next request finds it done."""
+    task = _fetches.get(job.id)
+    if task is None:
+        task = asyncio.create_task(materialize_result(state.store.blobs, job.result))
+        _fetches[job.id] = task
+        task.add_done_callback(lambda done: _fetched(job.id, done))
+    done, _ = await asyncio.wait({task}, timeout=READY_WAIT)
+    return task in done and not task.cancelled() and task.exception() is None
+
+
+async def files_ready(state: AppState, job: Job) -> bool:
+    """Whether the status may name the done ``job``'s preview: its files were fetched
+    into this process's cache (a job fetched before answers at once), else `_fetch`.
+    Only the preview leans on this: its read fetches again if the cache evicted them.
+    The estimate always fetches (`_parts`)."""
+    return job.id in _ready or await _fetch(state, job)
+
+
+async def shown_render(state: AppState, job: Job) -> StoreRender:
+    """`store_render` of ``job``, its preview named only once its files are fetched
+    (#6120): the preview request then streams at once, and the page polls the status
+    until it is. A fetch that failed is tried again on the next poll; once it failed
+    `FETCH_TRIES` times lately, the preview is named all the same, so its read says the
+    files are gone rather than the page polling to its limit."""
+    ready = (
+        job.state != "done"
+        or job.result is None
+        or await files_ready(state, job)
+        or files_lost(job.id)
+    )
+    return store_render(job, ready=ready)
 
 
 def _limited(error: RenderLimited) -> ApiError:
@@ -309,7 +421,8 @@ async def start_render(
         named, counted = stood
         if named is not None:
             try:
-                return store_render(await asyncio.to_thread(state.render.store.read, named))
+                named_job = await asyncio.to_thread(state.render.store.read, named)
+                return await shown_render(state, named_job)
             except JobNotFoundError:
                 raise _expired() from None
     params = reference.inputs.get("params", {})
@@ -359,7 +472,7 @@ async def start_render(
             await _withdraw_limited(state, limits, job, row, key)
             raise _limited(error) from None
     await asyncio.to_thread(limits.attach, row, job.id)
-    return store_render(job)
+    return await shown_render(state, job)
 
 
 async def owned_render(state: AppState, visitor_id: str, job_id: str) -> OwnedRender:
@@ -564,16 +677,28 @@ async def _parts(state: AppState, job: Job) -> list[EstimatedPart]:
         # Lock-free: the loop never takes `_lock`. A miss only means `_begin` looks again.
         outcome = _flights.get(job.id)
         if outcome is None:
-            assert job.result is not None
-            await materialize_result(state.store.blobs, job.result)
+            # Always fetched, never taken from `_ready`: the cache may have evicted the
+            # files since, and an analysis of missing files is recorded for good.
+            if not await _fetch(state, job):
+                if files_lost(job.id):
+                    raise _unavailable(
+                        "We cannot price this design here. Add it to your order and we"
+                        " will price it."
+                    )
+                raise _pending()
             runtime = await asyncio.to_thread(_runtime, state)
             outcome = await asyncio.to_thread(_begin, state, job, runtime.render_timeout)
-        # Shielded: a request that leaves never cancels the flight others await.
-        analysis = await asyncio.shield(asyncio.wrap_future(outcome))
+        # Shielded: a request that leaves, or stops waiting, never cancels the flight.
+        try:
+            analysis = await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(outcome)), READY_WAIT
+            )
+        except TimeoutError:
+            raise _pending() from None
     if analysis.parts is not None:
         return analysis.parts
     if analysis.error == "busy":
-        raise _unavailable("The price is not ready yet. Try again in a moment.")
+        raise _pending()
     raise _unavailable(
         "We cannot price this design here. Add it to your order and we will price it."
     )
@@ -601,9 +726,10 @@ def _filament_for(
 
 async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> StoreEstimate:
     """The rough price of the visitor's done render. 404 ``render_not_found`` as
-    `owned_job` says; 422 ``estimate_unavailable`` for a job not done, a 3MF that cannot
-    be analysed (or not within ``render_timeout``), a colour no listing filament has,
-    or a filament with no density."""
+    `owned_job` says; 429 ``estimate_pending`` while its files are fetched or it is
+    analysed, past `READY_WAIT` (#6120); 422 ``estimate_unavailable`` for a job not
+    done, a 3MF that cannot be analysed (or not within ``render_timeout``), a colour no
+    listing filament has, or a filament with no density."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")

@@ -343,6 +343,43 @@ describe('CustomizePage', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it('waits for a done render to name its preview, and for a price that is not ready', async () => {
+    let polls = 0
+    let reads = 0
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json({ ...DONE, preview_url: null })),
+      http.get('/api/store/v1/renders/:id', () => {
+        polls += 1
+        return HttpResponse.json(polls < 2 ? { ...DONE, preview_url: null } : DONE)
+      }),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        return reads < 2
+          ? HttpResponse.json({ type: `${PROBLEMS}estimate_pending`, status: 429, detail: 'Not ready.' }, { status: 429, headers: { 'Retry-After': '0' } })
+          : HttpResponse.json(ESTIMATE)
+      }),
+    )
+    show()
+    expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
+    expect(polls).toBe(2)
+    expect(reads).toBe(2)
+    expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it.each([
+    ['a part it could not measure', { unknown_parts: 1 }],
+    ['no filament', { grams: '0.00' }],
+  ])('never shows a floor price for a render with %s', async (_what, change) => {
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json({ ...ESTIMATE, ...change })),
+    )
+    show()
+    expect(await screen.findByText('We price this design by hand')).toBeInTheDocument()
+    expect(screen.queryByText(/about \$/)).toBeNull()
+  })
+
   it('tries a limited render once more after Retry-After', async () => {
     let posts = 0
     server.use(

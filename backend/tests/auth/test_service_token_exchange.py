@@ -572,22 +572,22 @@ def test_an_exchanged_row_is_never_handed_out_through_a_view(
     store: ServiceCredentialStore, pg_conninfo: str
 ) -> None:
     """A caller still reading its view (§8 step 1) never gets an unsealed row."""
-    store.issue("print", "k8s", pod_name="p", pod_uid="u")
-    assert TokenReader("print", pg_conninfo, KEK).token() is None
+    store.issue("agent", "k8s", pod_name="p", pod_uid="u")
+    assert TokenReader("agent", pg_conninfo, KEK).token() is None
     store.rotate_due(KEK)
-    token = TokenReader("print", pg_conninfo, KEK).token()
+    token = TokenReader("agent", pg_conninfo, KEK).token()
     assert token is not None
-    assert store.resolve(token) == Service("print", SCOPES["print"])
+    assert store.resolve(token) == Service("agent", SCOPES["agent"])
 
 
 @pg
-def test_the_rotation_never_mints_for_render_or_projects_or_counts_an_exchanged_row(
+def test_the_rotation_never_mints_for_a_worker_or_counts_an_exchanged_row(
     store: ServiceCredentialStore,
 ) -> None:
-    store.issue("print", "k8s", pod_name="p", pod_uid="u")
+    store.issue("agent", "k8s", pod_name="p", pod_uid="u")
     minted = store.rotate_due(KEK)
-    assert len(minted) == 2
-    assert sorted(c.caller for c in store.list() if c.proof == "legacy") == ["agent", "print"]
+    assert len(minted) == 1
+    assert [c.caller for c in store.list() if c.proof == "legacy"] == ["agent"]
 
 
 @pg
@@ -1001,7 +1001,7 @@ def _settings(**update: Any) -> Settings:
 
 
 def test_a_caller_without_a_proof_reads_its_view() -> None:
-    assert isinstance(token_source("print", _settings(), KEK), TokenReader)
+    assert isinstance(token_source("agent", _settings(), KEK), TokenReader)
 
 
 def test_a_caller_with_a_proof_exchanges_it(tmp_path: Path) -> None:

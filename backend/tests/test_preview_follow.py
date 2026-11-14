@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from typing import NoReturn
 
@@ -49,10 +50,12 @@ def running(progress: int | None = None) -> SlicePreview:
 
 
 async def settle(follows: PreviewFollows) -> None:
-    for _ in range(200):
+    # Real time, not loop turns: a follow releases its claim on a thread, which a busy CI
+    # runner can keep from finishing within any fixed number of turns.
+    for _ in range(500):
         if follows.following == 0:
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("the follow did not end")
 
 
@@ -352,6 +355,8 @@ async def cancel_a_claim_and_read_again(
         if seen and not follows._claiming:
             break
         await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("the cancelled claim did not settle")
 
 
 async def test_a_read_cancelled_while_it_claims_releases_the_claim() -> None:
@@ -482,6 +487,52 @@ def test_a_failed_statement_on_a_live_connection_starts_the_back_off_too(
     claims.close()
 
 
+class ReleaseFailsConnection:
+    """A connection that takes a lock, then fails the release, as one whose server went."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def execute(self, sql: str, *_: object) -> ReleaseFailsConnection:
+        if "unlock" in sql:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return self
+
+    def fetchone(self) -> tuple[bool]:
+        return (True,)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_failed_release_starts_the_back_off_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#6174: the failed release drops the connection, as a failed claim does, so the next
+    claim waits for the back-off and does not connect under the lock at once."""
+    opened: list[ReleaseFailsConnection] = []
+
+    def connect(conninfo: str, **_: object) -> ReleaseFailsConnection:
+        opened.append(ReleaseFailsConnection())
+        return opened[-1]
+
+    monkeypatch.setattr(psycopg, "connect", connect)
+    now = [100.0]
+    claims = PgFollowClaims("postgresql://nobody@db/nothing", clock=lambda: now[0])
+    assert claims.claim("native:7:x") is True
+    claims.release("native:7:x")
+    assert opened[0].closed
+    assert claims.open_connections() == 0
+    # #6182: the dropped connection freed the lock, so a second release does not connect.
+    claims.release("native:7:x")
+    assert len(opened) == 1
+    now[0] += claims_module.CONNECT_BACKOFF - 1
+    assert claims.claim("native:8:x") is True
+    assert len(opened) == 1
+    now[0] += 1
+    assert claims.claim("native:8:x") is True
+    assert len(opened) == 2
+    claims.close()
+
+
 @pytest.mark.requires_postgres
 def test_one_process_holds_a_slice_claim_at_a_time(pg_conninfo: str) -> None:
     one, two = PgFollowClaims(pg_conninfo), PgFollowClaims(pg_conninfo)
@@ -493,8 +544,15 @@ def test_one_process_holds_a_slice_claim_at_a_time(pg_conninfo: str) -> None:
         one.release("native:7:x")
         assert two.claim("native:7:x") is True
         two.close()
-        # Closing a process's connection frees every slice it held.
-        assert one.claim("native:8:x") is True
+        # Closing a process's connection frees every slice it held. The server frees them
+        # when its backend for that session ends, which can come just after the close
+        # returns (#6195), so the claim is tried again for a short time.
+        for _ in range(100):
+            if one.claim("native:8:x"):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("closing the connection did not free its slices")
     finally:
         one.close()
         two.close()

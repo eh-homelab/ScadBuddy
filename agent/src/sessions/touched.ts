@@ -342,9 +342,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attach: () => [],
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
+  // A storefront listing (#6131) is a record of its own, on the Storefront page; the draft's
+  // answer links it there.
+  storefront_listing_draft: () => [],
+  storefront_listing_publish: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
   price_book_import_spools: () => [],
+  price_book_fill_densities: () => [],
   // A printer's machine rate (#4625) is a record of its own, edited on the Settings page.
   machine_rate_set: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's

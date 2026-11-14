@@ -50,6 +50,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveRunList,
     ArchiveStats,
     AvailableFilament,
+    CatalogFilament,
     ExternalLink,
     FilamentRequirements,
     FileUpdate,
@@ -153,6 +154,7 @@ Operation = Literal[
     "external_links.create",
     "external_links.list",
     "external_links.update",
+    "filaments.catalog",
     "library.annotate",
     "library.bulk_delete",
     "library.delete",
@@ -757,6 +759,23 @@ class BambuddyClient:
             params={"include_archived": include_archived},
         )
         return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def filament_catalog(self) -> list[CatalogFilament]:
+        """``GET /api/v1/filament-catalog/`` — Bambuddy's filament catalogue, each entry
+        with its ``density`` (#6136). Bambuddy gates it with ``FILAMENTS_READ``
+        (``backend/app/api/routes/filaments.py``), which an API key holds through
+        ``can_read_status`` (``_APIKEY_SCOPE_BY_PERMISSION``,
+        ``backend/app/core/auth.py``), both at maziggy/bambuddy v1.3.2b1-daily.20261113.
+        """
+        what = "list the filament catalogue"
+        response = await self._send(
+            "GET",
+            "/filament-catalog/",
+            scope=Scope.READ_STATUS,
+            operation="filaments.catalog",
+            what=what,
+        )
+        return [CatalogFilament.model_validate(row) for row in self._rows(response, what=what)]
 
     async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
         """``GET /api/v1/inventory/spools/{id}/filament-presets`` — per-nozzle presets.

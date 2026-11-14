@@ -48,8 +48,19 @@ from scadbuddy.storefront.wire import (
 #: ``/pay#<token>`` page (#5283 phase 4).
 #: ``turnstile`` is the bot check (#5283, `storefront/turnstile.py`). ``order`` is the
 #: customer's order page (#5283).
+#: ``models`` is a customer's own models (#6133): upload slots, the request, the CSP origin.
 EDGE_AREAS: Final[frozenset[str]] = frozenset(
-    {"listings", "renders", "drafts", "requests", "pay", "turnstile", "accounts", "order"}
+    {
+        "listings",
+        "renders",
+        "drafts",
+        "requests",
+        "pay",
+        "turnstile",
+        "accounts",
+        "order",
+        "models",
+    }
 )
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
@@ -219,6 +230,31 @@ class StorefrontCrud:
         return await self._call(
             "POST", "/draft/items", visitor_id=visitor_id, client=client, content=body, key=key
         )
+
+    async def upload_slots(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/uploads`` (#6133): the visitor's JSON body as it came,
+        unread. The answer carries presigned URLs: the edge relays it and logs none."""
+        return await self._call(
+            "POST", "/uploads", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def add_models(self, body: bytes, *, key: str, visitor_id: str, client: str) -> Any:
+        """``POST …/storefront/draft/models`` (#6133): the visitor's JSON body as it came,
+        unread, and the request's ``Idempotency-Key``."""
+        return await self._call(
+            "POST", "/draft/models", visitor_id=visitor_id, client=client, content=body, key=key
+        )
+
+    async def upload_origin(self) -> str | None:
+        """``GET …/storefront/uploads/config``: the origin of the store's presigned PUTs,
+        which the page's CSP names (`storefront/static.py`). One quick try, as the site
+        key's read."""
+        response = await self._crud.request(
+            "GET", f"{BASE}/uploads/config", budget=SITE_KEY_BUDGET, timeout=SITE_KEY_BUDGET
+        )
+        answer = response.json()
+        origin = answer.get("origin") if isinstance(answer, dict) else None
+        return origin if isinstance(origin, str) else None
 
     async def remove_item(self, item_id: str, *, key: str, visitor_id: str, client: str) -> Any:
         """``DELETE …/storefront/draft/items/{id}``. ``item_id`` must be an item id

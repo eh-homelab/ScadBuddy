@@ -2,16 +2,14 @@
 follow-up to #4975 phase 4, spec 2026-11-01 §7.2).
 
 The deployment creates the roles and their passwords (`auth/service_credentials.py`
-`ROLES`); the app owns the lists, as `render/worker_role.py` owns `RENDER_GRANTS`. The API
-grants each existing role its list at every start (`grant_callers`), beside its credential
-view (`grant_caller_views`).
+`ROLES`); the app owns the lists. The API grants each existing role its list at every start
+(`grant_callers`, through `grant_role`), beside its credential view (`grant_caller_views`).
 
-The projects worker has no list and no role: it holds no database (#5298), and the API
-takes back what its role `scadbuddy_projects` held at every start (`auth/revoke.py`). The
-print worker's list is empty: it holds no pool (#5298 Task 31), and its role keeps what
-it held until #5298 Task 35 revokes it. A table dropped from a list is taken back at every
-start only once it is listed in `auth/revoke.py` `RETIRED_GRANTS`: `grant_role` never
-revokes.
+The projects, render and print workers have no list: they hold no database (#5298), and
+the API takes back what their roles `scadbuddy_projects`, `scadbuddy_render` and
+`scadbuddy_print` held at every start (`auth/revoke.py`). A table dropped from a list is
+taken back at every start only once it is listed in `auth/revoke.py` `RETIRED_GRANTS`:
+`grant_role` never revokes.
 
 A change to what a caller reads or writes changes its list in the same PR;
 `tests/auth/test_caller_grants.py` runs each caller's stores as a role holding exactly
@@ -29,34 +27,16 @@ from collections.abc import Mapping
 from typing import Any
 
 import psycopg
+from psycopg import sql
+from psycopg.rows import tuple_row
 
 from scadbuddy.auth.service_credentials import ROLES, ServiceCaller
-from scadbuddy.render.worker_role import grant_role
 
 logger = logging.getLogger(__name__)
 
 Grants = Mapping[str, tuple[str, ...]]
 
 _READ = ("SELECT",)
-
-#: What the print worker (`python -m scadbuddy.worker --queue bambuddy`) touches over SQL:
-#: nothing (#5298). Every store it reads or writes goes through the API's CRUD routes
-#: (`crud/print.py`): its settings, runs, outcomes, operations, events, uploads, slices,
-#: background slices, project records, print links, sends, outputs' last prints, printer
-#: registry, LAN reports, access codes and rack hotends' usage (Tasks 23 to 30), and its
-#: spools, ScadBuddy's own spools and their uses, the kept presets and a native slice's
-#: start (`RemoteSpoolStore`, `RemoteNativeSpools`, `RemoteHeldPresets`,
-#: `RemoteNativeSlices`, Task 31). It no longer waits for the migrations ledger either: it
-#: waits for its CRUD areas. With a proof it exchanges that proof only (`exchange_source`,
-#: no view fallback), whether or not `SCADBUDDY_DATABASE_URL` is set; only with no proof
-#: and the URL set does it read its sealed credential from its view (`grant_caller_views`,
-#: until #5298 Task 34); with neither it refuses to start. An existing role keeps every table it
-#: held, and the `native_slices_id_seq` sequence, until #5298 Task 35 revokes it. Never
-#: add a table here: add a CRUD route instead.
-PRINT_GRANTS: Grants = {}
-#: The bigserial keys the print worker inserts with: none (`native_slices` is written on
-#: the API, #5298 Task 31).
-PRINT_SEQUENCES: tuple[str, ...] = ()
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, and reads
 #: flow runs and their decisions. Its workspace files' `blob_refs` holds go through the
@@ -70,11 +50,38 @@ AGENT_GRANTS: Grants = {
     "flow_grant_uses": _READ,
 }
 
-GRANTS: Mapping[ServiceCaller, Grants] = {
-    "agent": AGENT_GRANTS,
-    "print": PRINT_GRANTS,
-}
-SEQUENCES: Mapping[ServiceCaller, tuple[str, ...]] = {"print": PRINT_SEQUENCES}
+GRANTS: Mapping[ServiceCaller, Grants] = {"agent": AGENT_GRANTS}
+
+#: `pg_advisory_xact_lock` key for `grant_role` and `auth/revoke.py` ("SCADRNDR" in ASCII,
+#: from when the render worker's role was the only one), so two API replicas starting
+#: together, or the API and the agent (`agent/src/db/grants.ts` `GRANT_LOCK`), never race.
+GRANT_LOCK = 0x5343_4144_524E_4452
+
+
+def grant_role(conn: psycopg.Connection[Any], role: str, grants: Grants) -> bool:
+    """Grant ``role`` USAGE on the current schema and ``grants`` (relation to privileges)
+    there, under `GRANT_LOCK`, if the role exists; whether it did. Idempotent, never
+    revokes (`auth/revoke.py` `RETIRED_GRANTS` does)."""
+    if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
+        return False
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (GRANT_LOCK,))
+        schema = conn.cursor(row_factory=tuple_row).execute("SELECT current_schema()").fetchone()
+        assert schema is not None and schema[0] is not None
+        conn.execute(
+            sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                sql.Identifier(str(schema[0])), sql.Identifier(role)
+            )
+        )
+        for table, privileges in grants.items():
+            conn.execute(
+                sql.SQL("GRANT {} ON {} TO {}").format(
+                    sql.SQL(", ").join(sql.SQL(p) for p in privileges),
+                    sql.Identifier(table),
+                    sql.Identifier(role),
+                )
+            )
+    return True
 
 
 def grant_callers(conn: psycopg.Connection[Any]) -> list[str]:
@@ -82,6 +89,6 @@ def grant_callers(conn: psycopg.Connection[Any]) -> list[str]:
     granted: list[str] = []
     for caller, grants in GRANTS.items():
         role = ROLES[caller]
-        if grant_role(conn, role, grants, sequences=SEQUENCES.get(caller, ())):
+        if grant_role(conn, role, grants):
             granted.append(role)
     return granted

@@ -79,6 +79,7 @@ def crud_mock() -> Iterator[respx.Router]:
                     "turnstile",
                     "accounts",
                     "order",
+                    "models",
                 ]
             },
             headers=CRUD,
@@ -98,6 +99,18 @@ def crud_mock() -> Iterator[respx.Router]:
         )
         router.post("/api/v1/internal/crud/storefront/turnstile/verify", name="turnstile").respond(
             200, json={"verdict": "off"}, headers=CRUD
+        )
+        # The store is not S3 (#6133): no upload origin, so the page's CSP names none.
+        router.get("/api/v1/internal/crud/storefront/uploads/config", name="upload_origin").respond(
+            503,
+            json={
+                "type": "https://scadbuddy.dev/problems/storefront/storefront_needs_s3",
+                "title": "Service Unavailable",
+                "status": 503,
+                "detail": "The shop is not available right now.",
+                "reason": "not_configured",
+            },
+            headers={**CRUD, "Content-Type": "application/problem+json"},
         )
         yield router
 

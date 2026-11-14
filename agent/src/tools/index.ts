@@ -28,6 +28,7 @@ import { settingsTools } from './settings.js'
 import { delegationTools } from './delegation.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
+import { storefrontTools } from './storefront.js'
 import { libraryCopyTools } from './libraryCopy.js'
 import { templateTools } from './templates.js'
 import { toolCallTools } from './toolCalls.js'
@@ -75,6 +76,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
+  ...storefrontTools,
 ]
 
 const byName = new Map<string, Tool>()

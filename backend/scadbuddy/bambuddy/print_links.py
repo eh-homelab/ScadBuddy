@@ -481,7 +481,8 @@ class PrintLinkStore:
         review): from its owner check through the model it makes and the printer file it
         keeps to `record_import`, so two imports of one archive never both make a model or
         a library copy. A session lock on a connection of its own, as
-        `BambuddyUploadStore.copy_lock` takes one: the section spans Bambuddy calls and an
+        `BambuddyUploadStore.copy_lock` took one before its copy lease (#5298 Task 27):
+        the section spans Bambuddy calls and an
         operation, longer than a pooled connection should be held. Its key differs from
         `record_import`'s transaction lock, which runs inside it on another connection.
         Waiting longer than `IMPORT_LOCK_WAIT_S` raises `ImportBusyError`."""
