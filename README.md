@@ -458,7 +458,9 @@ on shutdown.
     output backfill's claim, the service credential rotation and the flow keys. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
-    (psycopg_pool's `max_idle`). The agent sidecar holds at most 9 (`agent/src/db.ts`
+    (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
+    are not pools, and neither is closed while idle: the follows' connection opens at
+    the first claim and closes only after a failed statement or at shutdown. The agent sidecar holds at most 9 (`agent/src/db.ts`
     `AGENT_DB_CONNECTIONS`), briefly more while a failed lock connection is replaced.
     `scadbuddy_db_pool_connections{pool}`, `scadbuddy_db_pool_max_connections{pool}`
     and `scadbuddy_db_pool_requests_waiting{pool}` (callers queued for a connection: a

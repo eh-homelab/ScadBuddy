@@ -4,13 +4,17 @@ publishes each change on ``preview-slice:<slicer>:<job id>`` so the dialog never
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable
+from typing import NoReturn
 
+import psycopg
 import pytest
 
 from scadbuddy.bambuddy.preview import SlicePreview
 from scadbuddy.core.events import Event, InProcessEventBus, PreviewSliceEvent
 from scadbuddy.core.problems import ApiError
+from scadbuddy.preview_follow import claims as claims_module
 from scadbuddy.preview_follow.claims import PgFollowClaims
 from scadbuddy.preview_follow.follows import MAX_FOLLOWS, PreviewFollows, Reader
 
@@ -292,12 +296,117 @@ async def test_shutdown_releases_every_claim() -> None:
     assert seen == []
 
 
+class SlowClaims(ReplicaClaims):
+    """A first claim that waits on its thread until the test lets it answer."""
+
+    def __init__(self, shared: SharedClaims, replica: str) -> None:
+        super().__init__(shared, replica)
+        self.started = threading.Event()
+        self.go_on = threading.Event()
+        self.calls: list[str] = []
+
+    def claim(self, key: str) -> bool:
+        if not self.started.is_set():
+            self.started.set()
+            assert self.go_on.wait(5)
+        return super().claim(key)
+
+    def release(self, key: str) -> None:
+        self.calls.append("release")
+        super().release(key)
+
+    def close(self) -> None:
+        self.calls.append("close")
+        super().close()
+
+
+async def wait_for_thread(event: threading.Event) -> None:
+    for _ in range(500):
+        if event.is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the claim's thread did not start")
+
+
+async def test_a_read_cancelled_while_it_claims_releases_the_claim() -> None:
+    """#6162: the claim's thread takes the lock after its read was cancelled. No follow
+    uses it, so it is released, and another replica can follow the slice."""
+    bus, _ = watching()
+    shared = SharedClaims()
+    slow = SlowClaims(shared, "one")
+    follows = PreviewFollows(bus, claims=slow, interval=3600)
+    reading = asyncio.create_task(follows.read("native", 7, SUBJECT, reads(running())))
+    await wait_for_thread(slow.started)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    # The claim is on its way still: a read here meanwhile does not claim again.
+    again = await follows.read("native", 7, SUBJECT, reads(running()))
+    assert again.followed is True
+    slow.go_on.set()
+    for _ in range(500):
+        if not shared.held and not follows._claiming:
+            break
+        await asyncio.sleep(0.01)
+    assert shared.held == {}
+    assert follows.following == 0
+    other = PreviewFollows(bus, claims=shared.of("two"), interval=3600)
+    await other.read("native", 7, SUBJECT, reads(running()))
+    assert other.following == 1
+    await other.aclose()
+    await follows.aclose()
+
+
+async def test_shutdown_waits_for_a_cancelled_claim_and_releases_it() -> None:
+    bus, _ = watching()
+    shared = SharedClaims()
+    slow = SlowClaims(shared, "one")
+    follows = PreviewFollows(bus, claims=slow, interval=3600)
+    reading = asyncio.create_task(follows.read("native", 7, SUBJECT, reads(running())))
+    await wait_for_thread(slow.started)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    slow.go_on.set()
+    await follows.aclose()
+    # Released by the cancelled claim itself, before the connection closes.
+    assert slow.calls == ["release", "close"]
+    assert shared.held == {}
+
+
 def test_a_claim_postgres_cannot_answer_follows_here() -> None:
     """The dialog still hears of its slice, at worst from two replicas."""
     claims = PgFollowClaims("postgresql://nobody@127.0.0.1:1/nothing")
     assert claims.claim("native:7:x") is True
     assert claims.open_connections() == 0
     claims.release("native:7:x")
+    claims.close()
+
+
+def test_after_a_failed_connect_claims_wait_before_they_connect_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6162: a connect can take `CONNECT_TIMEOUT`, under the claims' lock. During an
+    outage the claims answer at once for `CONNECT_BACKOFF`, so the reads of new slices
+    do not queue behind each other's connects."""
+    connects: list[str] = []
+
+    def connect(conninfo: str, **_: object) -> NoReturn:
+        connects.append(conninfo)
+        raise psycopg.OperationalError("connection timeout expired")
+
+    monkeypatch.setattr(psycopg, "connect", connect)
+    now = [100.0]
+    claims = PgFollowClaims("postgresql://nobody@db/nothing", clock=lambda: now[0])
+    assert claims.claim("native:7:x") is True
+    assert claims.claim("native:8:x") is True
+    now[0] += claims_module.CONNECT_BACKOFF - 1
+    assert claims.claim("native:9:x") is True
+    assert len(connects) == 1
+    now[0] += 1
+    assert claims.claim("native:9:x") is True
+    assert len(connects) == 2
+    assert claims.open_connections() == 0
     claims.close()
 
 
