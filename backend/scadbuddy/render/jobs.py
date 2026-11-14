@@ -54,7 +54,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.meshmodel.paint import carry_paint, read_carried, select, turned, write_carried
 from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
-from scadbuddy.render.colours import colour_hex
+from scadbuddy.render.colours import colour_alpha, colour_hex
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import Job as Job
 from scadbuddy.render.job_models import JobResult as JobResult
@@ -205,6 +205,35 @@ def extruder_order(
     return sorted(parts, key=rank)
 
 
+def part_alphas(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> dict[str, int]:
+    """Each translucent colour's alpha byte (owner, 2026-11-14): the colour parameters
+    whose value carries an alpha below FF (`#RRGGBBAA`, a translucent spool picked on the
+    Customize page), by the `#RRGGBB` their parts render in. Parameters that share a
+    colour are one part, so the first one's alpha wins, as in :func:`extruder_order`."""
+    alphas: dict[str, int] = {}
+    seen: set[str] = set()
+    for parameter in schema.parameters:
+        if parameter.type != "color":
+            continue
+        value = params.get(parameter.name, parameter.initial)
+        colour = colour_hex(value)
+        if colour is None or colour in seen:
+            continue
+        seen.add(colour)
+        alpha = colour_alpha(value)
+        if alpha is not None:
+            alphas[colour] = alpha
+    return alphas
+
+
+def with_alphas(parts: Sequence[ColourPart], alphas: Mapping[str, int]) -> list[ColourPart]:
+    """``parts``, each translucent colour's with its alpha (:func:`part_alphas`)."""
+    return [
+        replace(part, alpha=alphas[part.colour]) if part.colour in alphas else part
+        for part in parts
+    ]
+
+
 async def solid_parts(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -282,6 +311,8 @@ class PlateLayout:
                         "file": source.file,
                         "solid": source.solid,
                         **({"negative": True} if part.negative else {}),
+                        # Only a translucent part's, so an opaque layout reads as before.
+                        **({"alpha": part.alpha} if part.alpha < 255 else {}),
                         **({"paint": source.paint} if source.paint is not None else {}),
                         # A mirrored painting's corner order (#4015), which the piece's mesh
                         # file does not carry.
@@ -342,6 +373,7 @@ class PlateLayout:
                     mesh,
                     paint,
                     negative=bool(entry.get("negative", False)),
+                    alpha=int(entry.get("alpha", 255)),
                 ),
                 source,
             )
@@ -465,6 +497,7 @@ async def plate_layout(
     plate_numbers: list[int | None] = list(range(1, count + 1)) if count > 1 else [None]
     object_numbers: list[int | None] = list(range(1, objects + 1)) if objects > 1 else [None]
     colours = [part.colour for part in preview_parts]
+    alphas = part_alphas(schema, params)
     warnings: list[str] = []
     drawn: list[tuple[list[ColourPart], list[int], list[int]]] = []
     sources: list[tuple[PartSource, ...]] = []
@@ -546,6 +579,7 @@ async def plate_layout(
                         f"it gets extruder {len(colours)}"
                     )
             split.sort(key=lambda part: colours.index(part.colour))
+            split = with_alphas(split, alphas)
             parts, solid_warnings = await solid_parts(
                 scad_path, schema, params, split, piece_dir, config=config, extra_defines=defines
             )
@@ -1241,7 +1275,9 @@ async def _render_solids(
         # task and activity of this worker. Held here, it timed workflow tasks out at 10 s
         # (#3788).
         split = await asyncio.to_thread(split_by_material, work / RAW_RENDER_NAME)
-        preview_parts = extruder_order(split, schema, staged)
+        preview_parts = with_alphas(
+            extruder_order(split, schema, staged), part_alphas(schema, staged)
+        )
         if not preview_parts:
             raise OpenSCADError(
                 "the render produced no geometry",
