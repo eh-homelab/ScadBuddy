@@ -47,6 +47,17 @@ MAX_LABEL_LENGTH = 200
 #: customer's (#6137).
 #: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
 EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
+#: A support material: the shop's choice, never the customer's (#6152, owner rule
+#: 2026-11-13). The page's copy is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`:
+#: change both together.
+SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
+#: A parameter that sets support: the shop may lock it, never offer it (#6152).
+SUPPORT_PARAM: Final = re.compile(r"support|interface", re.IGNORECASE)
+
+
+def is_support(material: str) -> bool:
+    """Whether ``material`` is a support material (`SUPPORT_MATERIAL`)."""
+    return SUPPORT_MATERIAL.search(material) is not None
 
 
 def shown_label(name: str, label: str | None, caption: str | None) -> str:
@@ -146,6 +157,10 @@ class ListingInput(BaseModel):
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them.
     media_ids: list[str] = Field(default_factory=list)
+    #: Every colour of an order is of one material (#6152): each pick, and the filament
+    #: of each offered colour left at its default, shares one; else 422
+    #: ``listing_mixed_material``.
+    one_material: bool = False
 
 
 class Listing(ListingInput):
@@ -239,7 +254,10 @@ class PublicListing(BaseModel):
     title: str
     description: str
     params: dict[str, PublicParam]
+    #: The listing filaments a visitor may pick: never a support material (#6152).
     colours: list[PublicFilament]
+    #: Every pick must share one material (#6152).
+    one_material: bool = False
     media: list[PublicMedia]
     updated_at: datetime
 
@@ -270,6 +288,12 @@ class RenderBody(BaseModel):
     values: dict[str, ParamValue] = Field(default_factory=dict, max_length=200)
     #: The listing filament the visitor chose for each colour slot of the render.
     colours: dict[ColourSlotIndex, str] = Field(default_factory=dict, max_length=64)
+    #: The listing filament the visitor picked for each offered colour parameter, by
+    #: parameter name (#6152). Its colour must be the parameter's value. The CRUD side
+    #: maps picks to the render's slots by colour, so the page never guesses a slot.
+    picks: dict[str, Annotated[str, StringConstraints(max_length=200)]] = Field(
+        default_factory=dict, max_length=200
+    )
 
 
 class StoreRender(BaseModel):

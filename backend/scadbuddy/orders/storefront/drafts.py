@@ -49,6 +49,7 @@ from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.lifecycle import LifecycleError, NewModelItem, NewRequestItem
 from scadbuddy.orders.models import Attachment, AttachmentKind, Order, OrderItem
 from scadbuddy.orders.store import item_subject
+from scadbuddy.orders.storefront.limits import RenderLimits
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.renders import checked_choice
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
@@ -65,6 +66,7 @@ from scadbuddy.orders.storefront.wire import (
     PublicShippingOption,
     shown_label,
 )
+from scadbuddy.render.job_models import JobNotFoundError
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.s3 import S3ContentBackend
@@ -334,6 +336,28 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
     return None if order is None else await _view(state, order)
 
 
+async def _render_colours(state: AppState, visitor_id: str, render_key: str) -> list[str] | None:
+    """The slot colours of the visitor's own done render of ``render_key``, or None when
+    it has none (#6152): the add fills each slot the page left out from the picks."""
+
+    def read() -> list[str] | None:
+        visitor = VisitorStore(state.projection.pool).find(visitor_id)
+        if visitor is None:
+            return None
+        job_id = RenderLimits(state.projection.pool).job_of(visitor.id, render_key)
+        if job_id is None:
+            return None
+        try:
+            job = state.render.store.read(job_id)
+        except JobNotFoundError:
+            return None
+        if job.state != "done" or job.result is None:
+            return None
+        return list(job.result.colors)
+
+    return await asyncio.to_thread(read)
+
+
 async def add_listing_item(
     state: AppState, visitor_id: str, key: str, body: AddListingItem
 ) -> DraftView:
@@ -347,7 +371,9 @@ async def add_listing_item(
     reply = await asyncio.to_thread(_stored, state, key, ADD_ROUTE, asked)
     if reply is not None:
         return await _answer(state, visitor_id, reply)
-    listing, resolved = await checked_choice(orders, body)
+    listing, resolved = await checked_choice(
+        orders, body, render_colours=lambda key: _render_colours(state, visitor_id, key)
+    )
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     by = visitor_actor(visitor)
     currency = await asyncio.to_thread(lambda: orders.price_book.policy()[0])

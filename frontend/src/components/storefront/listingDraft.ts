@@ -19,6 +19,8 @@ export interface ListingDraft {
   fixed: Record<string, ParamValue>
   colours: string[]
   media_ids: string[]
+  /** Every colour of an order is of one material (#6152). */
+  one_material: boolean
 }
 
 /** The schema's own hidden group: never shown to a customer, so never offered. */
@@ -28,7 +30,7 @@ export const MAX_TEXT_LENGTH = 200
 const NUMBERS: ReadonlySet<string> = new Set(['number', 'integer', 'slider'])
 
 export function emptyDraft(slug = '', commit = ''): ListingDraft {
-  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [] }
+  return { slug, commit, title: '', description: '', params: {}, fixed: {}, colours: [], media_ids: [], one_material: false }
 }
 
 export function draftOf(listing: StorefrontListing): ListingDraft {
@@ -41,6 +43,7 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     fixed: listing.fixed,
     colours: listing.colours,
     media_ids: listing.media_ids,
+    one_material: listing.one_material,
   }
 }
 
@@ -172,6 +175,7 @@ export function previewListing(
       const filament = filaments.find((f) => f.id === id)
       return filament ? [{ id, colour: filament.colour, colour_name: filament.colour_name, material: filament.material }] : []
     }),
+    one_material: draft.one_material,
     media: draft.media_ids.flatMap((id) => {
       const item = media.find((m) => m.id === id)
       return item ? [{ url: mediaUrl(item), kind: item.kind, caption: item.caption }] : []

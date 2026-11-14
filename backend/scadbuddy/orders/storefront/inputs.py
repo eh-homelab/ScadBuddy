@@ -16,7 +16,7 @@ library pins on the listing. It builds the same `Reference` as `orders/reference
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from typing import Literal
 
 from scadbuddy.orders.models import ColourSlot, Filament, Reference
@@ -28,6 +28,7 @@ from scadbuddy.orders.storefront.wire import (
     NumberBound,
     ParamBound,
     TextBound,
+    is_support,
 )
 from scadbuddy.render.runner import format_scad_value, with_defaults
 from scadbuddy.render.schema import Parameter, ParamValue
@@ -59,9 +60,23 @@ def _snapshot(listing: Listing) -> ListingSnapshot:
     return listing.snapshot
 
 
+class MixedMaterialError(ValueError):
+    """A ``one_material`` listing's colours that share no one material (#6152)."""
+
+
+def customer_filaments(listing: Listing, filaments: Mapping[str, Filament]) -> list[Filament]:
+    """The listing's filaments that the price book still has and a customer may pick:
+    never a support material (#6152)."""
+    return [
+        filaments[f]
+        for f in listing.colours
+        if f in filaments and not is_support(filaments[f].material)
+    ]
+
+
 def _offered_colours(listing: Listing, filaments: Mapping[str, Filament]) -> set[str]:
-    """The colours of the listing's filaments that the price book still has, casefolded."""
-    return {filaments[f].colour.casefold() for f in listing.colours if f in filaments}
+    """The colours of the listing's filaments that a customer may pick, casefolded."""
+    return {f.colour.casefold() for f in customer_filaments(listing, filaments)}
 
 
 def _same(choice: ParamValue, value: ParamValue) -> bool:
@@ -181,7 +196,11 @@ def listing_reference(
     snapshot = _snapshot(listing)
     slots: list[ColourSlot] = []
     for slot, filament_id in sorted(chosen.items()):
-        if filament_id not in listing.colours or filament_id not in filaments:
+        if (
+            filament_id not in listing.colours
+            or filament_id not in filaments
+            or is_support(filaments[filament_id].material)
+        ):
             raise InputOutsideListingError(f"colours.{slot}", "colour")
         slots.append(
             ColourSlot(slot=slot, colour=filaments[filament_id].colour, filament_id=filament_id)
@@ -196,3 +215,85 @@ def listing_reference(
         render_key=render_key_of(listing.slug, inputs, listing.commit, pipeline=snapshot.pipeline),
     )
     return ResolvedReference(reference, slots)
+
+
+def checked_picks(
+    listing: Listing,
+    values: Mapping[str, ParamValue],
+    picks: Mapping[str, str],
+    filaments: Mapping[str, Filament],
+) -> dict[str, Filament]:
+    """Each of ``picks`` (parameter name to filament id) as its filament (#6152). The
+    parameter must be an offered ``// color`` parameter, and the filament one of the
+    listing's that the price book still has, not a support material, whose colour is the
+    parameter's value in ``values`` (`listing_values`' answer), casefolded. Else
+    `InputOutsideListingError` (``picks.<name>``, ``colour``)."""
+    by_name = {p.name: p for p in _snapshot(listing).schema_.parameters}
+    offered = {f.id: f for f in customer_filaments(listing, filaments)}
+    picked: dict[str, Filament] = {}
+    for name, filament_id in picks.items():
+        parameter = by_name.get(name)
+        filament = offered.get(filament_id)
+        value = values.get(name)
+        if (
+            name not in listing.params
+            or parameter is None
+            or parameter.type != "color"
+            or filament is None
+            or not isinstance(value, str)
+            or filament.colour.casefold() != value.casefold()
+        ):
+            raise InputOutsideListingError(f"picks.{name}", "colour")
+        picked[name] = filament
+    return picked
+
+
+def check_one_material(
+    listing: Listing,
+    values: Mapping[str, ParamValue],
+    picked: Mapping[str, Filament],
+    filaments: Mapping[str, Filament],
+) -> None:
+    """For a ``one_material`` listing, `MixedMaterialError` unless one material (casefolded)
+    holds every pick and, for each offered colour parameter with no pick, a listing filament
+    of its value's colour (#6152). Any other listing passes."""
+    if not listing.one_material:
+        return
+    by_name = {p.name: p for p in _snapshot(listing).schema_.parameters}
+    offered = customer_filaments(listing, filaments)
+    materials: set[str] | None = None
+    for name in listing.params:
+        parameter = by_name.get(name)
+        if parameter is None or parameter.type != "color":
+            continue
+        if name in picked:
+            these = {picked[name].material.casefold()}
+        else:
+            value = values.get(name)
+            if not isinstance(value, str):
+                continue
+            these = {
+                f.material.casefold() for f in offered if f.colour.casefold() == value.casefold()
+            }
+        materials = these if materials is None else materials & these
+        if not materials:
+            raise MixedMaterialError(f"{listing.id!r}: {name!r} takes another material")
+
+
+def slots_from_picks(
+    chosen: Mapping[int, str],
+    picked: Mapping[str, Filament],
+    render_colours: Sequence[str],
+) -> dict[int, str]:
+    """``chosen`` (slot to filament id), with each slot it lacks filled from ``picked``:
+    the picked filament whose colour is the slot's colour in the render
+    (``job.result.colors``), casefolded (#6152). A slot no pick matches stays out, and
+    the shop picks it."""
+    by_colour: dict[str, str] = {}
+    for filament in picked.values():
+        by_colour.setdefault(filament.colour.casefold(), filament.id)
+    filled = dict(chosen)
+    for slot, colour in enumerate(render_colours):
+        if slot not in filled and colour.casefold() in by_colour:
+            filled[slot] = by_colour[colour.casefold()]
+    return filled

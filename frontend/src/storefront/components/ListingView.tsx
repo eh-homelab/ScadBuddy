@@ -1,6 +1,6 @@
-import type { ElementType } from 'react'
+import { useId, type ElementType } from 'react'
 import type { Listing, ParamValue } from '../api/client'
-import { listingUnavailable } from '../params'
+import { listingMaterials, listingUnavailable } from '../params'
 import { ParamField } from './ParamField'
 
 export type ParamValues = Record<string, ParamValue>
@@ -12,6 +12,14 @@ export interface ListingViewProps {
   onChange: (name: string, next: ParamValue | undefined) => void
   /** The title's heading level: 1 on the public page, 2 inside the back office's preview. */
   headingLevel?: 1 | 2
+  /** The filament picked for each colour parameter, by id (#6152). */
+  picks?: Record<string, string>
+  onPick?: (name: string, next: string | undefined) => void
+  /** With `one_material`: the material chosen; null or absent is the listing's first. */
+  material?: string | null
+  onMaterial?: (next: string) => void
+  /** What changed when the material did, said under the control. */
+  materialNote?: string | null
 }
 
 /**
@@ -24,9 +32,24 @@ export interface ListingViewProps {
  * Everything the shop typed (title, description, captions, labels) renders as React text,
  * never as HTML (spec §5.8).
  */
-export function ListingView({ listing, values, onChange, headingLevel = 1 }: ListingViewProps) {
+export function ListingView({
+  listing,
+  values,
+  onChange,
+  headingLevel = 1,
+  picks,
+  onPick,
+  material,
+  onMaterial,
+  materialNote,
+}: ListingViewProps) {
+  const id = useId()
   const Heading: ElementType = headingLevel === 1 ? 'h1' : 'h2'
   const params = Object.entries(listing.params)
+  const materials = listingMaterials(listing)
+  const shownMaterial = material ?? materials[0] ?? null
+  // #6152: one Material control above the colours, only when it chooses something.
+  const oneMaterial = listing.one_material && materials.length > 1
   return (
     <article className="flex min-w-0 flex-col gap-5">
       <header className="flex flex-col gap-2">
@@ -58,8 +81,43 @@ export function ListingView({ listing, values, onChange, headingLevel = 1 }: Lis
       )}
       {params.length > 0 ? (
         <form className="grid gap-[18px]" aria-label="Customize" onSubmit={(event) => event.preventDefault()}>
+          {oneMaterial && (
+            <div className="min-w-0">
+              <p className="mb-1.5 block p-0 font-semibold" id={`${id}-material`}>
+                Material
+              </p>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-labelledby={`${id}-material`}>
+                {materials.map((each) => (
+                  <button
+                    key={each}
+                    type="button"
+                    role="radio"
+                    aria-checked={each === shownMaterial}
+                    onClick={() => onMaterial?.(each)}
+                    className="min-h-11 rounded-full border-[1.5px] border-input px-4 aria-checked:border-primary aria-checked:ring-1 aria-checked:ring-primary"
+                  >
+                    {each}
+                  </button>
+                ))}
+              </div>
+              {materialNote && (
+                <p className="mt-1.5 text-sm text-muted-foreground" role="status">
+                  {materialNote}
+                </p>
+              )}
+            </div>
+          )}
           {params.map(([name, param]) => (
-            <ParamField key={name} param={param} value={values[name]} filaments={listing.colours} onChange={(next) => onChange(name, next)} />
+            <ParamField
+              key={name}
+              param={param}
+              value={values[name]}
+              filaments={listing.colours}
+              material={listing.one_material ? shownMaterial : null}
+              pick={picks?.[name]}
+              onPick={onPick && ((next) => onPick(name, next))}
+              onChange={(next) => onChange(name, next)}
+            />
           ))}
         </form>
       ) : (

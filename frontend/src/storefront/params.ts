@@ -68,17 +68,63 @@ export function filamentName(filament: Filament): string {
 }
 
 /**
- * The listing filament for each colour slot of a render (`StoreRender.colors`), by slot:
- * the one whose colour the slot has. A slot no filament matches is left out, and the shop
- * picks it.
+ * #6152 — of `filaments`, those a customer may pick for colour parameter `param`: its
+ * choices' colours, never a support material, of `material` only when one is set.
  */
-export function slotFilaments(colors: readonly string[] | null | undefined, filaments: readonly Filament[]): Record<string, string> {
-  const chosen: Record<string, string> = {}
-  ;(colors ?? []).forEach((colour, slot) => {
-    const filament = filamentOf(filaments, colour)
-    if (filament) chosen[String(slot)] = filament.id
-  })
-  return chosen
+export function paramFilaments(param: PublicParam, filaments: readonly Filament[], material: string | null = null): Filament[] {
+  if (param.kind !== 'choice') return []
+  const colours = new Set(param.choices.filter((c): c is string => typeof c === 'string').map((c) => c.toLowerCase()))
+  return customerFilaments(filaments).filter(
+    (filament) =>
+      colours.has(filament.colour.toLowerCase()) && (material === null || filament.material.toLowerCase() === material.toLowerCase()),
+  )
+}
+
+function rgb(hex: string): [number, number, number] {
+  const value = Number.parseInt(hex.replace('#', '').slice(0, 6), 16)
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255]
+}
+
+/** Of `filaments`, the one whose colour is nearest `colour` (RGB distance), or undefined for none. */
+export function nearestFilament(colour: string, filaments: readonly Filament[]): Filament | undefined {
+  const [r, g, b] = rgb(colour)
+  let best: Filament | undefined
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const filament of filaments) {
+    const [fr, fg, fb] = rgb(filament.colour)
+    const distance = (r - fr) ** 2 + (g - fg) ** 2 + (b - fb) ** 2
+    if (distance < bestDistance) {
+      best = filament
+      bestDistance = distance
+    }
+  }
+  return best
+}
+
+/**
+ * #6152 — of `picks` (parameter name to filament id), those `listing` still allows: an
+ * offered colour parameter, a filament it offers, of the colour in `values`. The shop's
+ * side refuses any other (`inputs.py` `checked_picks`).
+ */
+export function keepPicks(
+  listing: Listing,
+  values: Readonly<Record<string, ParamValue>>,
+  picks: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const kept: Record<string, string> = {}
+  for (const [name, id] of Object.entries(picks)) {
+    const param = listing.params[name]
+    const value = values[name]
+    if (!param || typeof value !== 'string') continue
+    const filament = paramFilaments(param, listing.colours).find((f) => f.id === id)
+    if (filament && filament.colour.toLowerCase() === value.toLowerCase()) kept[name] = id
+  }
+  return kept
+}
+
+/** The materials a customer may pick on `listing`, in the shop's order (#6152). */
+export function listingMaterials(listing: Listing): string[] {
+  return [...new Set(customerFilaments(listing.colours).map((filament) => filament.material))]
 }
 
 /** Of `values`, those `listing` still offers and allows: what survives a reload of it. */
@@ -107,7 +153,11 @@ export function shownLabel(name: string, label: string | null | undefined, capti
 }
 
 
-/** A support material: the shop's choice, never the customer's (owner rule, 2026-11-13). */
+/**
+ * A support material: the shop's choice, never the customer's (owner rule, 2026-11-13).
+ * The shop's copy is `backend/scadbuddy/orders/storefront/wire.py` `SUPPORT_MATERIAL`:
+ * change both together.
+ */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 /** Of `filaments`, those a customer may pick: never a support material. */

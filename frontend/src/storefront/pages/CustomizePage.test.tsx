@@ -1,8 +1,8 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreviewJob } from '../../components/Preview'
-import { ESTIMATE, KEYCHAIN, TAG_ID } from '../../mocks/features/storefrontPublic'
+import { CHARM_ID, ESTIMATE, KEYCHAIN, TAG_ID } from '../../mocks/features/storefrontPublic'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import type { PollTiming } from '../poll'
@@ -66,7 +66,7 @@ describe('CustomizePage', () => {
     show()
     expect(await screen.findByText('about $12.40, confirmed after we check it')).toBeInTheDocument()
     expect(screen.getByTestId('preview')).toHaveAttribute('data-status', 'done')
-    expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, colours: {} }])
+    expect(sent).toEqual([{ listing_id: 'l1', listing_updated_at: '2026-11-07T12:00:00Z', values: {}, picks: {}, colours: {} }])
     expect(screen.queryByRole('button', { name: 'Render' })).toBeNull()
   })
 
@@ -93,6 +93,7 @@ describe('CustomizePage', () => {
       listing_id: 'l1',
       listing_updated_at: '2026-11-07T12:00:00Z',
       values: { name: 'Ada' },
+      picks: {},
       colours: {},
     })
     expect(sent[1]!.key).toMatch(/^[0-9a-f-]{36}$/)
@@ -107,11 +108,13 @@ describe('CustomizePage', () => {
       }
     })
     const { user } = show()
-    const orange = await screen.findByRole('radio', { name: 'Signal orange PLA' })
-    await user.click(orange)
+    const picker = await screen.findByRole('button', { name: /Base colour/ })
+    await user.click(picker)
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     await screen.findByText('Added to your order.')
-    await user.click(orange)
+    await user.click(picker)
+    await user.click(await screen.findByRole('button', { name: 'Use the shop’s choice' }))
     await user.click(screen.getByRole('button', { name: 'One more' }))
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     await waitFor(() => expect(sent).toHaveLength(2))
@@ -119,7 +122,40 @@ describe('CustomizePage', () => {
     expect(sent).toEqual([{ base_colour: '#E8532F' }, {}])
   })
 
-  it('adds the design to the order with the render colours', async () => {
+  it('moves each colour to the nearest of a new material, and says so (#6152)', async () => {
+    const sent: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
+    })
+    const { user } = show(CHARM_ID)
+    await user.click(await screen.findByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
+    await user.click(within(screen.getByRole('radiogroup', { name: 'Material' })).getByRole('radio', { name: 'PETG' }))
+    expect(await screen.findByText('Your colours changed to the nearest PETG colours.')).toBeInTheDocument()
+    // Signal orange's nearest PETG colour is Rust.
+    await waitFor(() =>
+      expect(sent.at(-1)).toMatchObject({ values: { body_colour: '#C0502A' }, picks: { body_colour: 'f-petg-rust' } }),
+    )
+    server.events.removeAllListeners()
+  })
+
+  it('keeps a pick across a reload of the page (#6152)', async () => {
+    const sent: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
+    })
+    window.localStorage.setItem(
+      'scadbuddy.storefront.customize.l1',
+      JSON.stringify({ v: 1, values: { base_colour: '#E8532F' }, quantity: 1, picks: { base_colour: 'f-orange', gone: 'f-blue' } }),
+    )
+    show()
+    await screen.findByText('about $12.40, confirmed after we check it')
+    server.events.removeAllListeners()
+    expect(sent[0]).toMatchObject({ values: { base_colour: '#E8532F' }, picks: { base_colour: 'f-orange' } })
+    expect((sent[0] as { picks: object }).picks).toEqual({ base_colour: 'f-orange' })
+  })
+
+  it('adds the design to the order with its picks, never a guess of the slots', async () => {
     const added: unknown[] = []
     server.events.on('request:start', async ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/draft/items') {
@@ -136,7 +172,8 @@ describe('CustomizePage', () => {
         listing_id: 'l1',
         listing_updated_at: '2026-11-07T12:00:00Z',
         values: {},
-        colours: { '0': 'f-blue', '1': 'f-orange' },
+        picks: {},
+        colours: {},
         quantity: 1,
       },
     ])

@@ -1,19 +1,36 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { KEYCHAIN, TAG } from '../../mocks/features/storefrontPublic'
+import { CHARM, KEYCHAIN, TAG } from '../../mocks/features/storefrontPublic'
 import { ListingView } from './ListingView'
 
 describe('ListingView', () => {
   it('shows each offered parameter, with the shop’s choice until the visitor sets one', async () => {
     const onChange = vi.fn()
-    render(<ListingView listing={KEYCHAIN} values={{}} onChange={onChange} />)
+    const onPick = vi.fn()
+    render(<ListingView listing={KEYCHAIN} values={{}} onChange={onChange} onPick={onPick} />)
     expect(screen.getByRole('heading', { level: 1, name: 'Name keychain' })).toBeInTheDocument()
     expect(screen.getByLabelText('Name')).toHaveValue('')
     await userEvent.type(screen.getByLabelText('Length (mm)'), '5')
     expect(onChange).toHaveBeenLastCalledWith('size', 5)
+    // #6152: a colour is a picker of filaments; a pick sets the value and names the filament.
+    await userEvent.click(screen.getByRole('button', { name: /Base colour/ }))
     await userEvent.click(screen.getByRole('radio', { name: 'Ocean blue PLA' }))
     expect(onChange).toHaveBeenLastCalledWith('base_colour', '#1B6CA8')
+    expect(onPick).toHaveBeenLastCalledWith('base_colour', 'f-blue')
+  })
+
+  it('shows one Material control for a one-material listing, and its colours only (#6152)', async () => {
+    const onMaterial = vi.fn()
+    const { rerender } = render(<ListingView listing={CHARM} values={{}} onChange={() => undefined} onMaterial={onMaterial} />)
+    const material = screen.getByRole('radiogroup', { name: 'Material' })
+    expect(within(material).getByRole('radio', { name: 'PLA' })).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(within(material).getByRole('radio', { name: 'PETG' }))
+    expect(onMaterial).toHaveBeenCalledWith('PETG')
+    rerender(<ListingView listing={CHARM} values={{}} onChange={() => undefined} material="PETG" onMaterial={onMaterial} />)
+    await userEvent.click(screen.getByRole('button', { name: /Body colour/ }))
+    expect(screen.getByRole('radio', { name: 'Teal PETG' })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /Ocean blue/ })).toBeNull()
   })
 
   it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {

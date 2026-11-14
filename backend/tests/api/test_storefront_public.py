@@ -172,6 +172,8 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
         "params",
         "colours",
         "media",
+        # #6152: whether every colour is of one material.
+        "one_material",
         "updated_at",
     }
     [media] = listing["media"]

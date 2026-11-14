@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final, Literal
 
@@ -73,10 +73,12 @@ class RenderLimited(Exception):  # noqa: N818  (the plan names it)
 
 @dataclass(frozen=True)
 class OwnedRender:
-    """The newest row of a visitor's for one job: the listing it asked and its colours."""
+    """The newest row of a visitor's for one job: the listing it asked, its colours and
+    its picks (parameter name to filament id, #6152)."""
 
     listing_id: str
     colours: dict[int, str]
+    picks: dict[str, str] = field(default_factory=dict)
 
 
 def _seconds_until(leaves: datetime, at: datetime) -> int:
@@ -97,12 +99,14 @@ class RenderLimits:
         render_key: str,
         counted: bool,
         colours: Mapping[int, str],
+        picks: Mapping[str, str],
         at: datetime | None,
     ) -> int:
         row = conn.execute(
             "INSERT INTO storefront_renders"
-            " (visitor_id, client, listing_id, render_key, counted, colours, created_at)"
-            " VALUES (%s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp())) RETURNING id",
+            " (visitor_id, client, listing_id, render_key, counted, colours, picks, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, coalesce(%s, clock_timestamp()))"
+            " RETURNING id",
             (
                 visitor_id,
                 client,
@@ -110,6 +114,7 @@ class RenderLimits:
                 render_key,
                 counted,
                 Jsonb({str(slot): f for slot, f in colours.items()}),
+                Jsonb(dict(picks)),
                 at,
             ),
         ).fetchone()
@@ -152,6 +157,7 @@ class RenderLimits:
         settings: Settings,
         now: datetime | None = None,
         colours: Mapping[int, str] | None = None,
+        picks: Mapping[str, str] | None = None,
     ) -> int:
         """A counted row for a render that costs a run, and its id; `RenderLimited` when
         the visitor, the client or the open renders are at their limit. ``visitor_id``
@@ -167,6 +173,7 @@ class RenderLimits:
                 render_key=render_key,
                 counted=True,
                 colours=colours or {},
+                picks=picks or {},
                 at=now,
             )
 
@@ -230,6 +237,7 @@ class RenderLimits:
         listing_id: str,
         render_key: str,
         colours: Mapping[int, str] | None = None,
+        picks: Mapping[str, str] | None = None,
     ) -> int:
         """A row for a render the visitor shares with another: it costs nothing, and it
         lets the visitor read the job. Its id."""
@@ -241,6 +249,7 @@ class RenderLimits:
             render_key=render_key,
             counted=False,
             colours=colours or {},
+            picks=picks or {},
             at=None,
         )
 
@@ -295,14 +304,26 @@ class RenderLimits:
         for that job."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT listing_id, colours FROM storefront_renders"
+                "SELECT listing_id, colours, picks FROM storefront_renders"
                 " WHERE visitor_id = %s AND job_id = %s ORDER BY id DESC LIMIT 1",
                 (visitor_id, job_id),
             ).fetchone()
         if row is None:
             return None
         colours = {int(slot): str(f) for slot, f in row["colours"].items()}
-        return OwnedRender(listing_id=row["listing_id"], colours=colours)
+        picks = {str(name): str(f) for name, f in row["picks"].items()}
+        return OwnedRender(listing_id=row["listing_id"], colours=colours, picks=picks)
+
+    def job_of(self, visitor_id: str, render_key: str) -> str | None:
+        """The job of the visitor's newest row for ``render_key`` that names one, or None
+        (#6152: an add to the order reads that render's slot colours)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT job_id FROM storefront_renders WHERE visitor_id = %s"
+                " AND render_key = %s AND job_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (visitor_id, render_key),
+            ).fetchone()
+        return None if row is None else str(row["job_id"])
 
     def owns(self, visitor_id: str, job_id: str) -> bool:
         """Whether the visitor asked for ``job_id``."""

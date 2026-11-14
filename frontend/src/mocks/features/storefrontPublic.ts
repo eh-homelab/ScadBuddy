@@ -41,6 +41,7 @@ export const KEYCHAIN: Listing = {
   },
   colours: [BLUE, ORANGE],
   media: [],
+  one_material: false,
   updated_at: '2026-11-07T12:00:00Z',
 }
 
@@ -53,10 +54,42 @@ export const TAG: Listing = {
   },
   colours: [],
   media: [],
+  one_material: false,
   updated_at: '2026-11-07T12:00:00Z',
 }
 
-const LISTINGS = [KEYCHAIN, TAG]
+export const CHARM_ID = 'l3'
+const PETG_TEAL = { id: 'f-petg-teal', colour: '#1C8C8C', colour_name: 'Teal', material: 'PETG' }
+const PETG_RUST = { id: 'f-petg-rust', colour: '#C0502A', colour_name: 'Rust', material: 'PETG' }
+
+/** #6152: a listing whose colours are of one material, which the visitor chooses once. */
+export const CHARM: Listing = {
+  id: CHARM_ID,
+  title: 'Bag charm',
+  description: 'A charm in two colours of one material.',
+  params: {
+    body_colour: {
+      kind: 'choice',
+      label: 'Body colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+    },
+    rim_colour: {
+      kind: 'choice',
+      label: 'Rim colour',
+      group: '',
+      colour: true,
+      choices: [BLUE.colour, ORANGE.colour, PETG_TEAL.colour, PETG_RUST.colour],
+    },
+  },
+  colours: [BLUE, ORANGE, PETG_TEAL, PETG_RUST],
+  media: [],
+  one_material: true,
+  updated_at: '2026-11-07T12:00:00Z',
+}
+
+const LISTINGS = [KEYCHAIN, TAG, CHARM]
 
 export const ESTIMATE: StoreEstimate = {
   estimate: true,
@@ -115,6 +148,8 @@ interface Body {
   listing_updated_at?: string
   values?: Record<string, unknown>
   colours?: Record<string, string>
+  /** The filament picked for each colour parameter (#6152). */
+  picks?: Record<string, string>
   quantity?: number
 }
 
@@ -128,6 +163,20 @@ function outside(body: Body): Response | Listing {
     if (bound.kind === 'choice' && !bound.choices.includes(value as string)) {
       return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
     }
+  }
+  // #6152: a pick is a listing filament of the parameter's value (`checked_picks`), and a
+  // `one_material` listing's picks share one material (`check_one_material`).
+  const materials = new Set<string>()
+  for (const [name, id] of Object.entries(body.picks ?? {})) {
+    const filament = listing.colours.find((f) => f.id === id)
+    const value = body.values?.[name]
+    if (!filament || typeof value !== 'string' || filament.colour.toLowerCase() !== value.toLowerCase()) {
+      return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')
+    }
+    materials.add(filament.material.toLowerCase())
+  }
+  if (listing.one_material && materials.size > 1) {
+    return refused(422, 'listing_mixed_material', 'Every colour of this design must be of one material. Pick colours of one material.')
   }
   const archived = Object.values(listing.params).some((p) => p.kind === 'choice' && p.colour && p.choices.length === 0)
   if (archived) return refused(422, 'input_outside_listing', 'This choice is not offered for this listing.')

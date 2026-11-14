@@ -309,6 +309,11 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
             })}
           </ul>
         )}
+        {/* #6152: every colour of an order is of one material; the customer picks it once. */}
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox checked={draft.one_material} onCheckedChange={(on) => onChange({ ...draft, one_material: on === true })} />
+          One material for every colour
+        </label>
       </section>
 
       <section className="flex flex-col gap-2" aria-label="Media">

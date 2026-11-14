@@ -15,7 +15,7 @@ import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
 import { useDraftChanged } from '../draftCount'
-import { keepOffered, listingUnavailable, slotFilaments, valueProblem } from '../params'
+import { keepOffered, keepPicks, listingMaterials, listingUnavailable, nearestFilament, paramFilaments, valueProblem } from '../params'
 import { POLL, type PollTiming } from '../poll'
 
 // three.js is most of the viewer: its own chunk, fetched once there is a render to show.
@@ -77,9 +77,17 @@ interface Shown {
   key: string
 }
 
-/** The choices a render is of: the listing as read, and the visitor's values. */
-function choicesKey(listing: Listing, values: Record<string, ParamValue>): string {
-  return JSON.stringify([listing.updated_at, values])
+/**
+ * The choices a render is of: the listing as read, the visitor's values and picks. A new
+ * pick of the same colour asks again: the shop reuses the render and prices the pick.
+ */
+function choicesKey(listing: Listing, values: Record<string, ParamValue>, picks: Record<string, string>): string {
+  return JSON.stringify([listing.updated_at, values, picks])
+}
+
+/** The material `material` names, if `listing` still offers it for a customer to pick. */
+function offeredMaterial(listing: Listing, material: string | null | undefined): string | null {
+  return listingMaterials(listing).find((each) => each === material) ?? null
 }
 
 /**
@@ -113,6 +121,11 @@ export function CustomizePage({
   const [listing, setListing] = useState<Listing>()
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, ParamValue>>({})
+  /** The filament picked for each colour parameter, by id (#6152): the shop prices it and fills the slots from it. */
+  const [picks, setPicks] = useState<Record<string, string>>({})
+  /** With `one_material`, the material chosen; null is the listing's first. */
+  const [material, setMaterial] = useState<string | null>(null)
+  const [materialNote, setMaterialNote] = useState<string | null>(null)
   /** The latest render while it runs; the viewer shows its progress until one is done. */
   const [job, setJob] = useState<StoreRender>()
   /** The last done render: the viewer keeps it on screen while a newer one runs. */
@@ -149,7 +162,10 @@ export function CustomizePage({
         const saved = loadChoices(id)
         setListing(answer)
         if (saved) {
-          setValues(keepOffered(answer, saved.values))
+          const kept = keepOffered(answer, saved.values)
+          setValues(kept)
+          setPicks(keepPicks(answer, kept, saved.picks ?? {}))
+          setMaterial(offeredMaterial(answer, saved.material))
           setQuantity(Math.min(saved.quantity, MAX_QUANTITY))
         }
       },
@@ -166,11 +182,13 @@ export function CustomizePage({
     [listing, values],
   )
   const blocked = !listing || listingUnavailable(listing) || problems.length > 0 || stale
-  const current = listing ? choicesKey(listing, values) : ''
+  /** Only the picks the values still match: the shop refuses any other. */
+  const sentPicks = useMemo(() => (listing ? keepPicks(listing, values, picks) : {}), [listing, values, picks])
+  const current = listing ? choicesKey(listing, values, sentPicks) : ''
 
   useEffect(() => {
-    if (listing) saveChoices(listing.id, { values, quantity })
-  }, [listing, values, quantity])
+    if (listing) saveChoices(listing.id, { values, quantity, picks, material })
+  }, [listing, values, quantity, picks, material])
 
   useEffect(() => {
     choicesNow.current = { key: current, blocked }
@@ -193,8 +211,10 @@ export function CustomizePage({
     listing_id: on.id,
     listing_updated_at: on.updated_at,
     values,
-    // The colours of the render on screen, when it is of these values.
-    colours: shownIsCurrent ? slotFilaments(shown.job.colors, on.colours) : {},
+    // #6152: the picks, never a guess of the slots. The shop maps them to the render's
+    // slots by colour.
+    picks: sentPicks,
+    colours: {},
   })
 
   const setValue = (name: string, next: ParamValue | undefined) => {
@@ -204,6 +224,46 @@ export function CustomizePage({
       else copy[name] = next
       return copy
     })
+    setAdded(false)
+  }
+
+  const setPick = (name: string, next: string | undefined) => {
+    setPicks((before) => {
+      const copy = { ...before }
+      if (next === undefined) delete copy[name]
+      else copy[name] = next
+      return copy
+    })
+    setMaterialNote(null)
+  }
+
+  /**
+   * #6152: a `one_material` listing's material. Each colour the visitor set moves to the
+   * nearest colour (RGB distance) of the new material, and the page says so.
+   */
+  const chooseMaterial = (next: string) => {
+    if (!listing || next === (material ?? listingMaterials(listing)[0])) return
+    const nextValues = { ...values }
+    const nextPicks = { ...picks }
+    let moved = false
+    for (const [name, param] of Object.entries(listing.params)) {
+      const value = values[name]
+      if (!(param.kind === 'choice' && param.colour) || typeof value !== 'string') continue
+      const nearest = nearestFilament(value, paramFilaments(param, listing.colours, next))
+      if (nearest) {
+        moved = moved || nearest.colour.toLowerCase() !== value.toLowerCase() || nearest.id !== picks[name]
+        nextValues[name] = nearest.colour
+        nextPicks[name] = nearest.id
+      } else {
+        delete nextValues[name]
+        delete nextPicks[name]
+        moved = true
+      }
+    }
+    setMaterial(next)
+    setValues(nextValues)
+    setPicks(nextPicks)
+    setMaterialNote(moved ? `Your colours changed to the nearest ${next} colours.` : null)
     setAdded(false)
   }
 
@@ -335,7 +395,10 @@ export function CustomizePage({
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
       setListing(fresh)
-      setValues((before) => keepOffered(fresh, before))
+      const kept = keepOffered(fresh, values)
+      setValues(kept)
+      setPicks(keepPicks(fresh, kept, picks))
+      setMaterial(offeredMaterial(fresh, material))
       setStale(false)
       setRenderError(null)
       setAddError(null)
@@ -379,7 +442,16 @@ export function CustomizePage({
         <Link className="sf-back" to="/">
           All designs
         </Link>
-        <ListingView listing={listing} values={values} onChange={setValue} />
+        <ListingView
+          listing={listing}
+          values={values}
+          onChange={setValue}
+          picks={picks}
+          onPick={setPick}
+          material={material}
+          onMaterial={chooseMaterial}
+          materialNote={materialNote}
+        />
         {stale && (
           <div className="sf-panel sf-stale" role="status">
             <p>The shop has changed this design since you opened it.</p>

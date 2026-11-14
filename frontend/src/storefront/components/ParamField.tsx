@@ -1,7 +1,8 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentName, filamentOf, parseNumber, textLength, valueProblem, valueText } from '../params'
+import { colourGone, filamentOf, paramFilaments, parseNumber, textLength, valueProblem, valueText } from '../params'
+import { ColourPicker } from './ColourPicker'
 
 interface Props {
   param: PublicParam
@@ -9,6 +10,11 @@ interface Props {
   value: ParamValue | undefined
   filaments: readonly Filament[]
   onChange: (next: ParamValue | undefined) => void
+  /** A colour parameter's picked filament, by id (#6152). */
+  pick?: string
+  onPick?: (next: string | undefined) => void
+  /** With the listing's `one_material`: the one material a colour may be of. */
+  material?: string | null
 }
 
 const LABEL = 'mb-1.5 block p-0 font-semibold'
@@ -26,13 +32,39 @@ const INPUT =
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
  * same form in its own colours.
  */
-export function ParamField({ param, value, filaments, onChange }: Props) {
+export function ParamField({ param, value, filaments, onChange, pick, onPick, material = null }: Props) {
   const id = useId()
   const problem = valueProblem(param, value)
   const hintId = `${id}-hint`
 
-  if (param.kind === 'choice') {
+  if (param.kind === 'choice' && param.colour) {
+    // #6152: a colour is a filament, picked in a grid of swatches; the value is its colour.
     const gone = colourGone(param)
+    const offered = paramFilaments(param, filaments, material)
+    const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
+    return (
+      <div className="min-w-0" aria-describedby={hintId}>
+        <ColourPicker
+          label={param.label}
+          filaments={offered}
+          value={pick ?? current?.id}
+          onChange={(next) => {
+            onChange(next?.colour)
+            onPick?.(next?.id)
+          }}
+        />
+        <p id={hintId} className={gone ? BAD : HINT}>
+          {gone
+            ? 'No colour is available for this right now.'
+            : value === undefined
+              ? "The shop's choice, unless you pick one."
+              : 'Pick “Use the shop’s choice” to go back to it.'}
+        </p>
+      </div>
+    )
+  }
+
+  if (param.kind === 'choice') {
     return (
       <fieldset className="m-0 min-w-0 border-0 p-0" aria-describedby={hintId}>
         <legend className={LABEL}>{param.label}</legend>
@@ -46,8 +78,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           onValueChange={(picked) => onChange(picked === '' ? undefined : param.choices[Number(picked)])}
         >
           {param.choices.map((choice, index) => {
-            const filament = param.colour && typeof choice === 'string' ? filamentOf(filaments, choice) : undefined
-            const name = filament ? filamentName(filament) : valueText(choice)
+            const name = valueText(choice)
             return (
               <ToggleGroupItem
                 key={String(choice)}
@@ -56,20 +87,13 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
                 variant="outline"
                 className="h-auto min-h-11 max-w-full rounded-full px-3.5 py-1.5 text-left whitespace-normal [overflow-wrap:anywhere] data-[state=on]:border-primary data-[state=on]:ring-1 data-[state=on]:ring-primary"
               >
-                {param.colour && typeof choice === 'string' && (
-                  <span className="size-5 flex-none rounded-full border border-foreground/25" style={{ background: choice }} />
-                )}
                 <span>{name}</span>
               </ToggleGroupItem>
             )
           })}
         </ToggleGroup>
-        <p id={hintId} className={gone ? BAD : HINT}>
-          {gone
-            ? 'No colour is available for this right now.'
-            : value === undefined
-              ? "The shop's choice, unless you pick one."
-              : 'Tap it again to go back to the shop’s choice.'}
+        <p id={hintId} className={HINT}>
+          {value === undefined ? "The shop's choice, unless you pick one." : 'Tap it again to go back to the shop’s choice.'}
         </p>
       </fieldset>
     )

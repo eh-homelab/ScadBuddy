@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { KEYCHAIN } from '../mocks/features/storefrontPublic'
-import { keepOffered, parseNumber, shownLabel, valueText } from './params'
+import { keepOffered, keepPicks, nearestFilament, paramFilaments, parseNumber, shownLabel, valueText } from './params'
 
 describe('parseNumber', () => {
   it.each([
@@ -61,5 +61,29 @@ describe('shownLabel (#6137)', () => {
   it('takes the listing’s own label, else the name', () => {
     expect(shownLabel('colour', 'Letters', 'Letter colour (extruder 2)')).toBe('Letters')
     expect(shownLabel('colour', null, null)).toBe('colour')
+  })
+})
+
+describe('picks (#6152)', () => {
+  const blue = KEYCHAIN.colours[0]!
+  const orange = KEYCHAIN.colours[1]!
+
+  it('finds the nearest colour by RGB distance', () => {
+    expect(nearestFilament('#E0602A', KEYCHAIN.colours)).toBe(orange)
+    expect(nearestFilament('#102080', KEYCHAIN.colours)).toBe(blue)
+    expect(nearestFilament('#102080', [])).toBeUndefined()
+  })
+
+  it('keeps only a pick of an offered colour parameter whose colour is the value', () => {
+    const values = { base_colour: '#e8532f', name: 'Ada' }
+    expect(keepPicks(KEYCHAIN, values, { base_colour: orange.id })).toEqual({ base_colour: orange.id })
+    expect(keepPicks(KEYCHAIN, values, { base_colour: blue.id, name: orange.id, gone: blue.id })).toEqual({})
+  })
+
+  it('never offers a support material', () => {
+    const pva = { id: 'f-pva', colour: '#1B6CA8', colour_name: 'Natural', material: 'PVA' }
+    const param = KEYCHAIN.params.base_colour!
+    expect(paramFilaments(param, [...KEYCHAIN.colours, pva]).map((f) => f.id)).toEqual([blue.id, orange.id])
+    expect(paramFilaments(param, KEYCHAIN.colours, 'PETG')).toEqual([])
   })
 })
