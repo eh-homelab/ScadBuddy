@@ -91,7 +91,8 @@ function importSpools(): SpoolImportRow[] {
         updated_at: now(),
       }
       state.filaments.push(made)
-      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost }]
+      // The mock inventory names no slicer presets, so the import fills no density (#6168).
+      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost, no_density: 'no_preset' }]
     }
     const previous = found.cost_per_kg
     const action = Number(previous) === Number(cost) ? 'unchanged' : 'updated'

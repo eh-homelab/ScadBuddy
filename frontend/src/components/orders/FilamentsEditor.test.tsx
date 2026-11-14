@@ -79,7 +79,7 @@ describe('FilamentsEditor (#4250)', () => {
     await screen.findByRole('table', { name: 'Filaments' })
     await user.click(await screen.findByRole('button', { name: 'Import from spools' }))
     const status = await screen.findByRole('status', { name: 'Spool import' })
-    expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: added at 15.91 per kg')
+    expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: added at 15.91 per kg; no density, its newest spool names no slicer preset')
     expect(status).toHaveTextContent('Mistletoe Green: skipped, none of its spools has a price')
     expect(status).not.toHaveTextContent('Inland')
     await within(screen.getByRole('table', { name: 'Filaments' })).findByText(/Hot Pink/)

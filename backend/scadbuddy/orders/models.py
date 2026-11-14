@@ -951,6 +951,14 @@ class SpoolImportRow(BaseModel):
     #: The spread of the group's prices, only when its spools' prices differ.
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
+    #: The record's density as the import leaves it (#6168): its newest spool's preset's
+    #: on a record made, or on a matched one that had none; a density a record already
+    #: has is kept.
+    density_g_cm3: str | None = None
+    #: Why a record made or matched still has no density: ``no_preset`` (the newest spool
+    #: names no slicer preset) or ``not_in_preset`` (the preset cannot be read, or gives
+    #: no density). The import goes on without one.
+    no_density: Literal["no_preset", "not_in_preset"] | None = None
     spool_ids: list[int]
 
 

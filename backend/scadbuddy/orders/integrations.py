@@ -24,7 +24,10 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.problems import PROBLEMS
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from scadbuddy.bambuddy.projects import FolderlessProjects
+    from scadbuddy.slicing.profiles import Profiles
 
 
 class SpoolGroup(BaseModel):
@@ -42,6 +45,12 @@ class SpoolGroup(BaseModel):
     #: ``(spool id, cost_per_kg)`` of each spool, by id; a spool with no price has
     #: ``None``. A higher id is a spool Bambuddy recorded later.
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
+    #: The newest spool's slicer filament preset (its ``slicer_filament``), which the
+    #: import reads the density from (#6168); ``None`` when that spool names none.
+    preset: str | None = None
+    #: ``filament_density`` of :attr:`preset`, in g/cm³ as a record holds it (three
+    #: places); ``None`` when there is no preset, it cannot be read, or it gives none.
+    density_g_cm3: str | None = None
 
 
 class ShelfSpool(BaseModel):
@@ -235,12 +244,15 @@ def choose(
     bambuddy_url: str | None,
     settings: SettingsStore,
     folderless: FolderlessProjects | None = None,
+    profiles: Callable[[], Profiles | None] | None = None,
 ) -> OrderIntegrations:
     """The seam for a running ``bambuddy_url``: Bambuddy's when it is set, else
     :data:`NOT_LINKED`. ``folderless`` is the record that keeps a project create whose
-    folder step failed from making a second project when it is tried again (#2263)."""
+    folder step failed from making a second project when it is tried again (#2263).
+    ``profiles`` gives the image's BBL tree, where the spool import reads the density of
+    a Bambu Studio preset (#6168); read only when an import needs it."""
     if not bambuddy_url:
         return NOT_LINKED
     from scadbuddy.orders.bambuddy import BambuddyIntegrations
 
-    return BambuddyIntegrations(settings, folderless)
+    return BambuddyIntegrations(settings, folderless, profiles)

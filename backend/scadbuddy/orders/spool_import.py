@@ -4,6 +4,10 @@ One record per filament the inventory holds (``integrations.SpoolGroup``), match
 the book by the record's identity (material, subtype, brand and colour, upper-cased, as
 ``filaments_identity`` and ``_filament_key`` both are): a new record when the book has
 none, else its ``cost_per_kg`` set to the most recent priced spool's (the highest id).
+A record's density comes from the group's newest spool's slicer preset
+(``SpoolGroup.density_g_cm3``, #6168): set on a record made, and on a matched record only
+when it has none, so a density someone entered is never overwritten. A preset that gives
+none leaves the density empty and is reported on the row; it fails nothing.
 It runs on click only: a quote reads the book, never Bambuddy, so a quote is the same
 with Bambuddy down. A group known only by its colour's name, or with no priced spool, is
 reported and left alone: a record needs a ``#RRGGBB`` and a price.
@@ -86,6 +90,7 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                         colour_name=group.colour_name,
                         colour=group.colour,
                         cost_per_kg=_text(price),
+                        density_g_cm3=group.density_g_cm3,
                     ),
                     conn=conn,
                 )
@@ -95,6 +100,7 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                             "action": "created",
                             "filament_id": made.id,
                             "cost_per_kg": made.cost_per_kg,
+                            **_density(group, made.density_g_cm3),
                         }
                     )
                 )
@@ -102,14 +108,28 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
             current = store.filament(existing_id, conn=conn)
             assert current is not None
             previous = Decimal(current.cost_per_kg)
+            patch: dict[str, str] = {}
+            if previous != price:
+                patch["cost_per_kg"] = _text(price)
+            density = current.density_g_cm3
+            if density is None and group.density_g_cm3 is not None:
+                density = patch["density_g_cm3"] = group.density_g_cm3
             update: dict[str, object] = {
                 "filament_id": existing_id,
                 "cost_per_kg": _text(price),
                 "previous_cost_per_kg": current.cost_per_kg,
+                **_density(group, density),
             }
-            if previous == price:
+            if not patch:
                 rows.append(row.model_copy(update={**update, "action": "unchanged"}))
                 continue
-            store.update_filament(existing_id, FilamentPatch(cost_per_kg=_text(price)), conn=conn)
+            store.update_filament(existing_id, FilamentPatch.model_validate(patch), conn=conn)
             rows.append(row.model_copy(update={**update, "action": "updated"}))
     return SpoolImport(rows=rows)
+
+
+def _density(group: SpoolGroup, density: str | None) -> dict[str, object]:
+    """A made or matched record's density on its row, and why it has none."""
+    if density is not None:
+        return {"density_g_cm3": density}
+    return {"no_density": "no_preset" if group.preset is None else "not_in_preset"}

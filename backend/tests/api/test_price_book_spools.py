@@ -132,3 +132,160 @@ def test_a_quote_never_reads_the_spools(client: TestClient) -> None:
     inventory = respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
     assert client.get(BOOK).status_code == 200
     assert not inventory.called
+
+
+# -- density from the spool's slicer preset (#6168) ---------------------------------------
+
+
+def local_preset(preset_id: int, setting: dict[str, Any], **row: Any) -> dict[str, Any]:
+    """A ``GET /local-presets/{id}`` answer: the row with its ``setting`` document."""
+    return {
+        "id": preset_id,
+        "name": f"Preset {preset_id}",
+        "preset_type": "filament",
+        "source": "orcaslicer",
+        "setting": setting,
+        **row,
+    }
+
+
+@respx.mock
+def test_a_made_record_takes_its_presets_density(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[spool(4, slicer_filament="2", cost_per_kg=20)])
+    )
+    preset = respx.get(f"{API}/local-presets/2").mock(
+        return_value=httpx.Response(200, json=local_preset(2, {"filament_density": ["1.24"]}))
+    )
+
+    (row,) = client.post(IMPORT).json()["rows"]
+
+    assert preset.call_count == 1
+    assert (row["action"], row["density_g_cm3"], row["no_density"]) == ("created", "1.24", None)
+    (record,) = client.get(BOOK).json()["filaments"]
+    assert record["density_g_cm3"] == "1.24"
+
+
+@respx.mock
+def test_an_update_fills_an_empty_density(client: TestClient) -> None:
+    configure(client)
+    made = add_filament(
+        client, brand="Bambu", subtype="Basic", cost_per_kg="20", density_g_cm3=None
+    )
+    assert made["density_g_cm3"] is None
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[spool(4, slicer_filament="2", cost_per_kg=20)])
+    )
+    respx.get(f"{API}/local-presets/2").mock(
+        return_value=httpx.Response(200, json=local_preset(2, {"filament_density": "1.275"}))
+    )
+
+    (row,) = client.post(IMPORT).json()["rows"]
+
+    # The price did not move, but the density did: the record changed.
+    assert (row["action"], row["filament_id"], row["density_g_cm3"]) == (
+        "updated",
+        made["id"],
+        "1.275",
+    )
+    assert (row["cost_per_kg"], row["previous_cost_per_kg"]) == ("20", "20")
+    (record,) = client.get(BOOK).json()["filaments"]
+    assert record["density_g_cm3"] == "1.275"
+    # Imported again, nothing changes.
+    (again,) = client.post(IMPORT).json()["rows"]
+    assert (again["action"], again["density_g_cm3"]) == ("unchanged", "1.275")
+
+
+@respx.mock
+def test_an_update_keeps_a_density_someone_entered(client: TestClient) -> None:
+    configure(client)
+    made = add_filament(
+        client, brand="Bambu", subtype="Basic", cost_per_kg="20", density_g_cm3="1.3"
+    )
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=[spool(4, slicer_filament="2", cost_per_kg=25)])
+    )
+    respx.get(f"{API}/local-presets/2").mock(
+        return_value=httpx.Response(200, json=local_preset(2, {"filament_density": ["1.24"]}))
+    )
+
+    (row,) = client.post(IMPORT).json()["rows"]
+
+    assert (row["action"], row["cost_per_kg"], row["density_g_cm3"], row["no_density"]) == (
+        "updated",
+        "25",
+        "1.3",
+        None,
+    )
+    record = client.get(BOOK).json()["filaments"][0]
+    assert (record["id"], record["density_g_cm3"]) == (made["id"], "1.3")
+
+
+@respx.mock
+def test_a_preset_without_a_density_fails_no_import(client: TestClient) -> None:
+    """A preset that is gone, cannot be read or gives no density leaves the density
+    empty, says so on the row, and imports the price all the same."""
+    configure(client)
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                spool(1, slicer_filament="11", rgba="FF0000FF", cost_per_kg=20),
+                spool(2, slicer_filament="12", rgba="00FF00FF", cost_per_kg=20),
+                spool(3, slicer_filament="13", rgba="0000FFFF", cost_per_kg=20),
+                spool(4, slicer_filament="14", rgba="FFFF00FF", cost_per_kg=20),
+                spool(5, slicer_filament=None, rgba="00FFFFFF", cost_per_kg=20),
+            ],
+        )
+    )
+    respx.get(f"{API}/local-presets/11").mock(return_value=httpx.Response(404, json={}))
+    respx.get(f"{API}/local-presets/12").mock(return_value=httpx.Response(500, text="boom"))
+    respx.get(f"{API}/local-presets/13").mock(
+        return_value=httpx.Response(200, json=local_preset(13, {"filament_type": ["PLA"]}))
+    )
+    respx.get(f"{API}/local-presets/14").mock(
+        return_value=httpx.Response(200, json=local_preset(14, {"filament_density": ["nope"]}))
+    )
+
+    response = client.post(IMPORT)
+
+    assert response.status_code == 200, response.text
+    rows = {row["spool_ids"][0]: row for row in response.json()["rows"]}
+    assert {i: (r["action"], r["density_g_cm3"], r["no_density"]) for i, r in rows.items()} == {
+        1: ("created", None, "not_in_preset"),
+        2: ("created", None, "not_in_preset"),
+        3: ("created", None, "not_in_preset"),
+        4: ("created", None, "not_in_preset"),
+        5: ("created", None, "no_preset"),
+    }
+    assert len(client.get(BOOK).json()["filaments"]) == 5
+
+
+@respx.mock
+def test_one_read_per_preset_from_each_groups_newest_spool(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                # One group: only the newest spool's preset is read.
+                spool(3, slicer_filament="9", cost_per_kg=20),
+                spool(8, slicer_filament="2", cost_per_kg=20),
+                # Another group naming the same preset: read once for both.
+                spool(4, slicer_filament="2", rgba="000000FF", cost_per_kg=20),
+            ],
+        )
+    )
+    older = respx.get(f"{API}/local-presets/9").mock(
+        return_value=httpx.Response(200, json=local_preset(9, {"filament_density": ["9.99"]}))
+    )
+    newest = respx.get(f"{API}/local-presets/2").mock(
+        return_value=httpx.Response(200, json=local_preset(2, {"filament_density": ["1.24"]}))
+    )
+
+    rows = client.post(IMPORT).json()["rows"]
+
+    assert not older.called
+    assert newest.call_count == 1
+    assert [row["density_g_cm3"] for row in rows] == ["1.24", "1.24"]

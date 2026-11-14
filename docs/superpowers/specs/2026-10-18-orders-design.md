@@ -81,7 +81,7 @@ projects (§8.1), which is the only place the word "project" appears in an order
 | F3 | An output's `meta.json` carries `slug`, `model_version`, `job_id`, `colors`, `parts`, `layout_plates` and `libraries` (the exact library commits), beside `params.json` and `inputs.json`; outputs can be deleted. | `library/outputs.py:50-60,131-186,388-499` |
 | F4 | ScadBuddy's native slice result carries no grams: `SlicePlateOutput` is digests, sizes, warnings, exit code and elapsed time. The grams are read from the sliced 3MF afterwards: `slicing/slice_info.py` `read_sliced(payload, plate_id)` (#4162) gives a plate's `print_time_seconds`, `grams_by_slot` and `filament_changes`, over `filaments3mf.read_filaments(sliced=True)`, the same parser of `Metadata/slice_info.config` the Bambuddy path uses (F5). It reads no metres. | `slicing/models.py:56-64`, `workers/rust/crates/sb-slicer/src/models.rs:57-71`, `slicing/slice_info.py:58-101` at `ee43c92`, own-store spec §5.4 |
 | F5 | Today every grams figure comes through Bambuddy: `_sliced()` reads per-plate, per-slot `used_grams` from the same `slice_info.config`; `SlicePreview` sums the slots because Bambuddy's `filament_used_g` covers only the first filament (#2450). | `bambuddy/filaments3mf.py:108-117,268-291`, `bambuddy/preview.py:68-86,330-339` |
-| F6 | The only price anywhere is Bambuddy's per-spool `cost_per_kg`, exposed as `price_per_g` and a `grams_cost` on `GET /farm/spools/{id}/summary?grams=`; ScadBuddy stores no price and no density. | `bambuddy/farm.py:75,172-181,207-270`, `api/farm.py:105-126` |
+| F6 | The only price anywhere is Bambuddy's per-spool `cost_per_kg`, exposed as `price_per_g` and a `grams_cost` on `GET /farm/spools/{id}/summary?grams=`; ScadBuddy stores no price and no density. A spool row carries no density: that lives in the slicer filament preset the spool names (`slicer_filament`), as `filament_density`. The price book's records now hold both, and the spool import fills the density from that preset (§8.3, #6168). | `bambuddy/farm.py:75,172-181,207-270`, `api/farm.py:105-126` |
 | F7 | A print run's row holds `status` (running, succeeded, failed), `result` and `error`; "succeeded" means queued. The exact sliced file is `PrintRunResult.sliced_library_file_id`; the colour choice is `PrintRunRequest.filament_plan.slots[{slot_id, spool_id}]`. | `bambuddy/runs.py:91-114`, `bambuddy/print_run.py:169-206,311-339` |
 | F8 | The print's outcome (status, `failure_reason`, times, grams, `cost`, runs) and its media (`finish_` photo, photos, timelapse) are Bambuddy's archive, linked by `print_links` on the queue item or the sliced file's content hash; ScadBuddy proxies them and stores none. | `bambuddy/print_links.py:1-60,226,351`, `bambuddy/linking.py:182-220`, `api/print_history.py:160-172,280-339,1051-1079` |
 | F9 | `print_attachments` (photos and videos of the finished object) is keyed by Bambuddy `archive_id`, and the bytes live in Bambuddy; there is no "attach media to X" for any other subject. | `migrations/20261013T1600Z_print_attachments.sql`, `bambuddy/attachments.py:1-50` |
@@ -576,8 +576,9 @@ every quote; the filaments in a table of their own with an editor beside them):
 - `orders_currency` (ISO 4217, default `USD`); changing it affects new orders only.
 - `filaments`: ScadBuddy's own filament records, a new table `filaments`: `id`,
   `material`, `subtype`, `brand`, `colour_name`, `colour` (`#RRGGBB`), `cost_per_kg`
-  (decimal), `density_g_cm3` (decimal, nullable; for the rough estimate in §5.3),
-  `archived_at`. This is the price of a filament, not a spool: `_filament_key`'s
+  (decimal), `density_g_cm3` (decimal, nullable; for the rough estimate in §5.3;
+  entered by hand, or filled by the spool import from the newest spool's preset, which
+  never overwrites a density already set, §8.3), `archived_at`. This is the price of a filament, not a spool: `_filament_key`'s
   grouping (material, subtype, brand, colour; `bambuddy/farm.py:187-206`) is the
   identity, so with Bambuddy configured a record is matched to its spools by that key
   (§8.3).
@@ -1221,6 +1222,29 @@ The price book's filament records can be **imported from spools**: `POST
 `cost_per_kg` (the most recent spool's, with the spread shown when they differ) and
 the colour. It is an import, run on click: the book never reads Bambuddy at quote
 time, so a quote is the same with Bambuddy down.
+
+**Density (#6168).** The import also fills `density_g_cm3`. Bambuddy's spool row has no
+density; the slicer filament preset the spool names (`slicer_filament`) does, as
+`filament_density` (a list of strings, `["1.24"]`, the first taken, rounded to the
+column's three places). For each group the import reads the preset of its most recent
+spool (the highest id), one read per distinct preset however many groups name it:
+
+- A Bambuddy local preset (an id of digits only) is read through Bambuddy, `GET
+  /local-presets/{id}`, from its `setting` document.
+- Any other id is a Bambu Studio preset, read from the image's BBL tree as a native
+  slice reads it: by `setting_id` (`GFSA00_02`) or name, else by `filament_id`
+  (`GFA00`), which names one preset per printer and nozzle (the first by name is
+  taken: the density does not change with the printer). Bambuddy cannot serve these:
+  its `GET /slicer/preset-values` answers the process slot only. Without a tree (a dev
+  run outside the image) such a group gets no density. A Bambu Cloud user preset is in
+  neither place and gets none.
+
+A record made by the import takes that density. A matched record takes it only when it
+has none: a density someone entered is never overwritten. A preset that is gone, cannot
+be read, or gives no density leaves the density empty and fails nothing: the price is
+still imported, and the row says why the record has no density (`no_density`:
+`no_preset` when the newest spool names no preset, `not_in_preset` otherwise). A matched
+record whose density is filled is `updated` even when its price did not move.
 
 ### 8.4 Printers
 

@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from contextlib import aclosing
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from pydantic import ValidationError
+
+from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
@@ -47,6 +52,14 @@ from scadbuddy.orders.integrations import (
 )
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
+from scadbuddy.slicing.catalogue import native_catalogue
+from scadbuddy.slicing.profiles import ProfileError, Profiles
+
+logger = logging.getLogger(__name__)
+
+#: ``filaments.density_g_cm3``'s ``numeric(6,3)``: three places, below 1000.
+DENSITY_PLACES = Decimal("0.001")
+MAX_DENSITY = Decimal(1000)
 
 
 def _colour(rgba: str | None) -> str | None:
@@ -95,9 +108,100 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
                 colour_name=(latest.color_name or "").strip() or None,
                 colour=_colour(latest.rgba),
                 spools=[(s.id, s.cost_per_kg) for s in rows],
+                preset=(latest.slicer_filament or "").strip() or None,
             )
         )
     return out
+
+
+def density_text(value: object) -> str | None:
+    """A preset's ``filament_density`` as a record holds it (``models.Density``), or
+    ``None`` when it is not one. A preset stores it as a list of strings, one per
+    filament (``["1.24"]``, the first is taken), and a local preset's list row as a
+    string; rounded to the column's three places, and only above 0 and below 1000."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return None
+    try:
+        density = Decimal(str(value).strip()).quantize(DENSITY_PLACES, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+    if not density.is_finite() or not Decimal(0) < density < MAX_DENSITY:
+        return None
+    return format(density.normalize(), "f")
+
+
+def _is_local(preset: str) -> bool:
+    """A Bambuddy local preset's id: ASCII digits only (``bambuddy/resolver.py``)."""
+    return preset.isascii() and preset.isdigit()
+
+
+def _native_density(profiles: Profiles, preset: str) -> str | None:
+    """A Bambu Studio preset's density from the image's tree, as a native slice reads the
+    preset (``slicing/presets.py``): by its ``setting_id`` (a cloud id, ``GFSA00``) or
+    name, else by its ``filament_id`` (``GFA00``, an AMS tray's ``tray_info_idx``), which
+    names one preset per printer and nozzle (``slicing/catalogue.py``); the first by name,
+    as a filament's density does not change with the printer. Blocking: the catalogue's
+    first build is seconds of file I/O."""
+    name = profiles.find("filament", preset)
+    if name is None:
+        names = sorted(
+            row.name for row in native_catalogue(profiles).filament if row.filament_id == preset
+        )
+        if not names:
+            return None
+        name = names[0]
+    return density_text(profiles.filament(name).get("filament_density"))
+
+
+async def _preset_density(
+    client: BambuddyClient, preset: str, profiles: Callable[[], Profiles | None] | None
+) -> str | None:
+    """One preset's density, or ``None`` when it cannot be read or gives none: never an
+    error, so one bad preset fails no import (#6168). A local preset is Bambuddy's
+    (``GET /local-presets/{id}``, its ``setting`` the document it slices with, merged over
+    its base); any other id is Bambu Studio's, read from the image's tree, since
+    Bambuddy serves the values of process presets only (``slicing/presets.py``)."""
+    if _is_local(preset):
+        try:
+            detail = await client.local_preset(int(preset))
+        except (ApiError, ValidationError) as error:
+            logger.info(
+                "could not read a spool's local preset for its density",
+                extra={"preset": preset, "error": type(error).__name__},
+            )
+            return None
+        if detail.preset_type != "filament":
+            return None
+        return density_text(detail.setting.get("filament_density"))
+    tree = profiles() if profiles is not None else None
+    if tree is None:
+        return None
+    try:
+        return await asyncio.to_thread(_native_density, tree, preset)
+    except ProfileError as error:
+        # By type only: the message names files under the image's tree.
+        logger.info(
+            "could not read a spool's preset from the image's tree for its density",
+            extra={"preset": preset, "error": type(error).__name__},
+        )
+        return None
+
+
+async def preset_densities(
+    client: BambuddyClient,
+    presets: Iterable[str],
+    profiles: Callable[[], Profiles | None] | None,
+) -> dict[str, str]:
+    """The density of each distinct preset that gives one, by preset id: one read per
+    preset, however many groups name it."""
+    found: dict[str, str] = {}
+    for preset in sorted(set(presets)):
+        density = await _preset_density(client, preset, profiles)
+        if density is not None:
+            found[preset] = density
+    return found
 
 
 def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
@@ -154,10 +258,14 @@ class BambuddyIntegrations:
     """The seam with a Bambuddy linked."""
 
     def __init__(
-        self, settings: SettingsStore, folderless: FolderlessProjects | None = None
+        self,
+        settings: SettingsStore,
+        folderless: FolderlessProjects | None = None,
+        profiles: Callable[[], Profiles | None] | None = None,
     ) -> None:
         self.settings = settings
         self.folderless = folderless
+        self.profiles = profiles
 
     @property
     def linked(self) -> bool:
@@ -166,10 +274,18 @@ class BambuddyIntegrations:
     async def spool_groups(self) -> list[SpoolGroup]:
         """The inventory's spools (``inventory_view``'s, ``GET /inventory/spools``,
         archived ones left out) by filament. Only the spools: the loaded slots that
-        ``inventory_view`` adds say nothing about a price."""
+        ``inventory_view`` adds say nothing about a price. Each group's density is its
+        newest spool's preset's (#6168), each preset read once."""
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
-            return spool_groups(await client.spools())
+            groups = spool_groups(await client.spools())
+            densities = await preset_densities(
+                client, (g.preset for g in groups if g.preset is not None), self.profiles
+            )
+        return [
+            g.model_copy(update={"density_g_cm3": densities.get(g.preset)}) if g.preset else g
+            for g in groups
+        ]
 
     async def spool_inventory(self) -> list[ShelfSpool]:
         """``GET /inventory/spools`` (archived ones included, so a named one is known)

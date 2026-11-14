@@ -47,6 +47,8 @@ from scadbuddy.orders.storefront.mail import MAIL_SETTINGS, MailConfig, Storefro
 from scadbuddy.payments.registry import providers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
+from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.store.refs import BlobRefs
 
 #: The settings ``OrdersComponent.rules`` reads (#5281).
@@ -113,9 +115,16 @@ class OrdersComponent:
         if self._integrations is None or self._integrations[0] != url:
             self._integrations = (
                 url,
-                choose(url, self.core.settings_store, self.core.uploads),
+                choose(url, self.core.settings_store, self.core.uploads, self._profiles),
             )
         return self._integrations[1]
+
+    def _profiles(self) -> Profiles | None:
+        """The image's BBL tree, where the spool import reads a Bambu Studio preset's
+        density (#6168); ``None`` without the slicing component or a tree."""
+        if self._components is None:
+            return None
+        return self._components.get(SLICING).profiles
 
     @property
     def price_book(self) -> PriceBookReader:

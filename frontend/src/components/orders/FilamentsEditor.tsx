@@ -64,13 +64,20 @@ const REASONS: Record<NonNullable<SpoolImportRow['reason']>, string> = {
   too_long: 'a name is longer than a filament record takes (100 characters)',
 }
 
-/** One line of an import's answer: what happened to a filament, and the spread of its spools' prices. */
+/** #6168 — why a record made or matched still has no density after the import. */
+const NO_DENSITY: Record<NonNullable<SpoolImportRow['no_density']>, string> = {
+  no_preset: 'its newest spool names no slicer preset',
+  not_in_preset: 'its slicer preset gives none',
+}
+
+/** One line of an import's answer: what happened to a filament, the spread of its spools' prices, and a density the import could not fill. */
 function importLine(row: SpoolImportRow): string {
   const name = filamentLabel(row) || row.material
   if (row.action === 'skipped') return `${name}: skipped, ${row.reason ? REASONS[row.reason] : 'nothing to import'}`
-  const price = row.action === 'updated' ? `${row.previous_cost_per_kg} → ${row.cost_per_kg}` : row.cost_per_kg
+  const price = row.action === 'updated' && row.previous_cost_per_kg !== row.cost_per_kg ? `${row.previous_cost_per_kg} → ${row.cost_per_kg}` : row.cost_per_kg
   const spread = row.min_cost_per_kg && row.max_cost_per_kg ? ` (spools priced ${row.min_cost_per_kg} to ${row.max_cost_per_kg}; the newest spool's price)` : ''
-  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}`
+  const density = row.no_density ? `; no density, ${NO_DENSITY[row.no_density]}` : ''
+  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}${density}`
 }
 
 /**

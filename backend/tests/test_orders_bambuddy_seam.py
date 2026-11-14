@@ -5,21 +5,32 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from scadbuddy.bambuddy.models import Spool
+from scadbuddy.bambuddy.models import LocalPresetDetail, Spool
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders import bambuddy as orders_bambuddy
-from scadbuddy.orders.bambuddy import BambuddyIntegrations, spool_groups
+from scadbuddy.orders.bambuddy import (
+    BambuddyIntegrations,
+    density_text,
+    preset_densities,
+    spool_groups,
+)
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError, choose
+from scadbuddy.slicing.profiles import Profiles
 
 ORDERS = Path(orders_bambuddy.__file__).parent
 CLIENT = "scadbuddy.bambuddy.client"
 #: Never read: choosing a seam builds nothing.
 NO_STORE = cast(SettingsStore, object())
+#: The slicing tests' vendor tree (``tests/slicing/conftest.py``).
+SLICING_PROFILES = Path(__file__).parent / "slicing" / "profiles"
 
 
 def _imports_client(path: Path) -> bool:
@@ -127,3 +138,112 @@ def test_spools_of_one_record_are_one_group() -> None:
     assert [(g.colour, g.spools) for g in groups] == [
         ("#FFFFFF", [(2, 20.0), (4, 25.0), (6, 30.0)])
     ]
+
+
+def test_a_groups_preset_is_its_newest_spools() -> None:
+    """#6168: the density comes from one preset per group, the newest spool's."""
+    groups = spool_groups(
+        [
+            _spool(2, rgba="FFFFFFFF", slicer_filament="GFA00"),
+            _spool(6, rgba="FFFFFFFF", slicer_filament="7"),
+            _spool(4, rgba="FFFFFFFF", slicer_filament="GFG00"),
+            _spool(5, rgba="000000FF"),
+        ]
+    )
+    assert [(g.colour, g.preset, g.density_g_cm3) for g in groups] == [
+        ("#000000", None, None),
+        ("#FFFFFF", "7", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "density"),
+    [
+        (["1.24"], "1.24"),
+        (["1.24", "1.30"], "1.24"),
+        ("1.275", "1.275"),
+        ("1.2000", "1.2"),
+        ("1.2345", "1.235"),
+        (1.25, "1.25"),
+        ([], None),
+        (None, None),
+        ("", None),
+        ("nope", None),
+        ("0", None),
+        ("-1.2", None),
+        ("1000", None),
+        ("NaN", None),
+        ({"a": 1}, None),
+    ],
+)
+def test_a_presets_density_as_a_record_holds_it(value: object, density: str | None) -> None:
+    assert density_text(value) == density
+
+
+class _Presets:
+    """The client's ``local_preset``, from a table; anything else is an ApiError."""
+
+    def __init__(self, settings: dict[int, dict[str, Any]], preset_type: str = "filament"):
+        self.settings = settings
+        self.preset_type = preset_type
+        self.asked: list[int] = []
+
+    async def local_preset(self, preset_id: int) -> LocalPresetDetail:
+        self.asked.append(preset_id)
+        if preset_id not in self.settings:
+            raise ApiError(404, f"no local preset {preset_id}")
+        return LocalPresetDetail.model_validate(
+            {
+                "id": preset_id,
+                "name": f"Preset {preset_id}",
+                "preset_type": self.preset_type,
+                "source": "orcaslicer",
+                "setting": self.settings[preset_id],
+            }
+        )
+
+
+def _tree_with_density(tmp_path: Path) -> Profiles:
+    """The slicing tests' tree, its ``Bambu PLA Basic @base`` given a density."""
+    root = tmp_path / "profiles"
+    shutil.copytree(SLICING_PROFILES, root)
+    base = root / "BBL" / "filament" / "Bambu PLA Basic @base.json"
+    doc = json.loads(base.read_text(encoding="utf-8"))
+    doc["filament_density"] = ["1.26"]
+    base.write_text(json.dumps(doc), encoding="utf-8")
+    return Profiles(root)
+
+
+async def test_densities_read_each_preset_once(tmp_path: Path) -> None:
+    """A local preset (all digits) from Bambuddy, any other id from the image's tree by
+    ``setting_id`` or ``filament_id``; one read per distinct id."""
+    client = _Presets({2: {"filament_density": ["1.24"]}, 3: {"filament_type": ["PLA"]}})
+    profiles = _tree_with_density(tmp_path)
+
+    found = await preset_densities(
+        cast(Any, client),
+        ["2", "2", "3", "4", "GFA00", "GFSA00", "GF_PLA", "GFNOPE"],
+        lambda: profiles,
+    )
+
+    assert found == {"2": "1.24", "GFA00": "1.26", "GFSA00": "1.26"}
+    assert sorted(client.asked) == [2, 3, 4]
+
+
+async def test_without_the_tree_only_local_presets_are_read() -> None:
+    client = _Presets({2: {"filament_density": "1.24"}})
+    assert await preset_densities(cast(Any, client), ["2", "GFA00"], lambda: None) == {"2": "1.24"}
+    assert await preset_densities(cast(Any, client), ["2", "GFA00"], None) == {"2": "1.24"}
+
+
+async def test_a_local_preset_of_another_slot_gives_no_density() -> None:
+    client = _Presets({2: {"filament_density": "1.24"}}, preset_type="process")
+    assert await preset_densities(cast(Any, client), ["2"], None) == {}
+
+
+async def test_a_broken_tree_gives_no_density(tmp_path: Path) -> None:
+    root = tmp_path / "broken"
+    shutil.copytree(SLICING_PROFILES, root)
+    (root / "BBL" / "filament" / "Bambu PLA Basic @base.json").write_text("{", encoding="utf-8")
+    profiles = Profiles(root)
+    assert await preset_densities(cast(Any, _Presets({})), ["GFA00"], lambda: profiles) == {}
