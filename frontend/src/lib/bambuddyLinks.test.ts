@@ -44,6 +44,21 @@ describe('bambuddyBase', () => {
     expect(bambuddyBase([SSO, LAN], null, 'localhost')).toBe(SSO)
     expect(bambuddyBase([SSO, 'http://10.0.0.5'], null, '192.168.0.5')).toBe(SSO)
   })
+
+  // #6227 — a parent of one label is a bare TLD (or a LAN suffix), shared by unrelated names.
+  it('is the default on a two-label host: a bare TLD makes no sibling', () => {
+    expect(bambuddyBase([SSO, 'https://bambuddy.com'], null, 'scadbuddy.com')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'https://other.com'], null, 'scadbuddy.com')).toBe(SSO)
+    expect(bambuddyBase([SSO, 'https://bambuddy.lan'], null, 'scadbuddy.lan')).toBe(SSO)
+  })
+
+  it('is the same host on another port on a two-label host', () => {
+    expect(bambuddyBase([SSO, 'http://scadbuddy.lan:8000'], null, 'scadbuddy.lan')).toBe('http://scadbuddy.lan:8000')
+  })
+
+  it('is the Bambuddy beside the page when the framing origin is not listed', () => {
+    expect(bambuddyBase([SSO, LAN], 'https://bambuddy.unlisted.example', 'scadbuddy.lan.example')).toBe(LAN)
+  })
 })
 
 describe('bambuddyLink', () => {

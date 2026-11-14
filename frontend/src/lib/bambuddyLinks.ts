@@ -100,9 +100,16 @@ function hostOf(url: string): string | null {
 
 const IP_HOST = /^(\d+\.){3}\d+$|^\[.*\]$/
 
+/**
+ * The host without its first label, or null. The rest must keep two labels (#6227): a
+ * bare TLD or LAN suffix (`com`, `lan`) is shared by unrelated names, so `scadbuddy.com`
+ * and `scadbuddy.lan` have no siblings and match only on the same host.
+ */
 function parentDomain(host: string): string | null {
   const dot = host.indexOf('.')
-  return dot > 0 && !IP_HOST.test(host) ? host.slice(dot + 1) : null
+  if (dot <= 0 || IP_HOST.test(host)) return null
+  const rest = host.slice(dot + 1)
+  return rest.includes('.') ? rest : null
 }
 
 /**
