@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
@@ -151,19 +152,41 @@ def _filaments(orders: OrdersComponent) -> dict[str, Filament]:
 #: Each done job's files being fetched into this process's cache, by job id: one fetch
 #: per job, which every request for it shares and none cancels.
 _fetches: dict[str, asyncio.Task[None]] = {}
+#: The done jobs whose files this process fetched, newest last: their status reads skip
+#: the fetch. Bounded; a job that falls out is only fetched (from the cache) again.
+_ready: OrderedDict[str, None] = OrderedDict()
+READY_KEPT: Final = 4096
+#: Each job's failed fetches in a row. Past `FETCH_TRIES`, its files are taken as lost:
+#: the status names the preview, whose read then says so at once (404), rather than the
+#: page polling a render that can never show.
+_failed: dict[str, int] = {}
+FETCH_TRIES: Final = 3
 
 
 def _fetched(job_id: str, task: asyncio.Task[None]) -> None:
     if _fetches.get(job_id) is task:
         del _fetches[job_id]
-    if not task.cancelled() and task.exception() is not None:
+    if task.cancelled():
+        return
+    if task.exception() is not None:
+        _failed[job_id] = _failed.get(job_id, 0) + 1
         logger.warning("a render's files could not be fetched", exc_info=task.exception())
+        return
+    _failed.pop(job_id, None)
+    _ready[job_id] = None
+    _ready.move_to_end(job_id)
+    while len(_ready) > READY_KEPT:
+        _ready.popitem(last=False)
 
 
 async def files_ready(state: AppState, job: Job) -> bool:
     """Whether the done ``job``'s files are in this process's cache: starts their fetch
     (`materialize_result`) when none runs, and waits on it at most `READY_WAIT` seconds.
-    The fetch runs on when the wait ends, so the page's next poll finds it done."""
+    The fetch runs on when the wait ends, so the page's next poll finds it done. A job
+    fetched before answers at once, and so does one whose fetch failed `FETCH_TRIES`
+    times: its preview read then says the files are gone."""
+    if job.id in _ready or _failed.get(job.id, 0) >= FETCH_TRIES:
+        return True
     task = _fetches.get(job.id)
     if task is None:
         task = asyncio.create_task(materialize_result(state.store.blobs, job.result))

@@ -12,6 +12,7 @@ import json
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -889,6 +890,8 @@ def test_a_done_render_names_its_preview_once_its_files_are_here(
     page never asks for a preview the API would hold open; a later poll names it."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 69})
     monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
+    # As in a process that never fetched this job's files.
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
     real = materialize_result
     fetches = 0
 
@@ -908,6 +911,25 @@ def test_a_done_render_names_its_preview_once_its_files_are_here(
         time.sleep(0.1)
     assert r.json()["preview_url"].endswith(f"/renders/{job['id']}/preview.glb")
     assert fetches == 1
+
+
+def test_a_render_whose_files_are_lost_names_its_preview_after_a_few_tries(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6120 review: a lost blob never leaves the page polling for its whole time limit;
+    after `FETCH_TRIES` failed fetches the preview is named, and its read says so."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 70})
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
+    monkeypatch.setattr(renders_module, "_failed", {})
+
+    async def lost(_blobs: Any, _result: Any) -> None:
+        raise FileNotFoundError("the blob is gone")
+
+    monkeypatch.setattr(renders_module, "materialize_result", lost)
+    tries = renders_module.FETCH_TRIES
+    seen = [crud.get(f"/renders/{job['id']}").json()["preview_url"] for _ in range(tries + 1)]
+    assert seen[:tries] == [None] * tries
+    assert seen[-1] is not None
 
 
 def test_a_full_analysis_queue_is_not_ready(

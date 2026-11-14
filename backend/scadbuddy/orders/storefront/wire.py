@@ -284,7 +284,9 @@ class StoreRender(BaseModel):
     plates: list[PlateInfo]
     bbox_mm: BoundingBox | None
     colors: list[str] | None
-    #: The edge's path of the preview, once the render is done.
+    #: The edge's path of the preview, once the render is done and its files are in the
+    #: API's cache (`renders.py` `shown_render`); null until then, so the page keeps
+    #: polling (#6120).
     preview_url: str | None
     error: str | None
 

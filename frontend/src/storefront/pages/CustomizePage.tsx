@@ -256,9 +256,9 @@ export function CustomizePage({
   }
 
   /**
-   * The rough price of a done render. A read that fails for a passing reason (a 504 from
-   * the proxy while the shop works it out, #6120) waits and reads again, backing off, until
-   * the time limit.
+   * The rough price of a done render. While the shop works it out it answers 429
+   * `estimate_pending` with a `Retry-After` (#6120); that, and any other passing failure (a
+   * 5xx, the network), waits and reads again, backing off, until the time limit.
    */
   const estimateOf = async (job: string, live: () => boolean): Promise<StoreEstimate | null> => {
     const began = now()
