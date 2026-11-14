@@ -51,11 +51,13 @@ class _SizeMismatchError(Exception):
     pass
 
 
-async def _download(http: httpx.AsyncClient, url: str, to: Path, size: int) -> str:
-    """The object at ``url`` into ``to``, at most ``size`` bytes; its SHA-256."""
+async def _download(http: httpx.AsyncClient, read: SourceRead, to: Path) -> str:
+    """The frozen copy into ``to``, at most its size in bytes; its SHA-256. ``If-Match``
+    names its ETag: S3 answers 412 for any other object, and the attempt fails."""
     digest = hashlib.sha256()
+    size = read.size
     taken = 0
-    async with http.stream("GET", url) as response:
+    async with http.stream("GET", read.url, headers={"If-Match": read.etag}) as response:
         response.raise_for_status()
         with to.open("wb") as out:
             async for chunk in response.aiter_bytes(_CHUNK):
@@ -71,10 +73,17 @@ async def _download(http: httpx.AsyncClient, url: str, to: Path, size: int) -> s
 
 class IntakeActivities:
     def __init__(
-        self, crud: CrudClient, work_dir: Path, http: httpx.AsyncClient | None = None
+        self,
+        crud: CrudClient,
+        work_dir: Path,
+        http: httpx.AsyncClient | None = None,
+        *,
+        sandbox: bool = False,
     ) -> None:
         self._crud = crud
         self._work_dir = work_dir
+        #: The check's child runs in the pod's sandbox container (`runner.py`).
+        self._sandbox = sandbox
         self._http = http or httpx.AsyncClient(timeout=TRANSFER_TIMEOUT)
 
     async def aclose(self) -> None:
@@ -103,13 +112,13 @@ class IntakeActivities:
             folder = Path(scratch)
             file = folder / "upload.bin"
             try:
-                sha256 = await _download(self._http, read.url, file, read.size)
+                sha256 = await _download(self._http, read, file)
             except _SizeMismatchError:
                 result = CheckResult(
                     outcome="refused", reason="The file is not the size it was sent as."
                 )
             else:
-                verdict = await run_check(file, read.filename, folder)
+                verdict = await run_check(file, read.filename, folder, sandbox=self._sandbox)
                 if verdict.preview is None:
                     result = CheckResult(outcome="refused", reason=verdict.reason)
                 else:

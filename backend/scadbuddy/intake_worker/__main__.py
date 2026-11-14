@@ -9,6 +9,7 @@ import sys
 from collections.abc import Sequence
 
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.intake_worker.hardening import forbid_dumping
 from scadbuddy.intake_worker.settings import IntakeRefusal, IntakeSettings, check_environment
 from scadbuddy.intake_worker.worker import install_stop, run
 
@@ -29,6 +30,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for reason in refusal.reasons:
             logger.error(reason)
         return 2
+    # Before the proof is read: no process of this user may ptrace this one or read its
+    # memory, where the service credential lives (`hardening.py`).
+    forbid_dumping()
     settings = IntakeSettings()  # type: ignore[call-arg]  # read from the environment
     configure_logging(settings.log_level)
     asyncio.run(_main(settings))

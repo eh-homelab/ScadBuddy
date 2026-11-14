@@ -54,6 +54,10 @@ class IntakeSettings(BaseSettings):
     #: Where downloads and the child's files go: a writable volume in a pod whose root
     #: file system is read-only.
     intake_work_dir: Path = Path("/tmp")
+    #: Hand each check to the pod's sandbox container over `intake_work_dir`, an emptyDir
+    #: the two share (`runner.py`, `sandbox.py`), instead of starting the child here. The
+    #: deployment sets it; local runs and tests leave it off.
+    intake_sandbox: bool = False
     #: Checks at once; each holds a download and a child process.
     intake_concurrency: int = 2
     log_level: str = "INFO"

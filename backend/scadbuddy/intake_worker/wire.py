@@ -45,6 +45,8 @@ class SourceRead(BaseModel):
     size: int = Field(ge=1)
     media_type: str
     url: str
+    #: The frozen copy's ETag: sent as ``If-Match``, which the URL signs.
+    etag: str
 
 
 class PreviewAsk(BaseModel):

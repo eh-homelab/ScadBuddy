@@ -74,7 +74,7 @@ run in a pod that holds a database secret (root `CLAUDE.md`, "Database access";
 | --- | --- | --- | --- |
 | Presign | storefront edge, then CRUD | edge none; CRUD yes | text fields only: names, sizes, types. No bytes. |
 | Upload | the browser, straight to the bucket | n/a | the bytes go to a staging key; no ScadBuddy process sees them |
-| Claim | CRUD | yes | a `HEAD` of each staging object for its size. No bytes read. |
+| Claim | CRUD | yes | a server-side `CopyObject` of each staging object to its frozen key, and a `HEAD` of the copy for its size and ETag. No bytes read. |
 | Check and preview | intake worker (new, §7) | none | the full check, the plates, the preview, the SHA-256 |
 | Import | CRUD's `library` queue, through a flow (§8) | yes | copies the bytes to the native library; reads no structure (the worker's plates are passed in, §8.3) |
 | MakerWorld link | Bambuddy, through #6128's API | n/a | Bambuddy downloads; the native copy is #6128's |
@@ -245,14 +245,24 @@ completes ([AWS, presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/use
 ### 6.3 The claim
 
 Edge route `POST /api/store/v1/draft/models`, JSON
-`{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}` (Turnstile is not
-asked again; the allowance was spent at presign). CRUD route
+`{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}`. It is 404
+`requests_disabled` while "Ask for a design" is off. A request that names an upload is not
+asked Turnstile again: the allowance and the check were spent at that upload's presign, and
+each slot is claimed once. A request that names none (links only) takes them here, as the
+presign does: the design requests' `UploadAllowance` (429 `request_limited`), then Turnstile
+action `model`, a passed check spending one (found in review of #6147: a links-only request
+skipped every gate). CRUD route
 `POST /api/v1/crud/storefront/draft/models` (area `models`): each upload must be the
-visitor's, unclaimed and not cleaned up; a `HEAD` of its key must answer exactly the declared size
-(else 422 `upload_missing` or `upload_size`, naming the file). Then one transaction adds the
-request item, its sources and a `checking` state per file, and claims the uploads. After
-commit it signals each file's watcher `claimed` (§6.5) and starts one `CustomerFileCheck` per
-file (§7). A retry with the same idempotency
+visitor's, unclaimed and not cleaned up. Each is then frozen: a server-side `CopyObject` of
+`<prefix>/staging/<id>` to `<prefix>/staging/<id>.frozen`, a key no presigned URL names, and a
+`HEAD` of the copy, which must answer exactly the declared size (else 422 `upload_missing` or
+`upload_size`, naming the file; a copy of the wrong size is deleted). The customer's PUT URL
+stays valid up to 15 minutes after the claim, so nothing after the claim reads the original:
+the check and the import read only the frozen copy. Then one transaction adds the request
+item, its sources and a `checking` state per file, claims the uploads and keeps each copy's
+ETag (`storefront_uploads.frozen_etag`). After commit it deletes the writable originals (best
+effort; the watcher deletes every staging key of the file when it ends, §6.5), signals each
+file's watcher `claimed` (§6.5) and starts one `CustomerFileCheck` per file (§7). A retry with the same idempotency
 key answers its first reply, as `add_request` does. The CRUD service never reads the bytes.
 
 ### 6.4 The bucket's CORS rule
@@ -354,7 +364,11 @@ a claim, `orders/storefront/intake.py` `start_checks`, workflow id
 1. asks the CRUD service for a presigned `GET` of the staging object
    (`POST /api/v1/internal/crud/intake/sources/{id}/read`, area `sources`, 5 minutes; 409
    `not_checking` for a source that no longer waits, which ends the run) and downloads it
-   to its disk, counting bytes (at most the declared size; any other size is refused);
+   to its disk, counting bytes (at most the declared size; any other size is refused). The
+   GET is of the frozen copy (§6.3) and signs `If-Match` of its ETag, which the worker
+   sends, so S3 answers 412 for any other object at that key and the attempt fails. The
+   import (§8, PR 5) copies the same key with `CopySourceIfMatch` and checks the SHA-256
+   the worker reported;
 2. checks it by content, never by name or declared type:
    - a 3MF starts `PK\x03\x04`; a binary STL is `84 + 50 × n` bytes for the uint32 `n` at
      offset 80; otherwise printable ASCII starting `solid` is an ASCII STL; the name's
@@ -375,8 +389,10 @@ a claim, `orders/storefront/intake.py` `start_checks`, workflow id
 4. posts the result: `PUT /api/v1/internal/crud/intake/sources/{id}/check` (an
    `Idempotency-Key` that is the same on each retry). The CRUD service checks the result
    with Pydantic, reads the preview as opaque bytes (at most 4 MiB; none is 409
-   `preview_missing`), stores it in the content store as `customer-preview-<sha256>` held by
-   the source (`blob_refs` holder `order_item_source`, dropped by a trigger with the source),
+   `preview_missing`), stores it in the content store as `customer-preview-<sha256>`, the
+   SHA-256 of the preview bytes it read, never a hash the worker reports (the file's SHA-256
+   is kept as the blob's metadata only), so no verdict can point a source at another file's
+   preview; it is held by the source (`blob_refs` holder `order_item_source`, dropped by a trigger with the source),
    deletes the staging preview, and signals the watcher `checked`. A refusal writes
    `refused` and the reason; a check whose attempts all fail (a timeout, a crash) writes
    `failed`, which the back office can run again (PR 4). A verdict for a source that
@@ -390,6 +406,33 @@ worker is not versioned (no worker deployment): a change to the workflow's comma
 behind `workflow.patched`. It serves `/healthz` on 9090. Its child gets no inherited file
 descriptor but its three standard streams, all `/dev/null` (`close_fds`), so it cannot
 reach the worker's sockets.
+
+**The child's sandbox.** Three layers keep a parser exploit away from the worker's
+credential (`intake_worker/hardening.py`, `runner.py`, `sandbox.py`):
+
+- The worker makes itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`), before it
+  reads its proof, so no process of its user can `ptrace` it or read its
+  `/proc/<pid>/mem` or `environ`
+  ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)); the child does the same.
+- The child calls `unshare(CLONE_NEWUSER | CLONE_NEWNET)` before it reads the file: a new
+  network namespace has only a loopback device that is down, so the parse reaches no socket
+  ([network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)).
+  A container runtime's default seccomp profile may refuse it; the check then goes on, and
+  the worker logs the refusal once (the verdict's `isolation`). Measured on WSL2
+  (Linux 6.6.87.2) on 2026-11-14 by `tests/intake_worker/test_runner.py`
+  `test_an_isolated_child_reaches_no_socket`: allowed, and a connect to a host loopback
+  listener fails.
+- The deployment runs the child in a second container of the pod, `sandbox` (`python -m
+  scadbuddy.intake_worker.sandbox`): another `runAsUser`, no ServiceAccount token, no proof
+  volume, `readOnlyRootFilesystem`, sharing with the worker only an `emptyDir` (the spool)
+  through which the worker hands it the file and gets the verdict and the preview back
+  (`SCADBUDDY_INTAKE_SANDBOX=true` on the worker; the protocol is `runner.py`'s docstring).
+  The sandbox refuses to start with a database secret, the KEK or a proof. The worker reads
+  what comes back as untrusted: the verdict capped at 1 MiB and validated, the preview capped
+  at 4 MiB. Without the setting (development, tests) the worker starts the child itself. The
+  two containers share the pod's network namespace, so where the runtime refuses the child's
+  own namespace, the pod's NetworkPolicy (DNS, the CRUD port, Temporal and the bucket host
+  only) bounds what an exploited parse can reach; it holds no credential for the CRUD port.
 
 **Serving the preview (PR 4).** The preview is bytes the untrusted check made. ScadBuddy
 never decodes, resizes or re-encodes it, and serves it only as `Content-Type: image/png`,

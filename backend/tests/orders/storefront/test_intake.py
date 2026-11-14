@@ -27,8 +27,11 @@ from tests.orders.storefront.test_model_requests import (  # noqa: F401  (fixtur
     ask,
     backend,
     checker,
+    frozen,
     on_app,
+    put,
     rows,
+    slots,
     staged,
     sweep,
     uploaded,
@@ -107,7 +110,36 @@ def test_the_worker_reads_the_staged_file_through_a_presigned_get(
         len(STL),
         "model/stl",
     )
-    assert httpx.get(read["url"]).content == STL
+    # The GET reads the claim's frozen copy, with If-Match of its ETag.
+    assert ".frozen?" in read["url"]
+    assert httpx.get(read["url"], headers={"If-Match": read["etag"]}).content == STL
+
+
+def test_the_claim_freezes_the_file_so_a_later_put_changes_nothing(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    worker: Intake,
+) -> None:
+    [slot] = slots(asks, [("cube.stl", STL, "model/stl")]).json()["uploads"]
+    put(slot, STL)
+    assert ask(asks, {"uploads": [slot["id"]]}).status_code == 200
+    [upload] = rows(s3_api, "SELECT frozen_etag FROM storefront_uploads")
+    assert upload["frozen_etag"]
+    # The writable original is gone; the frozen copy, which no URL names, holds the file.
+    assert staged(s3_api, slot["id"]) is None
+    assert frozen(s3_api, slot["id"]) == len(STL)
+    # The customer's PUT URL is still valid: a second PUT of other bytes lands on the
+    # original key, which nothing reads.
+    other = STL.replace(b"cube", b"evil")
+    put(slot, other)
+    [row] = rows(s3_api, "SELECT id FROM order_item_sources WHERE upload_id = %s", slot["id"])
+    read = worker.read(row["id"]).json()
+    assert read["etag"] == upload["frozen_etag"]
+    assert httpx.get(read["url"], headers={"If-Match": read["etag"]}).content == STL
+    # Another ETag is refused (S3 also refuses a GET with no If-Match, as the header is
+    # signed; moto checks no signature).
+    wrong = {"If-Match": '"ffffffffffffffffffffffffffffffff"'}
+    assert httpx.get(read["url"], headers=wrong).status_code == 412
 
 
 def test_a_ready_verdict_keeps_its_facts_and_its_preview(
@@ -133,17 +165,50 @@ def test_a_ready_verdict_keeps_its_facts_and_its_preview(
         "check_reason": None,
         "facts": FACTS,
         "sha256": SHA,
-        "preview_key": preview_key(SHA),
+        "preview_key": preview_key(PNG),
     }
     [hold] = rows(s3_api, "SELECT key, holder_kind FROM blob_refs WHERE holder_id = %s", source_id)
-    assert hold == {"key": preview_key(SHA), "holder_kind": PREVIEW_HOLDER}
+    assert hold == {"key": preview_key(PNG), "holder_kind": PREVIEW_HOLDER}
     store = backend(s3_api)
     key = staging_key(store.settings.prefix, upload_id, preview=True)
     assert on_app(s3_api, store.staged_size, key) is None  # the staged copy is gone
-    assert staged(s3_api, upload_id) == len(STL)  # the file waits for its import
+    assert frozen(s3_api, upload_id) == len(STL)  # the file waits for its import
     assert (upload_id, "checked") in watcher.signals
     # The verdict sent again answers the first.
     assert worker.check(source_id, body).json() == {"recorded": True}
+
+
+def test_a_verdict_cannot_name_another_files_preview(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    worker: Intake,
+) -> None:
+    """The preview's key is the SHA-256 of the bytes the CRUD service read, never the hash
+    the worker reports: a verdict that reports another file's SHA-256 keeps its own
+    preview."""
+    first, _ = claimed(asks)
+    put_preview(worker, first)
+    assert worker.check(first, {"outcome": "ready", "sha256": SHA, "facts": FACTS}).json() == {
+        "recorded": True
+    }
+    [upload] = uploaded(asks, [("cube.stl", STL, "model/stl")], key="u2")
+    assert ask(asks, {"uploads": [upload]}, key="m2").status_code == 200
+    [row] = rows(s3_api, "SELECT id FROM order_item_sources WHERE upload_id = %s", upload)
+    second = row["id"]
+    other = PNG + b"\x01"
+    slot = worker.preview(second, len(other)).json()
+    httpx.put(slot["url"], content=other, headers=slot["headers"]).raise_for_status()
+    body = {"outcome": "ready", "sha256": SHA, "facts": FACTS}
+    assert worker.check(second, body, key="k2").json() == {"recorded": True}
+    keys = rows(
+        s3_api,
+        "SELECT id, preview_key FROM order_item_sources WHERE id = ANY(%s)",
+        [first, second],
+    )
+    assert {row["id"]: row["preview_key"] for row in keys} == {
+        first: preview_key(PNG),
+        second: preview_key(other),
+    }
 
 
 def test_a_refused_verdict_keeps_its_reason(

@@ -2351,11 +2351,20 @@ holds the manifest (spec §12).
   is read-only; default `/tmp`), `SCADBUDDY_INTAKE_CONCURRENCY` (checks at once, default 2)
   and `SCADBUDDY_LOG_LEVEL`.
 - **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
-  minutes, so size the pod's memory limit for `SCADBUDDY_INTAKE_CONCURRENCY` such children,
-  and its work volume for as many 256 MiB downloads.
-- **Pod:** `runAsNonRoot`, `readOnlyRootFilesystem` with an `emptyDir` for the work volume,
-  and no ServiceAccount token automount: the only token is the projected one its proof
-  needs.
+  minutes, so size the sandbox container's memory limit for `SCADBUDDY_INTAKE_CONCURRENCY`
+  such children, and the work volume for as many 256 MiB downloads.
+- **Two containers (spec §7, "The child's sandbox").** The worker container runs
+  `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true`; it never parses a
+  file. The `sandbox` container runs `python -m scadbuddy.intake_worker.sandbox`, which runs
+  each check's child: another `runAsUser` than the worker's, no ServiceAccount token and no
+  proof volume (it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set),
+  `readOnlyRootFilesystem`. The two share only the work volume, an `emptyDir` mounted at
+  `SCADBUDDY_INTAKE_WORK_DIR` in both, with a pod `fsGroup` both users are in (the spool's
+  files are group read-write). Both take the same `SCADBUDDY_INTAKE_CONCURRENCY`.
+- **Pod:** `runAsNonRoot`, `readOnlyRootFilesystem` in both containers, and no ServiceAccount
+  token automount: the only token is the projected one the worker container's proof needs,
+  mounted in that container only.
 - **Network:** its egress allows DNS, the API's 8082, Temporal and the bucket host only:
   nothing else on the LAN and no other internet.
 

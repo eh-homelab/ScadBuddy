@@ -1,11 +1,13 @@
 """The CRUD side of a customer file's check (#6133, spec 2026-11-13 §7).
 
 The check runs in the intake worker, which holds no database secret (#5295, #5296). This
-process never opens the file: it presigns a GET of the staging object, presigns a PUT of
-its preview, and records the verdict the worker posts. The preview is taken as opaque
+process never opens the file: it presigns a GET of the claim's frozen copy, presigns a PUT
+of its preview, and records the verdict the worker posts. The preview is taken as opaque
 bytes too: read capped, stored in the content store as `preview_key` (``customer-preview-
-<sha256>``), held by the source (``blob_refs`` holder `PREVIEW_HOLDER`; the migration
-``…_intake_worker.sql`` drops the hold with the source), and the staging copy deleted.
+<sha256 of the preview bytes this process read>``, never a hash the worker reports, so no
+verdict can name another file's preview), held by the source (``blob_refs`` holder
+`PREVIEW_HOLDER`; the migration ``…_intake_worker.sql`` drops the hold with the source),
+and the staging copy deleted.
 
 `start_checks` starts one ``CustomerFileCheck`` per file source on the intake worker's queue
 after a claim. A start that fails is logged; the staged files' backstop
@@ -16,6 +18,7 @@ after a claim. A start that fails is logged; the staged files' backstop
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 from collections.abc import Sequence
@@ -29,7 +32,7 @@ from temporalio.service import RPCError
 
 from scadbuddy.core.events import OrderChanged, emit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.crud.idempotency import Replay, idempotent_write
+from scadbuddy.crud.idempotency import Replay, idempotent_write, stored
 from scadbuddy.intake_worker.wire import (
     CHECK_WORKFLOW,
     MAX_PREVIEW_BYTES,
@@ -63,9 +66,10 @@ SOURCE_NOT_FOUND: Final = "source_not_found"
 PREVIEW_MISSING: Final = "preview_missing"
 
 
-def preview_key(sha256: str) -> str:
-    """The content store's key of a checked file's preview."""
-    return f"customer-preview-{sha256}"
+def preview_key(png: bytes) -> str:
+    """The content store's key of a checked file's preview: the SHA-256 of the preview's
+    own bytes, as `_store_preview` read them."""
+    return f"customer-preview-{hashlib.sha256(png).hexdigest()}"
 
 
 class Checker(Protocol):
@@ -136,14 +140,15 @@ def _waiting(conn: Any, source_id: str, *, lock: bool = False) -> Any:
     """The file source, while it waits for its check: 404 for none, 409 for one that no
     longer waits (checked, or its staged file gone)."""
     row = conn.execute(
-        "SELECT id, order_id, upload_id, filename, size, media_type, check_status"
-        " FROM order_item_sources WHERE id = %s AND kind = 'file'"
-        + (" FOR UPDATE" if lock else ""),
+        "SELECT s.id, s.order_id, s.upload_id, s.filename, s.size, s.media_type,"
+        " s.check_status, u.frozen_etag"
+        " FROM order_item_sources s LEFT JOIN storefront_uploads u ON u.id = s.upload_id"
+        " WHERE s.id = %s AND s.kind = 'file'" + (" FOR UPDATE OF s" if lock else ""),
         (source_id,),
     ).fetchone()
     if row is None:
         raise problem(status.HTTP_404_NOT_FOUND, SOURCE_NOT_FOUND, "No such file.")
-    if row["check_status"] != "checking" or row["upload_id"] is None:
+    if row["check_status"] != "checking" or row["upload_id"] is None or row["frozen_etag"] is None:
         raise problem(
             status.HTTP_409_CONFLICT, NOT_CHECKING, "This file no longer waits for a check."
         )
@@ -156,17 +161,21 @@ def _read(state: AppState, source_id: str) -> Any:
 
 
 async def read_source(state: AppState, source_id: str) -> SourceRead:
-    """``POST …/intake/sources/{id}/read``: a presigned GET of the staged file."""
+    """``POST …/intake/sources/{id}/read``: a presigned GET of the claim's frozen copy
+    (`model_requests._claimable`), never of the original the customer can still PUT to.
+    The GET is signed with ``If-Match`` of the copy's ETag, so S3 answers 412 for any other
+    object at that key."""
     backend = _backend(state)
     row = await asyncio.to_thread(_read, state, source_id)
-    key = staging_key(backend.settings.prefix, row["upload_id"])
-    url = await backend.presign_staged_get(key, URL_TTL)
+    key = staging_key(backend.settings.prefix, row["upload_id"], frozen=True)
+    url = await backend.presign_staged_get(key, URL_TTL, if_match=row["frozen_etag"])
     return SourceRead(
         source_id=row["id"],
         filename=row["filename"],
         size=row["size"],
         media_type=row["media_type"],
         url=url,
+        etag=row["frozen_etag"],
     )
 
 
@@ -183,21 +192,28 @@ async def preview_slot(state: AppState, source_id: str, ask: PreviewAsk) -> Prev
 async def _store_preview(
     state: AppState, backend: S3ContentBackend, upload_id: str, sha: str
 ) -> str:
-    """The staged preview copied into the content store as opaque bytes; its key."""
+    """The staged preview copied into the content store as opaque bytes, keyed by the
+    SHA-256 of those bytes (`preview_key`); its key. The file's SHA-256 the worker reported
+    (``sha``) is metadata only."""
     content = state.store.content
     assert content is not None
-    key = preview_key(sha)
-    stat = await asyncio.to_thread(content.index.get, key)
-    if stat is not None and stat.ref.backend == content.name:
-        return key
     staged = staging_key(backend.settings.prefix, upload_id, preview=True)
     data = await backend.read_staged(staged, MAX_PREVIEW_BYTES)
     if data is None:
         raise problem(
             status.HTTP_409_CONFLICT, PREVIEW_MISSING, "The check's preview was not uploaded."
         )
+    key = preview_key(data)
+    stat = await asyncio.to_thread(content.index.get, key)
+    if stat is not None and stat.ref.backend == content.name:
+        return key
     await content.put(
-        "media", io.BytesIO(data), name=f"{upload_id}.png", scope=BlobScope(), key=key
+        "media",
+        io.BytesIO(data),
+        name=f"{upload_id}.png",
+        scope=BlobScope(),
+        key=key,
+        meta={"file_sha256": sha},
     )
     return key
 
@@ -209,14 +225,19 @@ async def record_check(
     preview is stored first (`_store_preview`); then, under the order's lock, the source
     takes its status, reason, facts, SHA-256 and preview, and the preview's hold. A source
     that stopped waiting meanwhile records nothing (``recorded`` false). After the commit
-    the staged preview is deleted, the order's page told and the file's watcher woken."""
+    the staged preview is deleted, the order's page told and the file's watcher woken. A
+    replay of a committed key answers its first reply before anything is read (the staged
+    preview is gone by then)."""
     backend = _backend(state)
     asked = result.model_dump(mode="json")
+    replay = await asyncio.to_thread(_replay, state, key, asked)
+    if replay is not None:
+        return CheckRecorded.model_validate(replay.body)
     first = await asyncio.to_thread(_read_any, state, source_id)
-    stored: str | None = None
+    preview: str | None = None
     if result.outcome == "ready" and first is not None and first["upload_id"] is not None:
         assert result.sha256 is not None
-        stored = await _store_preview(state, backend, first["upload_id"], result.sha256)
+        preview = await _store_preview(state, backend, first["upload_id"], result.sha256)
     told: list[Any] = []
 
     def write() -> Replay:
@@ -236,7 +257,7 @@ async def record_check(
                     row = _waiting(conn, source_id, lock=True)
                 except ApiError:
                     return Replay(200, {"recorded": False})
-                if result.outcome == "ready" and stored is None:
+                if result.outcome == "ready" and preview is None:
                     return Replay(200, {"recorded": False})
                 conn.execute(
                     "UPDATE order_item_sources SET check_status = %s, check_reason = %s,"
@@ -247,15 +268,15 @@ async def record_check(
                         result.reason,
                         Jsonb(result.facts.model_dump(mode="json")) if result.facts else None,
                         result.sha256,
-                        stored,
+                        preview,
                         source_id,
                     ),
                 )
-                if stored is not None:
+                if preview is not None:
                     conn.execute(
                         "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
                         " ON CONFLICT DO NOTHING",
-                        (stored, PREVIEW_HOLDER, source_id),
+                        (preview, PREVIEW_HOLDER, source_id),
                     )
                 told.append((order, row["upload_id"]))
                 return Replay(200, {"recorded": True})
@@ -264,7 +285,7 @@ async def record_check(
 
     done = await asyncio.to_thread(write)
     for order, upload_id in told:
-        if stored is not None:
+        if preview is not None:
             await backend.remove_staged(
                 staging_key(backend.settings.prefix, upload_id, preview=True)
             )
@@ -276,6 +297,11 @@ async def record_check(
         )
         await poke(state, [upload_id], "checked")
     return CheckRecorded.model_validate(done.body)
+
+
+def _replay(state: AppState, key: str, asked: Any) -> Replay | None:
+    with state.projection.pool.connection() as conn:
+        return stored(conn, "intake", key, CHECK_ROUTE, asked)
 
 
 def _read_any(state: AppState, source_id: str) -> Any:

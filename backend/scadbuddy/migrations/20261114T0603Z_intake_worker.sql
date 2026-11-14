@@ -8,6 +8,12 @@ ALTER TABLE service_caller_suspensions DROP CONSTRAINT service_caller_suspension
 ALTER TABLE service_caller_suspensions ADD CONSTRAINT service_caller_suspensions_caller_check
     CHECK (caller IN ('agent', 'print', 'projects', 'render', 'storefront', 'intake'));
 
+-- The claim freezes each file: a server-side copy to a key no presigned URL names
+-- (`orders/storefront/model_requests.py` `_claimable`). Its ETag is kept here; the check
+-- reads the copy with `If-Match` of it, and the import (PR 5) copies it with
+-- `CopySourceIfMatch`. NULL until the claim.
+ALTER TABLE storefront_uploads ADD COLUMN frozen_etag text;
+
 -- A checked file's preview is held by its source (`orders/storefront/intake.py`,
 -- holder `order_item_source`). A source goes only by a cascade (its item's or its order's
 -- delete), so the hold goes with it here, and the blob sweep takes the preview once

@@ -21,7 +21,8 @@ from tests.intake_worker.test_check import box_stl
 
 HEADER = {"X-ScadBuddy-Crud": "1"}
 SOURCE = "0f0e0d0c-0000-4000-8000-000000000001"
-GET_URL = "https://bucket.example/shop/staging/abc?X-Amz-Signature=s"
+GET_URL = "https://bucket.example/shop/staging/abc.frozen?X-Amz-Signature=s"
+ETAG = '"0123456789abcdef0123456789abcdef"'
 PUT_URL = "https://bucket.example/shop/staging/abc.png?X-Amz-Signature=s"
 
 
@@ -35,6 +36,8 @@ class Fake:
         self.posted: list[tuple[dict[str, Any], str | None]] = []
         self.preview: bytes | None = None
         self.preview_headers: dict[str, str] = {}
+        #: The ETag the bucket holds at the frozen key (another one: the object changed).
+        self.etag = ETAG
 
     def crud(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -48,6 +51,7 @@ class Fake:
                 "size": self.declared,
                 "media_type": "model/stl",
                 "url": GET_URL,
+                "etag": ETAG,
             }
             return httpx.Response(200, json=body, headers=HEADER)
         if path == f"{BASE}/{SOURCE}/preview":
@@ -62,6 +66,8 @@ class Fake:
 
     def bucket(self, request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
+            if request.headers.get("If-Match") != self.etag:
+                return httpx.Response(412)
             return httpx.Response(200, content=self.data)
         self.preview = request.content
         self.preview_headers = dict(request.headers)
@@ -115,6 +121,14 @@ def test_a_file_not_its_declared_size_is_refused(tmp_path: Path) -> None:
         "facts": None,
     }
     assert fake.preview is None
+
+
+def test_a_frozen_copy_of_another_etag_fails_the_attempt(tmp_path: Path) -> None:
+    fake = Fake(box_stl())
+    fake.etag = '"ffffffffffffffffffffffffffffffff"'
+    with pytest.raises(httpx.HTTPStatusError, match="412"):
+        run(fake, tmp_path)
+    assert fake.posted == [] and fake.preview is None
 
 
 def test_a_file_that_is_not_a_model_is_refused(tmp_path: Path) -> None:

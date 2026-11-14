@@ -4,11 +4,13 @@ The files never pass through ScadBuddy: `presign_uploads` writes one `storefront
 row per file and answers a presigned PUT for its staging key (`store/s3.py`
 `presign_put`: the exact size and the type are signed in, `UPLOAD_URL_TTL`). The browser
 PUTs each file straight to the bucket. `add_model_request` then claims the uploads the
-body names: each must be the visitor's, unclaimed, and a ``HEAD`` of its key must answer
-exactly its declared size. No byte of a file is read here (#5295: the intake worker
-checks it, `order_item_sources.check_status`). The same transaction adds a ``request``
-item to the visitor's draft, its `order_item_model_requests` row (the colours asked for)
-and one `order_item_sources` row per file and link, and claims the uploads.
+body names: each must be the visitor's and unclaimed, and is frozen (`_claimable`: a
+server-side copy to a key no presigned URL names, whose ``HEAD`` must answer exactly its
+declared size; the check and the import read only the copy). No byte of a file is read
+here (#5295: the intake worker checks it, `order_item_sources.check_status`). The same
+transaction adds a ``request`` item to the visitor's draft, its `order_item_model_requests`
+row (the colours asked for) and one `order_item_sources` row per file and link, and claims
+the uploads.
 
 A link is stored as text only (`orders/customer_links.py`): this side never fetches it.
 
@@ -26,7 +28,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
@@ -147,6 +149,8 @@ class _Slot:
     filename: str
     size: int
     media_type: str
+    #: The ETag of the claim's frozen copy (`_claimable`); empty before the claim.
+    etag: str = ""
 
 
 async def _signed(backend: S3ContentBackend, slots: Sequence[_Slot]) -> UploadSlots:
@@ -351,9 +355,12 @@ def _upload_missing(index: int) -> ApiError:
 async def _claimable(
     state: AppState, backend: S3ContentBackend, visitor_id: str, ids: Sequence[str]
 ) -> list[_Slot]:
-    """The visitor's unclaimed slots of ``ids``, each ``HEAD``-checked: 422
-    ``upload_missing`` for an unknown, foreign, claimed or absent one, ``upload_size`` for
-    one whose object is not its declared size. No byte is read."""
+    """The visitor's unclaimed slots of ``ids``, each frozen: copied server side to its
+    frozen key (`staging_key` ``frozen``), which no presigned URL names, so the customer's
+    PUT URL (valid up to `UPLOAD_URL_TTL`) cannot change the file after the claim. The
+    check and the import read only that copy. 422 ``upload_missing`` for an unknown,
+    foreign, claimed or absent one, ``upload_size`` for one whose copy is not its declared
+    size (the copy is deleted). No byte passes through this process."""
     for index, slot_id in enumerate(ids):
         if UPLOAD_ID.fullmatch(slot_id) is None or ids.index(slot_id) != index:
             raise _upload_missing(index)
@@ -378,15 +385,29 @@ async def _claimable(
         slot = by_id.get(slot_id)
         if slot is None:
             raise _upload_missing(index)
-        size = await backend.staged_size(slot.object_key)
-        if size is None:
+        frozen_key = staging_key(backend.settings.prefix, slot.id, frozen=True)
+        frozen = await backend.freeze_staged(slot.object_key, frozen_key)
+        if frozen is None:
             raise _upload_missing(index)
+        size, etag = frozen
         if size != slot.size:
+            await backend.remove_staged(frozen_key)
             raise _unprocessable(
                 "upload_size", "A file arrived incomplete. Upload it again.", index=index
             )
-        slots.append(slot)
+        slots.append(replace(slot, etag=etag))
     return slots
+
+
+async def _drop_originals(backend: S3ContentBackend, slots: Sequence[_Slot]) -> None:
+    """The claimed slots' writable originals deleted, now that their frozen copies are
+    claimed. Best effort: a failure is logged, and the file's watcher deletes every staging
+    key of the slot when it ends (`staged_files.step`)."""
+    for slot in slots:
+        try:
+            await backend.remove_staged(slot.object_key)
+        except Exception:
+            logger.warning("could not delete the claimed original %s", slot.id, exc_info=True)
 
 
 def _upload_taken() -> ApiError:
@@ -446,9 +467,10 @@ async def add_model_request(
                 raise draft_full()
             if slots:
                 claimed = conn.execute(
-                    "UPDATE storefront_uploads SET claimed_at = now()"
-                    " WHERE id = ANY(%s) AND visitor_id = %s AND claimed_at IS NULL",
-                    ([slot.id for slot in slots], visitor.id),
+                    "UPDATE storefront_uploads AS u SET claimed_at = now(), frozen_etag = v.etag"
+                    " FROM unnest(%s::text[], %s::text[]) AS v(id, etag)"
+                    " WHERE u.id = v.id AND u.visitor_id = %s AND u.claimed_at IS NULL",
+                    ([slot.id for slot in slots], [slot.etag for slot in slots], visitor.id),
                 ).rowcount
                 if claimed != len(slots):
                     raise _upload_taken()
@@ -510,6 +532,7 @@ async def add_model_request(
         done = await asyncio.to_thread(write)
     except LifecycleError:
         raise draft_changed() from None
+    await _drop_originals(backend, slots)
     await poke(state, [slot.id for slot in slots], "claimed")
     await start_checks(state, checks)
     return done

@@ -357,6 +357,23 @@ def test_a_preview_key_sits_beside_its_upload() -> None:
     assert staging_key("t", STAGED, preview=True) == f"t/staging/{STAGED}.png"
 
 
+async def test_a_frozen_copy_keeps_the_bytes_of_the_moment_it_was_made(s3: S3Settings) -> None:
+    backend = S3ContentBackend(s3)
+    source, frozen = staging_key("t", STAGED), staging_key("t", STAGED, frozen=True)
+    assert frozen == f"t/staging/{STAGED}.frozen"
+    try:
+        assert await backend.freeze_staged(source, frozen) is None  # nothing to copy
+        client = await backend._s3()
+        await client.put_object(Bucket=s3.bucket, Key=source, Body=b"first")
+        size, etag = await backend.freeze_staged(source, frozen) or (0, "")
+        assert size == 5 and etag.startswith('"')
+        await client.put_object(Bucket=s3.bucket, Key=source, Body=b"later")
+        held = await client.get_object(Bucket=s3.bucket, Key=frozen, IfMatch=etag)
+        assert await held["Body"].read() == b"first"
+    finally:
+        await backend.aclose()
+
+
 async def test_staged_objects_lists_the_staging_area_only(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3)
     try:

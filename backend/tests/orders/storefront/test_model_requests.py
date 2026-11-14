@@ -1,6 +1,6 @@
 """A storefront customer's own models on the CRUD side (#6133, spec 2026-11-13 §5, §6):
 ``POST …/storefront/uploads`` answers a presigned PUT per file into the store's staging
-area, ``POST …/storefront/draft/models`` claims them after a ``HEAD`` each and adds a
+area, ``POST …/storefront/draft/models`` claims them (a server-side frozen copy each) and adds a
 request item with its files and links, and the storefront drafts sweep deletes what is
 never claimed."""
 
@@ -401,6 +401,13 @@ def staged(app: TestClient, slot_id: str) -> int | None:
     return on_app(app, store.staged_size, staging_key(store.settings.prefix, slot_id))
 
 
+def frozen(app: TestClient, slot_id: str) -> int | None:
+    """The size of the claim's frozen copy of ``slot_id``, or None."""
+    store = backend(app)
+    key = staging_key(store.settings.prefix, slot_id, frozen=True)
+    return on_app(app, store.staged_size, key)
+
+
 def step(app: TestClient, slot_id: str, now: datetime) -> StagedFileState:
     return on_app(app, lambda: staged_files.step(_state(app), slot_id, now=now))
 
@@ -490,7 +497,7 @@ def test_a_removed_line_tells_the_watcher_and_frees_its_file(
     assert (slot_id, "unclaimed") in watcher.signals
     found = step(s3_api, slot_id, datetime.now(UTC))
     assert (found.phase, found.reason) == ("ended", "removed")
-    assert staged(s3_api, slot_id) is None
+    assert frozen(s3_api, slot_id) is None
 
 
 def test_a_file_of_a_cart_not_sent_expires_72_hours_after_its_claim(
@@ -503,7 +510,7 @@ def test_a_file_of_a_cart_not_sent_expires_72_hours_after_its_claim(
     assert step(s3_api, slot_id, row["claimed_at"] + timedelta(hours=71)).phase == "claimed"
     found = step(s3_api, slot_id, row["claimed_at"] + STAGING_TTL)
     assert (found.phase, found.reason) == ("ended", "expired")
-    assert staged(s3_api, slot_id) is None
+    assert frozen(s3_api, slot_id) is None
     [source] = asks.get("/draft").json()["items"][0]["sources"]
     assert (source["check_status"], source["check_reason"]) == ("refused", EXPIRED)
 
@@ -519,9 +526,9 @@ def test_a_file_of_a_sent_order_has_no_deadline(
     assert (slot_id, "submitted") in watcher.signals
     found = step(s3_api, slot_id, datetime.now(UTC) + timedelta(days=30))
     assert (found.phase, found.due) == ("submitted", None)
-    assert staged(s3_api, slot_id) == len(STL)
+    assert frozen(s3_api, slot_id) == len(STL)
     assert sweep(s3_api, datetime.now(UTC) + timedelta(days=30)) == 0
-    assert staged(s3_api, slot_id) == len(STL)
+    assert frozen(s3_api, slot_id) == len(STL)
 
 
 def test_a_declined_file_of_a_sent_order_is_cleaned_up(
@@ -535,7 +542,7 @@ def test_a_declined_file_of_a_sent_order_is_cleaned_up(
         conn.execute("UPDATE order_item_sources SET status = 'declined'")
     found = step(s3_api, slot_id, datetime.now(UTC))
     assert (found.phase, found.reason) == ("ended", "declined")
-    assert staged(s3_api, slot_id) is None
+    assert frozen(s3_api, slot_id) is None
 
 
 def test_a_step_run_again_after_its_row_went_deletes_the_objects(
@@ -564,12 +571,14 @@ def test_the_backstop_takes_an_old_object_no_row_names(
     async def plant() -> None:
         client = await store.client()
         await client.put_object(Bucket=store.settings.bucket, Key=stray, Body=b"x")
+        await client.put_object(Bucket=store.settings.bucket, Key=f"{stray}.frozen", Body=b"x")
 
     on_app(s3_api, plant)
     assert sweep(s3_api, datetime.now(UTC) + timedelta(minutes=10)) == 0
     assert on_app(s3_api, store.staged_size, stray) == 1
-    assert sweep(s3_api, datetime.now(UTC) + timedelta(days=2)) == 1
+    assert sweep(s3_api, datetime.now(UTC) + timedelta(days=2)) == 2
     assert on_app(s3_api, store.staged_size, stray) is None
+    assert on_app(s3_api, store.staged_size, f"{stray}.frozen") is None
     # A named object only goes with its row, by its watcher.
     assert staged(s3_api, kept) == len(STL)
 

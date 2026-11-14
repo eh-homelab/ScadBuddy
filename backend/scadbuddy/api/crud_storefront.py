@@ -49,8 +49,8 @@ edge's checks.
 
 Area ``models`` (#6133, `orders/storefront/model_requests.py`): a customer's own models.
 ``POST …/uploads`` (``Idempotency-Key`` required) answers a presigned PUT per file into the
-store's staging area; ``POST …/draft/models`` claims the uploads it names (a ``HEAD`` each,
-no byte read) and adds a request item with its files and links as text; ``GET
+store's staging area; ``POST …/draft/models`` claims the uploads it names (each frozen by a
+server-side copy, no byte read) and adds a request item with its files and links as text; ``GET
 …/uploads/config`` is the origin of those PUTs, for the edge's page CSP. Both writes are
 404 ``requests_disabled`` while "Ask for a design" is off (unless the key holds a committed
 answer), and every route is 503 ``storefront_needs_s3`` on a store that is not S3.
@@ -605,8 +605,9 @@ async def draft_models(
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> DraftView:
     """A "print my own model" request added to the visitor's draft (#6133,
-    `model_requests.add_model_request`): the uploads it names, claimed after a ``HEAD``
-    each, and its links as text. 404 ``requests_disabled`` as ``…/uploads``."""
+    `model_requests.add_model_request`): the uploads it names, each frozen by a
+    server-side copy and claimed, and its links as text. 404 ``requests_disabled`` as
+    ``…/uploads``."""
     key = required_key(idempotency_key)
     if not await asyncio.to_thread(_requests_enabled, state, key, MODELS_ROUTE):
         raise requests_disabled()

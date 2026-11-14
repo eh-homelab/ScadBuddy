@@ -1385,13 +1385,17 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   per file and answers a presigned PUT of `<prefix>/staging/<id>` (`store/s3.py`
   `presign_put`, a Signature V4 client of its own so `content-length;content-type` are
   signed, 15 minutes); the browser PUTs straight to the bucket. `add_model_request` claims the
-  uploads (each the visitor's, unclaimed, and a `HEAD` of exactly its declared size; no byte
-  read) and adds a `request` item, its `order_item_model_requests` row (the colours asked
+  uploads (each the visitor's and unclaimed, frozen by a server-side copy to
+  `<prefix>/staging/<id>.frozen`, which no presigned URL names, whose `HEAD` must be exactly
+  its declared size; its ETag kept in `storefront_uploads.frozen_etag`; the writable original
+  deleted after the commit; no byte read; the check and the import read only the copy) and adds a `request` item, its `order_item_model_requests` row (the colours asked
   for) and its `order_item_sources` (files `checking`; links as text only, typed by
   `orders/customer_links.py`: `makerworld` `open`, any other print link `manual`, a purchase
   `pending`), in one transaction. Caps (`storefront/wire.py`): 256 MiB a file, 20 files, 10
   print links, 5 purchase links, 1 GiB a request. The edge's presign takes the design
-  requests' `UploadAllowance` and Turnstile action `model`; the page's CSP names the bucket
+  requests' `UploadAllowance` and Turnstile action `model`, and so does the edge's
+  `…/draft/models` when it names no upload (links only); both are 404 `requests_disabled`
+  while requests are off; the page's CSP names the bucket
   in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
   `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
   Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
@@ -1421,10 +1425,15 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   (`orders/storefront/intake.py` `start_checks`, best effort; the backstop above). Its
   activity reads the staged file through the CRUD routes of caller `intake` (area
   `sources`, `api/crud_intake.py`: a presigned GET, a presigned PUT of the preview, the
-  verdict), checks it in a child process (`child.py`: `RLIMIT_AS`, a timeout, its own
-  process group; `check.py`: the kind by content, the zip's directory, the read within the
-  read budget) and posts `ready`, `refused` or, once its attempts are spent, `failed`. The
-  API stores the preview as opaque bytes, `customer-preview-<sha256>`, held by the source
+  verdict; the GET is of the frozen copy, `If-Match` its ETag), checks it in a child process
+  (`child.py`: `RLIMIT_AS`, non-dumpable, `unshare(CLONE_NEWUSER | CLONE_NEWNET)` where
+  allowed, a timeout, its own process group; `check.py`: the kind by content, the zip's
+  directory, the read within the read budget) and posts `ready`, `refused` or, once its
+  attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
+  With `SCADBUDDY_INTAKE_SANDBOX` the child runs in the pod's `sandbox` container
+  (`sandbox.py`, the spool protocol in `runner.py`), never in the worker's. The
+  API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
+  (never the worker's reported hash), held by the source
   (`blob_refs` holder `order_item_source`; the trigger of
   `20261114T0603Z_intake_worker.sql` drops it with the source). The worker is not
   versioned: a change to `intake_worker/workflow.py`'s commands goes behind

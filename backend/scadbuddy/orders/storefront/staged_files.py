@@ -253,6 +253,7 @@ async def step(state: AppState, upload_id: str, *, now: datetime | None = None) 
         return found
     prefix = backend.settings.prefix
     await backend.remove_staged(staging_key(prefix, upload_id))
+    await backend.remove_staged(staging_key(prefix, upload_id, frozen=True))
     await backend.remove_staged(staging_key(prefix, upload_id, preview=True))
     if order is not None:
         emit(
@@ -320,7 +321,7 @@ async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
         if written < now - ORPHAN_AGE:
             old.append(object_key)
     if old:
-        uploads = [key.removesuffix(".png") for key in old]
+        uploads = [key.removesuffix(".png").removesuffix(".frozen") for key in old]
         named = await asyncio.to_thread(_named, state, uploads)
         for object_key, upload in zip(old, uploads, strict=True):
             if upload not in named:

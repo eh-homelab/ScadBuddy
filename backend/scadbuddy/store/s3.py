@@ -50,7 +50,7 @@ def object_key(prefix: str, kind: BlobKind, sha256: str) -> str:
 #: The storefront's staging area (#6133, spec 2026-11-13 §6): an upload slot's object, and
 #: its preview beside it. Nothing here is content-addressed, so `sweep_unrecorded` (which
 #: takes `_OBJECT` keys only) never touches it; `storefront_uploads` rows own it.
-_STAGED = re.compile(r"staging/[0-9a-f]{32}(?:\.png)?")
+_STAGED = re.compile(r"staging/[0-9a-f]{32}(?:\.png|\.frozen)?")
 
 
 #: The canned ACL every staging object is written with, signed into its presigned PUT.
@@ -59,9 +59,12 @@ STAGED_ACL: Final = "private"
 STAGED_PUT_HEADERS: Final = {"x-amz-acl": STAGED_ACL}
 
 
-def staging_key(prefix: str, upload_id: str, *, preview: bool = False) -> str:
-    """The staging object of the upload slot ``upload_id``, or of its preview."""
-    return f"{prefix}/staging/{upload_id}{'.png' if preview else ''}"
+def staging_key(prefix: str, upload_id: str, *, preview: bool = False, frozen: bool = False) -> str:
+    """The staging object of the upload slot ``upload_id``, its preview, or its frozen
+    copy: the claim's server-side copy, which no presigned URL names, so the customer
+    cannot change it after the claim (#6133)."""
+    suffix = ".png" if preview else ".frozen" if frozen else ""
+    return f"{prefix}/staging/{upload_id}{suffix}"
 
 
 def _missing(error: ClientError) -> bool:
@@ -284,9 +287,14 @@ class S3ContentBackend:
         *,
         media_type: str | None = None,
         disposition: str | None = None,
+        if_match: str | None = None,
     ) -> str:
-        """`presign_get` of a staging object."""
+        """`presign_get` of a staging object. With ``if_match``, ``If-Match`` is a signed
+        header: the caller must send it, and S3 answers 412 for an object of another
+        ETag."""
         params: dict[str, str] = {"Bucket": self.settings.bucket, "Key": self._staged(key)}
+        if if_match is not None:
+            params["IfMatch"] = if_match
         if media_type is not None:
             params["ResponseContentType"] = media_type
         if disposition is not None:
@@ -308,6 +316,26 @@ class S3ContentBackend:
                 return None
             raise
         return int(head["ContentLength"])
+
+    async def freeze_staged(self, key: str, frozen: str) -> tuple[int, str] | None:
+        """The staging object copied, server side, to ``frozen`` (a key no presigned URL
+        names), and the copy's size and ETag from a ``HEAD`` of it; None when there is no
+        object to copy. No byte passes through this process."""
+        source, target = self._staged(key), self._staged(frozen)
+        client = await self._s3()
+        try:
+            await client.copy_object(
+                Bucket=self.settings.bucket,
+                Key=target,
+                CopySource={"Bucket": self.settings.bucket, "Key": source},
+                ACL=STAGED_ACL,
+            )
+        except ClientError as error:
+            if _missing(error):
+                return None
+            raise
+        head = await client.head_object(Bucket=self.settings.bucket, Key=target)
+        return int(head["ContentLength"]), str(head["ETag"])
 
     async def read_staged(self, key: str, max_bytes: int) -> bytes | None:
         """The staging object's bytes, as opaque bytes (its caller stores them, never opens
