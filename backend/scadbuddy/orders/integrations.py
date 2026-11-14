@@ -62,7 +62,8 @@ class SpoolGroup(BaseModel):
     #: The Bambuddy local preset ``slicer_filament`` names, when it is one with a density.
     local_preset: LocalDensity | None = None
     #: Bambuddy's catalogue ``density`` for the group's material, brand and colour,
-    #: when its entries of them give exactly one.
+    #: when its entries of them whose ``name`` holds each word of the subtype give
+    #: exactly one.
     catalogue_density: str | None = None
 
 

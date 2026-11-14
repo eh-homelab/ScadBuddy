@@ -1381,8 +1381,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   A record with no density gets one there, from a manual add sent with no density, and
   from `POST …/price-book/fill-densities` (#6136, `orders/density.py`): the spools' preset id (`slicer_filament`, a K-profile's
   `setting_id`, the AMS tray's `tray_info_idx`), that preset's density (Bambuddy's local
-  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue;
-  never a match by subtype name. A density read Bambuddy refuses leaves the density
+  preset, else the image's Bambu Studio preset), else Bambuddy's filament catalogue
+  (only entries whose name holds each word of the spool's subtype); no preset is found
+  by a subtype's name. A density read Bambuddy refuses leaves the density
   empty and fails nothing. `filaments.density_profile` keeps where it came from; a
   person's density clears it. An estimate reads only the record's own density.
 - A customer's own models (#6133, spec 2026-11-13; migration

@@ -191,9 +191,8 @@ def fill_densities(
     Blocking: call it in a thread."""
     rows: list[DensityFillRow] = []
     with store.transaction() as conn:
-        for record in store.filaments(conn=conn, lock=True):
-            if record.density_g_cm3 is not None:
-                continue
+        # Only the empty rows are locked: an edit of another record never waits on it.
+        for record in store.filaments(conn=conn, lock=True, no_density=True):
             found = density_for(
                 groups, densities, record.material, record.subtype, record.brand, record.colour
             )

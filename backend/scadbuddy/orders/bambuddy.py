@@ -102,7 +102,7 @@ def spool_groups(
     their K-profiles' ``setting_id``), the ``tray_info_idx`` in ``trays`` (by spool id)
     of a spool of it, the local preset in ``local`` (by id) that ``slicer_filament``
     names, and the one ``density`` of the ``catalogue`` entries of its material, brand
-    and colour."""
+    and colour whose ``name`` holds each word of its subtype."""
     groups: dict[tuple[str, str, str, str], list[Spool]] = defaultdict(list)
     for spool in spools:
         if spool.archived_at is None:
@@ -149,17 +149,21 @@ def _catalogue_density(
 ) -> str | None:
     """The one density of the catalogue's entries of the spool's material, brand and
     colour (#6136); ``None`` for none, entries that disagree, or a spool with no brand
-    or colour. Bambuddy stores ``color_hex`` as ``#RRGGBB`` (``models/filament.py``,
+    or colour. A spool with a subtype takes only an entry whose ``name`` holds each word
+    of it, so a PLA Basic spool never takes a PLA Matte entry of its colour (#6148
+    review). Bambuddy stores ``color_hex`` as ``#RRGGBB`` (``models/filament.py``,
     validated by ``schemas/filament.py``'s ``^#[0-9A-Fa-f]{6}$`` at v1.3.2b1-daily.20261113:
     https://github.com/maziggy/bambuddy/blob/v1.3.2b1-daily.20261113/backend/app/schemas/filament.py)."""
     if colour is None or not (spool.brand or "").strip():
         return None
+    subtype = set((spool.subtype or "").upper().split())
     densities = {
         text
         for entry in catalogue
         if entry.type.strip().upper() == spool.material.strip().upper()
         and (entry.brand or "").strip().upper() == (spool.brand or "").strip().upper()
         and (entry.color_hex or "").upper() == colour
+        and subtype <= set(entry.name.upper().split())
         and (text := density_text(entry.density)) is not None
     }
     return densities.pop() if len(densities) == 1 else None
@@ -192,7 +196,8 @@ async def _density_read[T](read: Awaitable[T], what: str) -> T | None:
 
 async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int, str]:
     """The ``tray_info_idx`` of each loaded spool that names no preset, by spool id:
-    one read of the assignments, then one status read per printer that holds one."""
+    one read of the assignments, then the status reads of the printers that hold one,
+    at once, so the slowest printer bounds them, not their sum."""
     unnamed = {
         s.id
         for s in spools
@@ -202,9 +207,10 @@ async def _tray_presets(client: BambuddyClient, spools: list[Spool]) -> dict[int
     if not unnamed:
         return {}
     loaded = [a for a in await client.spool_assignments() if a.spool_id in unnamed]
+    printer_ids = sorted({a.printer_id for a in loaded})
+    statuses = await asyncio.gather(*(client.printer_status(p) for p in printer_ids))
     found: dict[int, str] = {}
-    for printer_id in sorted({a.printer_id for a in loaded}):
-        status = await client.printer_status(printer_id)
+    for printer_id, status in zip(printer_ids, statuses, strict=True):
         for assignment in loaded:
             if assignment.printer_id != printer_id:
                 continue

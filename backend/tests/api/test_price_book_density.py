@@ -4,6 +4,8 @@ where each came from, and the estimate says which density it used."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -11,8 +13,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import orders as orders_api
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.orders import component as orders_component
+from scadbuddy.slicing.profiles import ProfileImageError
 from tests.api.test_order_estimate import ESTIMATE, box, output_of
 from tests.api.test_price_book import BOOK, add_filament
 from tests.api.test_price_book_spools import IMPORT, spool
@@ -170,7 +175,8 @@ def test_the_spool_import_follows_the_chain(client: TestClient) -> None:
         catalogue=[
             {
                 "id": 1,
-                "name": "Insignia PETG",
+                # The spool's subtype, Basic, is a word of the entry's name.
+                "name": "Insignia PETG Basic",
                 "type": "PETG",
                 "brand": "Insignia",
                 "color_hex": "#111111",
@@ -313,3 +319,104 @@ def test_the_estimate_says_which_density_it_used(
     assert refused.status_code == 422, refused.text
     assert refused.json()["type"].endswith("/filament_density")
     assert "fill-densities" in refused.json()["detail"]
+
+
+BASIC = "Bambu PLA Basic @base (spool preset GFA00)"
+
+
+@respx.mock
+def test_an_import_that_fills_only_the_density_is_an_update(client: TestClient) -> None:
+    """#6148 review: an unchanged price with an empty density filled is ``updated``,
+    with only the density written; a later price change keeps where it came from."""
+    empty = add_filament(client, cost_per_kg="20", density_g_cm3=None)
+    configure(client)
+    routes = bambuddy([spool(1, cost_per_kg=20, slicer_filament="GFA00")])
+
+    [filled] = client.post(IMPORT).json()["rows"]
+
+    assert (filled["action"], filled["cost_per_kg"], filled["previous_cost_per_kg"]) == (
+        "updated",
+        "20",
+        "20",
+    )
+    assert (filled["density_g_cm3"], filled["density_profile"]) == ("1.26", BASIC)
+
+    routes["spools"].mock(
+        return_value=httpx.Response(200, json=[spool(1, cost_per_kg=22, slicer_filament="GFA00")])
+    )
+    [priced] = client.post(IMPORT).json()["rows"]
+    assert (priced["action"], priced["cost_per_kg"]) == ("updated", "22")
+    assert (priced["density_g_cm3"], priced["density_profile"]) == ("1.26", BASIC)
+    book = {f["id"]: f for f in client.get(BOOK).json()["filaments"]}
+    assert (book[empty["id"]]["density_g_cm3"], book[empty["id"]]["density_profile"]) == (
+        "1.26",
+        BASIC,
+    )
+
+
+@respx.mock
+def test_a_slow_bambuddy_never_holds_up_an_add(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6148 review: the density lookup of an add has one deadline; past it the record
+    is made with no density."""
+    configure(client)
+    routes = bambuddy([])
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json=[])
+
+    routes["spools"].mock(side_effect=slow)
+    monkeypatch.setattr(orders_api, "DENSITY_LOOKUP_TIMEOUT", 0.2)
+
+    started = time.monotonic()
+    made = tri_color(client)
+
+    assert time.monotonic() - started < 3
+    assert (made["density_g_cm3"], made["density_profile"]) == (None, None)
+
+
+@respx.mock
+def test_an_unreadable_vendor_tree_leaves_bambuddys_sources(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6148 review: a vendor tree that cannot be read is no density from it; the add,
+    the import and the fill go on with Bambuddy's own sources."""
+
+    def broken(root: object) -> None:
+        raise ProfileImageError("the profile file BBL.json cannot be read")
+
+    monkeypatch.setattr(orders_component, "density_table", broken)
+    configure(client)
+    bambuddy(
+        [
+            # Its preset is a vendor one, which the broken tree cannot give.
+            spool(1, cost_per_kg=20, slicer_filament="GFA00"),
+            spool(2, brand="Insignia", material="PETG", rgba="111111FF", cost_per_kg=15),
+        ],
+        catalogue=[
+            {
+                "id": 1,
+                "name": "Insignia PETG Basic",
+                "type": "PETG",
+                "brand": "Insignia",
+                "color_hex": "#111111",
+                "density": 1.27,
+            },
+        ],
+    )
+
+    made = add_filament(client, density_g_cm3=None)
+    assert made["density_g_cm3"] is None
+    response = client.post(IMPORT)
+    assert response.status_code == 200, response.text
+    rows = {row["spool_ids"][0]: row for row in response.json()["rows"]}
+    assert rows[1]["density_g_cm3"] is None
+    assert (rows[2]["density_g_cm3"], rows[2]["density_profile"]) == (
+        "1.27",
+        "Bambuddy filament catalogue",
+    )
+    filled = client.post(FILL)
+    assert filled.status_code == 200, filled.text
+    assert [row["density_g_cm3"] for row in filled.json()["rows"]] == [None]

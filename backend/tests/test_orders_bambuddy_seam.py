@@ -171,6 +171,30 @@ def test_a_group_carries_what_gives_its_density() -> None:
     assert by_ids[(11,)].catalogue_density is None
 
 
+def test_a_catalogue_entry_must_name_the_spools_subtype() -> None:
+    """#6148 review: a PLA Basic spool never takes the one PLA Matte entry of its
+    colour; an entry whose name holds each word of the subtype does."""
+    matte = CatalogFilament(
+        id=1, name="Bambu PLA Matte", type="PLA", brand="Bambu", color_hex="#FFFFFF", density=1.32
+    )
+    basic = CatalogFilament(
+        id=2, name="Bambu PLA Basic", type="PLA", brand="Bambu", color_hex="#000000", density=1.26
+    )
+    groups = spool_groups(
+        [
+            _spool(1, brand="Bambu", subtype="Basic", rgba="FFFFFFFF"),
+            _spool(2, brand="Bambu", subtype="basic", rgba="000000FF"),
+            # No subtype: the material, brand and colour are enough.
+            _spool(3, brand="Bambu", rgba="FFFFFFFF"),
+        ],
+        catalogue=[matte, basic],
+    )
+    by_ids = {tuple(spool_id for spool_id, _ in g.spools): g for g in groups}
+    assert by_ids[(1,)].catalogue_density is None
+    assert by_ids[(2,)].catalogue_density == "1.26"
+    assert by_ids[(3,)].catalogue_density == "1.32"
+
+
 def test_spools_of_one_record_are_one_group() -> None:
     """#5159 review: the alpha byte and a 6-digit spelling land on one ``#RRGGBB`` record,
     so they are one group, priced once from the newest priced spool."""

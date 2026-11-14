@@ -66,7 +66,7 @@ from scadbuddy.orders.costs import (
     order_costs,
     order_margins,
 )
-from scadbuddy.orders.density import used_density
+from scadbuddy.orders.density import DensityTable, ProfileDensity, used_density
 from scadbuddy.orders.estimate import EstimatedPart, OrderEstimate, filament_estimate
 from scadbuddy.orders.history import UnitCostHistory, unit_cost_history
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
@@ -167,6 +167,7 @@ from scadbuddy.payments.models import PaymentRequestView
 from scadbuddy.payments.store import requests_for_order
 from scadbuddy.print_library.component import PrintLibrary, PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
+from scadbuddy.slicing.profiles import ProfileError
 
 logger = logging.getLogger(__name__)
 
@@ -846,6 +847,37 @@ async def put_price_book(
     return await asyncio.to_thread(orders.price_book.snapshot)
 
 
+#: How long a filament added by hand waits for its density from Bambuddy (#6148
+#: review): its reads are the spools, the local presets, the assignments with a status
+#: read per printer, and the catalogue, each with the client's own timeout.
+DENSITY_LOOKUP_TIMEOUT = 10.0
+
+
+async def _vendor_densities(orders: OrdersComponent) -> DensityTable | None:
+    """The image's vendor densities; ``None``, logged, when the image's tree cannot be
+    read, so the add, the import and the fill go on with Bambuddy's sources only."""
+    try:
+        return await asyncio.to_thread(orders.densities)
+    except ProfileError as error:
+        logger.warning("no densities from the image's vendor presets: %s", error)
+        return None
+
+
+async def _hand_density(body: FilamentInput, orders: OrdersComponent) -> ProfileDensity | None:
+    """The density the inventory's spools of ``body``'s identity give; ``None`` when
+    Bambuddy refuses the spools' read or answers in another shape."""
+    try:
+        groups = await orders.integrations.spool_groups()
+    except ApiError as error:
+        logger.warning("a filament was added with no density: %s", error.detail)
+        return None
+    except ValidationError as error:
+        logger.warning("a filament was added with no density: %s", error)
+        return None
+    densities = await _vendor_densities(orders)
+    return density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
+
+
 @router.post(
     "/price-book/filaments",
     response_model=Filament,
@@ -856,20 +888,19 @@ async def create_filament(body: FilamentInput, orders: OrdersDep) -> Filament:
     """409 ``filament_exists`` naming the record of the same material, subtype, brand
     and colour (in any case). Sent with no density while a Bambuddy is linked, it takes
     the one Bambuddy's spools of its identity give (#6136, `orders/density.py`), with
-    ``density_profile`` saying where from; none when no source gives one, or when
-    Bambuddy does not answer (the add never waits on it to succeed)."""
+    ``density_profile`` saying where from; none when no source gives one, when Bambuddy
+    does not answer, or when the lookup takes longer than ``DENSITY_LOOKUP_TIMEOUT``
+    (the add never waits on it to succeed)."""
     profile = None
     if body.density_g_cm3 is None and orders.integrations.linked:
         try:
-            groups = await orders.integrations.spool_groups()
-        except ApiError as error:
-            logger.warning("a filament was added with no density: %s", error.detail)
-            groups = []
-        except ValidationError as error:
-            logger.warning("a filament was added with no density: %s", error)
-            groups = []
-        densities = await asyncio.to_thread(orders.densities)
-        found = density_for(groups, densities, body.material, body.subtype, body.brand, body.colour)
+            found = await asyncio.wait_for(_hand_density(body, orders), DENSITY_LOOKUP_TIMEOUT)
+        except TimeoutError:
+            logger.warning(
+                "a filament was added with no density: the lookup took longer than %s s",
+                DENSITY_LOOKUP_TIMEOUT,
+            )
+            found = None
         if found is not None:
             body = body.model_copy(update={"density_g_cm3": found.density_g_cm3})
             profile = found.profile
@@ -951,7 +982,7 @@ async def import_spools(orders: OrdersDep) -> SpoolImport:
         groups = await orders.integrations.spool_groups()
     except NotLinkedError:
         raise not_linked() from None
-    densities = await asyncio.to_thread(orders.densities)
+    densities = await _vendor_densities(orders)
     try:
         return await asyncio.to_thread(import_spools_into, orders.store, groups, densities)
     except FilamentExistsError as error:
@@ -976,7 +1007,7 @@ async def fill_densities(orders: OrdersDep) -> DensityFill:
         groups = await orders.integrations.spool_groups()
     except NotLinkedError:
         raise not_linked() from None
-    densities = await asyncio.to_thread(orders.densities)
+    densities = await _vendor_densities(orders)
     return await asyncio.to_thread(fill_densities_in, orders.store, densities, groups)
 
 

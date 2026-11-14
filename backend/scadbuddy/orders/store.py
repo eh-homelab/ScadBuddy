@@ -871,10 +871,19 @@ class OrderStore:
         return None if row is None else _filament_of(row)
 
     def filaments(
-        self, *, include_archived: bool = False, conn: Conn | None = None, lock: bool = False
+        self,
+        *,
+        include_archived: bool = False,
+        conn: Conn | None = None,
+        lock: bool = False,
+        no_density: bool = False,
     ) -> list[Filament]:
-        """By material, brand and colour name; ``lock`` as :meth:`filament`'s."""
-        where = "" if include_archived else " WHERE archived_at IS NULL"
+        """By material, brand and colour name; ``lock`` as :meth:`filament`'s;
+        ``no_density`` only the records with no density, so a lock takes no other row."""
+        conditions = ([] if include_archived else ["archived_at IS NULL"]) + (
+            ["density_g_cm3 IS NULL"] if no_density else []
+        )
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_FILAMENT} FROM filaments{where}"

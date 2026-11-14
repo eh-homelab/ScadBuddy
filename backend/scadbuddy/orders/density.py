@@ -30,9 +30,11 @@ is, for one filament of the inventory (:func:`resolve`):
 2. That preset's ``filament_density``: Bambuddy's local preset when the id names one,
    else the Bambu Studio vendor preset with that ``filament_id`` or ``setting_id`` in
    the image's tree (``slicing/profiles.py``, Bambu Studio v02.08.02.61).
-3. Only then the catalogue's ``density`` for the same material, brand and colour.
+3. Only then the catalogue's ``density`` for the same material, brand and colour,
+   from entries whose ``name`` holds each word of the spool's subtype.
 
-Nothing matches by a subtype's name: Bambu's "Dual Color" and "Tri Color" PLA have no
+No preset is found by a subtype's name (the subtype only narrows the catalogue's
+entries in step 3): Bambu's "Dual Color" and "Tri Color" PLA have no
 preset of that name; the sliced files of Bambuddy archives 40 and 41 (read 2026-11-13)
 show they print as ``GFA05``, Bambu PLA Silk, which is what the chain reads from their
 spools' preset ids. When every step is empty there is no source, and the record keeps
