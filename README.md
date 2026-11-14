@@ -1120,7 +1120,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   may touch only its pieces, the library pieces and snapshots; every other key is the
   API's: the API drops or forgets a copy the worker cannot read, through
   `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
-  forgets a library piece only when its own read finds the object gone or altered),
+  forgets a library piece only when its own read, bounded to a minute and made at most
+  once a piece in ten minutes, finds the object gone or altered and the row still names it),
   and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or

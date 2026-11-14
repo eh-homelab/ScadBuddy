@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import aclosing
@@ -131,8 +132,17 @@ FOUND_KINDS = frozenset({RENDER_KIND})
 #: A library file's object (`LIBRARY_PIECE_KEY`) is forgotten only when the API cannot
 #: read it either (`index_forget_copy`).
 FORGETTABLE_PREFIXES = ("font-", "src-")
-#: A forget of a library file's object that the API reads whole: a 409.
+#: A forget of a library file's object that the API reads whole, could not read in
+#: time, read a short while ago, or that was stored again meanwhile: a 409, the row kept.
 COPY_INTACT = "copy-intact"
+#: How long the API reads a library file's object before it gives up (a 409).
+FORGET_READ_TIMEOUT = 60.0
+#: How long after a full read of a key the API reads it again for a forget.
+FORGET_CHECK_COOLDOWN = 600.0
+#: How many keys' last reads are kept (`_recently_checked`).
+FORGET_CHECKS_KEPT = 4096
+#: Each key's last full read for a forget, by `time.monotonic`, in this process.
+_LAST_CHECKED: dict[str, float] = {}
 #: An adopt's own refusals, `crud/render.py` `RemoteAssetRows.adopt`: no copy of the upload
 #: in the blob store (a 404), or a copy of another kind or size (a 422).
 NO_COPY = "no-copy"
@@ -738,9 +748,30 @@ async def index_forget_copy(key: str, state: StateDep) -> BlobStat | None:
     return await asyncio.to_thread(_index(state).delete, key)
 
 
+def _intact(detail: str) -> ApiError:
+    return ApiError(status.HTTP_409_CONFLICT, detail, reason=COPY_INTACT)
+
+
+def _recently_checked(key: str, now: float) -> bool:
+    """Whether the API read ``key``'s object whole less than `FORGET_CHECK_COOLDOWN` ago;
+    if not, note this check. Best effort, per process: a render credential cannot make
+    the API read one object over and over."""
+    checked = _LAST_CHECKED.get(key)
+    if checked is not None and now - checked < FORGET_CHECK_COOLDOWN:
+        return True
+    if len(_LAST_CHECKED) >= FORGET_CHECKS_KEPT:
+        # Drop the oldest half; the record need not be complete.
+        for old in sorted(_LAST_CHECKED, key=_LAST_CHECKED.__getitem__)[: FORGET_CHECKS_KEPT // 2]:
+            del _LAST_CHECKED[old]
+    _LAST_CHECKED[key] = now
+    return False
+
+
 async def _forget_unreadable(key: str, state: AppState) -> BlobStat | None:
     """Drop ``key``'s row only when the API cannot read its object whole: missing, or not
-    its SHA-256. The row is dropped only while it still names the object read."""
+    its SHA-256. The read is bounded (`FORGET_READ_TIMEOUT`) and done at most once per key
+    in `FORGET_CHECK_COOLDOWN`; the drop is a compare-and-delete, so a row stored again
+    since the read stays. Every other outcome is a 409 ``copy-intact``, the row kept."""
     content = state.store.content
     if content is None:
         return None  # the local store keeps no index
@@ -750,28 +781,25 @@ async def _forget_unreadable(key: str, state: AppState) -> BlobStat | None:
         return None
     if stat.ref.backend != content.name:
         # Mid `/store/migrate`: another backend's row, which this store cannot judge.
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            "The copy is on another backend; it is not forgotten.",
-            reason=COPY_INTACT,
-        )
+        raise _intact("The copy is on another backend; it is not forgotten.")
+    if _recently_checked(key, time.monotonic()):
+        raise _intact("The API checked this copy a short while ago; it is not forgotten.")
     try:
-        if not await content.backend.exists(stat.ref.backend_id):
-            # Checked first: a download cache could still hold the bytes.
-            raise BlobMissingError(key)
-        async with aclosing(content.get(stat.ref)) as chunks:
-            async for _ in chunks:
-                pass
+        async with asyncio.timeout(FORGET_READ_TIMEOUT):
+            if not await content.backend.exists(stat.ref.backend_id):
+                # Checked first: a download cache could still hold the bytes.
+                raise BlobMissingError(key)
+            async with aclosing(content.get(stat.ref)) as chunks:
+                async for _ in chunks:
+                    pass
     except (BlobMissingError, BlobCorruptError):
-        held = await asyncio.to_thread(index.get, key)
-        if held is None or held.ref != stat.ref:
-            return None  # stored again meanwhile: that row stays
-        return await asyncio.to_thread(index.delete, key)
-    raise ApiError(
-        status.HTTP_409_CONFLICT,
-        "The API reads this copy whole; it is not forgotten.",
-        reason=COPY_INTACT,
-    )
+        taken = await asyncio.to_thread(index.delete_if_names, key, stat.ref)
+        if taken is None:
+            raise _intact("The copy was stored again meanwhile; it is not forgotten.") from None
+        return taken
+    except TimeoutError:
+        raise _intact("The API could not read this copy in time; it is not forgotten.") from None
+    raise _intact("The API reads this copy whole; it is not forgotten.")
 
 
 @router.delete("/blob-index/{key:path}/stale", name="crud_render_index_delete_stale")

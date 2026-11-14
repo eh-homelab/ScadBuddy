@@ -21,6 +21,7 @@ import pytest
 from psycopg.errors import DeadlockDetected
 from temporalio import activity
 
+from scadbuddy.api import crud_render
 from scadbuddy.crud.client import CrudRefusedError, CrudSyncClient, activity_key
 from scadbuddy.crud.render import BASE, RemoteBlobIndex, WriteKeys
 from scadbuddy.store.archive import pack_dir
@@ -590,6 +591,48 @@ async def test_forget_copy_takes_only_a_fonts_or_snapshots_key(client: CrudSyncC
 # -- a library file's object the worker cannot read (#5298 final review I-3) ----------
 
 LIB3 = "lib3-" + "a" * 48 + "-0"
+
+
+@pytest.fixture(autouse=True)
+def no_forget_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test starts with no key read for a forget (`crud_render._recently_checked`)."""
+    monkeypatch.setattr(crud_render, "_LAST_CHECKED", {})
+
+
+def test_the_compare_and_delete_keeps_a_row_stored_again(pool: Pool) -> None:
+    """`delete_if_names`: a row that names another object than the one read stays."""
+    sql = BlobIndex(pool)
+    sql.put(LIB3, _ref("b"), slug=None, meta={})
+    assert sql.delete_if_names(LIB3, _ref("a")) is None
+    held = sql.get(LIB3)
+    assert held is not None and held.ref == _ref("b")
+    taken = sql.delete_if_names(LIB3, _ref("b"))
+    assert taken is not None and taken.ref == _ref("b")
+    assert sql.get(LIB3) is None
+
+
+def test_a_swap_kept_to_pieces_leaves_a_row_of_another_kind(pool: Pool) -> None:
+    """`swap_in`'s ``only_kind``, checked under the row's lock: a row that holds another
+    kind is not rewritten, even when it names the expected bytes."""
+    sql = BlobIndex(pool)
+    other = BlobRef(sha256="d" * 64, kind="slice", backend="bambuddy", backend_id="id-d", size=4)
+    sql.put(K, other, slug=None, meta={"name": "real"})
+    with pool.connection() as conn:
+        swapped = sql.swap_in(
+            conn,
+            K,
+            _ref("a"),
+            expected=other.sha256,
+            slug="demo",
+            meta={},
+            only_kind="piece",
+        )
+    assert swapped is False
+    held = sql.get(K)
+    assert held is not None and held.ref == other and held.meta == {"name": "real"}
+    # The same swap without the bound rewrites it: the bound is what kept it.
+    with pool.connection() as conn:
+        assert sql.swap_in(conn, K, _ref("a"), expected=other.sha256, slug="demo", meta={})
 
 
 @pytest.fixture
