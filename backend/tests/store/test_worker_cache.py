@@ -32,10 +32,12 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
 from tests.support.activities import demo_paths, piece_request, worker_deps
-from tests.support.store import local_content, overwrite_object
+from tests.support.store import local_content, overwrite_object, render_key
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
+#: A piece's key as a render job writes it: the worker variant's writes reach the routes.
+K = render_key("k")
 
 
 def worker(root: Path, content: ContentStore, **kw: float) -> CachedBlobStore:
@@ -57,10 +59,10 @@ async def test_a_published_piece_is_fetched_once_on_another_worker(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
-    (a.dir_for("k") / "model.3mf").write_bytes(b"3mf")
-    await a.publish("k", scope=SCOPE)
-    assert await b.fetch("k")
-    assert (b.dir_for("k") / "model.3mf").read_bytes() == b"3mf"
+    (a.dir_for(K) / "model.3mf").write_bytes(b"3mf")
+    await a.publish(K, scope=SCOPE)
+    assert await b.fetch(K)
+    assert (b.dir_for(K) / "model.3mf").read_bytes() == b"3mf"
     downloads = content.backend.download
     calls = 0
 
@@ -70,7 +72,7 @@ async def test_a_published_piece_is_fetched_once_on_another_worker(
         return downloads(backend_id)
 
     content.backend.download = counting  # type: ignore[method-assign]
-    assert await b.fetch("k")
+    assert await b.fetch(K)
     assert calls == 0  # the second fetch is a cache hit
 
 
@@ -78,37 +80,37 @@ async def test_a_later_stage_published_elsewhere_replaces_the_cached_copy(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
-    (a.dir_for("k") / "model.3mf").write_bytes(b"main")
-    await a.publish("k", scope=SCOPE)
-    assert await b.fetch("k")
-    (b.dir_for("k") / "plate-1.3mf").write_bytes(b"solids")
-    await b.publish("k", scope=SCOPE)
-    assert await a.fetch("k")
-    assert (a.dir_for("k") / "plate-1.3mf").read_bytes() == b"solids"
+    (a.dir_for(K) / "model.3mf").write_bytes(b"main")
+    await a.publish(K, scope=SCOPE)
+    assert await b.fetch(K)
+    (b.dir_for(K) / "plate-1.3mf").write_bytes(b"solids")
+    await b.publish(K, scope=SCOPE)
+    assert await a.fetch(K)
+    assert (a.dir_for(K) / "plate-1.3mf").read_bytes() == b"solids"
 
 
 async def test_a_stale_publisher_cannot_overwrite_a_newer_piece(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
-    (a.dir_for("k") / "model.3mf").write_bytes(b"v1")
-    await a.publish("k", scope=SCOPE)
-    await b.fetch("k")
-    (a.dir_for("k") / "model.3mf").write_bytes(b"v2 from the retry")
-    await a.publish("k", scope=SCOPE)
-    (b.dir_for("k") / "model.3mf").write_bytes(b"v2 from the zombie")
+    (a.dir_for(K) / "model.3mf").write_bytes(b"v1")
+    await a.publish(K, scope=SCOPE)
+    await b.fetch(K)
+    (a.dir_for(K) / "model.3mf").write_bytes(b"v2 from the retry")
+    await a.publish(K, scope=SCOPE)
+    (b.dir_for(K) / "model.3mf").write_bytes(b"v2 from the zombie")
     with pytest.raises(StaleBlobError):
-        await b.publish("k", scope=SCOPE)
+        await b.publish(K, scope=SCOPE)
     c = worker(tmp_path / "c", content)
-    assert await c.fetch("k")
-    assert (c.dir_for("k") / "model.3mf").read_bytes() == b"v2 from the retry"
+    assert await c.fetch(K)
+    assert (c.dir_for(K) / "model.3mf").read_bytes() == b"v2 from the retry"
 
 
 async def test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a = worker(tmp_path / "a", content)
-    for key, damage in (("gone", "delete"), ("altered", "rewrite")):
+    for key, damage in ((render_key("gone"), "delete"), (render_key("altered"), "rewrite")):
         (a.dir_for(key) / "model.3mf").write_bytes(key.encode())
         await a.publish(key, scope=SCOPE)
         stat = content.index.get(key)
@@ -263,20 +265,20 @@ async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_inde
     tmp_path: Path, content: ContentStore
 ) -> None:
     a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
-    a_baseline = await a.indexed_sha("k")
-    (a.dir_for("k") / "model.3mf").write_bytes(b"from A")
-    await a.publish_fresh("k", scope=SCOPE, expected=a_baseline)
+    a_baseline = await a.indexed_sha(K)
+    (a.dir_for(K) / "model.3mf").write_bytes(b"from A")
+    await a.publish_fresh(K, scope=SCOPE, expected=a_baseline)
     # B's cache has never seen k; its baseline comes from the index, not a marker.
-    b_baseline = await b.indexed_sha("k")
+    b_baseline = await b.indexed_sha(K)
     assert b_baseline is not None
-    (b.dir_for("k") / "model.3mf").write_bytes(b"from B")
-    await b.publish_fresh("k", scope=SCOPE, expected=b_baseline)
+    (b.dir_for(K) / "model.3mf").write_bytes(b"from B")
+    await b.publish_fresh(K, scope=SCOPE, expected=b_baseline)
     c = worker(tmp_path / "c", content)
-    assert await c.fetch("k")
-    assert (c.dir_for("k") / "model.3mf").read_bytes() == b"from B"
+    assert await c.fetch(K)
+    assert (c.dir_for(K) / "model.3mf").read_bytes() == b"from B"
     # A zombie render_main that read its baseline before B published is still refused.
     with pytest.raises(StaleBlobError):
-        await a.publish_fresh("k", scope=SCOPE, expected=a_baseline)
+        await a.publish_fresh(K, scope=SCOPE, expected=a_baseline)
 
 
 async def test_local_store_fetch_and_publish_keep_phase_one_behaviour(tmp_path: Path) -> None:
@@ -377,8 +379,8 @@ async def test_a_stage_whose_piece_is_gone_fails_by_name(
 
 async def test_two_misses_on_one_key_download_once(tmp_path: Path, content: ContentStore) -> None:
     a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
-    (a.dir_for("k") / "model.3mf").write_bytes(b"3mf")
-    await a.publish("k", scope=SCOPE)
+    (a.dir_for(K) / "model.3mf").write_bytes(b"3mf")
+    await a.publish(K, scope=SCOPE)
     downloads = content.backend.download
     calls = 0
 
@@ -388,9 +390,9 @@ async def test_two_misses_on_one_key_download_once(tmp_path: Path, content: Cont
         return downloads(backend_id)
 
     content.backend.download = counting  # type: ignore[method-assign]
-    assert list(await asyncio.gather(b.fetch("k"), b.fetch("k"))) == [True, True]
+    assert list(await asyncio.gather(b.fetch(K), b.fetch(K))) == [True, True]
     assert calls == 1
-    assert (b.dir_for("k") / "model.3mf").read_bytes() == b"3mf"
+    assert (b.dir_for(K) / "model.3mf").read_bytes() == b"3mf"
 
 
 def test_unpacking_one_directory_from_two_threads_never_fails(tmp_path: Path) -> None:
@@ -423,10 +425,10 @@ async def test_a_row_on_another_backend_is_not_this_caches_to_fetch(
 ) -> None:
     b = worker(tmp_path / "b", content)
     foreign = BlobRef(sha256="0" * 64, kind="piece", backend="bambuddy", backend_id="42", size=1)
-    content.index.put("k", foreign, slug="demo", meta={})
-    assert await b.fetch("k") is False
-    assert await b.indexed_sha("k") is None
-    assert b.exists("k") is False
+    content.index.put(K, foreign, slug="demo", meta={})
+    assert await b.fetch(K) is False
+    assert await b.indexed_sha(K) is None
+    assert b.exists(K) is False
 
 
 async def test_a_template_activity_another_worker_published_is_reused_not_run_again(

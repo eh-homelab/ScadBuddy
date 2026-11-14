@@ -264,14 +264,14 @@ describe('Connection render key (#426)', () => {
     return bodies
   }
 
-  it('warns while render workers would hold the full key', async () => {
+  it('warns while no render key is saved', async () => {
     serve({ ...stored, has_render_api_key: false, render_key_fallback: true })
     renderSettingsSection(<Connection />)
     await seeded()
     const warning = screen.getByTestId('render-key-fallback')
     expect(warning).toHaveAttribute('role', 'status')
     expect(warning).toHaveTextContent(
-      /^Render workers hold the full Bambuddy key; template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
+      /^No render key is saved\. Render workers get no Bambuddy key, so their renders on the Bambuddy store fail; a worker inside the API process uses the full key, and template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
     )
     expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Paste the key')
   })

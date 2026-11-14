@@ -171,6 +171,13 @@ def render_target(current: RenderStoreSettings) -> BambuddyTarget:
         raise not_configured(
             "the Bambuddy store needs a Bambuddy URL and a library folder in Settings"
         )
+    if current.key_is_fallback and current.api_key is None:
+        # The API's CRUD route withholds the full key from a render worker
+        # (`api/crud_render.py` `withheld`); only the API's own read carries it.
+        raise not_configured(
+            "the render worker gets no Bambuddy key while no render key is saved: save"
+            " bambuddy_render_api_key (Settings, Bambuddy render key)"
+        )
     return BambuddyTarget(
         config=BambuddyConfig(base_url=current.bambuddy_url.rstrip("/"), api_key=current.api_key),
         inbox_id=current.library_folder_id,

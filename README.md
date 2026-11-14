@@ -905,9 +905,9 @@ store or another caller's credential:
 
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
-| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start, so the deployment can drop it (#5298 Task 22) | `scadbuddy-render.yaml`, until eh-homelab/clusters removes it |
-| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start, so the deployment can drop it (#5298 Task 35) | `scadbuddy-print.yaml`, until eh-homelab/clusters removes it |
-| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
+| render worker | none: the worker has no database client and ignores the URL (#5298 Task 20); the API revokes everything the role `scadbuddy_render` held at every start where the role still exists (#5298 Task 22) | none: prod sets none and has no such role (eh-homelab/clusters#3555, #3566, #3578; measured 2026-11-14) |
+| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start where the role still exists (#5298 Task 35) | none: prod sets none and has no such role (as above) |
+| flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start where the role still exists | none: prod sets none and has no such role (as above) |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
 Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
@@ -1106,16 +1106,22 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   timeouts from the same values.
 - **No database (#5298).** The worker opens no database connection. It reads the
   store's settings (backend, Bambuddy URL, library folder, render key, S3 keys) from the
-  API's CRUD route `/api/v1/internal/crud/render/settings`, which answers the full
-  Bambuddy key **only while no render key is saved** in Settings, the fallback `/healthz`
-  reports as `render_key_fallback`. Save a render key and the worker cannot read the
-  full key at all. The API writes a job's row, its events and its activity row for it,
+  API's CRUD route `/api/v1/internal/crud/render/settings`, which never answers the full
+  Bambuddy key: while no render key is saved in Settings (the fallback `/healthz` reports
+  as `render_key_fallback`), it answers no Bambuddy key at all and logs that it withheld
+  it, and a worker on the Bambuddy store fails its renders with an error that names
+  `bambuddy_render_api_key`. Save a render key before you run a standalone render worker
+  on the Bambuddy store. The API writes a job's row, its events and its activity row for it,
   through the routes under `/api/v1/internal/crud/render/jobs`, holds a done job's blobs
   and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
   and `…/render/geometry`, reads and writes the blob index for it, through
-  `…/render/blob-index` (it may not store or delete an upload's, font's or snapshot's
-  key, which only the API writes: the API drops or forgets a copy the worker cannot read,
-  through `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`),
+  `…/render/blob-index` (it may store, mark or delete only a render job's own pieces, and
+  read only those, the library pieces Arrange lays out, snapshots, fonts and uploads; it
+  may touch only its pieces, the library pieces and snapshots; every other key is the
+  API's: the API drops or forgets a copy the worker cannot read, through
+  `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
+  forgets a library piece only when its own read, bounded to a minute and made at most
+  once a piece in ten minutes, finds the object gone or altered and the row still names it),
   and finds a template's Bambuddy folder for it, through
   `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
   render key in Settings, under the folder's lock, and refuses a worker whose URL or
@@ -1128,11 +1134,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   render or a pin on the worker still holds a removal off; a renew or release must
   name the token the worker took it under, and a lease or hold lives at most five
   minutes unless renewed.
-- **The role `scadbuddy_render` (#601)** is no longer used. Remove the worker's
-  database secret from its Deployment. The API grants the role nothing and, at every
-  start, takes back everything it held (the older `render_settings` view, the tables
-  above, the schema and its `activity` row policy; `backend/scadbuddy/auth/revoke.py`,
-  #5298 Task 22), so the deployment can drop it.
+- **The role `scadbuddy_render` (#601)** is gone. The worker's Deployment holds no
+  database secret, and prod dropped the role (eh-homelab/clusters#3555, #3566, #3578;
+  measured 2026-11-14). The API grants the role nothing and, at every start, revokes
+  what it held where it still exists (`backend/scadbuddy/auth/revoke.py`, #5298 Task
+  22); with no such role, it does nothing.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
   `store-folders`, `assets`, `libraries`) and answers its first read of the store
@@ -1635,9 +1641,12 @@ workers restart.
   `/healthz` on the API and on each worker (port 9090) carries a `store` object:
   - `multi_worker: true` says more than one replica is safe;
   - `backend` differs from `configured_backend` until the restart;
-  - `render_key_fallback: true` means no render key is stored, so the workers hold the
-    full Bambuddy key and template code can print. The Settings page shows the same
-    warning.
+  - `render_key_fallback: true` (on the API) means no render key is stored but the full
+    Bambuddy key is. The API withholds the full key from standalone render workers, so
+    their renders on the `bambuddy` store fail with an error that names
+    `bambuddy_render_api_key`; a render worker inside the API process
+    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) uses the full key, and its template code can
+    print. The Settings page shows the same warning.
 
   If a `bambuddy` or `s3` store cannot start (no URL or folder; no endpoint, bucket or
   keys), see "Recovering an unready blob store" below.
@@ -1786,17 +1795,19 @@ form as the `store_backend` one above.
 With **`SCADBUDDY_SECRET_KEY_FILE`** set, the backend seals the API keys it stores
 (`bambuddy_api_key`, `bambuddy_render_api_key`, `google_fonts_api_key`) in the
 `settings` table with envelope encryption, in the agent's format and under the same key
-file (see "The agent sidecar" below: 32 random bytes, base64). At start the API (and the print
-worker, which opens the same store) seals any key still stored in plaintext, once, under the migration lock, and logs
+file (see "The agent sidecar" below: 32 random bytes, base64). At start the API seals any
+key still stored in plaintext, once, under the migration lock, and logs
 `sealed plaintext API keys`. A key that is set but unreadable or malformed stops the
 start.
 
-- Mount the **same** file into the API and the print worker, in one rollout. Both read the
-  keys from the database; a process without the key (or with another one) cannot open a
-  sealed key, logs `ignoring a stored secret this process cannot open` and falls back to
-  its own `SCADBUDDY_<FIELD>`. The render worker needs no key: the API opens its store
-  keys and answers them on its CRUD route (#5298).
-- Unset, the keys stay in plaintext as before, and the API (and the print worker) logs
+- Mount the file into the API only (and the agent, which shares it). The API reads the
+  keys from the database and opens them; a process without the key (or with another one)
+  cannot open a sealed key, logs `ignoring a stored secret this process cannot open` and
+  falls back to its own `SCADBUDDY_<FIELD>`. The render and print workers need no key and
+  must not mount it: they hold no settings store and read their settings, already opened,
+  from the API's CRUD routes (`GET …/crud/render/settings`, `GET …/crud/print/settings`,
+  #5298). Only the projects worker mounts it, for its flows' sealed payloads.
+- Unset, the keys stay in plaintext as before, and the API logs
   `SCADBUDDY_SECRET_KEY_FILE is not set` once at start. The live deployment does not
   mount it yet: #1900.
 - Keep a copy of the key. A key sealed under a lost one cannot be opened: enter it again

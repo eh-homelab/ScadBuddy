@@ -471,7 +471,8 @@ class Metrics:
         )
         self.store_render_key_fallback = Gauge(
             "scadbuddy_store_render_key_fallback",
-            "1 while render workers hold the full Bambuddy key (spec 2026-09-27 §9).",
+            "1 while this process's store holds the full Bambuddy key because no render key"
+            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(

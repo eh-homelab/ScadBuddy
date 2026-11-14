@@ -215,13 +215,14 @@ async def test_a_slicers_input_of_kind_slice_is_refused(tmp_path: Path, name: st
 def test_the_render_worker_cannot_put_or_mark_a_slice_key() -> None:
     """The render worker's pod runs template Python, so its credential must not mark a
     slicer's input as an output, nor put one: `crud_render` refuses a ``slice-`` key for
-    every index write (``put``, ``swap``, ``mark`` and both deletes call this check). The
-    routes themselves need Postgres: `tests/crud/test_crud_blob_index.py`."""
+    every index write (``put``, ``swap``, ``mark`` and both deletes call this check), as
+    any key that is not a render job's (#5298 final review). The routes themselves need
+    Postgres: `tests/crud/test_crud_blob_index.py`."""
     with pytest.raises(ApiError) as refused:
-        crud_render._worker_writable("piece-" + "a" * 64, KEY)
+        crud_render._worker_writable("a" * 64, KEY)
     assert refused.value.status == 403
     assert refused.value.extensions["reason"] == crud_render.API_OWNED_KEY
-    crud_render._worker_writable("piece-" + "a" * 64)
+    crud_render._worker_writable("a" * 64)
 
 
 @pytest.mark.parametrize(

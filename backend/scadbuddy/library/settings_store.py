@@ -703,9 +703,10 @@ class StoredSettings(BambuddyIds):
         return tuple(self.asset_fetch_domains)
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback. With
-        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
-        ``render_key_fallback``."""
+        """The key the API's own render store uses, and whether it is the full key by
+        fallback. With no key at all there is nothing to fall back to: ``(None, False)``,
+        as the view's ``render_key_fallback``. A standalone render worker never gets the
+        full key: the CRUD route withholds it (`api/crud_render.py` `withheld`, #5298)."""
         if self.bambuddy_render_api_key:
             return self.bambuddy_render_api_key, False
         return self.bambuddy_api_key, self.bambuddy_api_key is not None
@@ -1654,7 +1655,9 @@ class RenderStoreSettings(BaseModel):
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
     api_key: str | None = Field(default=None, repr=False)
-    #: True when `api_key` is the full key because no render key is stored.
+    #: True when no render key is stored but the full key is: the API's own read then
+    #: holds the full key in `api_key`; the CRUD route's answer to a render worker holds
+    #: none (`api/crud_render.py` `withheld`).
     key_is_fallback: bool = False
     library_folder_id: int | None = None
     s3: S3Settings | None = None
@@ -1668,8 +1671,9 @@ def load_render_store_settings(
 ) -> RenderStoreSettings:
     """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
     the `render_settings` view, all of the settings a render worker gets (#601), from
-    the API's CRUD route (#5298); the full key is in it only while no render key is
-    stored."""
+    the API's CRUD route (#5298). The full key is in it only while no render key is
+    stored, and the route withholds it from the worker then (`api/crud_render.py`
+    `withheld`)."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(

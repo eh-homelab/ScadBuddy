@@ -18,6 +18,7 @@ from scadbuddy.auth.service_credentials import (
     ServiceAuth,
     ServiceCredentialStore,
 )
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud import listener
 from scadbuddy.crud.client import CrudClient, CrudUnavailableError
@@ -29,6 +30,7 @@ from scadbuddy.library.settings_store import (
     SettingsStore,
     load_render_store_settings,
 )
+from scadbuddy.store.bambuddy import render_target
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import FixedToken, render_crud_app, served_render_crud
 
@@ -98,11 +100,27 @@ async def test_the_answer_is_what_the_api_reads(
         False,
     )
     assert current.s3 is not None and current.s3.secret_access_key == S3_SECRET
-    # No render key saved: the full key, as the API reads it.
+    # No render key saved: the API reads the full key, and withholds it from the worker
+    # (#5298 final review, I3): the pod runs template Python.
     _save_secrets(store, render_key=False)
     current = await RemoteRenderSettingsSource(crud).current()
-    assert current == load_render_store_settings(store.pool, keyed)
-    assert (current.api_key, current.key_is_fallback) == (FULL_KEY, True)
+    read = load_render_store_settings(store.pool, keyed)
+    assert (read.api_key, read.key_is_fallback) == (FULL_KEY, True)
+    assert current == read.model_copy(update={"api_key": None})
+    assert (current.api_key, current.key_is_fallback) == (None, True)
+    response = await crud.request("GET", f"{BASE}/settings")
+    assert FULL_KEY not in response.text
+
+
+async def test_a_worker_with_no_render_key_names_the_setting(
+    crud: CrudClient, store: SettingsStore
+) -> None:
+    """With the full key withheld, the worker's Bambuddy store says what to save."""
+    _save_secrets(store, render_key=False)
+    current = await RemoteRenderSettingsSource(crud).current()
+    with pytest.raises(ApiError) as refused:
+        render_target(current)
+    assert "bambuddy_render_api_key" in refused.value.detail
 
 
 async def test_the_answer_is_never_cached(crud: CrudClient, store: SettingsStore) -> None:
@@ -125,10 +143,17 @@ async def test_the_log_names_the_secrets_released_never_their_values(
         " bambuddy_render_api_key, store_s3_access_key_id, store_s3_secret_access_key"
     ]
     caplog.clear()
-    # No render key saved: the full key is released, and the log says so.
+    # No render key saved: the full key is withheld, and the log says so.
     _save_secrets(store, render_key=False)
     await crud.request("GET", f"{BASE}/settings")
-    assert "secrets: bambuddy_api_key," in caplog.text
+    released = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.crud_render"]
+    assert released == [
+        f"withheld the full Bambuddy key from service credential {credential.id}: no"
+        " bambuddy_render_api_key is saved, so the render worker gets no Bambuddy key",
+        f"released the render settings to service credential {credential.id}, secrets:"
+        " store_s3_access_key_id, store_s3_secret_access_key",
+    ]
+    assert "bambuddy_api_key," not in caplog.text
     for secret in (RENDER_KEY, FULL_KEY, S3_ID, S3_SECRET):
         assert secret not in caplog.text
 
