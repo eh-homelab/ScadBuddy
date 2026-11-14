@@ -305,6 +305,13 @@ describe('order tools (#4249)', () => {
     ).toThrow('shop_note')
   })
 
+  it('tells the charges tools to leave the purchase and handling rows out (review of #6200)', () => {
+    for (const name of ['order_update', 'order_charges_update_after_acceptance']) {
+      expect(tool(name).description).toMatch(/`purchase` and `handling` rows/)
+    }
+    expect(tool('order_purchase_record').description).toContain('purchase_recorded')
+  })
+
   it('lists parts, adds stock and sets an item\'s parts through their routes (#5543)', async () => {
     const sent: { path: string; body?: unknown; query?: string }[] = []
     server.use(

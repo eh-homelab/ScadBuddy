@@ -165,6 +165,21 @@ describe('orders mock (#4249)', () => {
     }
   })
 
+  it('keeps purchase and handling rows on a replace and drops them from a body, as the backend does (#6133)', async () => {
+    const post = { kind: 'shipping' as const, label: 'Post', amount_minor: 500 }
+    state.charges.push(
+      { id: 'h-bought', order_id: ORDER_ACCEPTED, kind: 'purchase', label: 'Bought for your project: magnets', amount_minor: 899, position: 0, auto: false, shipping_option_id: null, purchase_link_id: 's1' },
+      { id: 'h-handling', order_id: ORDER_ACCEPTED, kind: 'handling', label: 'Handling for bought items', amount_minor: 290, position: 0, auto: false, shipping_option_id: null, purchase_link_id: null },
+    )
+    await api.replaceChargesAfterAcceptance(ORDER_ACCEPTED, [post, { kind: 'purchase', label: 'forged', amount_minor: 1 }, { kind: 'handling', label: 'forged', amount_minor: 1 }])
+    const detail = await api.order(ORDER_ACCEPTED)
+    expect(detail.charges.map((c) => [c.kind, c.label, c.amount_minor])).toEqual([
+      ['shipping', 'Post', 500],
+      ['purchase', 'Bought for your project: magnets', 899],
+      ['handling', 'Handling for bought items', 290],
+    ])
+  })
+
   it('changes the charges after acceptance as the backend does (#5351)', async () => {
     const post = { kind: 'shipping' as const, label: 'Post', amount_minor: 500 }
     const cap = { kind: 'discount' as const, label: 'Agreed cap', amount_minor: -300 }

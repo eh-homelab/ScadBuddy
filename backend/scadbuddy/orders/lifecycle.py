@@ -2548,9 +2548,10 @@ class Lifecycle:
         same amount that names the link, labelled by `purchase_label`, the link `recorded`
         with both ids, the handling fee and the auto tax recomputed, and the audit row
         ``purchase.recorded``. Returns the link, and whether this call wrote it: a second
-        record of a recorded link returns it as it is and writes nothing. Refusals:
-        `source_not_found` (404), `order_not_submitted` on a cart,
-        `order_cancelled`/`order_closed`, `purchase_locked` past `quoted`,
+        record of a recorded link with the same amount and cost kind returns it as it is
+        and writes nothing; one that differs is `purchase_recorded` (a change is
+        ``update_purchase``). Refusals: `source_not_found` (404), `order_not_submitted` on
+        a cart, `order_cancelled`/`order_closed`, `purchase_locked` past `quoted`,
         `purchase_not_pending` for a link marked not needed."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -2558,6 +2559,13 @@ class Lifecycle:
             self._not_ended(order)
             source = self._purchase_source(conn, order, source_id)
             if source.status == "recorded":
+                if (source.amount_minor, source.cost_kind) != (body.amount_minor, body.cost_kind):
+                    raise LifecycleError(
+                        "purchase_recorded",
+                        f"purchase link {source.id} is already recorded at"
+                        f" {source.amount_minor} ({source.cost_kind}); change it with"
+                        f" PATCH /orders/{order.id}/purchases/{source.id}",
+                    )
                 return source, False
             self._purchase_open(order)
             if source.status != "pending":
@@ -4083,7 +4091,9 @@ class Lifecycle:
                 raise LifecycleError(
                     "item_has_entries",
                     f"item {item_id} has time or cost entries: remove them or cancel it"
-                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel); a recorded"
+                    " purchase's cost entry goes only with its decline"
+                    f" (POST /orders/{order_id}/purchases/<source id>/decline)",
                     items=[item.id],
                 )
             # Its files go with it, each on the audit line, and with them their holds

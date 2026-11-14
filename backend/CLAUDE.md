@@ -1022,7 +1022,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the auto row is kept and recomputed (`Lifecycle._typed`); any other `tax` charge,
   whatever its label, is typed, and a charge's `shipping_option_id` is kept when
   sent. A charges replace also keeps the `purchase` and `handling` rows and drops a body's
-  (#6133, `store.py` `LIFECYCLE_CHARGES`). `OrdersComponent.rules` reads only its seven
+  (#6133, `store.py` `LIFECYCLE_CHARGES`; the browser's `ChargesEditor` shows them
+  read-only and never sends them, and the mock's `typedCharges` drops them). `OrdersComponent.rules` reads only its seven
   settings (`SettingsStore.read`, one
   query, no secret unsealed), and `_retax` writes nothing at 0 percent with no auto row.
   `PUT …/shipping-option` (`set_shipping_option`, `{option_id}`, null
@@ -1495,20 +1496,25 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   the link's item, kind `material` or `other`, source `purchase:<source id>`; a
   `purchase` charge of the same amount labelled `purchase_label`; the source
   `recorded` with both ids; `_rehandle` and `_retax`; the audit row `purchase.recorded`;
-  a second record of a recorded link writes nothing), `update_purchase` (the entry and
+  a second record of a recorded link with the same amount and cost kind writes nothing,
+  one that differs is `purchase_recorded`), `update_purchase` (the entry and
   the charge together, `purchase.updated`) and `decline_purchase` (both removed, the
   source `not_needed` with `shop_note`, `purchase.declined`; a second decline writes
   nothing). All three work only while `draft` or `quoted` (`purchase_locked`), never on
   a cart; record refuses a `not_needed` link (`purchase_not_pending`), update one not
   recorded (`purchase_not_recorded`). A cost entry with a `purchase:` source is neither
-  removed nor added by hand (`purchase_cost_linked`). The handling fee is
+  removed nor added by hand (`purchase_cost_linked`), and its item's delete is
+  `item_has_entries`, whose text names the decline. The handling fee is
   `money.handling_minor`: Settings → Orders' `orders_purchase_fee_flat_minor` per
   recorded purchase (only for an order in `orders_currency`) plus
   `orders_purchase_fee_percent` (0 to 100, two decimals) of their sum, rounded half up
   once, the row removed at 0; both settings are env-seeded and live, and neither the
-  purchases nor the fee are in the auto tax's base. The gate `_no_pending_purchase`
+  purchases nor the fee are in the auto tax's base. A change to either setting reprices
+  no order by itself: an order's `handling` row follows it at that order's next record,
+  update or decline. The gate `_no_pending_purchase`
   (`purchase_pending`, 409, the problem's `sources` and `items` name the pending links)
-  refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
+  counts only links of items not `cancelled` (`store.py` `pending_purchases`; a reopen
+  brings the link back) and refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
   writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
   is not gated. The customer's order view offers no accept while one is pending
   (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
