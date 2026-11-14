@@ -14,7 +14,7 @@ const MAX_QUERY = 100
  */
 export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?: number }) {
   const [params, setParams] = useSearchParams()
-  const query = (params.get('q') ?? '').trim().slice(0, MAX_QUERY)
+  const query = (params.get('q') ?? '').trim().slice(0, MAX_QUERY).trim()
   const [typed, setTyped] = useState(query)
   /** The search this page last put in the address: any other came from outside it. */
   const wrote = useRef(query)
@@ -49,6 +49,9 @@ export function ListingsPage({ debounceMs = SEARCH_DEBOUNCE_MS }: { debounceMs?:
       },
       (caught: unknown) => {
         if (!live) return
+        // The last search's cards are not this one's.
+        setCards(undefined)
+        setNext(null)
         setError(errorText(caught))
         setLoading(false)
       },

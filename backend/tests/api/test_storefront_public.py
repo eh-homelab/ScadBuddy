@@ -352,3 +352,15 @@ def test_a_listing_id_that_is_not_one_is_404(crud: CrudCaller, listing_id: str) 
     r = crud.get(f"/listings/{listing_id}")
     assert r.status_code == 404, r.text
     assert r.json()["type"] == STOREFRONT_PROBLEMS + "listing_not_found"
+
+
+def test_a_card_whose_colours_are_all_archived_is_not_available(
+    client: TestClient,  # noqa: F811
+    crud: CrudCaller,
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    publish(client, create(client, listing_body(template, pla_red, title="Red tag"))["id"])
+    assert crud.get("/listings").json()["listings"][0]["available"] is True
+    assert client.post(f"{BOOK}/filaments/{pla_red}/archive").status_code == 200
+    assert crud.get("/listings").json()["listings"][0]["available"] is False

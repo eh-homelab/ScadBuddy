@@ -11,10 +11,13 @@ dependencies that read them, and every route takes both but ``pay/checkout`` and
 ``storefront`` credential reaches these routes (`crud_router`), so no other caller can
 send either header here.
 
-Area ``listings``: ``GET …/listings`` and ``GET …/listings/{id}``, the published listings
-as the public site shows them (`orders/storefront/listings.py` `public_listing`), with
-each media file as a presigned GET of an hour. An unpublished or unknown listing is 404
-``…/storefront/listing_not_found``; any store but S3 is 503
+Area ``listings``: ``GET …/listings`` is one keyset page of published listing cards
+(`orders/storefront/listings.py` `public_card`: the first picture as a presigned GET of
+an hour, ``available``, ``next_cursor``), at most ``limit``, after ``cursor``, titles
+matching ``q``; a cursor the shop never gave is 422 ``…/storefront/listing_cursor_invalid``
+(#6154). ``GET …/listings/{id}`` is the full listing as the public site shows it
+(`public_listing`), with each media file as a presigned GET of an hour. An unpublished
+or unknown listing is 404 ``…/storefront/listing_not_found``; any store but S3 is 503
 ``…/storefront/storefront_needs_s3`` with reason ``not_configured`` and a text a visitor
 may read (the edge shows it).
 

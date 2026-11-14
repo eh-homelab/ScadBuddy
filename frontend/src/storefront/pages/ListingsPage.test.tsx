@@ -108,6 +108,28 @@ describe('ListingsPage', () => {
     expect(asked).toEqual(['k'.repeat(100)])
   })
 
+  it('cuts a search where the cut leaves a space, once', async () => {
+    const asked: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      const url = new URL(request.url)
+      if (url.pathname === '/api/store/v1/listings') asked.push(url.searchParams.get('q') ?? '')
+    })
+    renderPage(<ListingsPage debounceMs={20} />, { route: `/?q=${'k'.repeat(99)}%20tail` })
+    await screen.findByText(/No design matches/)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    server.events.removeAllListeners()
+    expect(asked).toEqual(['k'.repeat(99)])
+  })
+
+  it('shows no earlier search’s cards when a new search fails', async () => {
+    const { user } = renderPage(<ListingsPage debounceMs={20} />)
+    await screen.findByRole('heading', { name: 'Luggage tag' })
+    server.use(http.get('/api/store/v1/listings', () => HttpResponse.json({ type: 'about:blank', title: 'Down', status: 503 }, { status: 503 })))
+    await user.type(screen.getByLabelText('Search designs'), 'key')
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Luggage tag' })).toBeNull())
+    expect(screen.queryByRole('heading', { name: 'Name keychain' })).toBeNull()
+  })
+
   it('never adds the last search’s next page to a new search', async () => {
     const many = Array.from({ length: 30 }, (_, n) => ({ ...KEYCHAIN, id: `l${n + 10}`, title: n % 2 ? `Key ${n}` : `Tag ${n}` }))
     let release: () => void = () => undefined
