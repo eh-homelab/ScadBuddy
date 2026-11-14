@@ -16,7 +16,7 @@ spool feature that Bambuddy (BB) has, and more:
 Why:
 - The values must be current at each event: spool loaded, before a print,
   after a print. Today SB polls BB every 5 minutes
-  (`spool_overlay_refresh_seconds`, `core/settings.py:662`).
+  (`spool_overlay_refresh_seconds`, `backend/scadbuddy/core/settings.py:686`).
 - SB must record what happened, not only the current value.
 - The owner buys filament from several suppliers and wants to see cost and
   price history for each spool.
@@ -125,6 +125,9 @@ acts on: event kinds, event sources, tag kinds, and sync directions.
   reference to `insert_materials`: cardboard, plastic, Bambu reusable with
   refill ... all rows), note. BB's spool catalog (`/inventory/catalog`,
   `CatalogEntry {name, weight}`) is the BB side.
+- Locations: §5.6.
+- Thresholds (low stock, humidity, drying presets) are settings with
+  per-material and per-type overrides, never constants.
 - `colours`: manufacturer, name, RGBA, material, extra colours, effect. BB
   parity with `/inventory/colors`, including its sync from filamentcolors.
 
@@ -140,7 +143,7 @@ Today SB drops the alpha in several places; each changes:
 - `native_spools.colour` is `^#[0-9A-Fa-f]{6}$` (`spools/native.py:57`).
 - The tray fingerprint is `material|RRGGBB` (`spools/models.py:59-62`), so a
   clear and an opaque spool of one hue look alike.
-- The price book keeps `#RRGGBB` (`orders/bambuddy.py:53-61`); open issue
+- The price book keeps `#RRGGBB` (`orders/bambuddy.py:63-64`, `_colour`); open issue
   #6209 is the same gap and folds into this work.
 
 Where alpha is used:
@@ -157,9 +160,6 @@ Where alpha is used:
   measured. The builder measures whether Bambu Studio and the H2C read alpha
   in a 3MF's filament colour before writing it there; the OpenSCAD export's
   alpha byte is ignored today (CLAUDE.md, verified facts).
-- Locations: §5.6.
-- Thresholds (low stock, humidity, drying presets) are settings with
-  per-material and per-type overrides, never constants.
 
 ### 5.2 Spool type (a product)
 
@@ -169,7 +169,7 @@ Where alpha is used:
   catalogs), colour name, `rgba`, extra colours
 - diameter, density, nozzle and bed temperature ranges
 - label weight (g), `insert_type_id`
-- category, low-stock threshold %, default cost per kg
+- low-stock threshold %, default cost per kg
 - archived
 
 Children:
@@ -262,8 +262,13 @@ anchor, then subtract the **deltas** of every later event.
 - An `ams_remain` reading is an anchor only if it is newer than the newest
   `scale` or `person` reading and the spool is not locked. With the weight lock
   on, `ams_remain` is recorded but never used.
-- The UI shows the anchor and the deltas that make the current value. `native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`)
-becomes `print_actual` events.
+- The UI shows the anchor and the deltas that make the current value.
+
+`native_spool_uses` (`20261101T1849Z_native_spool_uses.sql`) holds a LAN
+print's sliced grams, taken off when the run settles. The migration writes an
+applied row as `print_actual` with `data.basis = "sliced"` (a LAN print has no
+archive actual, so the sliced grams are the best actual known), and an
+unapplied row as `print_estimate`, which the run's end then replaces.
 
 ### 5.6 Locations
 
@@ -358,8 +363,10 @@ Low-cardinality labels only: material, brand, location, not the spool id.
      Bambu spool never changes grams left.
   3. With BB sync on, SB writes the binding to BB (`link-tag`). A 409
      `tag_already_linked` names the BB spool that holds the tag; SB moves it.
-  4. SB turns off BB's `auto_add_unknown_rfid` while override mode is on, so BB
-     does not create its own spool for the tag.
+  4. `auto_add_unknown_rfid` is one BB-wide setting, so SB turns it off for
+     every tag while the system setting "RFID override mode" is on, whether or
+     not an override binding exists yet. SB records the value it found. When a
+     person turns override mode off, SB restores that value.
 - **NTAG tags.** SB reads scans and writes tags through BB's SpoolBuddy
   endpoints (`nfc/tag-scanned` as seen through BB, `nfc/write-tag`,
   `nfc/write-result`). The tag carries OpenSpool data with the SB spool id.
