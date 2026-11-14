@@ -1139,7 +1139,7 @@ def _rotate_service_credentials(state: AppState) -> None:
     """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
     newest has under seven days left, and the long-dead ones forgotten. Without the KEK
     none can be sealed, so none are issued. First, a sealed credential of a caller that
-    reads none any more (the projects worker's, #5298) is revoked, KEK or not."""
+    reads none any more (the projects and print workers', #5298) is revoked, KEK or not."""
     auth = state.components.get(AUTH)
     try:
         retired = auth.credentials.revoke_retired_legacy()
@@ -1162,9 +1162,9 @@ def _rotate_service_credentials(state: AppState) -> None:
 
 def _grant_and_rotate_at_start(state: AppState) -> None:
     """At start, after the migrations: each caller's role its own view, a retired
-    caller's role nothing (#5298 Task 11), a table dropped from a caller's list taken back
-    (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is logged,
-    never fatal, as `grant_at_start`."""
+    caller's role nothing (#5298 Tasks 11 and 35), a table dropped from a caller's list
+    taken back (`auth/revoke.py` `RETIRED_GRANTS`), and the credentials due. A failure is
+    logged, never fatal, as `grant_at_start`."""
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)

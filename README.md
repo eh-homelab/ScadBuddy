@@ -829,13 +829,14 @@ above. On the deployment, besides that login's variables (`SCADBUDDY_AUTH_MODE`,
 `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` for an issuer inside the cluster), every
 service that calls the API presents a **service credential** (`Authorization: Bearer
 sbsvc_…`): the agent sidecar, the print worker (`--queue bambuddy`) and the flow runs'
-worker (`--queue projects`). Nothing is configured for them: the API issues each
-caller's credential at its start and rotates it on the prune Schedule with an overlap,
-and each caller reads its current one from a view of its own and unseals it with the
-KEK, so **each caller that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**.
-The print and projects workers read no view: each exchanges a proof (below), and the
-print worker needs no KEK at all (#5298 Task 33). Settings → System →
-Service credentials lists, rotates and revokes them.
+worker (`--queue projects`). Nothing is configured for them. The agent sidecar reads its
+current one from a view of its own: the API issues it at its start and rotates it on the
+prune Schedule with an overlap, and the sidecar unseals it with the KEK, so **a caller
+that reads its view needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. The print and projects
+workers read no view: each exchanges a proof (below), and the API mints them no sealed
+credential and revokes any left at its start (#5298). The print worker needs no KEK at
+all (#5298 Task 33). Settings → System → Service credentials lists and revokes them, and
+rotates the agent's.
 
 **The service-token exchange (#5494).** A caller can prove who it is instead, and get a
 15-minute credential with no sealed copy and no database read
@@ -905,22 +906,22 @@ store or another caller's credential:
 | Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
 |---|---|---|
 | render worker | `scadbuddy_render`, unused: the worker has no database client and ignores the URL (#5298) | `scadbuddy-render.yaml` |
-| print worker | `scadbuddy_print`: its list grants no table; the role keeps the 34 tables and the sequence it held until #5298 Task 35 revokes them. The worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33) | `scadbuddy-print.yaml` |
+| print worker | none: the worker holds no pool and no KEK. It exchanges its proof only (`exchange_source`, no view fallback) and ignores `SCADBUDDY_DATABASE_URL` with a warning; with no proof it refuses to start (#5298 Task 33). The API revokes everything the role `scadbuddy_print` held at every start, so the deployment can drop it (#5298 Task 35) | `scadbuddy-print.yaml`, until eh-homelab/clusters removes it |
 | flow runs' worker | none: the worker has no database client and ignores the URL (#5298); the API and the agent revoke everything the role `scadbuddy_projects` held at every start, so the deployment can drop it | `scadbuddy-projects.yaml`, until eh-homelab/clusters removes it |
 | agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
 
-Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
+Create each role with a password (`CREATE ROLE scadbuddy_agent LOGIN PASSWORD '…'`; on
 CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
 the API itself stays on the database's owner role. At every start the API grants each
 role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
 render worker's `RENDER_GRANTS`, empty now) and its credential's view; a role created
-after the API started is granted on the API's next start. The print worker never
-migrates and waits for no migration: it waits for its CRUD areas (#5298). The agent's role owns the
+after the API started is granted on the API's next start. The agent's role owns the
 `ai_*` tables it migrates and grants what the API's role reads of them
 (`agent/src/db/grants.ts`).
 
 On 2026-11-05 the render, print and projects workers connected as their own roles (the
-projects worker has made no connection since 2026-11-07, #5298), and
+projects worker has made no connection since 2026-11-07, and the print worker none since
+its build `sha-4d71920`, read in `pg_stat_activity` on 2026-11-14, #5298), and
 the agent sidecar and the agent workers still connected as the owner. **The target
 (#5295) replaces these roles.** A role per caller in one database is not a boundary, so
 only the CRUD service (the API) will hold a database secret. Every other caller becomes an
