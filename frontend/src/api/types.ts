@@ -414,6 +414,15 @@ export type CustomerPatch = Partial<Schemas['CustomerPatch']>
 export type Order = Schemas['Order']
 export type OrderStatus = Order['status']
 export type OrderDetail = Schemas['OrderDetail']
+/** #6133 — a storefront customer's file or link on a request item, as the back office reads it. */
+export type OrderItemSource = Schemas['OrderItemSource']
+/** #6133 — the colours an own-model request asked for. */
+export type ModelRequestColours = Schemas['ModelRequestColours']
+/** #6133 — a thing to buy for the customer (`GET /orders/{id}/purchases`). */
+export type PurchaseSource = Schemas['PurchaseSource']
+export type PurchaseRecordInput = Defaulted<Schemas['PurchaseRecordInput'], 'cost_kind' | 'note'>
+export type PurchaseUpdateInput = Partial<Schemas['PurchaseUpdateInput']>
+export type SourceDownload = Schemas['SourceDownload']
 export type OrderItem = Schemas['OrderItem']
 export type OrderItemStatus = OrderItem['status']
 /** An item with its quotes and fulfilment attempts, as `GET /orders/{id}` lists them. */

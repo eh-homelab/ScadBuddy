@@ -232,6 +232,11 @@ import type {
   Order,
   OrderCreate,
   OrderDetail,
+  OrderItemSource,
+  PurchaseRecordInput,
+  PurchaseSource,
+  PurchaseUpdateInput,
+  SourceDownload,
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
@@ -2521,6 +2526,29 @@ export const api = {
     request<CostEntry>(`/orders/${seg(orderId)}/cost-entries`, { method: 'POST', body: JSON.stringify(body) }),
   removeCostEntry: (orderId: string, id: string) =>
     request<void>(`/orders/${seg(orderId)}/cost-entries/${seg(id)}`, { method: 'DELETE' }),
+  /** #6133 — the address of a customer file's preview: untrusted bytes the backend serves
+   * as `image/png` with `nosniff`, for an `<img>` only. */
+  sourcePreviewUrl: (orderId: string, sourceId: string) => `${API_BASE}/orders/${seg(orderId)}/sources/${seg(sourceId)}/preview`,
+  /** #6133 — a presigned GET of a customer's staged file, as an attachment. */
+  sourceDownload: (orderId: string, sourceId: string) =>
+    request<SourceDownload>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/download`),
+  /** #6133 — "Check again" for a file whose check failed. */
+  checkSourceAgain: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/check`, { method: 'POST' }),
+  /** #6133 — the shop does not print this file or link; the reason is the shop's. */
+  declineSource: (orderId: string, sourceId: string, reason: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  /** #6133 — "Retry import" for a file whose import is stuck. */
+  retrySourceImport: (orderId: string, sourceId: string) =>
+    request<OrderItemSource>(`/orders/${seg(orderId)}/sources/${seg(sourceId)}/retry-import`, { method: 'POST' }),
+  /** #6133 — what the shop paid for a thing to buy: a cost entry and a charge together. */
+  recordPurchase: (orderId: string, sourceId: string, body: PurchaseRecordInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/record`, { method: 'POST', body: JSON.stringify(body) }),
+  updatePurchase: (orderId: string, sourceId: string, body: PurchaseUpdateInput) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** #6133 — a thing to buy the shop does not buy; the customer reads `shop_note`. */
+  declinePurchase: (orderId: string, sourceId: string, shopNote: string) =>
+    request<PurchaseSource>(`/orders/${seg(orderId)}/purchases/${seg(sourceId)}/decline`, { method: 'POST', body: JSON.stringify({ shop_note: shopNote }) }),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),

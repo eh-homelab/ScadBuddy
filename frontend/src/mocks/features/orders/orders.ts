@@ -41,7 +41,7 @@ import { balanceUnpaid, closeDeposit, noOptionShips, openBalance, replaceCharges
  * way, and on hold every step that advances the order is refused.
  */
 
-const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'cursor', 'limit'])
+const LIST_PARAMS = new Set(['status', 'customer_id', 'q', 'from', 'to', 'accepted_from', 'accepted_to', 'currency', 'product', 'margin_state', 'source', 'unsubmitted', 'own_model', 'purchase_pending', 'import_stuck', 'cursor', 'limit'])
 const MARGIN_STATES = new Set(['ok', 'thin', 'loss', 'unknown'])
 /** `SCAN_PAGE_SIZE` and `MAX_SCAN_PAGES` in backend/scadbuddy/api/orders.py (#5515). */
 export const SCAN_PAGE_SIZE = 100
@@ -284,6 +284,9 @@ function detail(order: Order): OrderDetail {
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
     projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
+    // #6133: a storefront customer's files and links, and the colours each request asked for.
+    sources: state.sources.filter((s) => s.order_id === order.id).sort((a, b) => (a.item_id === b.item_id ? a.position - b.position : a.item_id < b.item_id ? -1 : 1)),
+    model_requests: state.modelRequests.filter((m) => state.items.some((i) => i.id === m.item_id && i.order_id === order.id)),
     totals: {
       subtotal_minor: subtotal,
       pending_minor: pending,
@@ -937,12 +940,20 @@ export const handlers = [
     const source = sp.get('source')
     if (source !== null && source !== 'back_office' && source !== 'storefront') return fieldProblem(request, 'source', "Input should be 'back_office' or 'storefront'")
     const unsubmitted = sp.get('unsubmitted') === 'true'
+    // #6133: `OrderStore.orders`' own-model, purchase-pending and import-stuck filters.
+    const ownModel = sp.get('own_model') === 'true'
+    const purchasePending = sp.get('purchase_pending') === 'true'
+    const importStuck = sp.get('import_stuck') === 'true'
+    const sourcesOf = (orderId: string) => state.sources.filter((s) => s.order_id === orderId)
     const product = sp.get('product')
     if (product !== null && product !== 'custom' && !/^(model|sku):.+$/.test(product)) return fieldProblem(request, 'product', 'product is model:<slug>, sku:<sku> or custom')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
       .filter((o) => (o.source === 'storefront' && o.submitted_at == null) === unsubmitted)
       .filter((o) => !source || o.source === source)
+      .filter((o) => !ownModel || state.modelRequests.some((m) => state.items.some((i) => i.id === m.item_id && i.order_id === o.id)))
+      .filter((o) => !purchasePending || sourcesOf(o.id).some((s) => s.purpose === 'purchase' && s.status === 'pending'))
+      .filter((o) => !importStuck || sourcesOf(o.id).some((s) => s.import_stuck))
       .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))

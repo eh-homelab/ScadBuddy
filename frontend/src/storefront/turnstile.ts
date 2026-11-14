@@ -14,7 +14,7 @@ import { store } from './api/client'
 export const TURNSTILE_SCRIPT = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
 
 /** The forms that take the check, each the widget's `action` (backend `storefront/wire.py`). */
-export type TurnstileAction = 'submit' | 'request' | 'sign_up' | 'sign_in'
+export type TurnstileAction = 'submit' | 'request' | 'model' | 'sign_up' | 'sign_in'
 
 export interface TurnstileOptions {
   sitekey: string
