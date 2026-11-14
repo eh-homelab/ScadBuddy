@@ -75,6 +75,8 @@ const PRICING_DECIMALS = new Set([
   'orders_thin_margin_percent',
   // #5281 — auto tax, below 100.
   'orders_tax_percent',
+  // #6133 — the handling fee's percent, 0 to 100, at most two decimals.
+  'orders_purchase_fee_percent',
 ])
 
 /** #5281 — `money.py` `DepositRule`'s checks, or the message of the first one a rule fails. */
@@ -191,6 +193,9 @@ function putSettings(body: Record<string, unknown>) {
       if (!/^\d+(\.\d+)?$/.test(text)) return refused(name, `Value error, ${envName(name)} must be at least 0`)
       if ((name === 'rough_estimate_factor' || name === 'pricing_usd_rate') && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
       if (name === 'orders_tax_percent' && Number(text) >= 100) return refused(name, `Value error, ${envName(name)} must be less than 100`)
+      if (name === 'orders_purchase_fee_percent' && (Number(text) > 100 || !/^\d+(\.\d{1,2})?$/.test(text))) {
+        return refused(name, `Value error, ${envName(name)} is 0 to 100 with at most two decimals`)
+      }
     }
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")

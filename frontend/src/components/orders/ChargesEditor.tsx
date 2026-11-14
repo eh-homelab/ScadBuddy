@@ -9,6 +9,10 @@ import { refusalText } from './refusal'
 import { chargesWarning, saveCharges, type AddMode } from './afterAcceptance'
 
 const KINDS: OrderCharge['kind'][] = ['shipping', 'discount', 'fee', 'tax']
+/** #6133: the kinds only the backend's lifecycle writes (a recorded purchase and its handling fee). */
+const LIFECYCLE_KINDS: ReadonlySet<OrderCharge['kind']> = new Set(['purchase', 'handling'])
+/** A row the editor shows read-only and never sends: the auto tax, a purchase, the handling fee. */
+const keptByBackend = (c: OrderCharge) => c.auto || LIFECYCLE_KINDS.has(c.kind)
 /** An editable charge; `shipping_option_id` is kept so a save does not drop the option (#5281). */
 type Row = { kind: OrderCharge['kind']; label: string; amount: string; shipping_option_id?: string | null }
 
@@ -16,7 +20,8 @@ type Row = { kind: OrderCharge['kind']; label: string; amount: string; shipping_
  * quoted, and (#5351) on an accepted, in-production or ready order not on hold, through
  * `PUT …/charges/after-acceptance` after a confirm that names the order's status. The auto
  * tax row (#5281), which ScadBuddy computes from `orders_tax_percent`, is shown read-only
- * with an "auto" tag and never sent: the backend keeps and recomputes it. */
+ * with an "auto" tag and never sent: the backend keeps and recomputes it. So are a recorded
+ * purchase and the handling fee (#6133): only their own routes change them. */
 export function ChargesEditor({
   order,
   charges,
@@ -47,7 +52,7 @@ export function ChargesEditor({
   const [confirming, setConfirming] = useState(false)
   const auto = charges.find((c) => c.auto)
   useEffect(() => {
-    if (!dirty) setRows(charges.filter((c) => !c.auto).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
+    if (!dirty) setRows(charges.filter((c) => !keptByBackend(c)).map((c) => ({ kind: c.kind, label: c.label, amount: toMajor(c.amount_minor, exponent), shipping_option_id: c.shipping_option_id ?? null })))
   }, [charges, exponent, dirty])
   // A save answered: the charges it was made over, until the reload brings new ones. The
   // editor stays unsaved till then, so its rows do not flash back and the picker stays off.
@@ -73,6 +78,16 @@ export function ChargesEditor({
   // order and its summary: it needs another label.
   const clashes = (row: Row) => auto !== undefined && row.kind === 'tax' && row.label.trim() === auto.label
   const clash = rows.some(clashes)
+  const lifecycleRows = charges
+    .filter((c) => !c.auto && LIFECYCLE_KINDS.has(c.kind))
+    .map((c) => (
+      <p key={c.id} className="flex justify-between gap-2 text-[13px]" data-testid="lifecycle-charge">
+        <span>
+          {c.label} <Badge variant="secondary">{c.kind === 'purchase' ? 'purchase' : 'handling'}</Badge>
+        </span>
+        <span className="sb-num">{formatMoney(c.amount_minor, currency, exponent)}</span>
+      </p>
+    ))
   const autoRow = auto && (
     <p className="flex justify-between gap-2 text-[13px]" data-testid="auto-tax">
       <span>
@@ -188,6 +203,7 @@ export function ChargesEditor({
             )}
           </div>
         ))}
+        {lifecycleRows}
         {autoRow}
         <div className="flex flex-wrap items-center gap-2">
           <Button

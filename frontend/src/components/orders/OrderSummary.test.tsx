@@ -39,6 +39,27 @@ describe('OrderSummary (#4955)', () => {
     ])
   })
 
+  it('lists the charges as store.charges does: typed, purchases, handling, auto tax (#6133)', () => {
+    const auto = { ...charge('tax', 'Sales tax', 100, 0), id: 'auto', auto: true }
+    const handling = { ...charge('handling', 'Handling for bought items', 300, 0), id: 'h' }
+    const bought = { ...charge('purchase', 'Bought for your project: magnets', 899, 0), id: 'p' }
+    render(
+      <OrderSummary
+        currency="USD"
+        exponent={2}
+        totals={totals()}
+        charges={[auto, handling, bought, { ...charge('shipping', 'Post', 500, 1), auto: false }, { ...charge('fee', 'Rush', 200, 0), auto: false }]}
+      />,
+    )
+    expect(lines().slice(1, 6).map(([term]) => term)).toEqual([
+      'Fee · Rush',
+      'Shipping · Post',
+      'Bought for the customer · Bought for your project: magnets',
+      'Handling · Handling for bought items',
+      'Tax · Sales tax',
+    ])
+  })
+
   it('names the part not yet accepted, and calls the balance provisional', () => {
     render(<OrderSummary currency="USD" exponent={2} totals={totals({ pending_minor: 1250 })} charges={[]} />)
     expect(lines()).toContainEqual(['of which not accepted', '$12.50'])

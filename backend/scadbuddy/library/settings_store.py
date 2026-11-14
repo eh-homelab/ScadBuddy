@@ -872,6 +872,9 @@ class SettingsPatch(BaseModel):
     #: Auto tax (#5281): the percent, and whether shipping is in its base.
     orders_tax_percent: str | None = None
     orders_tax_shipping: bool | None = None
+    #: The handling fee for bought items (#6133): flat per purchase, and a percent.
+    orders_purchase_fee_flat_minor: int | None = None
+    orders_purchase_fee_percent: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
     #: Whether a native run waits for a cleared plate between its prints (#4939).

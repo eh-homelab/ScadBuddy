@@ -11,6 +11,8 @@ import type {
   OrderEvent,
   OrderAttachment,
   OrderItem,
+  OrderItemSource,
+  ModelRequestColours,
   OrderProject,
   Payment,
   PaymentRequestView,
@@ -112,6 +114,11 @@ export type State = {
   /** #5326 — `order_time_entries` and `order_cost_entries`. */
   timeEntries: TimeEntry[]
   costEntries: CostEntry[]
+  /** #6133 — `order_item_sources`: a storefront customer's files and links, and the
+   * preview bytes a checked file has (`has_preview`), by source id. */
+  sources: OrderItemSource[]
+  /** #6133 — `order_item_model_requests`: the colours each own-model request asked for. */
+  modelRequests: ModelRequestColours[]
 }
 
 let counter = 0
@@ -128,6 +135,18 @@ export const ORDER_CLOSED = '0e5a3c1e-1111-4222-8333-944455556663'
 export const ITEM_DRAFT = '7b1c2d3e-4f50-4617-8829-aabbccddee01'
 export const ITEM_APPROVED = '7b1c2d3e-4f50-4617-8829-aabbccddee02'
 export const ITEM_CLOSED = '7b1c2d3e-4f50-4617-8829-aabbccddee03'
+/** #6133 — a sent storefront order with a customer's own models and a thing to buy. */
+export const ORDER_MODELS = '0e5a3c1e-1111-4222-8333-944455556664'
+export const ITEM_MODELS = '7b1c2d3e-4f50-4617-8829-aabbccddee04'
+/** #6133 — the fixture's sources, by what each shows. */
+export const SOURCE_READY = '5c000000-0000-4000-8000-000000000001'
+export const SOURCE_FAILED = '5c000000-0000-4000-8000-000000000002'
+export const SOURCE_STUCK = '5c000000-0000-4000-8000-000000000003'
+export const SOURCE_MAKERWORLD = '5c000000-0000-4000-8000-000000000004'
+export const SOURCE_MANUAL = '5c000000-0000-4000-8000-000000000005'
+export const SOURCE_PURCHASE = '5c000000-0000-4000-8000-000000000006'
+/** The import-stuck reason (backend `orders/models.py` `IMPORT_STUCK`). */
+export const IMPORT_STUCK = 'The import has not finished an hour after the order was sent.'
 export const QUOTE_ACCEPTED = 'q0000000-0000-4000-8000-000000000002'
 /** The fixture output "Reagan" of name-keychain, which the draft item was made from. */
 export const OUTPUT_REAGAN = 'a'.repeat(32)
@@ -271,12 +290,75 @@ function firstRevision(of: OrderItem): Revision {
   }
 }
 
+/** #6133 — one source of the fixture's own-model request, with its defaults. */
+function source(id: string, position: number, extra: Partial<OrderItemSource>): OrderItemSource {
+  return {
+    id,
+    order_id: ORDER_MODELS,
+    item_id: ITEM_MODELS,
+    position,
+    kind: 'file',
+    purpose: 'print',
+    filename: null,
+    size: null,
+    media_type: null,
+    url: null,
+    link_type: null,
+    canonical: null,
+    note: '',
+    check_status: null,
+    check_reason: null,
+    facts: null,
+    sha256: null,
+    has_preview: false,
+    staged: false,
+    status: 'open',
+    status_reason: null,
+    import_stuck: false,
+    library_file_id: null,
+    result_item_id: null,
+    amount_minor: null,
+    cost_kind: null,
+    shop_note: '',
+    ...extra,
+  }
+}
+
+const CUBE_FACTS = {
+  format: '3mf',
+  plates: [{ index: 1, triangles: 1200, size_mm: [40, 30, 12.5], colours: ['#F9D72C'] }],
+  triangles: 1200,
+}
+
+function modelSources(): OrderItemSource[] {
+  return [
+    source(SOURCE_READY, 0, { filename: 'cube.3mf', size: 2_400_000, media_type: 'model/3mf', check_status: 'ready', facts: CUBE_FACTS, sha256: 'a'.repeat(64), has_preview: true, staged: true }),
+    source(SOURCE_FAILED, 1, { filename: 'lid.stl', size: 84_084, media_type: 'model/stl', check_status: 'failed', check_reason: 'The check timed out.', staged: true }),
+    source(SOURCE_STUCK, 2, { filename: 'base.stl', size: 120_084, media_type: 'model/stl', check_status: 'ready', has_preview: true, staged: true, status_reason: IMPORT_STUCK, import_stuck: true }),
+    source(SOURCE_MAKERWORLD, 3, { kind: 'link', url: 'https://makerworld.com/en/models/123-cube', link_type: 'makerworld', canonical: '123' }),
+    source(SOURCE_MANUAL, 4, { kind: 'link', url: 'https://www.printables.com/model/77-lid?<b>x</b>', link_type: 'printables', canonical: '77', status: 'manual', note: 'The lid only' }),
+    source(SOURCE_PURCHASE, 5, { kind: 'link', purpose: 'purchase', url: 'https://parts.example.com/magnets', link_type: 'manual', note: 'The 6 mm magnets, 20 of them', status: 'pending' }),
+  ]
+}
+
 function fixtures(): State {
   const items = [
     item(ITEM_CLOSED, ORDER_CLOSED, 'fulfilled', { output_id: null }),
     item(ITEM_APPROVED, ORDER_ACCEPTED, 'approved', { quantity: 2 }),
     item(ITEM_DRAFT, ORDER_DRAFT, 'draft', { quantity: 2 }),
   ]
+  // #6133: a request item has no design yet, so it has no revision 1.
+  const requestItem = item(ITEM_MODELS, ORDER_MODELS, 'draft', {
+    title: 'Your models',
+    notes: 'Two of the base, one of the lid.',
+    kind: 'request',
+    reference: null,
+    colours: [],
+    output_id: null,
+    current_revision_id: null,
+    created_at: '2026-10-20T09:00:00Z',
+    updated_at: '2026-10-20T09:00:00Z',
+  })
   const { id: _a, ...adaAddress } = address(ADDRESS_ADA, CUSTOMER_ADA)
   const snapshot = { ...adaAddress, id: ADDRESS_ADA }
   delete (snapshot as { position?: number }).position
@@ -321,8 +403,13 @@ function fixtures(): State {
         notes: 'Gift wrap, please.',
       }),
       order(ORDER_DRAFT, 'ORD-2026-3', CUSTOMER_ADA, 'draft', '2026-10-19T09:00:00Z'),
+      order(ORDER_MODELS, 'ORD-2026-4', CUSTOMER_BOB, 'draft', '2026-10-16T09:00:00Z', {
+        source: 'storefront',
+        submitted_at: '2026-10-16T09:00:00Z',
+        storefront_visitor_id: 'v-models',
+      }),
     ],
-    items,
+    items: [...items, requestItem],
     revisions: items.map(firstRevision),
     quotes: [
       {
@@ -402,7 +489,7 @@ function fixtures(): State {
       { id: 2, order_id: ORDER_ACCEPTED, at: '2026-10-18T12:00:00Z', by: BROWSER, kind: 'order.created', detail: {} },
       { id: 3, order_id: ORDER_ACCEPTED, at: '2026-10-18T13:00:00Z', by: BROWSER, kind: 'order.status', detail: { from_status: 'quoted', to: 'accepted' } },
     ],
-    numbers: { '2026': 3 },
+    numbers: { '2026': 4 },
     filaments: [
       filament(FILAMENT_PLA, 'PLA', '#F9D72C', 'Sunflower Yellow', '25.5'),
       filament(FILAMENT_PETG, 'PETG', '#1E1E1E', 'Black', '30'),
@@ -412,6 +499,8 @@ function fixtures(): State {
     files: {},
     timeEntries: [],
     costEntries: [],
+    sources: modelSources(),
+    modelRequests: [{ item_id: ITEM_MODELS, shop_choice: false, filaments: [FILAMENT_PLA] }],
   }
 }
 

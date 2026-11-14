@@ -43,6 +43,7 @@ from scadbuddy.orders.attachments import clean_filename
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.customer_links import LinkInvalidError, checked_link, link_type
 from scadbuddy.orders.lifecycle import LifecycleError, NewRequestItem
+from scadbuddy.orders.models import IMPORT_STUCK as IMPORT_STUCK
 from scadbuddy.orders.models import Order, OrderItem
 from scadbuddy.orders.storefront.listings import problem, public_content
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
@@ -54,12 +55,13 @@ from scadbuddy.orders.storefront.wire import (
     UploadSlotsBody,
 )
 from scadbuddy.store.s3 import STAGED_PUT_HEADERS, S3ContentBackend, staging_key
-from scadbuddy.storefront.uploads import checked_text
+from scadbuddy.storefront.uploads import PurchaseLinkAsk, checked_text
 from scadbuddy.storefront.wire import (
     MAX_MODEL_REQUEST_BYTES,
     MAX_PRINT_LINKS,
     MAX_PURCHASE_LINKS,
     UPLOAD_ID,
+    draft_preview_path,
 )
 
 if TYPE_CHECKING:
@@ -102,6 +104,10 @@ EXPIRED: Final = "This file expired before the order was sent; upload it again."
 #: The status reason of a staged file's source cleaned up `ENDED_GRACE` after its order ended.
 #: The customer's order page shows it (spec §10.5); a new request uploads the file again.
 ENDED: Final = "The order ended; the staged file was removed. Upload it again."
+#: How long after the submit a staged file's import may run before it reads `IMPORT_STUCK`.
+#: Nothing reads it yet: the watcher's import child (#6133 PR 5) sets the reason after it,
+#: and until then no source reads `import_stuck`.
+IMPORT_STUCK_AFTER: Final = timedelta(hours=1)
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 
 
@@ -339,6 +345,49 @@ def _checked_links(body: ModelRequestBody) -> list[_Link]:
     return links
 
 
+def checked_purchase_links(asks: Sequence[PurchaseLinkAsk]) -> list[_Link]:
+    """A design request's things to buy (#6133, spec 2026-11-13 §10.1), each held to the
+    text rules as an own-model request's link is (`checked_link`; 422 ``link_invalid``
+    with ``index``) and stored as a ``manual`` purchase link with its note trimmed. The
+    count (`MAX_PURCHASE_LINKS`) and the note's length were checked as the body was read
+    (`storefront/uploads.py` `checked_purchase_links`)."""
+    links = []
+    for index, ask in enumerate(asks):
+        try:
+            url = checked_link(ask.url)
+        except LinkInvalidError as error:
+            raise _unprocessable("link_invalid", str(error), index=index) from None
+        found, canonical = link_type(url, "purchase")
+        links.append(_Link(url, "purchase", found, canonical, ask.note.strip()))
+    if len(links) > MAX_PURCHASE_LINKS:
+        raise _unprocessable("too_many_links", f"Send at most {MAX_PURCHASE_LINKS} things to buy.")
+    return links
+
+
+def insert_links(
+    conn: Any, order_id: str, item_id: str, links: Sequence[_Link], position: int = 0
+) -> None:
+    """One `order_item_sources` row per link of the request item ``item_id``, from
+    ``position`` on: a purchase link `pending`, a print link as `_print_status` says."""
+    for offset, link in enumerate(links):
+        conn.execute(
+            "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
+            " purpose, url, link_type, canonical, note, status)"
+            " VALUES (%s, %s, %s, 'link', %s, %s, %s, %s, %s, %s)",
+            (
+                order_id,
+                item_id,
+                position + offset,
+                link.purpose,
+                link.url,
+                link.link_type,
+                link.canonical,
+                link.note,
+                "pending" if link.purpose == "purchase" else _print_status(link),
+            ),
+        )
+
+
 def _checked_note(note: str) -> str:
     """The note as plain text (`checked_text`), or empty."""
     return checked_text(note) if note.strip() else ""
@@ -554,24 +603,7 @@ async def add_model_request(
                 assert made is not None
                 checks.append(made["id"])
                 position += 1
-            for link in links:
-                conn.execute(
-                    "INSERT INTO order_item_sources (order_id, item_id, position, kind,"
-                    " purpose, url, link_type, canonical, note, status)"
-                    " VALUES (%s, %s, %s, 'link', %s, %s, %s, %s, %s, %s)",
-                    (
-                        draft.id,
-                        item.id,
-                        position,
-                        link.purpose,
-                        link.url,
-                        link.link_type,
-                        link.canonical,
-                        link.note,
-                        "pending" if link.purpose == "purchase" else _print_status(link),
-                    ),
-                )
-                position += 1
+            insert_links(conn, draft.id, item.id, links, position)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
             changes.append((order, [item]))
@@ -620,12 +652,16 @@ def draft_sources(state: AppState, order_id: str) -> dict[str, tuple[bool, list[
         }
         rows = conn.execute(
             "SELECT id, item_id, kind, purpose, filename, size, url, note, check_status,"
-            " check_reason, status FROM order_item_sources WHERE order_id = %s"
+            " check_reason, status, preview_key FROM order_item_sources WHERE order_id = %s"
             " ORDER BY item_id, position",
             (order_id,),
         ).fetchall()
     found: dict[str, tuple[bool, list[DraftSource]]] = {item_id: (True, []) for item_id in own}
     for row in rows:
         item_id = row.pop("item_id")
-        found.setdefault(item_id, (item_id in own, []))[1].append(DraftSource(**row))
+        preview = row.pop("preview_key")
+        source = DraftSource(
+            **row, preview_url=draft_preview_path(row["id"]) if preview is not None else None
+        )
+        found.setdefault(item_id, (item_id in own, []))[1].append(source)
     return found

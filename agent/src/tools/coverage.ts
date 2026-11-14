@@ -524,6 +524,20 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
   {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',
+    reason:
+      "A storefront customer's file preview (#6133, spec 2026-11-13 §7): untrusted bytes the intake check made, " +
+      "for the order page's \"Customer's models\" panel to draw. The agent reads each file's check and facts " +
+      'from order_get (`sources`); it has no use for the bytes.',
+  },
+  {
+    operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/download',
+    reason:
+      "A presigned GET of a customer's staged file (#6133, spec 2026-11-13 §11), for a person to download in " +
+      'the browser. The agent never opens a customer file: the intake worker checks it, and the import ' +
+      '(#6133 PR 5) copies it into the library.',
+  },
+  {
     operation: 'GET /api/v1/orders/{order_id}/items/{item_id}/quotes/{quote_id}/plates/{plate}/thumbnail',
     reason:
       "A slice quote's plate image from its sliced file (#4673), which the item's print setups draw. The " +

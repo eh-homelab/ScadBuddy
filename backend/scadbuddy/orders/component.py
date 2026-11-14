@@ -50,12 +50,14 @@ from scadbuddy.printers.component import PRINTERS
 from scadbuddy.rows.component import ROWS
 from scadbuddy.store.refs import BlobRefs
 
-#: The settings ``OrdersComponent.rules`` reads (#5281).
+#: The settings ``OrdersComponent.rules`` reads (#5281, #6133).
 ORDER_RULE_SETTINGS = frozenset(
     {
         "orders_currency",
         "orders_tax_percent",
         "orders_tax_shipping",
+        "orders_purchase_fee_flat_minor",
+        "orders_purchase_fee_percent",
         "orders_deposit_policy",
         "storefront_shipping_options",
     }
@@ -134,7 +136,7 @@ class OrdersComponent:
 
     def rules(self) -> OrderRules:
         """The shop's money rules (#5281) as stored now: the lifecycle reads them on each
-        use, so a change applies to the next transition. One query on their five rows
+        use, so a change applies to the next transition. One query on their seven rows
         (``SettingsStore.read``), never the whole snapshot or a secret; a transition reads
         them once."""
         values = self.core.settings_store.read(ORDER_RULE_SETTINGS)
@@ -144,6 +146,8 @@ class OrdersComponent:
             tax_shipping=values["orders_tax_shipping"],
             deposit_policy=tuple(values["orders_deposit_policy"] or ()),
             shipping_options=tuple(values["storefront_shipping_options"] or ()),
+            purchase_fee_flat_minor=values["orders_purchase_fee_flat_minor"],
+            purchase_fee_percent=Decimal(values["orders_purchase_fee_percent"]),
         )
 
     def mail_config(self) -> MailConfig:

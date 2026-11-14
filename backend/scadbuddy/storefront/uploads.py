@@ -21,6 +21,7 @@ imports no database code: the edge imports it.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unicodedata
@@ -30,14 +31,20 @@ from typing import Final
 
 import anyio
 from fastapi import Request, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.storefront.wire import (
+    MAX_LINK_CHARS,
+    MAX_LINK_NOTE,
+    MAX_PURCHASE_LINKS,
+    MAX_PURCHASE_LINKS_BYTES,
     MAX_REQUEST_FILE_BYTES,
     MAX_REQUEST_FILES,
     MAX_REQUEST_TEXT,
+    PURCHASE_LINKS_FIELD,
     STOREFRONT_PROBLEMS,
 )
 
@@ -71,6 +78,17 @@ BUSY_RETRY: Final = 30
 _KEPT_CONTROLS: Final = frozenset("\n\t")
 
 
+class PurchaseLinkAsk(BaseModel):
+    """A thing the customer asks the shop to buy for their design request (#6133, spec
+    2026-11-13 §10.1): a link, kept as text, and a note. The CRUD side holds the link to
+    the text rules (`orders/customer_links.py` `checked_link`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=MAX_LINK_CHARS)
+    note: str = Field(default="", max_length=MAX_LINK_NOTE)
+
+
 def refused(status_code: int, slug: str, detail: str) -> ApiError:
     """A refusal under ``https://scadbuddy.dev/problems/storefront/<slug>``."""
     return ApiError(status_code, detail, type_=STOREFRONT_PROBLEMS + slug)
@@ -98,6 +116,53 @@ def too_many_files() -> ApiError:
         "too_many_files",
         f"Send at most {MAX_REQUEST_FILES} files.",
     )
+
+
+def too_many_links() -> ApiError:
+    return refused(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "too_many_links",
+        f"Send at most {MAX_PURCHASE_LINKS} things to buy.",
+    )
+
+
+def link_invalid(index: int, detail: str = "This link cannot be used.") -> ApiError:
+    """422 ``link_invalid`` for the link at ``index`` of the things to buy."""
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail,
+        type_=STOREFRONT_PROBLEMS + "link_invalid",
+        index=index,
+    )
+
+
+def checked_purchase_links(sent: str) -> list[PurchaseLinkAsk]:
+    """A design request's things to buy, from their part's JSON: a list of at most
+    `MAX_PURCHASE_LINKS` objects, each a ``url`` and an optional ``note``. Refusals: 422
+    ``draft_body_invalid`` for text that is not such a list, ``too_many_links``, and
+    ``link_invalid`` (with ``index``) for an entry of another shape, past a cap, or with
+    text UTF-8 cannot carry (a lone surrogate)."""
+    try:
+        found = json.loads(sent)
+    except (ValueError, RecursionError):
+        raise not_a_request() from None
+    if not isinstance(found, list):
+        raise not_a_request()
+    if len(found) > MAX_PURCHASE_LINKS:
+        raise too_many_links()
+    links = []
+    for index, entry in enumerate(found):
+        try:
+            link = PurchaseLinkAsk.model_validate(entry)
+            # `json.loads` takes a lone surrogate escape, which UTF-8 cannot carry: the
+            # edge's forwarded part and the CRUD side's insert would fail on it (review
+            # of #6200).
+            link.url.encode()
+            link.note.encode()
+        except (ValidationError, UnicodeEncodeError):
+            raise link_invalid(index) from None
+        links.append(link)
+    return links
 
 
 def request_text_invalid() -> ApiError:
@@ -191,13 +256,14 @@ UPLOADS = UploadGate()
 
 @dataclass
 class RequestUpload:
-    """The text and the files, each spooled and at its start, and the gate's slot they
-    hold. `close` them; `release` frees the slot first, when the caller keeps the files
-    past what the gate should count."""
+    """The text, the things to buy (#6133) and the files, each spooled and at its start,
+    and the gate's slot they hold. `close` them; `release` frees the slot first, when the
+    caller keeps the files past what the gate should count."""
 
     text: str
     files: list[UploadFile] = field(default_factory=list)
     slot: UploadSlot | None = None
+    purchase_links: list[PurchaseLinkAsk] = field(default_factory=list)
 
     def release(self) -> None:
         if self.slot is not None:
@@ -224,11 +290,14 @@ class _CappedParser(MultiPartParser):
             stream,
             max_files=float("inf"),
             max_fields=float("inf"),
-            max_part_size=MAX_TEXT_BYTES,
+            max_part_size=max(MAX_TEXT_BYTES, MAX_PURCHASE_LINKS_BYTES),
         )
         self._header_bytes = 0
         self._file_bytes = 0
         self._texts = 0
+        self._link_parts = 0
+        #: The things to buy, read from their part as soon as it ends.
+        self.purchase_links: list[PurchaseLinkAsk] = []
 
     def on_part_begin(self) -> None:
         super().on_part_begin()
@@ -252,8 +321,13 @@ class _CappedParser(MultiPartParser):
         super().on_headers_finished()
         name = self._current_part.field_name
         if self._current_part.file is None:
-            self._texts += 1
-            if name != "text" or self._texts > 1:
+            if name == "text":
+                self._texts += 1
+            elif name == PURCHASE_LINKS_FIELD:
+                self._link_parts += 1
+            else:
+                raise not_a_request()
+            if self._texts > 1 or self._link_parts > 1:
                 raise not_a_request()
         else:
             if name != "files":
@@ -266,6 +340,9 @@ class _CappedParser(MultiPartParser):
             self._file_bytes += end - start
             if self._file_bytes > MAX_REQUEST_FILE_BYTES:
                 raise file_too_large()
+        elif self._current_part.field_name == PURCHASE_LINKS_FIELD:
+            if len(self._current_part.data) + end - start > MAX_PURCHASE_LINKS_BYTES:
+                raise not_a_request()
         elif len(self._current_part.data) + end - start > MAX_TEXT_BYTES:
             raise request_text_invalid()
         super().on_part_data(data, start, end)
@@ -273,10 +350,13 @@ class _CappedParser(MultiPartParser):
     def on_part_end(self) -> None:
         super().on_part_end()
         if self._current_part.file is None:
-            # The text, checked as soon as it ends: before any later file arrives.
+            # Each text part, checked as soon as it ends: before any later file arrives.
             name, sent = self.items[-1]
             assert isinstance(sent, str)
-            self.items[-1] = (name, checked_text(sent))
+            if name == PURCHASE_LINKS_FIELD:
+                self.purchase_links = checked_purchase_links(sent)
+            else:
+                self.items[-1] = (name, checked_text(sent))
 
 
 async def _capped(request: Request, slot: UploadSlot) -> AsyncGenerator[bytes]:
@@ -333,7 +413,8 @@ async def read_request(request: Request, gate: UploadGate | None = None) -> Requ
     ``file_too_large`` (a declared ``Content-Length`` too, before any byte), 408
     ``upload_too_slow``, 422 ``too_many_files``, 422 ``request_text``, 422
     ``draft_body_invalid`` (not multipart, a part header past `MAX_PART_HEADER`, a field
-    other than one ``text`` and the ``files``)."""
+    other than one ``text``, at most one `PURCHASE_LINKS_FIELD` and the ``files``), and
+    the things to buy's own (`checked_purchase_links`)."""
     slot = (gate or UPLOADS).enter()
     try:
         content_type = request.headers.get("content-type", "")
@@ -353,8 +434,13 @@ async def read_request(request: Request, gate: UploadGate | None = None) -> Requ
             # `ValueError`s.
             raise not_a_request() from None
         files = [value for _, value in form.multi_items() if isinstance(value, UploadFile)]
-        texts = [value for _, value in form.multi_items() if isinstance(value, str)]
-        upload = RequestUpload(text=texts[0] if texts else "", files=files, slot=slot)
+        texts = [value for name, value in form.multi_items() if name == "text"]
+        upload = RequestUpload(
+            text=str(texts[0]) if texts else "",
+            files=files,
+            slot=slot,
+            purchase_links=parser.purchase_links,
+        )
     except BaseException:
         slot.release()
         raise

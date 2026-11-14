@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, Route, Routes, useParams } from 'react-router'
 import { store, type Draft } from './api/client'
+import { ModelForm } from './components/ModelForm'
 import { RequestForm } from './components/RequestForm'
 import { DraftChanged } from './draftCount'
 import { AccountPage } from './pages/AccountPage'
@@ -23,6 +24,18 @@ function RequestRoute() {
       <h1 className="sf-h1">Ask for a design</h1>
       <p className="sf-lead">Tell us what you need. We add your request to your order and reply with a design and a price.</p>
       <RequestForm />
+    </section>
+  )
+}
+
+function ModelRoute() {
+  return (
+    <section>
+      <h1 className="sf-h1">Print my own model</h1>
+      <p className="sf-lead">
+        Send your STL or 3MF files, or links to the models. We check each file, then reply with a price.
+      </p>
+      <ModelForm />
     </section>
   )
 }
@@ -75,6 +88,7 @@ export function App() {
             <Route path="/l/:id" element={<CustomizeRoute />} />
             <Route path="/draft" element={<DraftPage />} />
             <Route path="/request" element={<RequestRoute />} />
+            <Route path="/print-my-model" element={<ModelRoute />} />
             <Route path="/o" element={<OrderPage />} />
             <Route path="/pay" element={<PayPage />} />
             <Route path="/account" element={<AccountPage />} />

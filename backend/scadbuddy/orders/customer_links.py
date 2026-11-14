@@ -22,11 +22,13 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from scadbuddy.storefront.wire import MAX_LINK_CHARS as WIRE_MAX_LINK_CHARS
+
 LinkType = Literal["makerworld", "printables", "thingiverse", "manual"]
 LinkPurpose = Literal["print", "purchase"]
 
-#: The longest link taken, in characters.
-MAX_LINK_CHARS: Final = 2048
+#: The longest link taken, in characters: the edge's cap (`storefront/wire.py`).
+MAX_LINK_CHARS: Final = WIRE_MAX_LINK_CHARS
 
 
 class LinkInvalidError(ValueError):
