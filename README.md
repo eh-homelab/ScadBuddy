@@ -2352,34 +2352,48 @@ holds the manifest (spec §12).
   `SCADBUDDY_INTAKE_WORK_DIR` (a writable volume for downloads, since the root file system
   is read-only; default `/tmp`) and `SCADBUDDY_LOG_LEVEL`. A pod checks one file at a time,
   fixed (spec §7, the isolation rule): scale with the Deployment's replicas.
+- **Two Deployments (spec §7, "The child's sandbox").** The worker never parses a file. It
+  runs with `SCADBUDDY_INTAKE_SANDBOX=true` and `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain
+  `http://` URL of the sandbox's Service, e.g. `http://scadbuddy-intake-sandbox:8090`; any
+  other scheme, a user, a path or a query is refused). `SCADBUDDY_INTAKE_SANDBOX` is
+  required: the worker refuses to start without it, and only the dev-only value
+  `unsafe-local` starts the child in the worker's own container. A second Deployment,
+  `scadbuddy-intake-sandbox`, runs `python -m scadbuddy.intake_worker.sandbox`, which runs
+  each check's child. The worker sends it each file over HTTP (`POST /check` on
+  `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090; `GET /healthz` there for its probes; the
+  wire format is `intake_worker/runner.py`'s docstring). The two pods share no network
+  namespace, no volume and no token. The sandbox's environment is
+  `SCADBUDDY_INTAKE_WORK_DIR` (its own `emptyDir`, where each check gets a box that is
+  removed after it), `SCADBUDDY_INTAKE_SANDBOX_PORT` and `SCADBUDDY_LOG_LEVEL`, nothing
+  else: it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
+  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set. It holds no secret, so
+  the RPC carries no key; the worker reads every answer as untrusted. It runs one check at
+  a time and answers a second request 503 (the worker tries again for up to 60 s), so give
+  it as many replicas as the worker.
 - **Memory:** each check runs in a child process capped at 4 GiB of address space and 5
-  minutes, so size the sandbox container's memory limit for one such child, and the work
-  volume for one 256 MiB download.
-- **Two containers (spec §7, "The child's sandbox").** The worker container runs
-  `python -m scadbuddy.intake_worker` with `SCADBUDDY_INTAKE_SANDBOX=true` and
-  `SCADBUDDY_INTAKE_SANDBOX_UID` set to the sandbox container's `runAsUser` (required with
-  `true`; not 0 and not the worker's own uid: the worker accepts only spool files that user
-  owns); it never parses a file. The variable is required: the worker refuses to start without it, and only the
-  dev-only value `unsafe-local` starts the child in the worker's own container. The `sandbox` container runs `python -m scadbuddy.intake_worker.sandbox`, which runs
-  each check's child: another `runAsUser` than the worker's, no ServiceAccount token and no
-  proof volume (it refuses to start with `SCADBUDDY_SERVICE_TOKEN_FILE`,
-  `SCADBUDDY_SERVICE_BOOTSTRAP_FILE` or any of `FORBIDDEN_ENV` set),
-  `readOnlyRootFilesystem`. The two share only the work volume, an `emptyDir` mounted at
-  `SCADBUDDY_INTAKE_WORK_DIR` in both, with a pod `fsGroup` both users are in (the spool's
-  files are group read-write).
+  minutes, so size the sandbox's memory limit for one such child and its work volume for
+  one 256 MiB upload; size the worker's work volume for one 256 MiB download.
 - **The sandbox fails closed.** It starts each parse through `confine.py --strict` (its own
   user, network, mount and PID namespaces, no `/proc`, no capabilities, no new privileges,
   a seccomp filter) and exits 3 at start, logging why, when any step is refused. A container
-  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so give the
-  `sandbox` container a seccomp profile that allows it (and, on Ubuntu 24.04 nodes, an
-  AppArmor profile that allows unprivileged user namespaces). While the sandbox is down,
-  every check fails and the worker counts it in `scadbuddy_intake_sandbox_unanswered_total`
-  (`/metrics` on port 9090); alert on it and on the container's restarts.
-- **Pod:** `runAsNonRoot`, `readOnlyRootFilesystem` in both containers, and no ServiceAccount
-  token automount: the only token is the projected one the worker container's proof needs,
-  mounted in that container only.
-- **Network:** its egress allows DNS, the API's 8082, Temporal and the bucket host only:
-  nothing else on the LAN and no other internet.
+  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the sandbox's pod
+  runs with the seccomp and AppArmor profiles `Unconfined`
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
+  [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)), its pod only, until
+  the nodes can carry a `Localhost` profile that allows exactly that call; the worker's pod
+  keeps `RuntimeDefault`. While the sandbox is down, busy or refusing, each check fails and
+  the worker counts it in `scadbuddy_intake_sandbox_failed_total` by `reason` (`busy`,
+  `unreachable`, `timeout`, `transport`, `check-timeout`, `crashed`, `status`,
+  `bad-answer`; `/metrics` on port 9090). Alert on it and on the sandbox's restarts.
+- **Pods:** `runAsNonRoot` and `readOnlyRootFilesystem` in both, and no ServiceAccount token
+  automount in either. The only token is the projected one the worker's proof needs, in the
+  worker's pod. No `fsGroup` is needed: no volume is shared.
+- **Network
+  ([NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)):**
+  the worker's egress allows DNS, the API's 8082, Temporal, the bucket host and the
+  sandbox's 8090 only; only the worker is on the Temporal frontend's allowlist. The
+  sandbox's ingress admits the worker's pods on 8090 only, and
+  its egress allows nothing.
 
 ### Switching continuous deploy off
 

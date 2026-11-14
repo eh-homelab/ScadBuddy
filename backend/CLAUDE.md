@@ -1446,20 +1446,28 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   capability; a timeout, its own process group; `check.py`: the kind by content, the zip's
   directory, the read within the read budget) and posts `ready`, `refused` or, once its
   attempts are spent, `failed`. The worker is non-dumpable from its start (`hardening.py`).
-  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the pod's
-  `sandbox` container (`sandbox.py`, the spool protocol in `runner.py`), never in the
-  worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_UID` (the sandbox's uid); only the dev-only
-  `unsafe-local` runs it in the worker's container. The sandbox fails closed: it runs the
-  launcher with `--strict` (a refused step is exit 126, no parse) and exits 3 at start when
-  its probe is refused (`probe_isolation`); the worker counts unanswered checks,
-  `scadbuddy_intake_sandbox_unanswered_total` on its `/metrics`. One tenant per pod: the
-  worker and the sandbox each run one check at a time, fixed, and the sandbox empties each
-  finished job and kills any process of an earlier job before it claims the next (it is
-  the child subreaper; one that survives makes it exit 4); scale with replicas. A job is built in the
-  worker's 0700 scratch folder and handed over by one rename into the spool's `jobs/`
-  (0750, the worker's); each child gets a `box/` of its own; every spool output is read by
-  `runner.read_output` (`O_NOFOLLOW` by a directory descriptor, a regular file with one link
-  and the expected owner, capped; the preview's PNG signature and `IHDR` checked). The
+  `SCADBUDDY_INTAKE_SANDBOX` is required (no default): `true` runs the child in the intake
+  sandbox, a Deployment of its own (`python -m scadbuddy.intake_worker.sandbox`, `sandbox.py`;
+  no token, proof or secret, its own `emptyDir`, nothing shared with the worker's pod),
+  never in the worker's, and needs `SCADBUDDY_INTAKE_SANDBOX_URL` (a plain `http://` URL of
+  its Service); only the dev-only `unsafe-local` runs it in the worker's container. The
+  worker hands each file over HTTP (`POST /check` on `SCADBUDDY_INTAKE_SANDBOX_PORT`,
+  default 8090; the body the file, the request JSON in `X-Intake-Request`; the answer
+  binary-framed: `X-Intake-Verdict-Bytes` bytes of verdict JSON, then the preview PNG; the
+  wire format and every cap in `runner.py`'s docstring). No RPC key: the sandbox holds no
+  secret; its NetworkPolicy admits only the worker's pods, and the worker reads every
+  answer as untrusted (`runner._read_answer`: the echoed `X-Intake-Id`, each length within
+  its cap, the verdict validated by `parse_verdict`, the PNG signature and `IHDR` checked).
+  The sandbox fails closed: it runs the launcher with `--strict` (a refused step is exit
+  126, no parse) and exits 3 at start when its probe is refused (`probe_isolation`); the
+  worker counts failed calls, `scadbuddy_intake_sandbox_failed_total` by `reason`, on its
+  `/metrics`. One tenant per pod: the worker and the sandbox each run one check at a time,
+  fixed (a second request is 503, which the worker tries again for up to `BUSY_WAIT`), and
+  the sandbox kills any process of an earlier check before the next (it is the child
+  subreaper; one that survives makes it exit 4); scale with replicas. Each check gets a
+  fresh `box/` (0700, the upload made `O_EXCL | O_NOFOLLOW`), removed after it; a client
+  that goes away, or the timeout, kills the child's group. The RPC tests are
+  `tests/intake_worker/test_sandbox.py`. The
   API stores the preview as opaque bytes, `customer-preview-<sha256 of the preview's bytes>`
   (never the worker's reported hash), held by the source
   (`blob_refs` holder `order_item_source`; the trigger of

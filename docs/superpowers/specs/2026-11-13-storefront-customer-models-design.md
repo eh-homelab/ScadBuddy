@@ -372,9 +372,11 @@ holds no database secret and no store credential. It gets a service credential t
 `exchange_source` (`auth/service_auth.py`), scoped to the CRUD area `intake` only. The pod
 has a read-only root file system and a memory limit; each parse runs in a child process with
 an address-space limit and a timeout, killed with its process group, as
-`workflows/template_process.py` runs template Python. Its egress policy allows the CRUD
-service, Temporal and the bucket host only (eh-homelab/clusters#3182 owns the policies; the
-clusters PR adds this pod's).
+`workflows/template_process.py` runs template Python. The child runs in a second
+Deployment, `scadbuddy-intake-sandbox` ("The child's sandbox" below). The worker's egress
+policy allows the CRUD service, Temporal, the bucket host and the sandbox's port only; the
+sandbox's ingress admits only the worker's pods, and its egress allows nothing
+(eh-homelab/clusters#3182 owns the policies; the clusters PR adds these pods').
 
 `CustomerFileCheck(source_id)` (`intake_worker/workflow.py`; the CRUD service starts it after
 a claim, `orders/storefront/intake.py` `start_checks`, workflow id
@@ -435,30 +437,66 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
 
 - **Fail closed.** A step that cannot be taken stops the check; it never runs weaker.
 - **The isolation rule: one tenant per pod.** A pod holds one customer's file at any
-  moment. The sandbox container runs one check at a time, fixed and not configurable, and
-  empties every finished job before it claims the next (`sandbox._wipe`). Before each claim
-  it also checks that no process of an earlier job is alive (`clear_job_processes`: it is
-  the pod's child subreaper, so a job's orphans become its children; it kills what it
-  finds, and exits 4 when one survives five seconds). The worker takes
-  one check at a time too (`max_concurrent_activities=1`). So while a parse runs, no other
-  customer's file or process exists in the pod for an exploit to reach, whatever it
-  escapes. Throughput comes from replicas of the intake Deployment, never from checks at
+  moment. The sandbox runs one check at a time, fixed and not configurable: a second
+  request while one runs is answered 503, and its body is never stored. Each check gets a
+  fresh box that is removed after it. Before each check the sandbox also checks that no
+  process of an earlier check is alive (`clear_job_processes`: it is the pod's child
+  subreaper, so a check's orphans become its children; it kills what it finds, and stops
+  serving and exits 4 when one survives five seconds). The worker takes one check at a
+  time too (`max_concurrent_activities=1`). So while a parse runs, no other customer's
+  file or process exists in the sandbox's pod for an exploit to reach, whatever it
+  escapes. Throughput comes from replicas of the two Deployments, never from checks at
   once in one pod.
 
 - The worker makes itself non-dumpable at start (`prctl(PR_SET_DUMPABLE, 0)`), before it
   reads its proof, so no process of its user can `ptrace` it or read its
   `/proc/<pid>/mem` or `environ`
   ([prctl(2)](https://man7.org/linux/man-pages/man2/prctl.2.html)); the child does the same.
-- The deployment runs the child in a second container of the pod, `sandbox` (`python -m
-  scadbuddy.intake_worker.sandbox`): another `runAsUser`, no ServiceAccount token, no proof
-  volume, `readOnlyRootFilesystem`, sharing with the worker only an `emptyDir` (the spool)
-  through which the worker hands it the file and gets the verdict and the preview back
-  (`SCADBUDDY_INTAKE_SANDBOX=true` on the worker; the protocol is `runner.py`'s docstring).
-  The variable has no default: the worker refuses to start without it, so a missing value
-  never falls back to the weaker mode; `unsafe-local` (development only) starts the child
-  in the worker's own container. The worker also needs `SCADBUDDY_INTAKE_SANDBOX_UID`, the
-  sandbox container's `runAsUser` (not root, not the worker's own). The sandbox refuses to
-  start with a database secret, the KEK or a proof.
+- The deployment runs the child in a Deployment of its own, `scadbuddy-intake-sandbox`
+  (`python -m scadbuddy.intake_worker.sandbox`): no ServiceAccount token, no proof
+  volume, `readOnlyRootFilesystem`, its own `emptyDir` (the spool). Its pods share no
+  network namespace, no volume and no token with the worker's. It used to be a second
+  container of the worker's pod; a security review found two faults in that design. The
+  pod's NetworkPolicy gave the sandbox the worker's grant to Temporal, whose frontend asks
+  no credential here. And the pod `fsGroup` on the shared spool made the worker's projected
+  token group-readable to the sandbox
+  ([Kubernetes: configure volume permission and ownership](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#configure-volume-permission-and-ownership-change-policy-for-pods)).
+  The owner chose the split (secure by default).
+  The worker hands each check over a narrow HTTP RPC on the pod network
+  (`SCADBUDDY_INTAKE_SANDBOX=true` and `SCADBUDDY_INTAKE_SANDBOX_URL` on the worker, an
+  `http://` URL of the sandbox's Service; the sandbox listens on
+  `SCADBUDDY_INTAKE_SANDBOX_PORT`, default 8090). `SCADBUDDY_INTAKE_SANDBOX` has no
+  default: the worker refuses to start without it, so a missing value never falls back to
+  the weaker mode; `unsafe-local` (development only) starts the child in the worker's own
+  container. The sandbox refuses to start with a database secret, the KEK or a proof.
+- The RPC (`runner.py`'s docstring has every bound). `POST /check`: the body is the file's
+  bytes (`Content-Length` required, at most 256 MiB, streamed to the box, never held in
+  memory whole), and the header `X-Intake-Request` is the request as JSON (the filename,
+  the timeout, the address-space cap and a random `id` of 16 to 64 hex digits; at most
+  4 KiB; checked by `runner.parse_request`). The answer is 200
+  `application/octet-stream` with `X-Intake-Id` (the id, echoed) and
+  `X-Intake-Verdict-Bytes: N`: the first `N` bytes are the verdict's JSON (at most 1 MiB),
+  the rest the preview PNG (at most 4 MiB, empty when none). The framing is binary, never
+  base64 (`.github/scripts/lint-base64-images.sh`). Every other status is a small JSON
+  error that fails the check: 400, 404, 405, 411, 413, 431, 500 (the child crashed, did not
+  start or wrote no verdict), 503 (busy, or stopping) and 504 (past the check's timeout).
+  When the client goes away, or the timeout passes, the sandbox kills the child's group.
+  The RPC carries no key, because the sandbox must hold no secret: a key in its pod is a
+  key an escaped parser reads. Two things protect it instead. The NetworkPolicy admits
+  only the worker's pods to its port, and the worker reads every answer as untrusted:
+  status 200, the echoed id, the verdict length an integer within its cap, no
+  `Content-Encoding`, the body counted while it is read and stopped past 5 MiB, the
+  verdict validated (`runner.parse_verdict`) and the preview's PNG signature and `IHDR`
+  checked. Each failed call is counted, `scadbuddy_intake_sandbox_failed_total` by
+  `reason`. A 503 busy or a refused connection is tried again for up to 60 s.
+- Pod security. Both pods run as non-root with a read-only root and no token automount.
+  The sandbox's pod runs with the seccomp and AppArmor profiles `Unconfined`, which the
+  launcher's `unshare(CLONE_NEWUSER)` needs, since a runtime's default profile refuses it
+  ([Kubernetes: seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
+  [AppArmor](https://kubernetes.io/docs/tutorials/security/apparmor/)). That is the
+  sandbox's pod only, and only until the nodes can carry a `Localhost` profile that allows
+  that call; the launcher's own seccomp filter still binds the parser. The worker's pod
+  keeps `RuntimeDefault`. Only the worker is on the Temporal frontend's allowlist.
 - Each parse starts through a small launcher, `confine.py` (standard library only, run
   with `-I -S`, so it is single-threaded), which confines itself and then `execv`s the
   parser in place:
@@ -505,62 +543,57 @@ credential and from other customers' files (`intake_worker/hardening.py`, `confi
   `setsid` and `setpgid` fail with `EPERM`; a kill of the launcher alone ends the parser
   and its child; a connect to a host loopback listener fails; the spool's other jobs are
   unreachable by absolute path and by `..`. CI proves the same on every run: shard 1 of
-  `backend-pytest` runs `tests/intake_worker/test_runner.py` as uid 10001 in a container
-  unconfined by seccomp and AppArmor, with the runner's AppArmor user-namespace
-  restriction lifted and `SCADBUDDY_REQUIRE_CONFINEMENT=1`, where a refused step fails.
+  `backend-pytest` runs `tests/intake_worker/test_runner.py` and `test_sandbox.py` as uid
+  10001 in a container unconfined by seccomp and AppArmor, with the runner's AppArmor
+  user-namespace restriction lifted and `SCADBUDDY_REQUIRE_CONFINEMENT=1`, where a refused
+  step fails.
 - It fails closed. The sandbox runs the launcher with `--strict`, where any refused step
   exits 126 and no parse runs; at start it runs the launcher once (`probe_isolation`), and
-  where that is refused it logs why and exits 3 without serving a job. The pod then
-  crash-loops and every check it is handed fails; the worker counts them in
-  `scadbuddy_intake_sandbox_unanswered_total` (`/metrics` on its health port). A container
-  runtime's default seccomp profile refuses `unshare(CLONE_NEWUSER)`, so the clusters PR
-  gives the sandbox container a profile that allows it. Only `unsafe-local` runs a parse
-  whose launcher step was refused (reported in the verdict's `isolation`).
-- The spool protocol never follows a name it did not make. The worker builds each job in
-  its own scratch folder (mode 0700, no other user reaches it): `job/` with `upload.bin`,
-  `request.json` (the filename, the timeout and the address-space cap, each checked finite,
-  positive and within its cap on both sides) and an empty `out/`, and keeps descriptors of
-  the job and `out/`. It hands the job over with one `rename` into the spool's `jobs/`
-  (mode 0750, the worker's own: the sandbox lists it but cannot add to it), so no job is
-  readable by the sandbox's user before it is whole. The sandbox claims a job (`taken`,
-  made `O_EXCL`), makes a `box/` (0700, its own), copies the upload into it with
-  `O_NOFOLLOW`, and starts the launcher with the box's descriptor, inherited
-  (`--box-fd`), which the launcher `fchdir`s to and closes before anything else. Never a
-  `/proc/<pid>/fd/<n>` path: the sandbox is non-dumpable, so its children cannot follow
-  such a link of its own. A launcher that does not start is answered (`spawn-failed`),
-  never left taken. It reads the box's outputs and writes fresh files into `out/`, then
-  `done`; the worker reads `done` and the outputs by its descriptors and removes the job.
-  A job the worker could not remove (it timed out while the sandbox still held its box)
-  is removed by its next check once the sandbox has answered it. Every read of an output opens it with
-  `O_NOFOLLOW | O_NONBLOCK` relative to a directory descriptor, then checks with `fstat`
-  that it is a regular file with one link, owned by the user that should have written it
-  (the sandbox's uid, for the worker), and reads at most the cap: the verdict 1 MiB and
+  where that is refused it logs why and exits 3 without serving a check. The pod then
+  crash-loops and every check fails; the worker counts them in
+  `scadbuddy_intake_sandbox_failed_total` (`/metrics` on its health port). Only
+  `unsafe-local` runs a parse whose launcher step was refused (reported in the verdict's
+  `isolation`).
+- The box never follows a name it did not make. For each check the sandbox makes `box/` on
+  its spool (0700, its own; one left by a crash is removed first), streams the body into
+  `upload.bin` made with `O_CREAT | O_EXCL | O_NOFOLLOW`, and starts the launcher with the
+  box's descriptor, inherited (`--box-fd`), which the launcher `fchdir`s to and closes
+  before anything else. Never a `/proc/<pid>/fd/<n>` path: the sandbox is non-dumpable, so
+  its children cannot follow such a link of its own. A launcher that does not start is a
+  500 `spawn-failed`. The sandbox reads the box's outputs with `runner.read_output`:
+  `O_NOFOLLOW | O_NONBLOCK` relative to the box's descriptor, then `fstat` (a regular file
+  with one link, its own user's, at most the cap). The box is removed before the answer is
+  sent. The worker checks the answer again (the RPC above): the verdict 1 MiB and
   validated, the preview 4 MiB, which must start with the PNG signature and an `IHDR`
-  chunk of sides 1 to 4096 ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)). A
-  symlink, a hard link, a FIFO or a file of another owner fails the check.
+  chunk of sides 1 to 4096 ([PNG §5.2, §11.2.2](https://www.w3.org/TR/png-3/)).
 - No gVisor or Kata. The production cluster (`primary`, containerd 2.2.7-k3s1, Ubuntu
   kernels 6.8) offers the RuntimeClasses `crun`, `nvidia` and `nvidia-experimental` only
-  (`kubectl get runtimeclass`, 2026-11-14), so the sandbox container runs on the host
-  kernel; a gVisor RuntimeClass would be the strongest layer, and the clusters PR should
-  use one if the cluster ever offers it.
+  (`kubectl get runtimeclass`, 2026-11-14), so the sandbox runs on the host kernel; a
+  gVisor RuntimeClass would be the strongest layer, and the clusters PR should use one if
+  the cluster ever offers it.
 
 **Residual risk.** Accepted, and what would remove each:
 
 - A kernel bug reachable from the parser's allowed syscalls escapes everything above;
-  only a sandboxed kernel (gVisor, Kata) removes that.
-- A parser that escaped through such a bug runs as the sandbox's user, which can read
-  the spool. By the isolation rule the spool then holds no other customer's file: the
-  worker hands over one job at a time and the sandbox empties each finished job first.
-- The two containers share the pod's network namespace. The parser has a namespace of its
-  own (fail closed), so this matters only after an escape; then the pod's NetworkPolicy
-  (DNS, the CRUD port, Temporal and the bucket host only) bounds what it reaches, and it
-  holds no credential for the CRUD port.
+  only a sandboxed kernel (gVisor, Kata) removes that. The sandbox's pod runs `Unconfined`
+  by the runtime's seccomp and AppArmor, so the launcher's own filter is the only syscall
+  filter on the parser until a `Localhost` profile replaces `Unconfined`.
+- A parser that escaped through such a bug runs as the sandbox's user in the sandbox's
+  pod. That pod holds no token, no proof and no secret, and by the isolation rule no other
+  customer's file: it runs one check at a time and removes each box. It shares no network
+  namespace and no volume with the worker, so the worker's projected token, its Temporal
+  grant and its CRUD credential are out of reach. Its NetworkPolicy allows it no egress,
+  and it can answer the worker only with bytes the worker reads as untrusted.
+- An escaped parser could answer a later check of the same pod with a forged verdict: the
+  verdict is what the sandbox says. The worker bounds and validates it, and the CRUD
+  service stores the preview as opaque bytes under their own hash (§7, step 4), so a
+  forged verdict mislabels at most the files that pod checks until it restarts.
 - The parser's memory and time are capped (`RLIMIT_AS` 4 GiB, 5 minutes); the pod's memory
   limit bounds the rest.
 - On Ubuntu 24.04 hosts, `kernel.apparmor_restrict_unprivileged_userns` may refuse the
   launcher's namespace inside a container unless its AppArmor profile allows it; the
-  sandbox then refuses to start, which is safe and visible, and the clusters PR fixes the
-  profile. Not yet measured on the cluster's nodes.
+  sandbox then refuses to start, which is safe and visible. Not yet measured on the
+  cluster's nodes.
 
 With `unsafe-local` (development, tests) the worker starts the launcher itself, without
 `--strict`.
@@ -817,8 +850,11 @@ fetches a link.
 
 One PR: the `scadbuddy-intake` Deployment (the app image, `python -m scadbuddy.intake_worker`,
 a ServiceAccount whose projected token the CRUD service exchanges, no database secret, no
-store credential, read-only root, a memory limit, its egress policy), and the bucket's CORS
-rule (§6.4).
+store credential, read-only root, a memory limit, its egress policy), the
+`scadbuddy-intake-sandbox` Deployment and its Service (`python -m
+scadbuddy.intake_worker.sandbox`, no token, its own `emptyDir`, seccomp and AppArmor
+`Unconfined` on its pod only, ingress from the worker's pods only, no egress; §7, "The
+child's sandbox"), and the bucket's CORS rule (§6.4).
 
 ## 13. Phases, one PR each
 
