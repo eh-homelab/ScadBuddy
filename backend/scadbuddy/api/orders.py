@@ -2833,8 +2833,9 @@ async def print_item(
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` when the quote records
     no setup (manual, archive) and the body sends no ``choices`` or ``filament_plan``;
     and the print run's own refusals, as the print route answers them."""
@@ -2891,8 +2892,9 @@ async def test_print_item(
     print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, the output gone, or a
     ``part_settings``, ``printer_id``, ``printer``, ``choices``, ``prime_tower``,
-    ``supports`` or ``print_sequence`` sent that the quote was not sliced with; each one
-    omitted, and an omitted ``path``, is the quote's, #5571, #4673; another ``path``
+    ``supports``, ``print_sequence`` or ``process_overrides`` sent that the quote was not
+    sliced with; each one omitted, and an omitted ``path``, is the quote's, #5571, #4673,
+    #2998; another ``path``
     slices again on its route, #5352); 422 ``print_setup_missing`` as ``POST …/print``
     answers it; and the print run's own refusals, as the print route answers them."""
     check_path(order_id, item_id, revision_id)

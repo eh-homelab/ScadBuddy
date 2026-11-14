@@ -12,6 +12,7 @@ import {
   printOptionFields,
   printPath,
   printSequence,
+  processOverrides,
   setupPhrase,
   slotChoice,
   supportsChoice,
@@ -675,6 +676,14 @@ const sliceQuote = z
     prime_tower: primeTowerChoice,
     supports: supportsChoice,
     print_sequence: printSequence,
+    // #2998: any process setting, sliced with and recorded as part of the quote's print setup.
+    process_overrides: processOverrides.describe(
+      'Any Bambu Studio process settings to slice the quote with (#2998), as {key: value}, e.g. ' +
+        '{"skirt_loops": 0, "wipe_tower_no_sparse_layers": true}: every key is accepted, with no allowlist, and the ' +
+        "slicer judges it (a slice it refuses over one is a 422 naming the key). They win over the template's " +
+        "defaults and over prime_tower, supports and print_sequence. Recorded in the quote's print setup " +
+        "(`choices.process_overrides`), so order_item_print slices what was priced",
+    ),
     // #4673 PR 3: a new design first, through the revise path; the quote is of it.
     inputs: z
       .object({})
@@ -2152,9 +2161,9 @@ export const orderTools: Tool[] = [
     description:
       "Print an approved line item of an accepted order from its accepted quote (#4719): a print run of the item's " +
       "output with the quote's print setup (#4673: printer, path, a spool per slot, nozzles and quality, tower, " +
-      'supports and sequence, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
+      'supports, sequence and process overrides, as order_item_quote `slice` recorded them; order_get lists each quote\'s `choices` and ' +
       '`filament_plan`), every plate, for the quantity still to print. Send none of them to print what was quoted; ' +
-      "each one sent must be the quote's (a printer, choices, tower, supports or sequence that differs is refused " +
+      "each one sent must be the quote's (a printer, choices, tower, supports, sequence or process overrides that differ is refused " +
       '`requote_needed`: quote it again with them), except `path` (another route slices again) and the spools ' +
       "(`filament_plan`, filled from the item's filaments). A manual or archive quote records no setup: send " +
       '`choices` and `filament_plan` (else 422 `print_setup_missing`). Answers with the attempt it recorded (outcome unknown, ' +
@@ -2197,6 +2206,12 @@ export const orderTools: Tool[] = [
       ),
       print_sequence: printSequence.describe(
         "Omit to print with the accepted quote's (order_item_quote's `slice.print_sequence`); another is refused `requote_needed`",
+      ),
+      // #2998: any process setting; omitted is the quote's (`choices.process_overrides`).
+      process_overrides: processOverrides.describe(
+        'Any Bambu Studio process settings (#2998), as {key: value}: every key is accepted, with no allowlist, and ' +
+          'the slicer judges it (a refusal is a 422 naming the key). Omit to print with the accepted quote\'s ' +
+          "(order_item_quote's `slice.process_overrides`); others are refused `requote_needed`: quote with them first",
       ),
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +

@@ -3,6 +3,7 @@ import type {
   PrintChoices,
   FilamentProfile,
   ProfilePreview,
+  ProcessValues,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -2195,6 +2196,16 @@ export const api = {
     request<ProfilePreview[]>('/print/filament-profiles/preview', {
       method: 'POST',
       body: JSON.stringify({ choices, profiles }),
+    }),
+
+  /**
+   * #2998 — every key and value of the process preset these choices resolve to: what the
+   * dialog's "Slicer settings" list, and the value each prints with when none is set.
+   */
+  processValues: (choices: PrintChoices) =>
+    request<ProcessValues>('/print/process-values', {
+      method: 'POST',
+      body: JSON.stringify({ choices }),
     }),
 
   /**

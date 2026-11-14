@@ -61,9 +61,16 @@ def test_none_is_empty_and_a_parameter_that_sets_nothing_is_dropped() -> None:
         {"layer_height": 0.2},
     ],
 )
-def test_a_key_or_value_out_of_range_is_refused(settings: dict[str, object]) -> None:
+def test_any_key_or_value_is_taken(settings: dict[str, object]) -> None:
+    """#2998: no key, value or range is refused; the slicer judges each."""
+    meta = meta_from_raw({"part_print_settings": {"letter_color": settings}}, "demo")
+
+    assert meta.part_print_settings == {"letter_color": settings}
+
+
+def test_a_value_that_is_no_setting_at_all_is_refused() -> None:
     with pytest.raises(ValidationError):
-        meta_from_raw({"part_print_settings": {"letter_color": settings}}, "demo")
+        meta_from_raw({"part_print_settings": {"letter_color": {"wall_loops": {"a": 1}}}}, "demo")
 
 
 @pytest.mark.parametrize("name", ["2", "letter-color", "", "a b"])
@@ -74,7 +81,7 @@ def test_a_part_is_named_by_an_identifier_not_a_slot(name: str) -> None:
 
 def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
     catalogue = _catalogue(
-        tmp_path, {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": 2000}}}
+        tmp_path, {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": [[2]]}}}
     )
 
     with pytest.raises(InvalidModelMetaError, match=r"part_print_settings.*base_color\.wall_loops"):

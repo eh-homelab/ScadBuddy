@@ -89,14 +89,23 @@ def test_each_setting_is_written_as_the_slicer_stores_it() -> None:
         {"infill_wall_overlap": "15%"},
     ],
 )
-def test_an_unknown_key_or_a_value_out_of_range_is_refused(settings: dict[str, Any]) -> None:
+def test_any_key_or_value_is_taken(settings: dict[str, Any]) -> None:
+    """#2998: no key, value or range is refused; the slicer judges each."""
+    request = PrintRunRequest.model_validate(body(part_settings={"2": settings}))
+
+    assert request.part_settings is not None
+    assert request.part_settings[2].model_dump(exclude_none=True) == settings
+
+
+def test_a_value_that_is_no_setting_at_all_is_refused() -> None:
     with pytest.raises(ValidationError):
-        PrintRunRequest.model_validate(body(part_settings={"2": settings}))
+        PrintRunRequest.model_validate(body(part_settings={"2": {"wall_loops": {"a": 1}}}))
 
 
 def test_the_process_values_are_read_as_the_settings_take_them() -> None:
     """#5627: a preset's strings (a vector option a list), the density with its ``%``; a
-    value out of the bounds, of another shape or left out is not read."""
+    whole number of the four numeric keys is a number, any other value its string (#2998:
+    no bounds), and a value of another shape or left out is not read."""
     read = process_part_settings(
         {
             "top_shell_layers": " 5 ",
@@ -110,6 +119,7 @@ def test_the_process_values_are_read_as_the_settings_take_them() -> None:
 
     assert read.model_dump(exclude_none=True) == {
         "top_shell_layers": 5,
+        "bottom_shell_layers": 1001,
         "wall_loops": 3,
         "sparse_infill_density": 15,
         "sparse_infill_pattern": "gyroid",
@@ -124,13 +134,14 @@ def test_the_process_values_are_read_as_the_settings_take_them() -> None:
         ("15.4%", 15),
         ("0.5%", 1),
         ("99.5%", 100),
-        ("100.5%", None),
-        ("x%", None),
-        ("1e30%", None),
+        ("100.5%", 101),
+        # Not a whole number: kept as the preset's text (#2998).
+        ("x%", "x"),
+        ("1e30%", "1e30"),
     ],
 )
 def test_a_fractional_preset_density_is_rounded_to_a_whole_percent(
-    density: str, read: int | None
+    density: str, read: int | str
 ) -> None:
     """#5627 review: Bambu Studio's density may carry a fraction; the control takes whole
     percents, so it opens on the nearest, half up, not empty."""

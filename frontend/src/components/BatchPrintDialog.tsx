@@ -489,6 +489,11 @@ function overridesOf(request: NonNullable<BatchItem['request']>): string[] {
     shown.push(!tower.enabled ? 'No prime tower' : tower.no_sparse_layers ? 'Prime tower, no sparse layers' : 'Prime tower')
   }
   if (request.print_sequence) shown.push(request.print_sequence === 'by object' ? 'By object' : 'By layer')
+  // #2998 — any slicer setting by key.
+  const settings = Object.entries(request.process_overrides ?? {})
+  if (settings.length > 0) {
+    shown.push(`Slicer settings: ${settings.map(([key, value]) => `${key} ${Array.isArray(value) ? value.join(',') : String(value)}`).join(', ')}`)
+  }
   const profiles = request.filament_profiles ?? []
   if (profiles.length > 0) shown.push(`Filament ${profiles.length === 1 ? 'profile' : 'profiles'}: ${profiles.join(', ')}`)
   return shown

@@ -1276,14 +1276,56 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(plain.body).not.toHaveProperty('part_settings')
     expect(t.summarize({ ...args, part_settings })).toContain(", with slot 2's parts at top_shell_layers 8, ironing_type top")
     expect(t.summarize(args)).not.toContain('parts at')
-    // An unknown key or a value out of range is refused before anything is sent.
-    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { infill_wall_overlap: 15 } } }).success).toBe(false)
-    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { sparse_infill_density: 150 } } }).success).toBe(false)
+    // #2998: any key and any value go; the slicer judges them. Only a value that is no setting is refused.
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { infill_wall_overlap: 15 } } }).success).toBe(true)
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { sparse_infill_density: 150 } } }).success).toBe(true)
+    expect(z.object(t.shape).safeParse({ ...args, part_settings: { '2': { wall_loops: { x: 1 } } } }).success).toBe(false)
     // Keys are slot ids from 1 (#5571 review): no 0, no leading zero, no name, nothing past 64.
     for (const slot of ['0', '01', 'Color 2', '-1', '1.5', '65']) {
       expect(z.object(t.shape).safeParse({ ...args, part_settings: { [slot]: { wall_loops: 3 } } }).success).toBe(false)
     }
     expect(z.object(t.shape).safeParse({ ...args, part_settings: { '64': { wall_loops: 3 } } }).success).toBe(true)
+  })
+
+  it('sends any process overrides it is given, names them in its approval line, and omits them otherwise (#2998)', async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    const process_overrides = { skirt_loops: 0, enable_prime_tower: false, some_future_key: 'x', outer_wall_speed: [200, 180] }
+    expect(z.object(t.shape).safeParse({ ...args, process_overrides }).success).toBe(true)
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, process_overrides }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { process_overrides?: unknown }).process_overrides).toEqual(process_overrides)
+    expect(plain.body).not.toHaveProperty('process_overrides')
+    expect(t.summarize({ ...args, process_overrides })).toContain(', with slicer settings skirt_loops=0, enable_prime_tower=false')
+    expect(t.summarize(args)).not.toContain('slicer settings')
+    expect(z.object(t.shape).safeParse({ ...args, process_overrides: { '': 1 } }).success).toBe(false)
+  })
+
+  it('reads the resolved process preset values (#2998)', async () => {
+    let body: unknown
+    server.use(
+      http.post('*/api/v1/print/process-values', async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ process: { source: 'cloud', id: 'GP004' }, resolved: true, reason: null, values: { wall_loops: '2' } })
+      }),
+    )
+    const result = await tool('get_process_values').execute({ process_name: '0.20mm Standard @BBL X1C' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({
+      choices: {
+        nozzles: [
+          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'standard' },
+        ],
+        tier: null,
+        process_name: '0.20mm Standard @BBL X1C',
+      },
+    })
+    expect(JSON.stringify(result)).toContain('wall_loops')
   })
 
   it('sends the accepted analyzer fixes it is given and names them in its approval line (#284)', async () => {

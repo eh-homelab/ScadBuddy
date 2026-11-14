@@ -23,7 +23,7 @@ import type {
   NeedsBackfillProblem,
   ModelPatch,
   ModelPrintChoices,
-  PartSettings,
+  PrintCheck,
   ModelSummary,
   MergePreview,
   ModelVersion,
@@ -97,7 +97,7 @@ const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charC
  * #5627 — the process's part settings the output check answers: `0.20mm Standard @BBL
  * H2C`'s top shell layers (5, print-flow spec §4's measurement); the rest are examples.
  */
-export const MOCK_PROCESS_PARTS: PartSettings = {
+export const MOCK_PROCESS_PARTS: NonNullable<PrintCheck['process_part_settings']> = {
   top_shell_layers: 5,
   bottom_shell_layers: 3,
   wall_loops: 2,
@@ -116,6 +116,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   process_name: null,
   print_sequence: null,
   part_settings: null,
+  process_overrides: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -126,7 +127,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
     !choices.nozzles?.length &&
     choices.tier == null &&
     choices.process_name == null &&
-    choices.print_sequence == null
+    choices.print_sequence == null &&
+    !Object.keys(choices.process_overrides ?? {}).length
   )
 }
 

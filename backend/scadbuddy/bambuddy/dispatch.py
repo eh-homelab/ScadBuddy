@@ -75,8 +75,10 @@ class SlicePlan(BaseModel):
     filament_presets: list[PresetRef]
     filament_colours: list[str]
     bed_type: str
-    #: The template's ``print_settings`` (#770), written over the process preset.
-    #: Accepted analyzer fixes never land here yet: their process-level target
+    #: Process settings written over the process preset: the filament profiles' (#717),
+    #: the template's ``print_settings`` (#770), the print's shorthands (supports, prime
+    #: tower, print sequence), then the request's own ``process_overrides`` (#2998), each
+    #: over the ones before (``print_run.plan_run``). Accepted analyzer fixes never land here yet: their process-level target
     #: (``derived_process_preset``) is unverified (``analyzers/model.py``); the verified
     #: ones change the run's request (``analyzers/apply.py``). Once one does, an explicit
     #: fix goes over these.

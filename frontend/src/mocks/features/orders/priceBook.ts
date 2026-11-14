@@ -405,6 +405,7 @@ export const handlers = [
           prime_tower: body.prime_tower ?? null,
           supports: body.supports ?? null,
           print_sequence: body.print_sequence ?? null,
+          process_overrides: body.process_overrides ?? null,
         },
         filament_plan: body.filament_plan as Quote['filament_plan'],
         total_minor: 0,

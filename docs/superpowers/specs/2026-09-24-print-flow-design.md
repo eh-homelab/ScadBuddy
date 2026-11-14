@@ -234,11 +234,12 @@ catalogue cannot look up, the **pipeline's own** filament preset stays — sendi
 Bambuddy cannot resolve fails the slice naming a preset nobody chose.
 
 **A template's own print settings (#770).** A template may declare `print_settings` in
-its `model.json`: a few Bambu Studio process keys and their values (prime tower, support,
-brim), allowlisted by `PRINT_SETTING_VALUES` in `backend/scadbuddy/library/catalogue.py`
-and refused at load when a key or value is not one Bambu Studio takes. They are read as
-the template's `model.json` has them *now*, not as they were at render time, and they go
-two places:
+its `model.json`: Bambu Studio process keys and their values (prime tower, support, brim,
+or any other process key). Since #2998 there is no allowlist: any key and any value is
+taken, a number or a boolean is stored as the string a Bambu config stores (`true` is
+`"1"`), and a list is joined with commas (`library/catalogue.py` `_print_setting_text`);
+the slicer judges them. They are read as the template's `model.json` has them *now*, not
+as they were at render time, and they go two places:
 
 - **Every slice.** They become `SlicePlan.process_overrides`
   (`bambuddy/dispatch.py`) and so `SliceRequest.process_overrides`, which Bambuddy
@@ -253,18 +254,67 @@ two places:
   (#2652), so it carries the settings the template had when the output was saved; it
   no longer re-plates for the default printer or asks Bambuddy for preset names.
 
+### Any process setting (#2998)
+
+Every Bambu Studio process setting can be set on a print, through one generic field.
+The owner decided on 2026-11-14 (#2998) that every setting is allowed by default: no
+allowlist, no named field per setting, and no check that refuses a key or a value. The
+slicer is the only judge.
+
+- **The field.** `process_overrides: {<Bambu Studio process key>: value}` on the print
+  run's request (`PrintRunRequest`: an output's and a library file's run, a batch step,
+  an order item's print, which extends it) and on the slice quote's
+  (`SliceQuoteRequest`). A value is a string, a number, a boolean or a list of them (a
+  per-extruder option), and is kept as a Bambu config stores it
+  (`bambuddy/process_overrides.py` `normalised_overrides`: `true` is `"1"`, `0.2` is
+  `"0.2"`, keys sorted; an empty map is no field, so a run's key is the one it had
+  before).
+- **The order.** The plan's `process_overrides` (`print_run.py` `plan_run`) are the
+  filament profiles' (#717), then the template's `print_settings`, then the named
+  shorthands (`supports`, `prime_tower`, `print_sequence`), then the request's
+  `process_overrides`. So an explicit override wins over all of them. The plan goes into
+  `SliceRequest.process_overrides` (Bambuddy writes it over the process JSON it slices
+  with) or the native slicer's `slicing/presets.py` `apply_overrides`, and from there into
+  the sliced 3MF. A list over a single value is written as it is (Bambu Studio's JSON
+  loader reads it joined with commas), where `apply_overrides` refused it before.
+- **Checks.** Bambu Studio's option definitions (`PrintConfigDef`) are compiled into its
+  binary; neither the image nor the repo holds them as data. So the only check is
+  against the resolved process preset's own values: a key it has no value for, or a
+  list over one value, is a `process-override-unchecked` warning on the dialog's check
+  and the run (`process_overrides.override_warnings`), never a refusal.
+- **The slicer's refusal.** A slice that fails is the run's failure, as before. When its
+  text names one of the plan's overrides as a whole word, the run's error is a 422,
+  `https://scadbuddy.dev/problems/slicer-setting-refused`, with the key as the extension
+  `key` (`workflows/problems.py` `setting_refused`, from `PrintRunWorkflow._slice`). The
+  wording of Bambuddy's and Bambu Studio's refusals has not been measured, so a refusal
+  that does not name the key stays the plain slice failure.
+- **The run key and the record.** `process_overrides` is part of `run_key` when sent.
+  The run's result records them (`PrintRunResult.process_overrides`), and
+  `GET /prints/{archive_id}` lists them, so a reprint sends the same.
+- **Quotes.** A slice quote slices with them and records them in its print setup (the
+  `choices` column, `quote.py` `print_setup`, `SETUP_FIELDS`; no migration). An item's
+  print that sends none prints with the quote's; one that sends others is
+  `requote_needed` (`printing.py` `QUOTED_SETUP`), as for the other setup fields.
+- **Remembered.** `ModelPrintChoices.process_overrides` is stored in the settings jsonb
+  with the model's or file's other choices, left out of the entry when none are set.
+- **Reading the values.** `POST /print/process-values` (`api/process_values.py`, body
+  `{choices}`) answers the resolved process preset and every key and value of it,
+  flattened, from Bambuddy's `GET /slicer/preset-values` or, on `slicer_backend`
+  `native`, the image's profiles. The dialog's "Slicer settings" editor lists them, and
+  any other key can be typed.
+
 ### Settings per part (#5571)
 
-A print can set a few process settings on the parts of one filament slot: more top
-layers on raised letters, say. The print run's request and the slice quote's take
+A print can set process settings on the parts of one filament slot: more top layers on
+raised letters, say. The print run's request and the slice quote's take
 `part_settings`, a map from the slot (`slot_id`, from 1, as `filament_plan` numbers
-it) to a bounded set of keys (`bambuddy/part_settings.py`): `top_shell_layers`,
-`bottom_shell_layers` and `wall_loops` (0-1000), `sparse_infill_density` (0-100,
-written `N%`), `sparse_infill_pattern` and `ironing_type` (Bambu Studio's
-`enum_values`). The limits are Bambu Studio v02.08.02.61's `PrintConfig.cpp` (lines
-5954, 1363, 4596, 3085, 3102 and 4069): the shell layers have a minimum of 0 and no
-maximum there, so they take `wall_loops`' maximum, 1000. An unknown key, a value out of
-range or slot 0 is a 422 from the request's validation. A slot that no printed part of
+it) to any Bambu Studio keys (`bambuddy/part_settings.py` `PartSettings`, open since
+#2998). The six the dialog first offered stay named fields, so a request that sets them
+keys as before: `top_shell_layers`, `bottom_shell_layers`, `wall_loops`,
+`sparse_infill_density` (a number is written `N%`), `sparse_infill_pattern` and
+`ironing_type`. No key, value or range is refused (#2998); each is written as a Bambu
+config stores it, and the slicer judges it. Slot 0 is still a 422 from the request's
+validation. A slot that no printed part of
 the file is made in is a 422 from `prepare_run` (`part_settings_refusal`, which reads the
 file's `model_settings.config` with `printed_part_slots`), so the dialog's check lists
 it too. A slot only painted on another part's faces is among them: it has no part of its
@@ -447,9 +497,9 @@ at 0.2 mm) sets a minimum, so a `top_shell_layers` below it changes nothing, fro
 object, a part or a request.
 
 A template declares its own (#5626) in `model.json` as `part_print_settings`, beside
-`print_settings`, with the same keys and limits (`PartSettings`). An unknown key or a
-value out of range fails the load (`InvalidModelMetaError`), as `PRINT_SETTING_VALUES`
-does, and a print of the template is then refused (409), as for a bad `print_settings`.
+`print_settings`, with the same keys (`PartSettings`: any key since #2998). Only a value
+that is no setting at all (an object, say) fails the load (`InvalidModelMetaError`), and
+a print of the template is then refused (409), as for a bad `print_settings`.
 The dialog's background slice and the slice quote refuse it too, with the same 409, so
 neither shows or prices a copy without the template's settings that the run would then
 refuse (#5649). The dialog's check (`POST /print/outputs/{id}/check`) puts that refusal

@@ -1,62 +1,41 @@
 """Slicer settings per filament slot for one print (#5571).
 
-A print can set a few Bambu Studio process settings on the parts of one colour: more
-top layers on raised letters, say. They go into the laid-out 3MF as each part's
+A print can set Bambu Studio process settings on the parts of one colour: more top
+layers on raised letters, say. They go into the laid-out 3MF as each part's
 ``<metadata key= value=/>`` in ``Metadata/model_settings.config``
 (:func:`~scadbuddy.render.bambu3mf.set_part_settings`), which the slicer reads over
 the process preset for that part alone. The process preset and the whole-print
 overrides stay as they are.
 
-The keys and their limits are Bambu Studio v02.08.02.61's
-(``src/libslic3r/PrintConfig.cpp``): ``top_shell_layers`` (line 5954, coInt, min 0),
-``bottom_shell_layers`` (line 1363, coInt, min 0), ``wall_loops`` (line 4596, coInt,
-0-1000), ``sparse_infill_density`` (line 3085, coPercent, 0-100),
-``sparse_infill_pattern`` (line 3102, its ``enum_values``) and ``ironing_type`` (line
-4069, its ``enum_values``). The slicer sets no maximum for the shell layers; ScadBuddy
-takes the ``wall_loops`` bound, 1000, for them too.
+Any Bambu Studio key is taken (#2998, the owner's decision of 2026-11-14): no allowlist,
+no type or range check. Each value is written as a Bambu config stores it
+(``process_overrides.scalar_text``), and the slicer judges it. The six keys the dialog
+first offered (#5627) stay named fields, so a request that sets them keys as before
+(``runs.run_key``): ``top_shell_layers``, ``bottom_shell_layers``, ``wall_loops``,
+``sparse_infill_density`` (a number is a percent), ``sparse_infill_pattern`` and
+``ironing_type`` (Bambu Studio v02.08.02.61, ``src/libslic3r/PrintConfig.cpp``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
+from scadbuddy.bambuddy.process_overrides import (
+    ProcessInput,
+    ProcessScalar,
+    joined_text,
+    scalar_text,
+)
 from scadbuddy.render.bambu3mf import PartOverrides
 from scadbuddy.render.colours import colour_hex
 
-#: The most layers or loops a part setting takes: ``wall_loops``' own maximum.
-MAX_LAYERS = 1000
-
-#: ``sparse_infill_pattern``'s ``enum_values`` (PrintConfig.cpp lines 3107-3128).
-SparseInfillPattern = Literal[
-    "concentric",
-    "zig-zag",
-    "grid",
-    "line",
-    "cubic",
-    "triangles",
-    "tri-hexagon",
-    "gyroid",
-    "honeycomb",
-    "adaptivecubic",
-    "alignedrectilinear",
-    "3dhoneycomb",
-    "hilbertcurve",
-    "archimedeanchords",
-    "octagramspiral",
-    "supportcubic",
-    "lightning",
-    "crosshatch",
-    "zigzag",
-    "crosszag",
-    "lockedzag",
-    "2dlattice",
-]
-#: ``ironing_type``'s ``enum_values`` (PrintConfig.cpp lines 4075-4078).
-IroningType = Literal["no ironing", "top", "topmost", "solid"]
+#: The part settings the process's own value is read for, to open the dialog's first
+#: controls on (#5627, :func:`process_part_settings`), each with whether it is a number.
+NUMBER_KEYS = ("top_shell_layers", "bottom_shell_layers", "wall_loops", "sparse_infill_density")
 
 
 def without_unset(dumped: dict[str, Any]) -> dict[str, Any]:
@@ -92,23 +71,33 @@ def parts_set_only(
 
 class PartSettings(BaseModel):
     """The process settings for the parts of one slot; each omitted one is the
-    process's."""
+    process's. Any Bambu Studio key (#2998): the named fields are the dialog's first six,
+    and every other key is kept as sent."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
+    #: Every other key: a value, or a list for a per-extruder option.
+    __pydantic_extra__: dict[str, ProcessInput] = Field(init=False)
 
-    top_shell_layers: int | None = Field(default=None, ge=0, le=MAX_LAYERS)
-    bottom_shell_layers: int | None = Field(default=None, ge=0, le=MAX_LAYERS)
-    wall_loops: int | None = Field(default=None, ge=0, le=MAX_LAYERS)
-    #: Percent, 0-100.
-    sparse_infill_density: int | None = Field(default=None, ge=0, le=100)
-    sparse_infill_pattern: SparseInfillPattern | None = None
-    ironing_type: IroningType | None = None
+    top_shell_layers: ProcessScalar | None = None
+    bottom_shell_layers: ProcessScalar | None = None
+    wall_loops: ProcessScalar | None = None
+    #: A number is a percent (written ``15%``); a string goes as written.
+    sparse_infill_density: ProcessScalar | None = None
+    sparse_infill_pattern: ProcessScalar | None = None
+    ironing_type: ProcessScalar | None = None
 
     def metadata(self) -> tuple[tuple[str, str], ...]:
         """Each setting sent, as the 3MF stores it, sorted by key."""
         values: list[tuple[str, str]] = []
         for key, value in sorted(self.model_dump(exclude_none=True).items()):
-            text = f"{value}%" if key == "sparse_infill_density" else str(value)
+            if (
+                key == "sparse_infill_density"
+                and isinstance(value, int | float)
+                and not (isinstance(value, bool))
+            ):
+                text = f"{scalar_text(value)}%"
+            else:
+                text = joined_text(value)
             values.append((key, text))
         return tuple(values)
 
@@ -164,7 +153,7 @@ def _decimal(text: str) -> Decimal | None:
 
 def _whole_percent(text: str) -> str:
     """``text`` rounded to a whole number, half up; as it is when it is not a number, or
-    too large to round (``1e30``: ``quantize`` refuses it), so the bounds refuse it."""
+    too large to round (``1e30``: ``quantize`` refuses it), which is then kept as text."""
     number = _decimal(text)
     if number is None:
         return text
@@ -189,12 +178,13 @@ def inexact_part_settings(values: Mapping[str, Any]) -> list[str]:
 
 
 def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
-    """The process's own value of each part setting (#5627), from a process preset's
-    flattened values (``PresetValues.values``: a string, or a list of strings for a
-    vector option, ``slicing/presets.py`` ``apply_overrides``). The print dialog opens
-    each control on it. A value the preset leaves out, or one out of :class:`PartSettings`'
-    bounds, is left out: the dialog then shows the control empty. A fractional density
-    (``15.5%``) is rounded to the nearest whole percent, half up, which the control takes."""
+    """The process's own value of the dialog's first part settings (#5627), from a process
+    preset's flattened values (``PresetValues.values``: a string, or a list of strings for
+    a vector option, ``slicing/presets.py`` ``apply_overrides``). A whole number of
+    :data:`NUMBER_KEYS` is a number (a fractional density, ``15.5%``, rounded to the
+    nearest whole percent, half up), any other value its first string. A value the preset
+    leaves out is left out. Every other key's process value is
+    ``POST /print/process-values``'s."""
     read: dict[str, Any] = {}
     for key in PartSettings.model_fields:
         value = values.get(key)
@@ -205,10 +195,10 @@ def process_part_settings(values: Mapping[str, Any]) -> PartSettings:
         text = value.strip()
         if key == "sparse_infill_density":
             text = _whole_percent(text.removesuffix("%").strip())
-        try:
-            read[key] = PartSettings.model_validate({key: text}).model_dump()[key]
-        except ValidationError:
-            continue
+        if key in NUMBER_KEYS and text.isascii() and text.isdigit():
+            read[key] = int(text)
+        else:
+            read[key] = text
     return PartSettings.model_validate(read)
 
 

@@ -147,20 +147,20 @@ test.describe('print dialog', () => {
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
-  test('sets one colour’s top shell layers, opening on the process value, and prints with them (#5627)', async ({
+  test('sets one colour’s top shell layers, showing the process value, and prints with them (#5627, #2998)', async ({
     page,
   }) => {
     const dialog = await openDialog(page)
     await dialog.getByTestId('part-settings-toggle-2').click()
     const settings = dialog.getByTestId('part-settings-2')
-    const top = settings.getByLabel(/Top shell layers/)
-    await expect(top).toHaveValue('5')
+    const top = settings.getByTestId('part-settings-2-top_shell_layers-value')
+    await expect(top).toHaveAttribute('placeholder', '5')
     await top.fill('8')
     await expect(dialog.getByTestId('part-settings-toggle-2')).toContainText('(1 changed)')
 
     const run = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/run'))
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
-    expect((await run).postDataJSON()).toMatchObject({ part_settings: { '2': { top_shell_layers: 8 } } })
+    expect((await run).postDataJSON()).toMatchObject({ part_settings: { '2': { top_shell_layers: '8' } } })
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
