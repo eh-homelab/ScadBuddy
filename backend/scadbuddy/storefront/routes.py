@@ -28,6 +28,7 @@ cookie's session on. The POSTs are checked by `CrossSiteGate`, as every write is
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 import time
@@ -249,11 +250,44 @@ async def upload_slots(request: Request, crud: Crud, visitor_id: Visitor, client
 @visitor_router.post("/draft/models")
 async def add_models(request: Request, crud: Crud, visitor_id: Visitor, client: Client) -> Any:
     """A "Print my own model" request (#6133, spec 2026-11-13 §6.3): the uploads the
-    browser filled and the links, as the visitor sent them. The bot check and the
-    allowance were the slots' (``POST /uploads``)."""
+    browser filled and the links, as the visitor sent them. 404 ``requests_disabled`` while
+    "Ask for a design" is off, as ``POST /uploads``. A request that names an upload had its
+    bot check and allowance at that upload's slots (the CRUD side claims each slot once).
+    One that names none (links only) takes them here, as ``POST /uploads`` does: 429
+    ``request_limited``, then the bot check (action ``model``); a passed check spends one."""
+    state = request.app.state
+    if not await state.requests_enabled.get(crud, visitor_id=visitor_id, client=client):
+        raise _requests_off()
     key = _request_key(request, visitor_id)
     body = await _body(request, "draft_body_invalid")
+    if not _names_uploads(body):
+        allowance: UploadAllowance = state.upload_allowance
+        held = allowance.start(client)
+        if isinstance(held, int):
+            raise ApiError(
+                429,
+                "You have sent a lot of requests, or one is still sending. Try again later.",
+                type_=REQUEST_LIMITED,
+                headers={"Retry-After": str(held)},
+                retry_after=held,
+            )
+        try:
+            await require_turnstile(request, "model")
+            allowance.spend(held)
+        finally:
+            allowance.finish(held)
     return await crud.add_models(body, key=key, visitor_id=visitor_id, client=client)
+
+
+def _names_uploads(body: bytes) -> bool:
+    """Whether the body is a JSON object with a non-empty ``uploads`` list. Anything else
+    takes the gates; the CRUD side judges the body's shape."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return False
+    uploads = parsed.get("uploads") if isinstance(parsed, dict) else None
+    return isinstance(uploads, list) and len(uploads) > 0
 
 
 @visitor_router.delete("/draft/items/{item_id}")
