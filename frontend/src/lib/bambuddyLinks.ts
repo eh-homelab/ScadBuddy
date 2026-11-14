@@ -100,10 +100,18 @@ function hostOf(url: string): string | null {
 
 const IP_HOST = /^(\d+\.){3}\d+$|^\[.*\]$/
 
+/** A fully qualified host (`scadbuddy.example.`) without its one trailing dot (#6227). */
+function bareHost(host: string): string {
+  return host.endsWith('.') ? host.slice(0, -1) : host
+}
+
 /**
  * The host without its first label, or null. The rest must keep two labels (#6227): a
  * bare TLD or LAN suffix (`com`, `lan`) is shared by unrelated names, so `scadbuddy.com`
- * and `scadbuddy.lan` have no siblings and match only on the same host.
+ * and `scadbuddy.lan` have no siblings and match only on the same host. There is no
+ * public-suffix list here, so a public suffix of two labels (`co.uk`) still reads as a
+ * parent: `scadbuddy.co.uk` takes a listed `other.co.uk`. Only listed URLs can be picked,
+ * so the cost is a wrong choice among them, never a link to an unlisted host.
  */
 function parentDomain(host: string): string | null {
   const dot = host.indexOf('.')
@@ -114,22 +122,23 @@ function parentDomain(host: string): string | null {
 
 /**
  * #6212 — the listed web URL for the host the page is on: one on the same host (another
- * port), else one whose name differs only in its first label (`scadbuddy.sso.example`
- * picks `bambuddy.sso.example`). It picks from the configured list only, so no host the
- * browser reports ever becomes a link by itself.
+ * port), else one whose name differs only in its first label, when the rest keeps at
+ * least two labels (#6227; `scadbuddy.sso.example` picks `bambuddy.sso.example`, and
+ * `scadbuddy.com` has no sibling). It picks from the configured list only, so no host
+ * the browser reports ever becomes a link by itself.
  */
 export function pageMatch(urls: string[], page: string): string | null {
   if (!page) return null
-  const same = urls.find((url) => hostOf(url) === page)
-  if (same) return same
-  const wanted = parentDomain(page)
+  const pageHost = bareHost(page)
+  const listed = urls.map((url) => {
+    const host = hostOf(url)
+    return { url, host: host == null ? null : bareHost(host) }
+  })
+  const same = listed.find(({ host }) => host === pageHost)
+  if (same) return same.url
+  const wanted = parentDomain(pageHost)
   if (!wanted) return null
-  return (
-    urls.find((url) => {
-      const host = hostOf(url)
-      return host != null && parentDomain(host) === wanted
-    }) ?? null
-  )
+  return listed.find(({ host }) => host != null && parentDomain(host) === wanted)?.url ?? null
 }
 
 /** `url`, built on the default web URL by the server, moved to {@link bambuddyBase}. */
