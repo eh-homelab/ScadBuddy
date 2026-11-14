@@ -289,10 +289,10 @@ class ListingStore:
     def set_media(
         self, listing_id: str, media_ids: Sequence[str], *, expected_updated_at: datetime
     ) -> Listing:
-        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a
-        published listing stays published with what it last published until it is
-        published again. 409 ``listing_changed`` when it changed after
-        ``expected_updated_at`` was read, 404 when it is gone."""
+        """The listing's pictures set to ``media_ids`` (#6213), and nothing else: a published
+        listing stays published with what it last published until it is published again. 409
+        ``listing_changed`` when it changed after ``expected_updated_at`` was read, 404 when it
+        is gone."""
         with self.pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "UPDATE storefront_listings SET media_ids = %s, updated_at = clock_timestamp()"
@@ -956,15 +956,16 @@ async def change_media(
     expected_updated_at: datetime,
 ) -> Listing:
     """The listing's pictures set to ``media_ids`` (#6213), each an image of its
-    template or a video the listing already shows (#6290), in the order to show them. A draft stays a draft. A published listing is
-    published again at once, so it stays on the public site and shows the new pictures;
-    when that publish is refused, the pictures are kept and the public site shows what
-    was last published (the listing's ``media``, each with its ``media_id``) until the
-    next publish. Refusals: 404 ``listing_not_found``, 409 ``listing_changed``, the 422s
-    of `_check_pictures`, and those of `publish`. A refusal that comes after the pictures
-    were written says so with the extension ``pictures_saved: true`` (any failure of the
-    republish that is not a refusal is 500 ``listing_republish_failed`` with it), so a
-    client never has to guess whether its change landed."""
+    template or a video the listing already shows (#6290), in the order to show them. A
+    draft stays a draft. A published listing is published again at once, so it stays on
+    the public site and shows the new pictures; when that publish is refused, the
+    pictures are kept and the public site shows what was last published (the listing's
+    ``media``, each with its ``media_id``) until the next publish. Refusals: 404
+    ``listing_not_found``, 409 ``listing_changed``, the 422s of `_check_pictures`, and
+    those of `publish`. A refusal that comes after the pictures were written says so with
+    the extension ``pictures_saved: true`` (any failure of the republish that is not a
+    refusal is 500 ``listing_republish_failed`` with it), so a client never has to guess
+    whether its change landed."""
     listing = await asyncio.to_thread(store.get, listing_id)
     if listing is None:
         raise listing_not_found(listing_id)
