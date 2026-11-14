@@ -379,3 +379,12 @@ def test_a_colour_default_no_filament_is_left_for_is_not_shown(listing: Listing)
     """The template's red with red archived: the page preselects nothing."""
     left = {k: v for k, v in FILAMENTS.items() if k != PLA_RED}
     assert _public(listing, left).params["colour"].default is None
+
+
+def test_a_choice_default_outside_its_choices_is_not_shown(listing: Listing) -> None:
+    """A listing saved before #6144 may start a choice outside what it offers: the page
+    preselects nothing rather than a value it cannot show."""
+    bounds = dict(listing.params)
+    bounds["shape"] = bounds["shape"].model_copy(update={"default": "square"})
+    shown = _public(listing.model_copy(update={"params": bounds}), FILAMENTS).params
+    assert shown["shape"].default is None

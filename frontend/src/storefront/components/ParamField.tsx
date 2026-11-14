@@ -19,8 +19,9 @@ const INPUT =
 
 /**
  * One parameter a listing offers. A field the visitor has not touched says the shop's
- * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in); only a text
- * field shows the design's default, as its placeholder (#6137). Labels are the listing's
+ * choice stands, and sends nothing (spec §5.4: the CRUD side fills it in). The default an
+ * unpicked render takes (the listing's, else the design's) shows as a text or number
+ * field's placeholder, and as a choice's pick (#6137, #6144). Labels are the listing's
  * own or the template's caption without its extruder note (`shown_label`), and choices
  * are the shop's values, a switch's as Yes or No (`valueText`); all are shown as text. Styled
  * with the theme's tokens only, so the back office's preview (StorefrontPage) shows the
@@ -42,7 +43,7 @@ export function ParamField({ param, value, filaments, onChange }: Props) {
           className="w-full flex-wrap"
           aria-label={param.label}
           // The shop's default shows as picked until the visitor picks (#6144).
-          value={String(param.choices.findIndex((choice) => sameChoice(param.colour, choice, value ?? param.default)))}
+          value={picked(param, value)}
           // Choosing the one picked again empties the group: back to the shop's choice.
           onValueChange={(picked) => onChange(picked === '' ? undefined : param.choices[Number(picked)])}
         >
@@ -150,3 +151,10 @@ function sameChoice(colour: boolean, choice: ParamValue, value: ParamValue | nul
   if (colour && typeof choice === 'string' && typeof value === 'string') return choice.toLowerCase() === value.toLowerCase()
   return choice === value
 }
+
+/** The toggle group's value: the index of the choice on screen, or '' for none. */
+function picked(param: Extract<PublicParam, { kind: 'choice' }>, value: ParamValue | undefined): string {
+  const index = param.choices.findIndex((choice) => sameChoice(param.colour, choice, value ?? param.default))
+  return index < 0 ? '' : String(index)
+}
+

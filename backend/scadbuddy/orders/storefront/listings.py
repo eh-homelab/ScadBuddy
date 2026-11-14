@@ -825,6 +825,9 @@ def _public_param(
         ]
         if not (isinstance(start, str) and start.casefold() in colours):
             fields["default"] = None
+    elif isinstance(bound, ChoiceBound) and start not in bound.choices:
+        # Publish refuses such a default; a listing saved before #6144 may still hold one.
+        fields["default"] = None
     if isinstance(bound, NumberBound):
         return PublicNumber.model_validate(fields)
     if isinstance(bound, ChoiceBound):

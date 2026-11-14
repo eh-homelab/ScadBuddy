@@ -132,6 +132,36 @@ describe('ListingEditor (#5282)', () => {
     expect(shown.line).toMatchObject({ label: 'Name', placeholder: 'Your name' })
   })
 
+  it('previews the default an unpicked render takes, as the public page does (#6144)', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        { ...keychainSchema.parameters!.find((p) => p.name === 'body_color')!, initial: '#ff0000' },
+        { name: 'shape', type: 'select', initial: 'round', caption: 'Shape', group: 'Plate', options: [{ name: 'round', value: 'round' }, { name: 'square', value: 'square' }] } as Param,
+        { name: 'size', type: 'slider', initial: 40, caption: 'Size', group: 'Plate', min: 20, max: 80, step: 1 } as Param,
+        { name: 'line', type: 'string', initial: 'Your name', caption: 'Name', group: 'Text', max_length: 20 } as Param,
+      ],
+    }
+    const draft: ListingDraft = {
+      ...emptyDraft('name-keychain', COMMIT),
+      title: 'Tag',
+      colours: [PLA.id],
+      params: {
+        body_color: { kind: 'choice', choices: [] },
+        shape: { kind: 'choice', choices: ['round', 'square'] },
+        size: { kind: 'number', min: 20, max: 80, step: 1 },
+        line: { kind: 'text', max_length: 20, default: 'Ada' },
+      },
+    }
+    const shown = previewListing(draft, schema, [PLA], [], () => '').params
+    expect(shown.body_color!.default).toBe('#ff0000')
+    expect(shown.shape!.default).toBe('round')
+    expect(shown.size!.default).toBe(40)
+    expect(shown.line).toMatchObject({ default: 'Ada', placeholder: 'Ada' })
+    const elsewhere = previewListing({ ...draft, colours: [] }, schema, [PLA], [], () => '').params
+    expect(elsewhere.body_color!.default).toBeNull()
+  })
+
   it('locks a numeric select at one of its options, as a number', async () => {
     const user = userEvent.setup()
     const seen: ListingDraft[] = []

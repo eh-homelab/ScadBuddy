@@ -156,17 +156,26 @@ export function previewListing(
   mediaUrl: (item: MediaView) => string,
 ): PublicListing {
   const input = listingInput(draft, schema, filaments)
+  const colours = filamentColours(draft, filaments)
   const params: Record<string, PublicParam> = {}
   for (const param of schema?.parameters ?? []) {
     const bound = input.params?.[param.name]
     if (!bound) continue
-    const placeholder = bound.kind === 'text' && typeof param.initial === 'string' && param.initial.trim() ? param.initial : null
+    // What an unpicked render takes (`effective_default`): the listing's, else the template's;
+    // a colour's only while a listing filament has it.
+    const start = bound.default ?? param.initial ?? null
+    const shownDefault =
+      param.type !== 'color' || (typeof start === 'string' && colours.some((colour) => colour.toLowerCase() === start.toLowerCase()))
+        ? start
+        : null
+    const placeholder = bound.kind === 'text' && typeof start === 'string' && start.trim() ? start : null
     params[param.name] = {
       ...bound,
       // As the public page shows it (`shown_label`, `_public_param`).
       label: shownLabel(param.name, bound.label, param.caption),
       group: param.group ?? '',
       colour: param.type === 'color',
+      default: shownDefault,
       ...(bound.kind === 'text' ? { placeholder } : {}),
     } as PublicParam
   }
