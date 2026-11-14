@@ -299,10 +299,14 @@ def slots_from_picks(
     """``chosen`` (slot to filament id), with each slot it lacks filled from ``picked``:
     the picked filament whose colour is the slot's colour in the render
     (``job.result.colors``), casefolded (#6152). A slot no pick matches stays out, and
-    the shop picks it."""
+    the shop picks it. A slot shows only a colour, so two picks of one colour must be one
+    filament: else `InputOutsideListingError` (``picks.<name>``, ``colour``) for the
+    second pick, and the order line never drops it."""
     by_colour: dict[str, str] = {}
-    for filament in picked.values():
-        by_colour.setdefault(filament.colour.casefold(), filament.id)
+    for name, filament in picked.items():
+        colour = filament.colour.casefold()
+        if by_colour.setdefault(colour, filament.id) != filament.id:
+            raise InputOutsideListingError(f"picks.{name}", "colour")
     filled = dict(chosen)
     for slot, colour in enumerate(render_colours):
         if slot not in filled and colour.casefold() in by_colour:

@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
 import type { Filament, ParamValue, PublicParam } from '../api/client'
-import { colourGone, filamentOf, paramFilaments, parseNumber, textLength, valueProblem, valueText } from '../params'
+import { colourGone, filamentOf, nearestFilament, paramFilaments, parseNumber, startColour, textLength, valueProblem, valueText } from '../params'
 import { ColourPicker } from './ColourPicker'
 
 interface Props {
@@ -42,11 +42,16 @@ export function ParamField({ param, value, filaments, onChange, pick, onPick, ma
     const gone = colourGone(param)
     const offered = paramFilaments(param, filaments, material)
     const current = typeof value === 'string' ? filamentOf(offered, value) : undefined
+    // #6152: on a `one_material` listing, the row shows the colour `settleMaterial` sends
+    // while no pick is set: the shop's colour, else the nearest of the shown material.
+    const start = material === null ? undefined : startColour(param)
+    const fallback = start === undefined ? undefined : (filamentOf(offered, start) ?? nearestFilament(start, offered))
     return (
       <div className="min-w-0" aria-describedby={hintId}>
         <ColourPicker
           label={param.label}
           filaments={offered}
+          fallback={fallback}
           value={pick ?? current?.id}
           onChange={(next) => {
             onChange(next?.colour)

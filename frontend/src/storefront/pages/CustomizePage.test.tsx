@@ -111,6 +111,8 @@ describe('CustomizePage', () => {
     const picker = await screen.findByRole('button', { name: /Base colour/ })
     await user.click(picker)
     await user.click(await screen.findByRole('radio', { name: 'Signal orange PLA' }))
+    // A pick waits for its preview: the shop maps it to the render's slots.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add to order' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Add to order' }))
     await screen.findByText('Added to your order.')
     await user.click(picker)
@@ -159,6 +161,74 @@ describe('CustomizePage', () => {
         picks: { body_colour: 'f-blue', rim_colour: 'f-blue' },
       }),
     )
+  })
+
+  it('hides the price of the last pick when a pick of the same colour renders (#6152)', async () => {
+    const cheap = { id: 'f-cheap', colour: '#C0392B', colour_name: 'Cheap red', material: 'PLA' }
+    const dear = { id: 'f-dear', colour: '#C0392B', colour_name: 'Dear red', material: 'PLA' }
+    const listing = {
+      ...KEYCHAIN,
+      id: 'l9',
+      params: { base_colour: { kind: 'choice', label: 'Base colour', group: '', colour: true, choices: ['#C0392B'] } },
+      colours: [cheap, dear],
+    }
+    let reads = 0
+    server.use(
+      http.get('/api/store/v1/listings/l9', () => HttpResponse.json(listing)),
+      // The shop reuses one render for one colour, whatever filament is picked.
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE)),
+      http.get('/api/store/v1/renders/:id/estimate', () => {
+        reads += 1
+        if (reads === 1) return HttpResponse.json(ESTIMATE)
+        if (reads === 2) return HttpResponse.json({ ...ESTIMATE, price_minor: 500 })
+        return HttpResponse.json({ type: `${PROBLEMS}render_not_found`, status: 404, detail: 'There is no such render.' }, { status: 404 })
+      }),
+    )
+    const { user } = show('l9')
+    await screen.findByText('about $12.40, confirmed after we check it')
+    await user.click(screen.getByRole('button', { name: /Base colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Cheap red PLA' }))
+    await screen.findByText('about $5.00, confirmed after we check it')
+    await user.click(screen.getByRole('button', { name: /Base colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Dear red PLA' }))
+    await waitFor(() => expect(reads).toBe(3))
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByText(/about \$5\.00/)).toBeNull()
+  })
+
+  it('moves a one-material colour to the shop’s, in the shown material, when its pick is cleared (#6152)', async () => {
+    const sent: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname === '/api/store/v1/renders') sent.push(await request.clone().json())
+    })
+    const { user } = show(CHARM_ID)
+    await user.click(within(await screen.findByRole('radiogroup', { name: 'Material' })).getByRole('radio', { name: 'PETG' }))
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('radio', { name: 'Rust PETG' }))
+    await waitFor(() => expect(sent.at(-1)).toMatchObject({ picks: { body_colour: 'f-petg-rust' } }))
+    const before = sent.length
+    await user.click(screen.getByRole('button', { name: /Body colour/ }))
+    await user.click(await screen.findByRole('button', { name: 'Use the shop’s choice' }))
+    await waitFor(() => expect(sent.length).toBeGreaterThan(before))
+    server.events.removeAllListeners()
+    // The shop's start colour, Ocean blue, is PLA only: its nearest PETG colour is Teal.
+    expect(sent.at(-1)).toEqual(
+      expect.objectContaining({
+        values: { body_colour: '#1C8C8C', rim_colour: '#1C8C8C' },
+        picks: { body_colour: 'f-petg-teal', rim_colour: 'f-petg-teal' },
+      }),
+    )
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Teal')
+  })
+
+  it('holds “Add to order” back while the preview of the picked colours is made (#6152)', async () => {
+    server.use(
+      http.post('/api/store/v1/renders', () => HttpResponse.json(RUNNING, { status: 202 })),
+      http.get('/api/store/v1/renders/:id', () => HttpResponse.json(RUNNING)),
+    )
+    show(CHARM_ID, { firstMs: 5, maxMs: 20, limitMs: 60_000 })
+    expect(await screen.findByText('You can add it once its preview shows.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add to order' })).toBeDisabled()
   })
 
   it('keeps a pick across a reload of the page (#6152)', async () => {

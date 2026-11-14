@@ -212,6 +212,9 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
   const bound = draft.params[param.name]
   const value = lockedValue(draft, param)
   const why = bound ? null : whyNotOffered(param, draft, schema, filaments)
+  // #6152: a label that says "support" or "interface" makes a support setting, which the
+  // saved body locks (`listingInput`), as publish refuses to offer it.
+  const supportLabel = bound !== undefined && !isSupport(param) && isSupport(param, bound.label)
 
   function lock() {
     const { [param.name]: _dropped, ...params } = draft.params
@@ -252,6 +255,9 @@ function ParamRow({ param, draft, schema, filaments, onChange }: { param: Param;
         />
       )}
       {why && <p className="text-xs text-muted-foreground">{why}</p>}
+      {supportLabel && (
+        <p className="text-xs text-destructive">A label with “support” or “interface” makes this a support setting: a customer never sees it. Change the label.</p>
+      )}
     </li>
   )
 }

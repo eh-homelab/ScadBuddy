@@ -63,8 +63,8 @@ MAX_LABEL_LENGTH = 200
 #: ASCII digits only, as the preview's copy (`params.ts` `EXTRUDER_NOTE`) reads them.
 EXTRUDER_NOTE: Final = re.compile(r"\s*\(\s*extruder\s*[0-9]+\s*\)", re.IGNORECASE)
 #: A support material: the shop's choice, never the customer's (#6152, owner rule
-#: 2026-11-13). The page's copy is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`:
-#: change both together.
+#: 2026-11-13). The page's copy is `frontend/src/storefront/params.ts` `SUPPORT_MATERIAL`,
+#: the agent's `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
 SUPPORT_MATERIAL: Final = re.compile(r"support|pva|bvoh|hips", re.IGNORECASE)
 #: A parameter that sets support: the shop may lock it, never offer it (#6152).
 SUPPORT_PARAM: Final = re.compile(r"support|interface", re.IGNORECASE)

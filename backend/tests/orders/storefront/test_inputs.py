@@ -455,6 +455,17 @@ def test_slots_take_the_pick_of_their_colour() -> None:
     }
 
 
+def test_two_picks_of_one_colour_are_one_filament() -> None:
+    # #6152: a slot shows only a colour, so it cannot take two filaments of one colour.
+    same = {"colour": WITH_RED_TOO[PLA_RED], "trim": WITH_RED_TOO[PLA_RED]}
+    assert slots_from_picks({}, same, ["#FF0000"]) == {0: PLA_RED}
+    two = {"colour": WITH_RED_TOO[PLA_RED], "trim": WITH_RED_TOO[PETG_RED]}
+    with pytest.raises(InputOutsideListingError) as refused:
+        slots_from_picks({}, two, ["#FF0000"])
+    assert refused.value.name == "picks.trim"
+    assert refused.value.reason == "colour"
+
+
 def test_a_slot_is_never_a_support_filament(listing: Listing) -> None:
     listing = _with_colours(listing, PLA_RED, PVA_RED)
     values = listing_values(listing, {}, WITH_RED_TOO)

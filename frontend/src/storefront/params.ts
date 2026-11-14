@@ -128,7 +128,7 @@ export function listingMaterials(listing: Listing): string[] {
 }
 
 /** The colour an unpicked parameter starts at: the listing's default once it has one (#6144), else its first choice. */
-function startColour(param: PublicParam): string | undefined {
+export function startColour(param: PublicParam): string | undefined {
   const start = (param as { default?: unknown }).default
   if (typeof start === 'string') return start
   return param.kind === 'choice' ? param.choices.find((c): c is string => typeof c === 'string') : undefined
@@ -219,13 +219,13 @@ export function shownLabel(name: string, label: string | null | undefined, capti
 
 /**
  * A support material: the shop's choice, never the customer's (owner rule, 2026-11-13).
- * The shop's copy is `backend/scadbuddy/orders/storefront/wire.py` `SUPPORT_MATERIAL`:
- * change both together.
+ * The shop's copy is `backend/scadbuddy/orders/storefront/wire.py` `SUPPORT_MATERIAL`, and
+ * the agent's `agent/src/tools/storefrontDraft.ts` `SUPPORT_MATERIAL`: change all together.
  */
 const SUPPORT_MATERIAL = /support|pva|bvoh|hips/i
 
 /** Of `filaments`, those a customer may pick: never a support material. */
-export function customerFilaments(filaments: readonly Filament[]): Filament[] {
+export function customerFilaments<T extends { material: string }>(filaments: readonly T[]): T[] {
   return filaments.filter((filament) => !SUPPORT_MATERIAL.test(filament.material))
 }
 

@@ -33,6 +33,13 @@ describe('ListingView', () => {
     expect(screen.queryByRole('radio', { name: /Ocean blue/ })).toBeNull()
   })
 
+  it('shows the shop’s colour of the material on a one-material row with no pick, never “Choose a colour” (#6152)', () => {
+    render(<ListingView listing={CHARM} values={{}} onChange={() => undefined} material="PETG" />)
+    // The start colour, Ocean blue, is PLA only: the nearest PETG colour is Teal.
+    expect(screen.getByRole('button', { name: /Body colour/ })).toHaveAccessibleName('Body colour Teal')
+    expect(screen.queryByText('Choose a colour')).toBeNull()
+  })
+
   it('offers a switch as Yes and No, never the words true and false (#6141)', async () => {
     const onChange = vi.fn()
     const listing = {

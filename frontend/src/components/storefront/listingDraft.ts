@@ -1,6 +1,6 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
-import { shownLabel } from '../../storefront/params'
+import { customerFilaments, shownLabel } from '../../storefront/params'
 
 /**
  * #5282 (spec 2026-11-02 §5.3) — a listing as the Storefront page edits it, and what the
@@ -60,10 +60,11 @@ export function offerable(param: Param): boolean {
 /**
  * The owner's rule (2026-11-13): support material and settings are internal, never shown to
  * a customer, even when the template exposes them. A parameter whose name, caption or group
- * says "support" or "interface" is one.
+ * says "support" or "interface" is one. #6152: the listing's own `label` counts too, as
+ * publish reads it (backend `listings.py` `_sets_support`).
  */
-export function isSupport(param: Param): boolean {
-  return [param.name, param.caption, param.group].some((text) => typeof text === 'string' && /support|interface/i.test(text))
+export function isSupport(param: Param, label?: string | null): boolean {
+  return [param.name, param.caption, param.group, label].some((text) => typeof text === 'string' && /support|interface/i.test(text))
 }
 
 /** The bound a parameter is offered with at first: the whole of what its schema allows. */
@@ -261,7 +262,7 @@ function withoutSupport(draft: ListingDraft, schema: CustomizerSchema | undefine
   const params: Record<string, ListingBound> = {}
   for (const [name, bound] of Object.entries(draft.params)) {
     const param = byName.get(name)
-    if (param && isSupport(param)) {
+    if (param && isSupport(param, bound.label)) {
       if (param.initial != null) fixed[name] = param.initial
     } else {
       params[name] = bound
@@ -269,9 +270,10 @@ function withoutSupport(draft: ListingDraft, schema: CustomizerSchema | undefine
   }
   const valueOf = (param: Param) => (params[param.name] ? param.initial : (fixed[param.name] ?? param.initial))
   const colourParams = [...byName.values()].filter((param) => param.type === 'color')
-  const customerValues = colourParams.filter((param) => !isSupport(param)).map(valueOf)
+  const support = (param: Param) => isSupport(param, draft.params[param.name]?.label)
+  const customerValues = colourParams.filter((param) => !support(param)).map(valueOf)
   const supportValues = colourParams
-    .filter(isSupport)
+    .filter(support)
     .map(valueOf)
     .filter((colour) => !customerValues.some((value) => sameColour(value, colour)))
   const listed = filaments.filter((filament) => draft.colours.includes(filament.id))
@@ -294,14 +296,17 @@ export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: C
 /**
  * The body the page saves: a support parameter is never offered (`isSupport`; one an older
  * listing offers is locked at its default), and each offered colour parameter takes the
- * listing filaments' colours but the colour of a support-only filament (`withoutSupport`).
+ * listing filaments' colours but the colour of a support-only filament (`withoutSupport`)
+ * or of a support material (`customerFilaments`).
  * That filament stays in `colours`: publish checks every locked colour against the listing's
  * filaments (backend `checked_fixed`, 422 `listing_colour_unknown`), and the support colour
  * is locked.
  */
 export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
   const { byName, params, fixed, supportOnly } = withoutSupport(draft, schema, filaments)
-  const colours = filamentColours(draft, filaments).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+  // #6152: never the colour of a support material (`customerFilaments`), which publish
+  // refuses on offer, even one the shop ticked by hand.
+  const colours = filamentColours(draft, customerFilaments(filaments)).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
   for (const [name, bound] of Object.entries(params)) {
     // A colour's choices are the filaments'; its own label stays (#6137).
     if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours, ...(bound.label ? { label: bound.label } : {}) }

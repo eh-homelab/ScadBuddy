@@ -142,8 +142,12 @@ export function CustomizePage({
   const [shown, setShown] = useState<Shown>()
   const [rendering, setRendering] = useState(false)
   const [renderError, setRenderError] = useState<string | null>(null)
-  /** The rough price of the render `job` names. */
-  const [estimate, setEstimate] = useState<{ job: string; estimate: StoreEstimate }>()
+  /**
+   * The rough price of the render `job` names, for the choices `key` (`choicesKey`). #6152:
+   * a pick of another filament of the same colour reuses the render, so the job alone does
+   * not tell the price of one pick from that of the other.
+   */
+  const [estimate, setEstimate] = useState<{ job: string; key: string; estimate: StoreEstimate }>()
   const [quantity, setQuantity] = useState(1)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -217,6 +221,11 @@ export function CustomizePage({
   }, [blocked, current, shown, debounceMs])
 
   const shownIsCurrent = shown?.key === current
+  /**
+   * #6152: the shop maps picks to the slots of the done render of these choices, and
+   * answers 409 `render_pending` to an add with picks until that render is done.
+   */
+  const waitsForPreview = !shownIsCurrent && Object.keys(sentPicks).length > 0
   const input = (on: Listing): RenderInput => ({
     listing_id: on.id,
     listing_updated_at: on.updated_at,
@@ -238,13 +247,23 @@ export function CustomizePage({
   }
 
   const setPick = (name: string, next: string | undefined) => {
+    setMaterialNote(null)
+    if (next === undefined && listing?.one_material) {
+      // #6152: "Use the shop's choice" on a `one_material` listing. With no value, the shop
+      // would use the listing's default, which can be of another material (422
+      // `listing_mixed_material`): the colour goes to the nearest of the shown material.
+      const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([key]) => key !== name))
+      const settled = settleMaterial(listing, without(values), without(picks), material)
+      setValues(settled.values)
+      setPicks(settled.picks)
+      return
+    }
     setPicks((before) => {
       const copy = { ...before }
       if (next === undefined) delete copy[name]
       else copy[name] = next
       return copy
     })
-    setMaterialNote(null)
   }
 
   /**
@@ -330,6 +349,8 @@ export function CustomizePage({
     const live = () => alive.current && latest.current === mine
     setRendering(true)
     setRenderError(null)
+    // #6152: the old price is hidden until the new one is read (spec 2026-11-13 §5.3).
+    setEstimate(undefined)
     try {
       const first = await store.startRender(body, renderKey.current.for(JSON.stringify(body)))
       renderKey.current.done()
@@ -343,7 +364,7 @@ export function CustomizePage({
       }
       setShown({ job: done, key })
       const rough = await estimateOf(done.id, live)
-      if (rough && live()) setEstimate({ job: done.id, estimate: rough })
+      if (rough && live()) setEstimate({ job: done.id, key, estimate: rough })
     } catch (caught) {
       if (!live()) return
       if (changedListing(caught)) setStale(true)
@@ -474,7 +495,7 @@ export function CustomizePage({
             )}
           </div>
         )}
-        {estimate && shownIsCurrent && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
+        {estimate && shownIsCurrent && estimate.key === current && estimate.job === shown.job.id && <Estimate estimate={estimate.estimate} />}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">
             How many
@@ -488,10 +509,11 @@ export function CustomizePage({
               +
             </button>
           </div>
-          <button type="button" className="sf-button" disabled={blocked || adding} onClick={() => void add()}>
+          <button type="button" className="sf-button" disabled={blocked || adding || waitsForPreview} onClick={() => void add()}>
             {adding ? 'Adding…' : 'Add to order'}
           </button>
         </div>
+        {waitsForPreview && !blocked && <p className="sf-hint">You can add it once its preview shows.</p>}
         {addError && (
           <p className="sf-error" role="alert">
             {addError}

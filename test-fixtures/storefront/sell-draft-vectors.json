@@ -166,5 +166,23 @@
       "colours": ["f-white"]
     },
     "input": { "body": { "kind": "choice", "choices": ["#ffffff"] } }
+  },
+  {
+    "name": "a support material on the listing is never a colour on offer, even when no support setting uses it (#6152): publish refuses its colour",
+    "schema": {
+      "groups": ["Colours"],
+      "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
+    },
+    "filaments": [
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-pva", "material": "PVA", "subtype": null, "brand": null, "colour_name": "Natural", "colour": "#F5F5DC", "cost_per_kg": "60", "density_g_cm3": "1.23", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [] } },
+      "fixed": {},
+      "colours": ["f-white", "f-pva"]
+    },
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff"] } }
   }
 ]
