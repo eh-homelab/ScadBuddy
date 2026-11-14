@@ -52,7 +52,11 @@ interface Open {
 /** The draft's fields a derived value may fill (`Open.touched`). */
 type Field = 'title' | 'params' | 'colours' | 'media_ids'
 
-/** The fields `next` changes from `cur`, added to `touched`; a new template's own fields start untouched again. */
+/**
+ * The fields `next` changes from `cur`, added to `touched`; a new template's own fields start
+ * untouched again. A change is told by reference: the editor builds a new `params`, `fixed`,
+ * `colours` or `media_ids` only for an edit of it, and keeps the others as they were.
+ */
 function touchedBy(touched: readonly Field[], cur: ListingDraft, next: ListingDraft): Field[] {
   const kept = next.slug === cur.slug ? touched : touched.filter((field) => field === 'title')
   const changed: Field[] = []
@@ -484,6 +488,7 @@ export function StorefrontListingPage() {
                 live={open.live}
                 mediaState={models.error ? 'failed' : models.data ? 'ready' : 'loading'}
                 onPictureUploaded={(model, id) => pictureUploaded(open.key, model, id)}
+                coloursSettled={open.filled && Boolean(book.data || book.error)}
               />
             </section>
 

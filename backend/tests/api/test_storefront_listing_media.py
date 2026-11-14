@@ -155,6 +155,15 @@ def test_a_video_the_listing_already_shows_is_kept(
     assert answer.status_code == 200, answer.text
     assert answer.json()["media_ids"] == [video, template["media_id"]]
 
+    # Published, the change republishes with the video still on the store.
+    live = publish(client, listing["id"])
+    assert [m["media_id"] for m in live["media"]] == [video, template["media_id"]]
+    again = _set(client, live, [template["media_id"], video])
+    assert again.status_code == 200, again.text
+    assert again.json()["published"] is True
+    assert [m["media_id"] for m in again.json()["media"]] == [template["media_id"], video]
+    assert [m["kind"] for m in again.json()["media"]] == ["image", "video"]
+
 
 def test_a_stale_read_and_a_missing_listing_are_refused(
     client: TestClient, template: dict[str, Any], pla_red: str

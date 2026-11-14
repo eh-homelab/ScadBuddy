@@ -164,6 +164,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
     expect(screen.getByRole('switch', { name: 'Customer can change Text' })).toBeChecked()
     // No filament is the keychain's colours, so every priced one is on offer, of any material.
+    await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
     expect(screen.getByRole('checkbox', { name: 'PLA Sunflower Yellow' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'PETG Black' })).toBeChecked()
     // Locking is the person's choice.
@@ -245,6 +246,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const seen = recordRequests()
     const { user } = renderStorefront()
     await screen.findByRole('switch', { name: 'Customer can change Plate' })
+    await user.click(within(screen.getByRole('group', { name: 'Colours on offer' })).getByRole('button', { name: /^Show all/ }))
     await user.click(await screen.findByRole('checkbox', { name: 'PLA Sunflower Yellow' }))
     await user.click(screen.getByRole('checkbox', { name: 'PETG Black' }))
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
@@ -345,6 +347,35 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(await screen.findByTestId('listing-design')).toHaveTextContent('Name Keychain')
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Customer can change Plate' })).toBeChecked())
     expect(screen.getByLabelText('Title')).toHaveValue('')
+  })
+
+  it('folds the colours on offer once the smart defaults tick some (#6292 review)', async () => {
+    renderStorefront()
+    // A new listing mounts with none ticked, so the list is open until the defaults land.
+    expect(await screen.findByRole('switch', { name: 'Customer can change Plate' })).toBeChecked()
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await waitFor(() => expect(within(colours).queryByRole('checkbox')).toBeNull())
+    expect(colours).toHaveTextContent(/\d+ ticked \(/)
+  })
+
+  it('folds the colours on offer of a saved listing when the price book answers late (#6292 review)', async () => {
+    const listing = await api.createStorefrontListing({ slug: KEYCHAIN, commit: COMMIT, title: 'Tag', colours: [FILAMENT_PLA] })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/v1/orders/price-book', async () => {
+        await gate
+        return undefined
+      }),
+    )
+    renderStorefront(`/storefront/listings/${listing.id}`)
+    expect(await screen.findByLabelText('Title')).toHaveValue('Tag')
+    release()
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    await waitFor(() => expect(colours).toHaveTextContent(/1 ticked \(PLA /))
+    expect(within(colours).queryByRole('checkbox')).toBeNull()
   })
 
   it('says nothing is unsaved when a saved listing opens (#6290)', async () => {

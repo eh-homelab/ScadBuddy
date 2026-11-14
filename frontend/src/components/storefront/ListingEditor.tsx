@@ -37,6 +37,11 @@ export interface ListingEditorProps {
    * image's id, which the page adds to the listing as it is when the upload ends.
    */
   onPictureUploaded?: (model: ModelSummary, id: string) => void
+  /**
+   * #6292 review — the listing has loaded: the price book answered and a new listing's smart
+   * defaults are in. "Colours on offer" decides then whether it starts open. Default true.
+   */
+  coloursSettled?: boolean
 }
 
 /** Where the price book's filaments are added (Settings → Printing → Orders). */
@@ -381,31 +386,41 @@ function DesignLine({ draft, onChange, models, versions }: Pick<ListingEditorPro
 
 /**
  * #6290 — the listing's filaments, after the settings: a long list (a price book holds
- * dozens), so folded to a count and the ticked names until asked for. It starts open while
- * none is ticked, since a colour setting cannot be offered until one is.
+ * dozens), so folded to a count and the ticked names until asked for. Whether it is open is
+ * decided once per listing opened, when the listing has loaded (`settled`: the price book
+ * has answered and a new listing's smart defaults are in): open when no colour is ticked,
+ * folded otherwise. From then on it stays as the person leaves it, so it never folds while
+ * they tick colours (#6292 review). The page keys the editor by the opening, so another
+ * listing decides again. Until it is settled it follows the ticks; a tick or a Show/Hide
+ * before then is the person's choice and is kept.
  */
 function ColoursOnOffer({
   draft,
   schema,
   filaments,
   offersColour,
+  settled,
   onChange,
 }: {
   draft: ListingDraft
   schema: CustomizerSchema | undefined
   filaments: readonly Filament[]
   offersColour: boolean
+  settled: boolean
   onChange: (draft: ListingDraft) => void
 }) {
   const id = useId()
   const ticked = filaments.filter((filament) => draft.colours.includes(filament.id))
-  const [open, setOpen] = useState(ticked.length === 0)
+  const [chosen, setChosen] = useState<boolean | null>(null)
+  const open = chosen ?? ticked.length === 0
+  // The decision on load, made once: later ticks never change it.
+  if (settled && chosen === null) setChosen(ticked.length === 0)
   return (
     <section className="flex flex-col gap-1" role="group" aria-label="Colours on offer">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold">Colours on offer</h3>
         {filaments.length > 0 && (
-          <Button variant="link" size="sm" className="h-auto p-0" aria-expanded={open} aria-controls={`${id}-filaments`} onClick={() => setOpen(!open)}>
+          <Button variant="link" size="sm" className="h-auto p-0" aria-expanded={open} aria-controls={`${id}-filaments`} onClick={() => setChosen(!open)}>
             {open ? 'Hide the filaments' : `Show all ${filaments.length} filaments`}
           </Button>
         )}
@@ -414,7 +429,9 @@ function ColoursOnOffer({
         {offersColour ? 'The filaments a customer can pick from' : 'The filaments this product is printed in'}
         {open ? '.' : ticked.length === 0 ? ': none ticked yet.' : `: ${ticked.length} ticked (${ticked.map(filamentName).join(', ')}).`}
       </p>
-      {filaments.length === 0 ? (
+      {filaments.length === 0 && !settled ? (
+        <p className="text-xs text-muted-foreground">Reading the price book…</p>
+      ) : filaments.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           The price book has no filaments yet.{' '}
           <Link to={PRICE_BOOK_PATH} className="underline">
@@ -433,9 +450,10 @@ function ColoursOnOffer({
                     <Checkbox
                       checked={draft.colours.includes(filament.id)}
                       aria-label={name}
-                      onCheckedChange={(on) =>
+                      onCheckedChange={(on) => {
+                        setChosen(true)
                         onChange({ ...draft, colours: on === true ? [...draft.colours, filament.id] : draft.colours.filter((c) => c !== filament.id) })
-                      }
+                      }}
                     />
                     <Swatch colour={filament.colour} />
                     {name}
@@ -453,7 +471,7 @@ function ColoursOnOffer({
   )
 }
 
-export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded }: ListingEditorProps) {
+export function ListingEditor({ draft, onChange, models, versions, schema, filaments, media, live = null, mediaState = 'ready', onPictureUploaded, coloursSettled = true }: ListingEditorProps) {
   const id = useId()
   const params = shownParams(schema)
   const offersColour = params.some((param) => param.type === 'color' && draft.params[param.name])
@@ -509,7 +527,7 @@ export function ListingEditor({ draft, onChange, models, versions, schema, filam
         </ul>
       </section>
 
-      <ColoursOnOffer draft={draft} schema={schema} filaments={filaments} offersColour={offersColour} onChange={onChange} />
+      <ColoursOnOffer draft={draft} schema={schema} filaments={filaments} offersColour={offersColour} settled={coloursSettled} onChange={onChange} />
     </div>
   )
 }

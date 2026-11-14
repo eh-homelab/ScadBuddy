@@ -87,6 +87,48 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(settings.compareDocumentPosition(colours) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
+  it('opens the colours on offer when none is ticked, and keeps them open while colours are ticked (#6292 review)', async () => {
+    const seen: ListingDraft[] = []
+    function Untouched() {
+      const [draft, setDraft] = useState<ListingDraft>({ ...emptyDraft('name-keychain', COMMIT), title: 'Tag' })
+      return (
+        <ListingEditor
+          draft={draft}
+          onChange={(next) => {
+            seen.push(next)
+            setDraft(next)
+          }}
+          models={[]}
+          versions={[]}
+          schema={keychainSchema}
+          filaments={[RED, BLUE, CORAL]}
+          media={[]}
+        />
+      )
+    }
+    const { user } = renderPage(<Untouched />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).getAllByRole('checkbox')).toHaveLength(3)
+    await user.click(within(colours).getByRole('checkbox', { name: 'PLA Red' }))
+    await user.click(within(colours).getByRole('checkbox', { name: 'PLA Ocean' }))
+    // Still open under the person's hand.
+    expect(within(colours).getAllByRole('checkbox')).toHaveLength(3)
+    expect(last(seen).colours).toEqual(['f1', 'f2'])
+  })
+
+  it('decides whether the colours start open only once the listing has loaded (#6292 review)', () => {
+    const draft: ListingDraft = { ...emptyDraft('name-keychain', COMMIT), title: 'Tag' }
+    const props = { onChange: () => undefined, models: [], versions: [], schema: keychainSchema, media: [] }
+    // Loading: no filaments yet, so it says so rather than "no filaments".
+    const { rerender } = renderPage(<ListingEditor {...props} draft={draft} filaments={[]} coloursSettled={false} />)
+    expect(screen.getByRole('group', { name: 'Colours on offer' })).toHaveTextContent('Reading the price book…')
+    // The book and the defaults land: ticked, so it folds.
+    rerender(<ListingEditor {...props} draft={{ ...draft, colours: ['f1'] }} filaments={[RED, BLUE]} coloursSettled={true} />)
+    const colours = screen.getByRole('group', { name: 'Colours on offer' })
+    expect(within(colours).queryByRole('checkbox')).toBeNull()
+    expect(colours).toHaveTextContent('1 ticked (PLA Red)')
+  })
+
   it('lets the customer change a locked parameter, and narrows its bounds', async () => {
     const seen: ListingDraft[] = []
     const { user } = renderPage(<Harness seen={seen} />)

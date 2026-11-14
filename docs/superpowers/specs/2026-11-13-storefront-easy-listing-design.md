@@ -153,7 +153,10 @@ test and the assistant's tool test (§6) both read it.
      switch never moves a row: the first build split them into "What the customer chooses"
      and a folded "Set by you", and turning a switch off moved the row out of sight.
   4. "Colours on offer": folded to the count and names of the ticked filaments, with
-     "Show all N filaments" to open the list (open while none is ticked).
+     "Show all N filaments" to open the list. When a listing has loaded (the price book has
+     answered, and a new listing's smart defaults are in), it opens if no colour is ticked and
+     is folded otherwise. After that it stays as the person leaves it: it never folds while
+     they tick colours. Opening another listing decides again.
 - No variable names beside the captions (the name stays in the row's tooltip).
 - Each parameter row has one switch, "Customer can change", instead of two radio buttons. A
   switch that cannot be turned on says why ("A customer cannot choose a typeface.", "Tick a
