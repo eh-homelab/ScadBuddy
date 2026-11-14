@@ -235,6 +235,8 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "alpha": 255,
             "extra_colours": [],
             "effect": None,
+            "subtype": None,
+            "brand": None,
         }
     ]
     # Nothing the shop keeps to itself: no price, snapshot or blob key.
@@ -245,6 +247,8 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
         "params",
         "colours",
         "media",
+        # #6152: whether every colour is of one material.
+        "one_material",
         "updated_at",
     }
     [media] = listing["media"]

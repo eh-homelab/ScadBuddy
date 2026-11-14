@@ -32,6 +32,7 @@ from typing import Literal
 import numpy as np
 import trimesh
 
+from scadbuddy.render.colours import MIN_PART_ALPHA
 from scadbuddy.render.split import ColourPart, painted_pieces
 
 PLATE_PNG_SIZE = 512
@@ -191,7 +192,8 @@ def _rasterise(
                 axis=-1,
             )
             if alpha < 255:
-                canvas.blend(screen, base * lit[:, None], alpha)
+                # Never below the floor: an alpha of 0 would leave nothing to divide by.
+                canvas.blend(screen, base * lit[:, None], max(alpha, MIN_PART_ALPHA))
             else:
                 canvas.draw(screen, base * lit[:, None])
     return canvas.image()

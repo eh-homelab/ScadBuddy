@@ -824,7 +824,8 @@ export const printTools: Tool[] = [
       'file_output_in_project_folder may go to instead (`folder_id`), each with its `path`; and `sort`, how ' +
       'the picker orders them. get_default_print_project says where some content goes by default. With ' +
       "`native`, the destinations of a print over the LAN: ScadBuddy's own library folders, no projects, and " +
-      'Bambuddy is not asked.' +
+      'Bambuddy is not asked. Without `native`, every `folder_id` here (a project\'s or a folder\'s) is a Bambuddy library folder, ' +
+      "not one of ScadBuddy's own: on library_backend native, list_library refuses it (404)." +
       PAGED,
     input: z.object({ native: z.boolean().optional(), ...pageInput }),
     risk: 'read',
@@ -1622,7 +1623,9 @@ export const printTools: Tool[] = [
     description:
       'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`. ' +
       '`parent_id` nests a new project under an existing one, and its folder under the parent\'s folder; ' +
-      'it applies only to a new project, and sent with `project_id` or `folder_id` it is refused (400), never ignored.',
+      'it applies only to a new project, and sent with `project_id` or `folder_id` it is refused (400), never ignored. ' +
+      "A project's `folder_id` is a Bambuddy library folder, never one of ScadBuddy's own library folders: on library_backend native, " +
+      'list_library refuses it (404); pass it as import_makerworld_model\'s `bambuddy_folder_id`, not its `folder_id`.',
     input: z.object({
       name: z.string().optional(),
       description: z.string().optional(),

@@ -54,7 +54,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.meshmodel.paint import carry_paint, read_carried, select, turned, write_carried
 from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
-from scadbuddy.render.colours import colour_alpha, colour_hex
+from scadbuddy.render.colours import colour_alpha, colour_hex, stored_alpha
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import Job as Job
 from scadbuddy.render.job_models import JobResult as JobResult
@@ -373,7 +373,7 @@ class PlateLayout:
                     mesh,
                     paint,
                     negative=bool(entry.get("negative", False)),
-                    alpha=int(entry.get("alpha", 255)),
+                    alpha=stored_alpha(entry.get("alpha")),
                 ),
                 source,
             )

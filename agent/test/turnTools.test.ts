@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { SpanStatusCode } from '@opentelemetry/api'
 import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
@@ -21,6 +22,7 @@ import { type AccessRow, BUILTIN_SOURCES, packageServerSource } from '../src/acc
 import { toolOffReason } from '../src/access/items.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
+import { exportedText, flushTracing, resetTracing, testTracing } from './support/tracing.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
@@ -636,6 +638,31 @@ describe('turn tools in a durable session', () => {
       const err = await failure(flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {}))
       expect(err.message).toContain('it broke')
       expect(kept).toEqual([])
+    })
+
+    // #6123 item 3: a flow's call is no session's ToolCall, yet it is traced as one is.
+    it("traces each call as agent.tool/<name>, naming the run, its tier and outcome, its error scrubbed", async () => {
+      const spans = testTracing()
+      await resetTracing()
+      const h = harness()
+      expect(await flowEnv('turn:notes__read_note').run(h.call, { id: 'a' })).toBe('note a')
+      await failure(flowEnv('turn:notes__post', 'tool-flow_refused').run(h.call, { method: 'POST', body: 'x' }))
+      await flushTracing()
+      const ok = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/notes__read_note')
+      expect(ok?.attributes).toMatchObject({
+        'scadbuddy.tool': 'notes__read_note',
+        'scadbuddy.tier': 'read',
+        'scadbuddy.outcome': 'ok',
+        'scadbuddy.task_queue': 'agent-tools',
+        'scadbuddy.flow_run_id': FLOW,
+        'scadbuddy.tool_use_id': 'flow_01',
+      })
+      expect(ok?.status.code).not.toBe(SpanStatusCode.ERROR)
+      const refused = spans.getFinishedSpans().find((s) => s.name === 'agent.tool/notes__post')
+      expect(refused?.attributes).toMatchObject({ 'scadbuddy.tier': 'outward', 'scadbuddy.outcome': 'refused', 'scadbuddy.flow_run_id': FLOW })
+      expect(refused?.status.code).toBe(SpanStatusCode.ERROR)
+      // The refusal's text is the call's, never the span's.
+      expect(exportedText(spans)).not.toContain('needs an approval')
     })
 
     it("tiers and runs a read call as the run's starter, with no session and no browser", async () => {

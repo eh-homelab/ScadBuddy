@@ -17,16 +17,24 @@ from scadbuddy.orders.models import ColourSlot, Filament
 from scadbuddy.orders.storefront.drafts import _captions
 from scadbuddy.orders.storefront.inputs import (
     InputOutsideListingError,
+    MixedMaterialError,
+    PickColourClashError,
+    check_one_material,
+    checked_picks,
+    customer_filaments,
     listing_reference,
     listing_values,
+    slots_from_picks,
 )
 from scadbuddy.orders.storefront.listings import public_listing
+from scadbuddy.orders.storefront.renders import _filament_for
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingSnapshot,
     PublicChoice,
     PublicListing,
     PublicText,
+    RenderBody,
     TextBound,
 )
 from scadbuddy.render.job_models import render_key
@@ -349,6 +357,194 @@ def test_the_cart_never_shows_another_listings_label(listing: Listing) -> None:
     locked = labelled.model_copy(update={"id": "c", "params": bounds})
     found = _captions([with_label("a", "Letters"), locked])
     assert found[("demo", COMMIT)]["colour"] == "Letters"
+
+
+# -- picks, one material and support (#6152) ---------------------------------------------
+
+PLA_RED_TOO = "pla-red-too"
+PETG_RED = "petg-red"
+PVA_RED = "pva-red"
+WITH_RED_TOO = {
+    **FILAMENTS,
+    PLA_RED_TOO: filament(PLA_RED_TOO, "#FF0000"),
+    PETG_RED: filament(PETG_RED, "#FF0000", "PETG"),
+    PVA_RED: filament(PVA_RED, "#FF0000", "PVA"),
+}
+
+
+def _with_colours(listing: Listing, *ids: str, one_material: bool = False) -> Listing:
+    return listing.model_copy(update={"colours": list(ids), "one_material": one_material})
+
+
+def test_a_pick_is_a_listing_filament_of_the_value(listing: Listing) -> None:
+    listing = _with_colours(listing, PLA_RED, PLA_RED_TOO, PLA_BLUE)
+    values = listing_values(listing, {"colour": "#ff0000"}, WITH_RED_TOO)
+    picked = checked_picks(listing, values, {"colour": PLA_RED_TOO}, WITH_RED_TOO)
+    assert picked == {"colour": WITH_RED_TOO[PLA_RED_TOO]}
+
+
+@pytest.mark.parametrize(
+    ("picks", "colours"),
+    [
+        # The value is red: a blue filament is not its pick.
+        ({"colour": PLA_BLUE}, [PLA_RED, PLA_BLUE]),
+        # Not a listing filament.
+        ({"colour": PETG_GREEN}, [PLA_RED, PLA_BLUE]),
+        ({"colour": PLA_RED_TOO}, [PLA_RED, PLA_BLUE]),
+        # A support material is never the customer's.
+        ({"colour": PVA_RED}, [PLA_RED, PVA_RED]),
+        # Not a colour parameter, or not offered.
+        ({"width": PLA_RED}, [PLA_RED]),
+        ({"height": PLA_RED}, [PLA_RED]),
+        ({"nope": PLA_RED}, [PLA_RED]),
+    ],
+)
+def test_a_pick_outside_the_listing_is_refused(
+    listing: Listing, picks: dict[str, str], colours: list[str]
+) -> None:
+    listing = _with_colours(listing, *colours)
+    values = listing_values(listing, {}, WITH_RED_TOO)
+    with pytest.raises(InputOutsideListingError) as refused:
+        checked_picks(listing, values, picks, WITH_RED_TOO)
+    name = next(iter(picks))
+    assert (refused.value.name, refused.value.reason) == (f"picks.{name}", "colour")
+
+
+TWO_COLOURS = CustomizerSchema(
+    parameters=[
+        Parameter(name="colour", type="color", initial="#FF0000"),
+        Parameter(name="trim", type="color", initial="#0000FF"),
+    ]
+)
+
+
+def _two_colours(listing: Listing, *ids: str) -> Listing:
+    assert listing.snapshot is not None
+    snapshot = listing.snapshot.model_copy(update={"schema_": TWO_COLOURS, "fixed": {}})
+    choices = {"kind": "choice", "choices": ["#FF0000", "#0000FF"]}
+    return Listing.model_validate(
+        {
+            **listing.model_dump(),
+            "params": {"colour": choices, "trim": choices},
+            "fixed": {},
+            "colours": list(ids),
+            "one_material": True,
+            "snapshot": snapshot.model_dump(by_alias=True),
+        }
+    )
+
+
+def test_one_material_takes_picks_and_defaults_of_one_material(listing: Listing) -> None:
+    two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
+    values = listing_values(two, {}, WITH_RED_TOO)
+    # The trim's default blue is PLA only: a PETG red pick mixes.
+    with pytest.raises(MixedMaterialError):
+        check_one_material(two, values, {"colour": WITH_RED_TOO[PETG_RED]}, WITH_RED_TOO)
+    check_one_material(two, values, {"colour": WITH_RED_TOO[PLA_RED]}, WITH_RED_TOO)
+    # With no pick, red has a PLA filament, so the defaults share PLA.
+    check_one_material(two, values, {}, WITH_RED_TOO)
+    # Any other listing takes any mix.
+    mixed = two.model_copy(update={"one_material": False})
+    check_one_material(mixed, values, {"colour": WITH_RED_TOO[PETG_RED]}, WITH_RED_TOO)
+
+
+def test_slots_take_the_pick_of_their_colour() -> None:
+    picked = {"colour": WITH_RED_TOO[PLA_RED_TOO], "trim": FILAMENTS[PLA_BLUE]}
+    # A slot already chosen stays; a slot no pick matches is left to the shop.
+    assert slots_from_picks({2: PLA_RED}, picked, ["#ff0000", "#00ff00", "#0000FF"]) == {
+        0: PLA_RED_TOO,
+        2: PLA_RED,
+    }
+
+
+def test_a_slot_no_pick_matches_takes_the_first_customer_filament_of_its_colour(
+    listing: Listing,
+) -> None:
+    """#6152: a colour left at the shop's choice still gets a slot filament, so the shop
+    does not pick it by hand. Never a support material; a pick's material first."""
+    shown = _with_colours(listing, PVA_RED, PETG_RED, PLA_RED, PLA_BLUE)
+    offered = customer_filaments(shown, WITH_RED_TOO)
+    assert slots_from_picks({}, {}, ["#ff0000", "#00ff00"], offered) == {0: PETG_RED}
+    picked = {"trim": FILAMENTS[PLA_BLUE]}
+    assert slots_from_picks({}, picked, ["#FF0000", "#0000FF"], offered) == {
+        0: PLA_RED,
+        1: PLA_BLUE,
+    }
+
+
+def test_two_picks_of_one_colour_are_one_filament(listing: Listing) -> None:
+    """#6152: a slot shows only a colour, so it cannot take two filaments of one colour.
+    The render refuses the pair, so the visitor learns it when it is chosen, not at the
+    add."""
+    two = _two_colours(listing, PLA_RED, PLA_RED_TOO, PLA_BLUE)
+    values = listing_values(two, {"colour": "#FF0000", "trim": "#FF0000"}, WITH_RED_TOO)
+    same = {"colour": PLA_RED, "trim": PLA_RED}
+    picked = checked_picks(two, values, same, WITH_RED_TOO)
+    assert slots_from_picks({}, picked, ["#FF0000"]) == {0: PLA_RED}
+    with pytest.raises(PickColourClashError) as refused:
+        checked_picks(two, values, {"colour": PLA_RED, "trim": PLA_RED_TOO}, WITH_RED_TOO)
+    assert refused.value.name == "picks.trim"
+
+
+def test_a_slot_is_never_a_support_filament(listing: Listing) -> None:
+    listing = _with_colours(listing, PLA_RED, PVA_RED)
+    values = listing_values(listing, {}, WITH_RED_TOO)
+    with pytest.raises(InputOutsideListingError) as refused:
+        listing_reference(listing, values, {0: PVA_RED}, filaments=WITH_RED_TOO)
+    assert refused.value.name == "colours.0"
+
+
+def test_the_public_listing_never_shows_a_support_filament(listing: Listing) -> None:
+    support_blue = filament("pva-blue", "#0000FF", "PVA")
+    shown = _public(
+        _with_colours(listing, PLA_RED, "pva-blue", one_material=True),
+        {**FILAMENTS, "pva-blue": support_blue},
+    )
+    assert [f.id for f in shown.colours] == [PLA_RED]
+    colour = shown.params["colour"]
+    assert isinstance(colour, PublicChoice) and colour.choices == ["#ff0000"]
+    assert shown.one_material is True
+
+
+def test_the_estimate_prices_a_slot_at_the_pick(listing: Listing) -> None:
+    listing = _with_colours(listing, PLA_RED, PLA_RED_TOO)
+    chosen = _filament_for(listing, WITH_RED_TOO, {}, ["#FF0000"], {"colour": PLA_RED_TOO})
+    assert chosen["#ff0000"].id == PLA_RED_TOO
+    # No pick: the first listing filament of the colour.
+    assert _filament_for(listing, WITH_RED_TOO, {}, ["#FF0000"])["#ff0000"].id == PLA_RED
+
+
+def test_the_estimate_prices_a_locked_support_colour(listing: Listing) -> None:
+    """#6152: a support filament is never a customer's pick, but a locked support colour
+    is still a slot of the render, and the estimate prices it at that filament."""
+    natural = filament("pva-natural", "#F4F1E8", "PVA")
+    listing = _with_colours(listing, PLA_RED, natural.id)
+    chosen = _filament_for(listing, {**FILAMENTS, natural.id: natural}, {}, ["#FF0000", "#F4F1E8"])
+    assert chosen["#f4f1e8"].id == natural.id
+    assert chosen["#ff0000"].id == PLA_RED
+
+
+def test_picks_are_bounded() -> None:
+    body = {"listing_id": "l", "listing_updated_at": NOW.isoformat()}
+    with pytest.raises(ValidationError):
+        RenderBody.model_validate({**body, "picks": {str(n): "f" for n in range(201)}})
+    # A key is bounded as a value is (#6152).
+    with pytest.raises(ValidationError):
+        RenderBody.model_validate({**body, "picks": {"k" * 201: "f"}})
+    with pytest.raises(ValidationError):
+        RenderBody.model_validate({**body, "picks": {"k": "f" * 201}})
+    assert RenderBody.model_validate(body).picks == {}
+
+
+def test_one_material_counts_the_slot_filaments_too(listing: Listing) -> None:
+    """A slot map names filaments too: on a ``one_material`` listing a PETG slot beside
+    PLA picks mixes, as a PETG pick would (#6152)."""
+    two = _two_colours(listing, PLA_RED, PETG_RED, PLA_BLUE)
+    values = listing_values(two, {}, WITH_RED_TOO)
+    picks = {"colour": WITH_RED_TOO[PLA_RED]}
+    with pytest.raises(MixedMaterialError):
+        check_one_material(two, values, picks, WITH_RED_TOO, slots=[PETG_RED])
+    check_one_material(two, values, picks, WITH_RED_TOO, slots=[PLA_RED, PLA_BLUE])
 
 
 def test_an_unpicked_value_is_the_listings_default(listing: Listing) -> None:
