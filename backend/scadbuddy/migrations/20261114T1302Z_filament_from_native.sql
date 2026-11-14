@@ -50,7 +50,15 @@ BEGIN
                 WHERE br.archived_at IS NULL AND upper(br.name) = upper(btrim(n.brand))),
                n.name,
                CASE WHEN n.colour ~ '^#[0-9A-Fa-f]{6}$' THEN upper(n.colour) || 'FF' END,
-               n.label_weight_g, n.note, n.remaining_g, n.archived_at,
+               -- What the ledger gives (`filament/ledger.py` `grams_left`): the native
+               -- weight less the grams of each print still running, never below 0 (and
+               -- unknown while the native weight is; `greatest` alone would give 0).
+               n.label_weight_g, n.note,
+               CASE WHEN n.remaining_g IS NOT NULL THEN greatest(n.remaining_g - coalesce((
+                   SELECT sum(u.grams) FROM native_spool_uses u
+                   WHERE u.spool_id = n.id AND u.settled_at IS NULL
+               ), 0), 0) END,
+               n.archived_at,
                n.created_at, n.updated_at
         FROM filament_materials f
         WHERE f.archived_at IS NULL

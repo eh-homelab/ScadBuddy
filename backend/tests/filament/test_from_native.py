@@ -78,7 +78,8 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
         assert len(spools) == 4
         by_id = {s[0]: s for s in spools}
         a = by_id[live[0]]
-        assert a[1:6] == ("#AABBCCFF", 600, 1000, "hi", None)
+        # 600 native, less the 3 g of the print still running: what the ledger gives.
+        assert a[1:6] == ("#AABBCCFF", 597, 1000, "hi", None)
         assert a[7] == "PLA"
         assert by_id[old[0]][6] is not None
         assert by_id[old[0]][7] == "Carbon Fibre"
@@ -136,7 +137,7 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             ("print_ended", "print_actual", 0, "print_run", "r3/s/2", "not_applied"),
         ]
 
-        # The ledger gives the native weight back, less the print still running.
+        # A first refresh from the ledger does not move the copied value.
         conn.commit()
     with psycopg.connect(pg_conninfo, row_factory=dict_row) as rows:
         refresh_derived(rows, live[0])

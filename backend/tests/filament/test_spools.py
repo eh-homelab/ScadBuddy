@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import (
@@ -160,3 +164,49 @@ def test_a_weighing_and_a_drying_update_the_derived_values(pg_pool: PgPool) -> N
     restored = store.archive(spool, False, actor="ann")
     assert restored is not None and restored.archived_at is None
     assert _kinds(store, spool)[-1] == "restored"
+
+
+def test_a_reading_from_the_future_is_refused() -> None:
+    soon = datetime.now(UTC) + timedelta(minutes=1)
+    assert SpoolEventAdd(kind="weighed", grams=1, at=soon).at == soon
+    with pytest.raises(ValidationError, match="future"):
+        SpoolEventAdd(kind="weighed", grams=1, at=datetime.now(UTC) + timedelta(hours=1))
+    with pytest.raises(ValidationError):
+        SpoolEventAdd(kind="weighed", grams=1, at=datetime(2026, 11, 1))  # no offset
+
+
+def test_binds_in_opposite_directions_do_not_deadlock(pg_pool: PgPool) -> None:
+    # Two tags swap between two spools at once, over and over. Each bind locks the
+    # other's spool too; with the locks taken in one order, every round completes.
+    store = FilamentSpoolStore(pg_pool)
+    a, b = _spool(store, pg_pool), _spool(store, pg_pool)
+    tag_aa = store.bind_tag(a, tag_uid="AA01", kind="other", actor="ann")
+    tag_bb = store.bind_tag(b, tag_uid="BB02", kind="other", actor="ann")
+    assert tag_aa is not None and tag_bb is not None
+    rounds = 15
+    gate = threading.Barrier(2)
+
+    def swap(uid: str, targets: tuple[UUID, UUID]) -> None:
+        for i in range(rounds):
+            gate.wait(timeout=30)
+            store.bind_tag(targets[i % 2], tag_uid=uid, kind="other", actor="ann")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        moves = [pool.submit(swap, "AA01", (b, a)), pool.submit(swap, "BB02", (a, b))]
+        for move in moves:
+            move.result(timeout=120)  # a DeadlockDetected would surface here
+    # The last round moved AA01 to b and BB02 to a, in either order.
+    on_a, on_b = store.open_binding(a), store.open_binding(b)
+    assert on_a is not None and on_b is not None
+    assert (on_a.tag_id, on_b.tag_id) == (tag_bb.tag_id, tag_aa.tag_id)
+
+
+def test_a_bind_to_a_missing_spool_makes_no_tag(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    missing = UUID(int=7)
+    assert store.bind_tag(missing, tag_uid="CC03", kind="other", actor="ann") is None
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM filament_tags WHERE tag_uid = 'CC03'"
+        ).fetchone()
+    assert row is not None and row["n"] == 0

@@ -57,18 +57,22 @@ def record(
     transaction. ``absolute_g`` is a reading (``grams_after``); ``grams_before`` is the
     spool's ``grams_left`` before the event. ``None`` when an event with the spool,
     ``ref_kind``, ``ref_id`` and ``kind`` is already recorded: a retry books nothing.
-    With no ``at`` the event takes the clock's time, so the events of one transaction
-    keep their order."""
+    With no ``at`` the event takes the clock's time, but never earlier than a microsecond
+    after the spool's newest event: the events of one transaction keep their order, and
+    a clock that steps back cannot put an event before the one it follows."""
     row = conn.execute(
         "INSERT INTO filament_spool_events (spool_id, at, kind, source, printer_id, ams_id,"
         " tray_id, grams_before, grams_after, delta_g, ref_kind, ref_id, actor, data)"
-        " VALUES (%s, coalesce(%s, clock_timestamp()), %s, %s, %s, %s, %s,"
+        " VALUES (%s, coalesce(%s, greatest(clock_timestamp(), (SELECT max(at)"
+        " + interval '1 microsecond' FROM filament_spool_events WHERE spool_id = %s))),"
+        " %s, %s, %s, %s, %s,"
         " (SELECT grams_left FROM filament_spools WHERE id = %s), %s, %s, %s, %s, %s, %s)"
         " ON CONFLICT (spool_id, ref_kind, ref_id, kind) WHERE ref_id IS NOT NULL DO NOTHING"
         f" RETURNING {_COLUMNS}",
         (
             spool_id,
             at,
+            spool_id,
             kind,
             source,
             printer,

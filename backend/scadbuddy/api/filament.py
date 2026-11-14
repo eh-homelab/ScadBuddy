@@ -296,13 +296,11 @@ _SPOOL_REFUSED = (
 )
 
 
-def _actor(caller: Caller) -> str:
-    """Who a ledger event names: a person by name (else email, else principal), a token
-    by its person's principal, a service by its name."""
-    if isinstance(caller, Person):
-        session = caller.session
-        return session.name or session.email or session.principal
-    if isinstance(caller, PersonalToken):
+def actor(caller: Caller) -> str:
+    """Who a ledger event names: a person by their principal, the same through a session
+    or a token of theirs (a name or email can change, and would split one person in
+    two); a service by its name."""
+    if isinstance(caller, Person | PersonalToken):
         return caller.principal
     if isinstance(caller, Service):
         return f"service:{caller.caller}"
@@ -346,7 +344,7 @@ async def list_spools(
 )
 async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
     try:
-        return await asyncio.to_thread(filament.spools.create, body, actor=_actor(caller))
+        return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -381,7 +379,7 @@ async def patch_spool(
 ) -> m.Spool:
     try:
         changed = await asyncio.to_thread(
-            filament.spools.update, spool_id, body, actor=_actor(caller)
+            filament.spools.update, spool_id, body, actor=actor(caller)
         )
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
@@ -423,7 +421,7 @@ async def archive_spool(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolArchive
 ) -> m.Spool:
     changed = await asyncio.to_thread(
-        filament.spools.archive, spool_id, body.archived, actor=_actor(caller)
+        filament.spools.archive, spool_id, body.archived, actor=actor(caller)
     )
     if changed is None:
         raise _no_spool(spool_id)
@@ -454,7 +452,7 @@ async def bind_spool_tag(
                 tray_uuid=body.tray_uuid,
                 kind=body.kind,
                 override=body.override,
-                actor=_actor(caller),
+                actor=actor(caller),
             )
         )
     except _SPOOL_REFUSED as exc:
@@ -474,7 +472,7 @@ async def bind_spool_tag(
     ),
 )
 async def unbind_tag(filament: FilamentDep, caller: CallerDep, tag_id: UUID) -> m.TagBinding:
-    closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=_actor(caller))
+    closed = await asyncio.to_thread(filament.spools.unbind_tag, tag_id, actor=actor(caller))
     if closed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"tag {tag_id} is on no spool")
     return closed
@@ -510,7 +508,7 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
 async def add_spool_event(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolEventAdd
 ) -> m.SpoolEvent:
-    made = await asyncio.to_thread(filament.spools.add_event, spool_id, body, actor=_actor(caller))
+    made = await asyncio.to_thread(filament.spools.add_event, spool_id, body, actor=actor(caller))
     if made is None:
         raise _no_spool(spool_id)
     return made

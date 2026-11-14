@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+
+from scadbuddy.api.filament import actor
+from scadbuddy.auth.models import ANONYMOUS, AuthSession, Person, PersonalToken, Service
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -193,3 +198,25 @@ def test_a_missing_spool_is_404(client: TestClient) -> None:
     assert client.post(f"{one}/events", json={"kind": "weighed", "grams": 1}).status_code == 404
     tag = {"tag_uid": "AA", "kind": "other"}
     assert client.post(f"{one}/tags", json=tag).status_code == 404
+
+
+def test_one_person_is_one_actor_by_session_or_token() -> None:
+    now = datetime.now(UTC)
+    principal = "user:https://id.example#ann"
+    session = AuthSession(
+        id_hash=b"x",
+        principal=principal,
+        issuer="https://id.example",
+        subject="ann",
+        name="Ann",
+        email="ann@example.com",
+        kind="login",
+        created_at=now,
+        last_seen_at=now,
+        idle_expires_at=now,
+        absolute_expires_at=now,
+    )
+    assert actor(Person(session)) == principal
+    assert actor(PersonalToken(token_id="t", principal=principal, scope="write")) == principal
+    assert actor(Service(caller="agent", scopes=frozenset())) == "service:agent"
+    assert actor(ANONYMOUS) == "anonymous"

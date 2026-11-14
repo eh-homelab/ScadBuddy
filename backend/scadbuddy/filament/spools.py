@@ -59,6 +59,10 @@ class TagUnnamedError(ValueError):
         super().__init__("the tag has no tag_uid or tray_uuid once cleaned")
 
 
+class _NoSpoolError(Exception):
+    """The spool a tag is bound to does not exist; raised to roll back the bind."""
+
+
 class TagKeysClashError(ValueError):
     """The tag's UID and its tray UUID name two different tags."""
 
@@ -244,19 +248,48 @@ class FilamentSpoolStore:
         takes a key it lacked; a tag not seen before is made with ``kind``. An open binding
         of the tag to another spool, and of the spool to another tag, is closed with
         ``reason='rebound'`` and a ``tag_unbound`` event on its spool; the new binding
-        writes ``tag_bound``. A tag already on the spool is left as it is."""
+        writes ``tag_bound``. A tag already on the spool is left as it is.
+
+        Locks, in this order: the tag, then the new and the old spool by id. Every writer of
+        bindings takes the tag first, so two binds in opposite directions wait rather than
+        deadlock."""
         uid, tray = clean_tag_uid(tag_uid), clean_tray_uuid(tray_uuid)
         if uid is None and tray is None:
             raise TagUnnamedError()
+        try:
+            return self._bind(spool_id, uid, tray, kind, override, actor)
+        except _NoSpoolError:
+            return None
+
+    def _bind(
+        self,
+        spool_id: UUID,
+        uid: str | None,
+        tray: str | None,
+        kind: m.TagKind,
+        override: bool,
+        actor: str,
+    ) -> m.TagBinding:
         with self._pool.connection() as conn, conn.transaction():
             if (
-                conn.execute(
-                    "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (spool_id,)
-                ).fetchone()
+                conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
                 is None
             ):
-                return None
+                raise _NoSpoolError()
             tag_id = self._tag(conn, uid, tray, kind)
+            holder = conn.execute(
+                "SELECT spool_id FROM filament_tag_bindings"
+                " WHERE tag_id = %s AND unbound_at IS NULL",
+                (tag_id,),
+            ).fetchone()
+            wanted = {spool_id} | ({holder["spool_id"]} if holder else set())
+            locked = conn.execute(
+                "SELECT id FROM filament_spools WHERE id = ANY(%s) ORDER BY id FOR UPDATE",
+                (list(wanted),),
+            ).fetchall()
+            if spool_id not in {row["id"] for row in locked}:
+                # Deleted since the first look: roll back the tag this may have made.
+                raise _NoSpoolError()
             held = conn.execute(
                 f"SELECT {_BINDING_COLUMNS} FROM filament_tag_bindings"
                 " WHERE tag_id = %s AND spool_id = %s AND unbound_at IS NULL",
@@ -295,8 +328,19 @@ class FilamentSpoolStore:
 
     def unbind_tag(self, tag_id: UUID, *, actor: str) -> m.TagBinding | None:
         """Take a tag off its spool, with a ``tag_unbound`` event; ``None`` when the tag
-        is on no spool."""
+        is on no spool. Locks the tag, then the spool, as `bind_tag` does."""
         with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SELECT 1 FROM filament_tags WHERE id = %s FOR UPDATE", (tag_id,))
+            holder = conn.execute(
+                "SELECT spool_id FROM filament_tag_bindings"
+                " WHERE tag_id = %s AND unbound_at IS NULL",
+                (tag_id,),
+            ).fetchone()
+            if holder is None:
+                return None
+            conn.execute(
+                "SELECT 1 FROM filament_spools WHERE id = %s FOR UPDATE", (holder["spool_id"],)
+            )
             row = conn.execute(
                 "UPDATE filament_tag_bindings SET unbound_at = now(), reason = 'unbound'"
                 f" WHERE tag_id = %s AND unbound_at IS NULL RETURNING {_BINDING_COLUMNS}",
@@ -384,30 +428,33 @@ class FilamentSpoolStore:
 
     @staticmethod
     def _tag(conn: Conn, uid: str | None, tray: str | None, kind: m.TagKind) -> UUID:
-        """The id of the tag either key names, given the key it lacked; else a new tag."""
-        found = conn.execute(
-            f"SELECT {_TAG_COLUMNS} FROM filament_tags"
-            " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
-            (uid, tray),
-        ).fetchall()
-        if len(found) > 1:
-            raise TagKeysClashError()
-        if found:
-            tag = found[0]
-            if (uid is not None and tag["tag_uid"] is None) or (
-                tray is not None and tag["tray_uuid"] is None
-            ):
-                conn.execute(
-                    "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
-                    " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
-                    (uid, tray, tag["id"]),
-                )
-            tag_id: UUID = tag["id"]
-            return tag_id
-        made = conn.execute(
-            "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s) RETURNING id",
-            (kind, uid, tray),
-        ).fetchone()
-        assert made is not None
-        new_id: UUID = made["id"]
-        return new_id
+        """The id of the tag either key names, locked and given the key it lacked; else a
+        new tag. A tag another transaction makes first is found on the second look."""
+        while True:
+            found = conn.execute(
+                f"SELECT {_TAG_COLUMNS} FROM filament_tags"
+                " WHERE tag_uid = %s OR tray_uuid = %s FOR UPDATE",
+                (uid, tray),
+            ).fetchall()
+            if len(found) > 1:
+                raise TagKeysClashError()
+            if found:
+                tag = found[0]
+                if (uid is not None and tag["tag_uid"] is None) or (
+                    tray is not None and tag["tray_uuid"] is None
+                ):
+                    conn.execute(
+                        "UPDATE filament_tags SET tag_uid = coalesce(tag_uid, %s),"
+                        " tray_uuid = coalesce(tray_uuid, %s) WHERE id = %s",
+                        (uid, tray, tag["id"]),
+                    )
+                tag_id: UUID = tag["id"]
+                return tag_id
+            made = conn.execute(
+                "INSERT INTO filament_tags (kind, tag_uid, tray_uuid) VALUES (%s, %s, %s)"
+                " ON CONFLICT DO NOTHING RETURNING id",
+                (kind, uid, tray),
+            ).fetchone()
+            if made is not None:
+                new_id: UUID = made["id"]
+                return new_id

@@ -10,12 +10,19 @@ are typed so. Every colour is an `Rgba`: ``#rrggbb`` is stored as ``#RRGGBBFF``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from scadbuddy.filament.colour import Rgba
 
@@ -34,6 +41,8 @@ LabelWeight = Annotated[int, Field(gt=0, le=100_000)]
 Percent = Annotated[int, Field(ge=0, le=100)]
 Cost = Annotated[Decimal, Field(ge=0, lt=100_000_000)]
 Colours = Annotated[list[Rgba], Field(max_length=16)]
+#: How far past the server's clock a person's ``at`` may be (their clock may run ahead).
+FUTURE_SKEW = timedelta(minutes=5)
 
 
 class _In(BaseModel):
@@ -773,7 +782,8 @@ class SpoolEventAdd(_In):
 
     kind: Literal["weighed", "dried"]
     source: Literal["person", "scale"] = "person"
-    at: datetime | None = None
+    #: When it happened, with its offset; never later than now (`FUTURE_SKEW` allowed).
+    at: AwareDatetime | None = None
     grams: Grams | None = None
     temp_c: Temp | None = None
     hours: Hours | None = None
@@ -781,6 +791,9 @@ class SpoolEventAdd(_In):
 
     @model_validator(mode="after")
     def _fits_kind(self) -> SpoolEventAdd:
+        if self.at is not None and self.at > datetime.now(UTC) + FUTURE_SKEW:
+            # A future reading would stay the anchor over every reading until then.
+            raise ValueError("at is in the future")
         if self.kind == "weighed" and self.grams is None:
             raise ValueError("a weighing needs grams")
         if self.kind == "weighed" and (self.temp_c is not None or self.hours is not None):
