@@ -175,6 +175,21 @@ export function colourHex(value: string): string | null {
 }
 
 /**
+ * How opaque a colour value draws in the preview, from its alpha (`#RGBA`,
+ * `#RRGGBBAA`), 0 to 1; null for a value with no alpha or that is no hex colour. The
+ * renderer gives OpenSCAD the `#RRGGBB` and keeps the alpha for the part
+ * (`render/jobs.py` `part_alphas`): the preview and the covers draw it see-through.
+ */
+export function colourOpacity(value: string): number | null {
+  const trimmed = value.trim()
+  if (!HEX.test(trimmed)) return null
+  const digits = trimmed.slice(1)
+  if (digits.length === 4) return Number.parseInt(digits.slice(3).repeat(2), 16) / 255
+  if (digits.length === 8) return Number.parseInt(digits.slice(6), 16) / 255
+  return null
+}
+
+/**
  * #921 — why a number field's value is outside the range the model declares, in the
  * field's own words, or null when it is inside (or the parameter is not a number).
  * The render would refuse it with a 422; the field says so before any request goes out.

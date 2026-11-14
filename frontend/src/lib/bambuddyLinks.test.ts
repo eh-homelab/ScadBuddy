@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bambuddyBase, bambuddyLink, framingOrigin, webUrls } from './bambuddyLinks'
+import { bambuddyBase, bambuddyLink, framingOrigin, pageMatch, webUrls } from './bambuddyLinks'
 
 const API = 'http://bambuddy.bambuddy.svc.cluster.local:8000'
 const SSO = 'https://bambuddy.sso.example'
@@ -73,6 +73,24 @@ describe('bambuddyBase', () => {
 
   it('is the Bambuddy beside the page when the framing origin is not listed', () => {
     expect(bambuddyBase([SSO, LAN], 'https://bambuddy.unlisted.example', 'scadbuddy.lan.example')).toBe(LAN)
+  })
+})
+
+describe('pageMatch', () => {
+  // #6240: a page whose rest is one label (`scadbuddy.example`, with `example` standing
+  // for `com`) looks for no sibling. That page-side rule is what this test pins. A listed
+  // host matches only when its rest equals the page's, so a listed host whose rest is one
+  // label cannot match a page that passed the rule; the second assertion below is a
+  // regression guard for that case and passes with or without the rule (#6247).
+  it('takes a listed sibling whose rest keeps two labels', () => {
+    expect(pageMatch(['https://bambuddy.sso.example'], 'scadbuddy.sso.example')).toBe(
+      'https://bambuddy.sso.example',
+    )
+  })
+
+  it('takes no sibling for a page whose rest is a bare TLD', () => {
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.example')).toBeNull()
+    expect(pageMatch(['https://bambuddy.example'], 'scadbuddy.sso.example')).toBeNull()
   })
 })
 

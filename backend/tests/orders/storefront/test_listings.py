@@ -334,8 +334,9 @@ def test_a_bound_outside_the_schema_is_refused(bound: dict[str, Any]) -> None:
 def test_a_step_on_the_schemas_is_kept() -> None:
     fixed = checked(
         params={
-            "width": {"kind": "number", "min": 10, "max": 20, "step": 1.5},
-            "count": {"kind": "number", "min": 2, "max": 8, "step": 2},
+            # Each starts on its grid (#6144: the template's own default is outside).
+            "width": {"kind": "number", "min": 10, "max": 20, "step": 1.5, "default": 11.5},
+            "count": {"kind": "number", "min": 2, "max": 8, "step": 2, "default": 4},
         }
     )
     assert "width" not in fixed and "count" not in fixed

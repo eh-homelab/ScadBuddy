@@ -214,6 +214,7 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "label": "width",
             "group": "Main",
             "colour": False,
+            "default": 50,
         },
         "colour": {
             "kind": "choice",
@@ -221,6 +222,7 @@ def test_a_public_listing_shows_what_a_visitor_may_choose(
             "label": "colour",
             "group": "Main",
             "colour": True,
+            "default": "#FF0000",
         },
     }
     assert listing["colours"] == [

@@ -59,7 +59,7 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
             0,
             "SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT must be more than 0",
         ),
-        ("job_ttl", -1, "SCADBUDDY_JOB_TTL must be more than 0"),
+        ("job_ttl", -1, "SCADBUDDY_JOB_TTL must be 0 \\(keep forever\\) or more"),
         ("media_upload_max_bytes", 0, "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES"),
         ("read_max_triangles", -1, "SCADBUDDY_READ_MAX_TRIANGLES"),
         ("read_max_objects", 0, "SCADBUDDY_READ_MAX_OBJECTS"),

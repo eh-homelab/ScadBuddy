@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Param } from '../../api/types'
-import { colourHex, paramLabel, rangeProblem } from '../../lib/params'
+import { colourHex, colourOpacity, paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
 import { Input } from '@/components/ui/input'
@@ -98,9 +98,11 @@ export function ColorWidget({
             <FilamentColourPicker
               label={paramLabel(param)}
               value={hex}
-              onPick={(picked) => {
-                // Through commit: the swatch of the colour already set sends nothing.
-                commit(picked)
+              onPick={(_hex, picked) => {
+                // Not through commit, which drops a translucent spool's alpha. The colour
+                // already set, at the same alpha, sends nothing.
+                setDraft(null)
+                if (colourHex(picked) !== colour || colourOpacity(picked) !== colourOpacity(value)) onChange(picked)
                 setOpen(false)
               }}
             />

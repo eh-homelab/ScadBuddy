@@ -540,3 +540,143 @@ def test_a_colour_only_the_painting_uses_gets_a_breakdown_tile() -> None:
         [ColourPart(1, "Color 1", BLUE, box, Paint(codes, (PINK,)))]
     )
     assert breakdown.colours == [BLUE, PINK]
+
+
+# ── translucent parts (owner, 2026-11-14) ─────────────────────────────────────
+
+
+def _red_inside_clear(alpha: int) -> list[ColourPart]:
+    """A small red cube inside a large white box of ``alpha``: clear PETG around a core."""
+    return [
+        ColourPart(1, "core", "#FF0000", trimesh.creation.box(extents=(10, 10, 10))),
+        ColourPart(2, "shell", "#FFFFFF", trimesh.creation.box(extents=(40, 40, 30)), alpha=alpha),
+    ]
+
+
+def test_a_translucent_part_blends_over_the_part_behind_it() -> None:
+    parts = _red_inside_clear(128)
+    image = thumbnail._rasterise(
+        parts,
+        (0.0, 0.0, -1.0),
+        200,
+        shaded=False,
+        colours=[(255, 0, 0), (255, 255, 255)],
+        alphas=[part.alpha for part in parts],
+    )
+    a = 128 / 255
+    centre = image[100, 100]
+    # The shell's top face over the core, once: white at a over red.
+    assert centre[3] == 255
+    assert centre[0] == 255
+    assert abs(int(centre[1]) - round(255 * a)) <= 1
+    assert abs(int(centre[2]) - round(255 * a)) <= 1
+    # Over nothing, the shell is white and only as opaque as its alpha.
+    edge = image[100, 30]
+    assert tuple(edge[:3]) == (255, 255, 255)
+    assert abs(int(edge[3]) - round(255 * a)) <= 1
+
+
+def test_two_translucent_layers_blend_back_to_front() -> None:
+    """A blue pane over a green pane over nothing: blue over green, by their alphas."""
+    parts = [
+        ColourPart(1, "far", "#00FF00", trimesh.creation.box(extents=(20, 20, 1)), alpha=128),
+        ColourPart(
+            2,
+            "near",
+            "#0000FF",
+            trimesh.creation.box(extents=(20, 20, 1), transform=_translate(0, 0, 5)),
+            alpha=64,
+        ),
+    ]
+    image = thumbnail._rasterise(
+        parts,
+        (0.0, 0.0, -1.0),
+        100,
+        shaded=False,
+        colours=[(0, 255, 0), (0, 0, 255)],
+        alphas=[part.alpha for part in parts],
+    )
+    far, near = 128 / 255, 64 / 255
+    covered = 1 - (1 - far) * (1 - near)
+    pixel = image[50, 50]
+    assert abs(int(pixel[3]) - round(covered * 255)) <= 1
+    assert abs(int(pixel[1]) - round(255 * far * (1 - near) / covered)) <= 1
+    assert abs(int(pixel[2]) - round(255 * near / covered)) <= 1
+
+
+def test_the_covers_show_the_core_through_a_translucent_shell() -> None:
+    clear = read_png(render_plate_thumbnails(_red_inside_clear(128)).top)
+    solid = read_png(render_plate_thumbnails(_red_inside_clear(255)).top)
+    middle = PLATE_PNG_SIZE // 2
+    # Opaque, the shell hides the core; translucent, the core's red shows through it.
+    assert solid[middle, middle, 1] > 200
+    assert clear[middle, middle, 0] > 200
+    assert clear[middle, middle, 1] < solid[middle, middle, 1] - 60
+
+
+def test_the_pick_image_stays_opaque_under_a_translucent_part() -> None:
+    pick = read_png(render_plate_thumbnails(_red_inside_clear(128)).pick)
+    covered = pick[..., 3] > 0
+    assert covered.any()
+    assert (pick[covered, 3] == 255).all()
+
+
+def test_a_view_draws_a_translucent_part_see_through() -> None:
+    clear = read_png(render_view(_red_inside_clear(128), "top", 128))
+    solid = read_png(render_view(_red_inside_clear(255), "top", 128))
+    assert clear[64, 64, 1] < solid[64, 64, 1] - 60
+
+
+def _kept(canvas: thumbnail._Canvas) -> int:
+    return sum(len(layer[0]) for layer in canvas.layers)
+
+
+def test_many_overlapping_translucent_faces_keep_a_bounded_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6243 security review: a template's mesh of many overlapping translucent faces must
+    not grow the buffer with the mesh. Each pixel keeps its `TRANSLUCENT_LAYERS` nearest,
+    pruned every `BATCH_PIXELS` fragments, and the image still renders."""
+    monkeypatch.setattr(thumbnail, "BATCH_PIXELS", 1 << 12)
+    size = 64
+    covered = size * size
+    canvas = thumbnail._Canvas(size)
+    # Sixty full-frame panes, nearest last: sixty fragments a pixel, far past the cap.
+    square = np.array(
+        [[[0, 0, 0], [size, 0, 0], [size, size, 0]], [[0, 0, 0], [size, size, 0], [0, size, 0]]],
+        dtype=np.float64,
+    )
+    bound = thumbnail.TRANSLUCENT_LAYERS * covered + thumbnail.BATCH_PIXELS + 2 * covered
+    peak = 0
+    for index in range(60):
+        pane = square.copy()
+        pane[..., 2] = 60 - index
+        canvas.blend(pane, np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]), 128)
+        peak = max(peak, _kept(canvas))
+    assert peak <= bound
+    assert peak < 60 * covered // 4
+
+    image = canvas.image()
+    assert _kept(canvas) == thumbnail.TRANSLUCENT_LAYERS * covered
+    # Four blue layers of a half alpha over nothing.
+    through = (1 - 128 / 255) ** thumbnail.TRANSLUCENT_LAYERS
+    assert abs(int(image[32, 32, 3]) - round((1 - through) * 255)) <= 1
+    assert tuple(image[32, 32, :3]) == (0, 0, 255)
+
+
+def test_a_part_of_many_translucent_faces_still_renders() -> None:
+    """The same through the public path: forty stacked translucent panes over a core."""
+    panes = [
+        trimesh.creation.box(extents=(30, 30, 0.2), transform=_translate(0, 0, 6 + index))
+        for index in range(40)
+    ]
+    stack = trimesh.util.concatenate(panes)
+    assert isinstance(stack, trimesh.Trimesh)
+    parts = [
+        ColourPart(1, "core", "#FF0000", trimesh.creation.box(extents=(10, 10, 10))),
+        ColourPart(2, "stack", "#FFFFFF", stack, alpha=60),
+    ]
+    image = read_png(render_view(parts, "top", 128))
+    assert image[64, 64, 3] == 255
+    # Four layers at 60/255 let a third of the core's red through: still reddish.
+    assert image[64, 64, 0] > image[64, 64, 1]
