@@ -131,13 +131,13 @@ SOURCE_ID: Final = LISTING_ID
 #: §7 "Serving the preview"). The bytes are the untrusted check's and are never decoded or
 #: re-encoded, so they are always a PNG shown inline that no browser sniffs as anything
 #: else. A presigned GET cannot set ``nosniff``, so the bytes always come through a route.
-#: Only the reader's own browser keeps a copy, and only for a short time: a check run
-#: again stores a new preview.
+#: Only the reader's own browser keeps a copy, and it asks again on each use: the URL
+#: stays the same when a check run again stores a new preview (review of #6217).
 PREVIEW_HEADERS: Final[dict[str, str]] = {
     "Content-Type": "image/png",
     "Content-Disposition": "inline",
     "X-Content-Type-Options": "nosniff",
-    "Cache-Control": "private, max-age=60",
+    "Cache-Control": "private, no-cache",
 }
 
 

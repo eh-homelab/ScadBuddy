@@ -136,8 +136,16 @@ def test_the_back_office_reads_the_preview_with_fixed_headers(
     assert r.status_code == 200, r.text
     assert r.content == PNG
     assert preview_headers(r) == PREVIEW_HEADERS
-    none = asks.api.get(f"{ORDERS}/{order_id}/sources/{ids['makerworld:print']}/preview")
+    # The URL stays when "Check again" stores a new preview, so the browser asks again.
+    assert r.headers["cache-control"] == "private, no-cache"
+    none =asks.api.get(f"{ORDERS}/{order_id}/sources/{ids['makerworld:print']}/preview")
     assert none.status_code == 404
+    # An order or source that is not one says so, as the download does (review of #6217).
+    gone = "00000000-0000-4000-8000-000000000000"
+    no_order = asks.api.get(f"{ORDERS}/{gone}/sources/{ids['cube.stl']}/preview")
+    assert no_order.status_code == 404 and slug(no_order) == "order_not_found"
+    no_source = asks.api.get(f"{ORDERS}/{order_id}/sources/{gone}/preview")
+    assert no_source.status_code == 404 and slug(no_source) == "source_not_found"
 
 
 def test_a_staged_file_downloads_through_a_presigned_get(

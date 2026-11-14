@@ -1472,7 +1472,7 @@ export const orderTools: Tool[] = [
     label: "Decline a customer's model",
     description:
       "Decline a file or link of a customer's own models request: the shop will not print it. A staged file is " +
-      'deleted by its watcher. `reason` is kept for the shop; the customer is shown it only once the order ends. ' +
+      'deleted by its watcher. `reason` is the shop\'s; the customer never reads it. ' +
       'A source already declined is returned as it is. 409 source_not_print for a thing to buy (use ' +
       'order_purchase_decline), source_imported once it is in the library.',
     input: z.object({
@@ -1499,7 +1499,8 @@ export const orderTools: Tool[] = [
     label: "Check a customer's file again",
     description:
       "Start the check of a customer's staged file again after it failed (`check_status` `failed`). A file still " +
-      'being checked is returned as it is. 409 source_not_failed for a file that is ready or refused, ' +
+      '`checking` is not refused: it is returned as it is and its check is started again (a running check is ' +
+      'joined), for a check that stalled. 409 source_not_failed for a file that is ready or refused, ' +
       'source_not_staged once its staged copy is gone.',
     input: z.object({ order_id: orderId, source_id: ID.describe("A file source id, as order_get's sources list them") }),
     risk: 'write',

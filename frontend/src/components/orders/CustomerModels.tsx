@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { DownloadIcon, ExternalLinkIcon } from 'lucide-react'
 import { api } from '../../api/client'
 import type { OrderDetail, OrderItemSource } from '../../api/types'
+import { downloadUrl } from '../../lib/embed'
 import { formatBytes } from '../../lib/format'
 import { formatMoney, toMajor, toMinor } from '../../lib/money'
 import { useAsync } from '../../lib/useAsync'
@@ -124,8 +125,8 @@ export function CustomerModels({ detail, itemId, onChanged }: { detail: OrderDet
     setError(null)
     setBusy(source.id)
     try {
-      const { url } = await api.sourceDownload(order.id, source.id)
-      window.open(url, '_blank', 'noopener,noreferrer')
+      // The window opens in the click, before the fetch (CLAUDE.md "Bambuddy iframe facts").
+      await downloadUrl(async () => (await api.sourceDownload(order.id, source.id)).url)
     } catch (caught) {
       setError(refusalText(caught))
     } finally {

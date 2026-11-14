@@ -65,12 +65,24 @@ describe("CustomerModels, the customer's models panel (#6133)", () => {
     expect(within(panel).getByText('Let the shop choose')).toBeInTheDocument()
   })
 
-  it('downloads a staged file through its presigned GET', async () => {
+  it('downloads a staged file through its presigned GET, in a window opened before the fetch', async () => {
+    const popup = { closed: false, opener: window, location: { href: '' }, close: vi.fn() }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    const { user } = renderPage(<Host />)
+    const ready = await row(SOURCE_READY)
+    await user.click(within(ready).getByRole('button', { name: 'Download' }))
+    expect(open).toHaveBeenCalledWith('', '_blank')
+    await waitFor(() => expect(popup.location.href).toContain(`/staging/${SOURCE_READY}.frozen?`))
+    expect(popup.opener).toBeNull()
+    open.mockRestore()
+  })
+
+  it('says so when the download window is blocked', async () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null)
     const { user } = renderPage(<Host />)
     const ready = await row(SOURCE_READY)
     await user.click(within(ready).getByRole('button', { name: 'Download' }))
-    await waitFor(() => expect(open).toHaveBeenCalledWith(expect.stringContaining(`/staging/${SOURCE_READY}.frozen?`), '_blank', 'noopener,noreferrer'))
+    expect(await screen.findByText(/Allow pop-ups/)).toBeInTheDocument()
     open.mockRestore()
   })
 

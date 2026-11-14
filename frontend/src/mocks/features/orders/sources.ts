@@ -88,7 +88,7 @@ export const handlers = [
       return refused(request, error)
     }
     return new HttpResponse(PREVIEW_PNG, {
-      headers: { 'Content-Type': 'image/png', 'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=60' },
+      headers: { 'Content-Type': 'image/png', 'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-cache' },
     })
   }),
   http.get(`${BASE}/sources/:source/download`, ({ request, params }) =>

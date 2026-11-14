@@ -1532,7 +1532,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `insert_links`).
   The UI's routes (#6133 PR 4, spec §4.3, §7 "Serving the preview", §10.5, §11): a
   preview is served only by a route that sends `storefront/wire.py` `PREVIEW_HEADERS`
-  (`image/png`, `inline`, `nosniff`, `private, max-age=60`), never a presigned URL; the
+  (`image/png`, `inline`, `nosniff`, `private, no-cache`), never a presigned URL; the
   CRUD side reads it (`intake.read_preview`, capped at `MAX_PREVIEW_BYTES`) and the edge
   streams it (`routes.py` `_relayed_preview`, any refusal a 404 with no body). The cart's
   is `GET …/draft/sources/{id}/preview` (the visitor's unsubmitted cart only,

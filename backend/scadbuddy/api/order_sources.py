@@ -74,7 +74,8 @@ def _preview_key(orders: OrdersComponent, order_id: str, source_id: str) -> str 
     description=(
         "The PNG the file's check made, served as it was stored with `Content-Type: "
         "image/png`, `Content-Disposition: inline` and `X-Content-Type-Options: nosniff`. "
-        "404 when the source has no preview."
+        "404 `order_not_found` or `source_not_found`, and a plain 404 when the source has no "
+        "preview."
     ),
     responses={status.HTTP_200_OK: {"content": {"image/png": {}}}},
 )
@@ -82,6 +83,10 @@ async def source_preview(
     order_id: str, source_id: str, orders: OrdersDep, state: StateDep
 ) -> Response:
     check_path(order_id, source_id)
+    try:
+        await asyncio.to_thread(_source, orders, order_id, source_id)
+    except LifecycleError as error:
+        raise refused(error) from None
     key = await asyncio.to_thread(_preview_key, orders, order_id, source_id)
     data = await read_preview(state, key)
     if data is None:

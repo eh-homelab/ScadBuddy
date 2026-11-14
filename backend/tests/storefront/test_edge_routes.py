@@ -1983,7 +1983,7 @@ SHOWN_PREVIEW = {
     "content-type": "image/png",
     "content-disposition": "inline",
     "x-content-type-options": "nosniff",
-    "cache-control": "private, max-age=60",
+    "cache-control": "private, no-cache",
 }
 
 

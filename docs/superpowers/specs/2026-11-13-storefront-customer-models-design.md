@@ -656,7 +656,9 @@ So the back office and the edge stream it through a route of their own that sets
 three, never a presigned URL.
 
 As built (PR 4): the headers are `storefront/wire.py` `PREVIEW_HEADERS`, with
-`Cache-Control: private, max-age=60` (a shared cache must not keep a customer's picture).
+`Cache-Control: private, no-cache` (a shared cache must not keep a customer's picture, and
+the browser asks again on each use: the URL stays the same when "Check again" stores a new
+preview).
 The CRUD service reads the bytes (`intake.read_preview`: at most `MAX_PREVIEW_BYTES`) and
 the edge streams them (`routes.py` `_relayed_preview`). The cart's line is `GET
 /api/store/v1/draft/sources/{id}/preview` (the visitor's cookie, only for a cart not yet
@@ -937,7 +939,8 @@ As built (PR 4): the routes are `api/order_sources.py` under
 `/api/v1/orders/{id}/sources/{source}`: `GET …/preview`, `GET …/download` (a presigned
 `GET` of the frozen copy, 5 minutes, `attachment` with a safe file name; 409
 `source_not_staged` once it is gone), `POST …/check` (a `failed` check back to `checking`,
-then `intake.start_checks`), `POST …/decline` (`{reason}`, default "Declined by the
+then `intake.start_checks`; a check still `checking` is not refused but started again, a
+running one joined, so a stalled check can be pushed), `POST …/decline` (`{reason}`, default "Declined by the
 shop."; the watcher is told `declined`) and `POST …/retry-import` (the watcher is told
 `retry`). They take no `Idempotency-Key`: a repeat finds the source in its new state and
 writes nothing. `GET /orders/{id}` adds `sources` (`OrderItemSource`) and `model_requests`
