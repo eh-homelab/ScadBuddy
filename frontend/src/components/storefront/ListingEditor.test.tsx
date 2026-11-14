@@ -93,6 +93,18 @@ describe('ListingEditor (#5282, #6131)', () => {
     expect(screen.getByText('A customer cannot choose a typeface.')).toBeInTheDocument()
   })
 
+  it('never offers a support setting, and says why', async () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [...(keychainSchema.parameters ?? []), { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#E8532F' }],
+    }
+    const seen: ListingDraft[] = []
+    const { user } = renderPage(<Harness seen={seen} schema={schema} />)
+    await user.click(screen.getByRole('button', { name: /^Show all/ }))
+    expect(screen.getByRole('switch', { name: 'Customer can change Support material' })).toBeDisabled()
+    expect(screen.getByText('Support settings are yours: a customer never sees them.')).toBeInTheDocument()
+  })
+
   it('gives an offered colour the listing filaments’ colours when it is saved', () => {
     const draft: ListingDraft = {
       ...emptyDraft('name-keychain', COMMIT),

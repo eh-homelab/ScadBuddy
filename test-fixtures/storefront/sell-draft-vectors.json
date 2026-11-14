@@ -80,5 +80,27 @@
       "fixed": { "body": "#123456" },
       "colours": []
     }
+  },
+  {
+    "name": "support settings stay internal: never offered, and a support colour picks neither the material nor a colour on offer",
+    "schema": {
+      "groups": ["Supports", "Colours"],
+      "parameters": [
+        { "name": "support_colour", "type": "color", "group": "Supports", "caption": "Support material (extruder 2)", "initial": "#F5F5DC" },
+        { "name": "supports", "type": "boolean", "group": "Supports", "caption": "Use supports", "initial": true },
+        { "name": "support_note", "type": "string", "group": "Supports", "caption": "Support label", "initial": "PVA" },
+        { "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#FFFFFF" }
+      ]
+    },
+    "filaments": [
+      { "id": "f-pva", "material": "PVA", "subtype": null, "brand": null, "colour_name": "Natural", "colour": "#F5F5DC", "cost_per_kg": "60", "density_g_cm3": "1.23", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" },
+      { "id": "f-white", "material": "PLA", "subtype": null, "brand": null, "colour_name": "White", "colour": "#ffffff", "cost_per_kg": "20", "density_g_cm3": "1.24", "archived_at": null, "created_at": "2026-11-01T00:00:00Z", "updated_at": "2026-11-01T00:00:00Z" }
+    ],
+    "values": {},
+    "expected": {
+      "params": { "body": { "kind": "choice", "choices": [] } },
+      "fixed": { "support_colour": "#F5F5DC", "supports": true, "support_note": "PVA" },
+      "colours": ["f-white"]
+    }
   }
 ]

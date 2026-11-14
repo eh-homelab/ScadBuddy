@@ -53,6 +53,15 @@ export function offerable(param: Param): boolean {
   return param.type !== 'font' && param.type !== 'file'
 }
 
+/**
+ * The owner's rule (2026-11-13): support material and settings are internal, never shown to
+ * a customer, even when the template exposes them. A parameter whose name, caption or group
+ * says "support" or "interface" is one.
+ */
+export function isSupport(param: Param): boolean {
+  return [param.name, param.caption, param.group].some((text) => typeof text === 'string' && /support|interface/i.test(text))
+}
+
 /** The bound a parameter is offered with at first: the whole of what its schema allows. */
 export function schemaBound(param: Param): ListingBound {
   if (NUMBERS.has(param.type)) {
@@ -93,8 +102,8 @@ export function offeredFilaments(colourValues: readonly ParamValue[], filaments:
 /**
  * #6131 (design 2026-11-13 §4) — a listing's parameters and filaments from the commit's
  * schema and the values the person was looking at (none for a blank listing): free text
- * and every colour are the customer's (the owner: "why can't I specify colors"), the rest
- * is locked at its value. A colour is locked only by the person, or when the price book has
+ * and every colour are the customer's (the owner: "why can't I specify colors"), the rest,
+ * support settings always (`isSupport`), is locked at its value. A colour is locked only by the person, or when the price book has
  * no filament to offer (`offeredFilaments`). A customer who picks no colour gets the
  * template's default (`orders/storefront/inputs.py` `listing_values`), which must be a
  * listing filament's: `colourProblems` names one that is not.
@@ -111,12 +120,12 @@ export function defaultsFor(
   const shown = shownParams(schema)
   const valueOf = (param: Param) => values[param.name] ?? param.initial ?? undefined
   const offered = offeredFilaments(
-    shown.filter((param) => param.type === 'color').flatMap((param) => valueOf(param) ?? []),
+    shown.filter((param) => param.type === 'color' && !isSupport(param)).flatMap((param) => valueOf(param) ?? []),
     filaments,
   )
   for (const param of shown) {
     const value = valueOf(param)
-    if ((param.type === 'string' && !(param.options ?? []).length) || (param.type === 'color' && offered.length > 0)) {
+    if (!isSupport(param) && ((param.type === 'string' && !(param.options ?? []).length) || (param.type === 'color' && offered.length > 0))) {
       params[param.name] = param.type === 'color' ? { kind: 'choice', choices: [] } : schemaBound(param)
     } else if (value !== undefined) {
       fixed[param.name] = value
@@ -219,14 +228,34 @@ function filamentColours(draft: ListingDraft, filaments: readonly Filament[]): s
   return draft.colours.flatMap((id) => filaments.find((filament) => filament.id === id)?.colour ?? [])
 }
 
-/** The body the page saves: each offered colour parameter takes the filaments' colours. */
+/**
+ * The body the page saves: a support parameter is never offered (`isSupport`; one an older
+ * listing offers is locked at its default), and each offered colour parameter takes the
+ * listing filaments' colours but a colour only a support parameter uses.
+ */
 export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
-  const colours = filamentColours(draft, filaments)
-  const types = new Map((schema?.parameters ?? []).map((param) => [param.name, param.type]))
-  const params = Object.fromEntries(
-    Object.entries(draft.params).map(([name, bound]) => [name, types.get(name) === 'color' ? { kind: 'choice' as const, choices: colours } : bound]),
-  )
-  return { ...draft, params }
+  const byName = new Map((schema?.parameters ?? []).map((param) => [param.name, param]))
+  const fixed = { ...draft.fixed }
+  const params: Record<string, ListingBound> = {}
+  for (const [name, bound] of Object.entries(draft.params)) {
+    const param = byName.get(name)
+    if (param && isSupport(param)) {
+      if (param.initial != null) fixed[name] = param.initial
+    } else {
+      params[name] = bound
+    }
+  }
+  const valueOf = (param: Param) => (params[param.name] ? param.initial : (fixed[param.name] ?? param.initial))
+  const colourParams = [...byName.values()].filter((param) => param.type === 'color')
+  const supportOnly = colourParams
+    .filter(isSupport)
+    .map(valueOf)
+    .filter((colour) => !colourParams.some((param) => !isSupport(param) && sameColour(valueOf(param), colour)))
+  const colours = filamentColours(draft, filaments).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
+  for (const name of Object.keys(params)) {
+    if (byName.get(name)?.type === 'color') params[name] = { kind: 'choice', choices: colours }
+  }
+  return { ...draft, params, fixed }
 }
 
 /** `value` as JSON with every object's keys sorted, so two equal bodies compare equal whatever order the server wrote their keys in. */

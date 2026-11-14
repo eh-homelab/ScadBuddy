@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
-import { colourProblems, defaultsFor, emptyDraft, fixColour, nearestFilaments, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, defaultsFor, emptyDraft, fixColour, listingInput, nearestFilaments, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -136,6 +136,31 @@ describe('a colour the customer chooses stays out of the title (#6131)', () => {
     expect(withoutWords('Owl Pencil Cup – Navy', ['Navy'])).toBe('Owl Pencil Cup')
     expect(withoutWords('Navy Owl (Coral)', ['Navy', 'Coral'])).toBe('Owl')
     expect(withoutWords('Owl, navy, large', ['Navy'])).toBe('Owl, large')
+  })
+})
+
+describe('support settings stay internal (#6131, the owner 2026-11-13)', () => {
+  const schema: CustomizerSchema = {
+    ...keychainSchema,
+    groups: ['Colours', 'Supports'],
+    parameters: [
+      { name: 'body', type: 'color', group: 'Colours', caption: 'Body', initial: '#1b6ca8' },
+      { name: 'supports', type: 'boolean', group: 'Supports', caption: 'Use supports', initial: true },
+      { name: 'support_colour', type: 'color', group: 'Supports', caption: 'Support material', initial: '#E8532F' },
+    ],
+  }
+
+  it('saves no support setting offered, and no colour only a support setting uses on offer', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('tag', 'c'.repeat(40)),
+      title: 'Tag',
+      params: { body: { kind: 'choice', choices: [] }, supports: { kind: 'choice', choices: [true, false] } },
+      fixed: { support_colour: '#E8532F' },
+      colours: [BLUE.id, CORAL.id],
+    }
+    const body = listingInput(draft, schema, [BLUE, CORAL])
+    expect(body.params).toEqual({ body: { kind: 'choice', choices: ['#1b6ca8'] } })
+    expect(body.fixed).toEqual({ support_colour: '#E8532F', supports: true })
   })
 })
 

@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, emptyDraft, fixColour, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
+import { colourProblems, emptyDraft, fixColour, isSupport, lockedValue, MAX_TEXT_LENGTH, nearestFilaments, offerable, schemaBound, shownParams, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
  * #5282 (spec 2026-11-02 §5.3), #6131 (design 2026-11-13 §5) — one storefront listing in
@@ -197,6 +197,7 @@ function LockedField({
 
 /** Why the customer cannot be given `param`, or null. */
 function whyNotOffered(param: Param, draft: ListingDraft): string | null {
+  if (isSupport(param)) return 'Support settings are yours: a customer never sees them.'
   if (param.type === 'font') return 'A customer cannot choose a typeface.'
   if (!offerable(param)) return 'A customer cannot upload a file.'
   if (param.type === 'color' && draft.colours.length === 0) return 'Tick a colour on offer first.'
