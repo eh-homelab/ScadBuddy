@@ -150,8 +150,8 @@ from scadbuddy.orders.storefront.model_requests import (
 from scadbuddy.orders.storefront.renders import (
     owned_job,
     render_estimate,
+    shown_render,
     start_render,
-    store_render,
 )
 from scadbuddy.orders.storefront.submit import submit_draft
 from scadbuddy.orders.storefront.turnstile import (
@@ -338,7 +338,7 @@ async def render_status(
 ) -> StoreRender:
     """The visitor's render; 404 ``render_not_found`` unless the visitor asked for it."""
     _, job = await owned_job(state, visitor, job_id)
-    return store_render(job)
+    return await shown_render(state, job)
 
 
 @router.get(
