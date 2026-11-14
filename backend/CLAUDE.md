@@ -1516,7 +1516,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   counts only links of items not `cancelled` (`store.py` `pending_purchases`; a reopen
   brings the link back) and refuses `_accept_quote` (every caller), `_accept_order` (so `_accepted_by_the_last`
   writes `order.accept_skipped`) and a `balance` payment request; a `deposit` request
-  is not gated. The customer's order view offers no accept while one is pending
+  is not gated. The customer's order view offers no accept while one is pending, and
+  no answer to a `together` item's design, whose accept accepts the quote too
   (`order_page.py` `_Rows.purchase_pending`). Routes `api/order_purchases.py`: `GET
   /orders/{id}/purchases`, `POST …/purchases/{source}/record` (201, 200 for a repeat),
   `PATCH …/purchases/{source}`, `POST …/purchases/{source}/decline`, the three writes
@@ -1525,10 +1526,33 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `order_purchase_update`, `order_purchase_decline` (write). A design request takes up
   to `MAX_PURCHASE_LINKS` things to buy too: the multipart part `purchase_links`, a JSON
   list of `{url, note}` that both sides read with `storefront/uploads.py`
-  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`,
-  `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
+  `checked_purchase_links` (`too_many_links`, `link_invalid` with `index`, also for a
+  lone surrogate, `draft_body_invalid`); the CRUD side holds each link to `checked_link` and stores it
   as a `pending` `manual` purchase source (`model_requests.checked_purchase_links`,
   `insert_links`).
+  The UI's routes (#6133 PR 4, spec §4.3, §7 "Serving the preview", §10.5, §11): a
+  preview is served only by a route that sends `storefront/wire.py` `PREVIEW_HEADERS`
+  (`image/png`, `inline`, `nosniff`, `private, no-cache`), never a presigned URL; the
+  CRUD side reads it (`intake.read_preview`, capped at `MAX_PREVIEW_BYTES`) and the edge
+  streams it (`routes.py` `_relayed_preview`, any refusal a 404 with no body). The cart's
+  is `GET …/draft/sources/{id}/preview` (the visitor's unsubmitted cart only,
+  `intake.draft_preview`); the order page's is `POST …/order/sources/{id}/preview` with the
+  reader in the body (`order_page.preview`). `GET …/models/colours` lists the price book's
+  filaments with no price (the edge keeps `FILAMENT_FIELDS`). Submit refuses a cart with a
+  refused or expired file, 409 `model_file_refused` with `sources` (`submit.py`
+  `_no_refused_file`). The customer's view gains `charges` and `items[].sources`
+  (`CustomerSource`; `customer_reason` only for `ENDED`, `order_page.CUSTOMER_REASONS`). The
+  back office: `api/order_sources.py` (`…/sources/{source}/preview`, `/download` (a
+  presigned GET of the frozen copy, 5 minutes, an attachment), `/check`
+  (`Lifecycle.recheck_source`, then `intake.start_checks`), `/decline`
+  (`Lifecycle.decline_source`, then `poke` `declined`) and `/retry-import`
+  (`Lifecycle.retry_import`, then `poke` `retry`); no `Idempotency-Key`, a repeat writes
+  nothing). `GET /orders/{id}` adds `sources` (`OrderItemSource`, `OrderStore.item_sources`,
+  with `import_stuck` and the reason `models.py` `IMPORT_STUCK`, an hour past the submit)
+  and `model_requests`; `GET /orders` takes `own_model`, `purchase_pending` and
+  `import_stuck`. Agent `order_item_source_decline`, `order_item_source_check_again`,
+  `order_item_source_retry_import` (write); the preview and download are the page's
+  (`coverage.ts`).
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's

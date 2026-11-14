@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.media import MediaKind
 from scadbuddy.orders.customer_links import MAX_LINK_CHARS
-from scadbuddy.orders.models import ItemKind, OrderStatus, SubmitAddress
+from scadbuddy.orders.models import ChargeKind, ItemKind, OrderStatus, SubmitAddress
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobState, PlateInfo
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -442,6 +442,10 @@ class DraftSource(BaseModel):
     check_status: CheckStatus | None = None
     check_reason: str | None = None
     status: SourceStatus
+    #: The edge's path of a checked file's preview (`storefront/wire.py`
+    #: `draft_preview_path`), which the visitor's own cookie reads; None until the check
+    #: stored one. Never a presigned URL (spec 2026-11-13 §7, "Serving the preview").
+    preview_url: str | None = None
 
 
 class DraftItem(BaseModel):
@@ -632,6 +636,37 @@ class CustomerQuote(BaseModel):
     can_accept: bool
 
 
+class CustomerSource(BaseModel):
+    """A file or a link of a request item, as its customer reads it (#6133, spec 2026-11-13
+    §10.5). ``url`` is text only: the page shows it escaped, never as an anchor.
+    ``amount_minor`` is a recorded purchase's (the customer pays it as a charge).
+    ``preview_url`` is the edge's route that serves a checked file's preview to this
+    order's reader (`storefront/wire.py` `order_preview_path`), never a presigned URL.
+    ``customer_reason`` is the source's reason only when ScadBuddy wrote it for the
+    customer (`model_requests.ENDED`); an import's refusal and a person's reason stay the
+    shop's."""
+
+    kind: SourceKind
+    purpose: SourcePurpose
+    filename: str | None
+    url: str | None
+    note: str
+    status: SourceStatus
+    amount_minor: int | None
+    shop_note: str
+    preview_url: str | None
+    customer_reason: str | None
+
+
+class CustomerCharge(BaseModel):
+    """A line the customer pays besides the items (spec 2026-11-13 §10.5): shipping, a
+    discount, a fee, tax, a thing bought for the project and its handling fee."""
+
+    kind: ChargeKind
+    label: str
+    amount_minor: int
+
+
 class CustomerItem(BaseModel):
     id: str
     title: str
@@ -640,6 +675,8 @@ class CustomerItem(BaseModel):
     status: str
     revisions: list[CustomerRevision]
     quote: CustomerQuote | None
+    #: A request item's files and links (#6133); empty on every other item.
+    sources: list[CustomerSource] = Field(default_factory=list)
 
 
 class CustomerPayment(BaseModel):
@@ -683,6 +720,8 @@ class CustomerOrderView(BaseModel):
     #: open request has no provider, and the shop has saved some.
     payment_instructions: str | None
     shipments: list[CustomerShipment]
+    #: The order's charges, by kind and position (#6133, spec 2026-11-13 §10.5).
+    charges: list[CustomerCharge] = Field(default_factory=list)
 
 
 class RevisionAnswerBody(BaseModel):

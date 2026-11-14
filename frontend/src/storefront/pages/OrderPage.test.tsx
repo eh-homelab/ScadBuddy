@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
@@ -391,5 +391,48 @@ describe('OrderPage', () => {
     await user.click(screen.getByRole('button', { name: 'Check for updates' }))
     expect(await screen.findByText('Paid')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Pay $12.50' })).toBeNull()
+  })
+
+  describe("a customer's own models (#6133)", () => {
+    it('lists the files and links as text, with no anchor to a customer link', async () => {
+      renderPage(<OrderPage />, { route: '/o#models' })
+      const list = await screen.findByRole('list', { name: 'Your models' })
+      expect(list.querySelectorAll('li')).toHaveLength(3)
+      expect(screen.getByText('https://www.printables.com/model/77-hinge')).toBeInTheDocument()
+      expect(screen.getByText('https://parts.example.com/magnets')).toBeInTheDocument()
+      expect(document.querySelector('a[href^="https://"]')).toBeNull()
+    })
+
+    it("reads a file's preview by a POST of the reader, never a URL with the token", async () => {
+      const previews: { url: string; body: unknown }[] = []
+      server.use(
+        http.post('/api/store/v1/order/sources/:id/preview', async ({ request }) => {
+          previews.push({ url: request.url, body: await request.json() })
+          return new HttpResponse(new Uint8Array([137, 80, 78, 71]), { headers: { 'Content-Type': 'image/png' } })
+        }),
+      )
+      renderPage(<OrderPage />, { route: '/o#models' })
+      expect(await screen.findByRole('img', { name: 'Preview of bracket.3mf' })).toBeInTheDocument()
+      expect(previews).toHaveLength(1)
+      expect(previews[0]!.body).toEqual({ token: 'models' })
+      expect(previews[0]!.url).not.toContain('models')
+    })
+
+    it("shows the reason for a file the order's end removed, and a way to upload it again", async () => {
+      renderPage(<OrderPage />, { route: '/o#models' })
+      const line = (await screen.findByText('lid.stl')).closest('li')!
+      const again = within(line).getByRole('link', { name: 'Upload it again' })
+      expect(again).toHaveAttribute('href', '/print-my-model')
+    })
+
+    it('shows the purchase charges and how many things the shop is still pricing', async () => {
+      renderPage(<OrderPage />, { route: '/o#models' })
+      expect(await screen.findByText('Purchase pending: the shop is pricing 1 thing to buy for you.')).toBeInTheDocument()
+      expect(screen.getByText('Bought for $4.50')).toBeInTheDocument()
+      const charges = screen.getByRole('list', { name: 'Charges' })
+      expect(charges).toHaveTextContent('Bought for your project: 6 mm magnets, 20 of them')
+      expect(charges).toHaveTextContent('Handling for bought items')
+      expect(charges).toHaveTextContent('$1.00')
+    })
   })
 })

@@ -325,6 +325,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_purchase_record: () => [],
   order_purchase_update: () => [],
   order_purchase_decline: () => [],
+  // A customer's models (#6133 PR 4): the order's audit line records them.
+  order_item_source_decline: () => [],
+  order_item_source_check_again: () => [],
+  order_item_source_retry_import: () => [],
   // Parts (#5543): a part's stock line and the order's audit line record them.
   part_stock_add: () => [],
   order_item_parts_set: () => [],

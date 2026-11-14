@@ -136,6 +136,7 @@ from scadbuddy.orders.storefront.drafts import (
     request_sent,
     requests_disabled,
 )
+from scadbuddy.orders.storefront.intake import draft_preview
 from scadbuddy.orders.storefront.listings import (
     cursor_after,
     listing_cursor,
@@ -178,6 +179,7 @@ from scadbuddy.orders.storefront.wire import (
     CustomerOrderView,
     DraftView,
     ModelRequestBody,
+    PublicFilament,
     PublicListing,
     PublicListings,
     RenderBody,
@@ -193,6 +195,7 @@ from scadbuddy.payments.venmo import VenmoCheckout, venmo_checkout
 from scadbuddy.storefront.uploads import read_request
 from scadbuddy.storefront.wire import (
     CLIENT_HEADER,
+    PREVIEW_HEADERS,
     SESSION_HEADER,
     STORE_CLIENT_PROBLEM,
     VISITOR_HEADER,
@@ -588,6 +591,26 @@ class UploadConfig(BaseModel):
     """What the edge's page CSP needs for the browser's direct uploads (#6133)."""
 
     origin: str
+
+
+class ModelColours(BaseModel):
+    """The colours "Print my own model" offers (#6133, spec 2026-11-13 §4.1): the price
+    book's filaments not archived, never a price."""
+
+    filaments: list[PublicFilament]
+
+
+@router.get("/models/colours", name="crud_storefront_model_colours")
+async def model_colours(orders: OrdersDep, _visitor: Visitor, _client: StoreClient) -> ModelColours:
+    """The filaments a customer may ask for on an own-model request; the request takes at
+    most `MAX_COLOUR_CHOICES` of their ids (`model_requests._checked_colours`)."""
+    filaments = await asyncio.to_thread(_filaments, orders)
+    return ModelColours(
+        filaments=[
+            PublicFilament(id=f.id, colour=f.colour, colour_name=f.colour_name, material=f.material)
+            for f in filaments.values()
+        ]
+    )
 
 
 @router.get("/uploads/config", name="crud_storefront_upload_config")
@@ -1034,3 +1057,50 @@ async def account_orders_route(
     return AccountOrders(
         orders=[AccountOrder.model_validate(row, from_attributes=True) for row in rows]
     )
+
+
+#: A preview route's answer: the PNG, or a bare 404.
+_PREVIEW_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_200_OK: {"content": {"image/png": {}}},
+    status.HTTP_404_NOT_FOUND: {"description": "No preview for this reader (an empty body)"},
+}
+
+
+def _preview(data: bytes | None) -> Response:
+    """A stored preview with `PREVIEW_HEADERS`, whatever its bytes; a bare 404 for none."""
+    if data is None:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    return Response(content=data, headers=PREVIEW_HEADERS)
+
+
+@router.get(
+    "/draft/sources/{source_id}/preview",
+    name="crud_storefront_draft_source_preview",
+    response_class=Response,
+    responses=_PREVIEW_RESPONSES,
+)
+async def draft_source_preview(
+    source_id: str, state: StateDep, visitor: Visitor, _client: StoreClient
+) -> Response:
+    """The checked preview of a line of the visitor's own cart (#6133, spec 2026-11-13 §4.3,
+    §7 "Serving the preview"): the stored bytes, never decoded, with `PREVIEW_HEADERS`. Any
+    other source, or none, is a 404 with no body."""
+    return _preview(await draft_preview(state, visitor, source_id))
+
+
+@router.post(
+    "/order/sources/{source_id}/preview",
+    name="crud_storefront_order_source_preview",
+    response_class=Response,
+    responses=_PREVIEW_RESPONSES,
+    openapi_extra=_order_body(),
+)
+async def order_source_preview(
+    source_id: str, request: Request, state: StateDep, account: StoreAccount
+) -> Response:
+    """The checked preview of a source of the order the body's reader opens (#6133, spec
+    2026-11-13 §10.5), with `PREVIEW_HEADERS`. The reader is the order page's (`resolve`):
+    any reader that reads nothing, another order's source, or no preview, is a 404 with no
+    body."""
+    reader, _ = order_page.read_body(await request.body(), _account_id(account))
+    return _preview(await order_page.preview(state, reader, source_id))

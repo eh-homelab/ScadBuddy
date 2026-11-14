@@ -38,6 +38,19 @@ export type OrderReader = { token: string } | { order_id: string }
 /** What the pay page needs to render PayPal's buttons for one request (`/pay#<token>`). */
 export type PayCheckout = Schemas['VenmoCheckout']
 export type CustomerItem = Schemas['CustomerItem']
+export type CustomerSource = Schemas['CustomerSource']
+export type CustomerCharge = Schemas['CustomerCharge']
+// A customer's own models (#6133, spec 2026-11-13 §4).
+export type DraftSource = Schemas['DraftSource']
+export type UploadSlot = Schemas['UploadSlot']
+export type UploadSlots = Schemas['UploadSlots']
+export type ModelColours = Schemas['ModelColours']
+export type ModelRequest = paths['/api/store/v1/draft/models']['post']['requestBody']['content']['application/json']
+/** A thing to buy for the project (spec §10.1): a link as text, and a note. */
+export interface PurchaseLink {
+  url: string
+  note: string
+}
 export type CustomerRevision = Schemas['CustomerRevision']
 export type CustomerPayment = Schemas['CustomerPayment']
 export type ParamValue = boolean | number | string
@@ -162,12 +175,33 @@ export const store = {
     call<Draft>('/draft/items', { method: 'POST', json: input, key }),
   removeItem: (itemId: string, key: string) =>
     call<Draft>(`/draft/items/${encodeURIComponent(itemId)}`, { method: 'DELETE', key }),
-  addRequest: (text: string, files: readonly File[], key: string, turnstile: string | null = null) => {
+  addRequest: (
+    text: string,
+    files: readonly File[],
+    key: string,
+    turnstile: string | null = null,
+    purchaseLinks: readonly PurchaseLink[] = [],
+  ) => {
     const form = new FormData()
     form.append('text', text)
+    // The things to buy are one JSON text part (`storefront/wire.py` `PURCHASE_LINKS_FIELD`).
+    if (purchaseLinks.length > 0) form.append('purchase_links', JSON.stringify(purchaseLinks))
     for (const file of files) form.append('files', file, file.name)
     return call<Draft>('/draft/requests', { method: 'POST', form, key, turnstile })
   },
+  /** The price book's colours "Print my own model" offers (never a price). */
+  modelColours: () => call<ModelColours>('/models/colours'),
+  /** A presigned PUT per file (spec §6.2); the call takes the bot check. */
+  uploadSlots: (files: readonly File[], key: string, turnstile: string | null = null) =>
+    call<UploadSlots>('/uploads', {
+      method: 'POST',
+      json: { files: files.map((file) => ({ filename: file.name, size: file.size, media_type: modelType(file) })) },
+      key,
+      turnstile,
+    }),
+  /** The request that claims the uploaded files (spec §6.3); a links-only one takes the bot check. */
+  addModels: (body: ModelRequest, key: string, turnstile: string | null = null) =>
+    call<Draft>('/draft/models', { method: 'POST', json: body, key, turnstile }),
   submit: (input: SubmitInput, key: string, turnstile: string | null = null) =>
     call<SubmittedOrder>('/draft/submit', { method: 'POST', json: input, key, turnstile }),
   turnstile: () => call<TurnstileSiteKey>('/turnstile'),
@@ -199,6 +233,70 @@ export const store = {
   signIn: (email: string, code: string, turnstile: string | null = null) =>
     call<Account>('/account/verify', { method: 'POST', json: { email, code }, turnstile }),
   signOut: () => call<void>('/account/sign-out', { method: 'POST' }),
+}
+
+/** A model file's type, from its name: the shop checks the bytes again (spec §7). */
+export function modelType(file: File): 'model/stl' | 'model/3mf' {
+  return file.name.toLowerCase().endsWith('.3mf') ? 'model/3mf' : 'model/stl'
+}
+
+/** Why a direct upload failed: the store's refusal, a lost connection, or an expired URL. */
+export class UploadError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'UploadError'
+    this.status = status
+  }
+}
+
+/**
+ * One file `PUT` straight to the store at its presigned URL (spec §4.2), with the headers
+ * the slot names (the size, the type and the ACL are signed in). `onProgress` gets the
+ * fraction sent. `XMLHttpRequest`, since `fetch` reports no upload progress. A failure can
+ * be tried again on the same URL until `slot.expires_at`.
+ */
+export function putFile(slot: UploadSlot, file: File, onProgress: (fraction: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('PUT', slot.url)
+    for (const [name, value] of Object.entries(slot.headers)) request.setRequestHeader(name, value)
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total)
+    }
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(1)
+        resolve()
+      } else {
+        reject(new UploadError(request.status, 'The file did not upload. Try again.'))
+      }
+    }
+    request.onerror = () => reject(new UploadError(0, 'The file did not upload. Check your connection and try again.'))
+    request.send(file)
+  })
+}
+
+/**
+ * A source's preview on the order page (spec 2026-11-13 §10.5): the page POSTs its reader to
+ * the edge's `preview_url`, so no URL holds the order link's token, and shows the answer as
+ * an object URL. The caller revokes it. Null when the shop shows none.
+ */
+export async function orderPreview(who: OrderReader, previewUrl: string): Promise<string | null> {
+  if (!previewUrl.startsWith(`${BASE}/order/sources/`)) return null
+  try {
+    const response = await fetch(previewUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(who),
+      credentials: 'same-origin',
+    })
+    if (!response.ok) return null
+    const blob = await response.blob()
+    return URL.createObjectURL(new Blob([blob], { type: 'image/png' }))
+  } catch {
+    return null
+  }
 }
 
 /**
