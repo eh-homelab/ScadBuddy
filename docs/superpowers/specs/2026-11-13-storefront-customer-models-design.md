@@ -115,14 +115,18 @@ zip"). A refused file blocks submit until the customer removes it (`model_file_r
 409) **(call)**. A file still being checked does not block submit. Each link and purchase
 link is shown back as escaped text only, never an anchor (the owner's ruling).
 
-A staged file of a cart not submitted within 72 hours (`model_requests.STAGING_TTL`) is
-deleted by the sweep, and the line reads "This file expired; upload it again" **(call)**:
-an abandoned cart must not keep up to 1 GiB in the bucket for the 30-day cart TTL.
+A staged file of a cart not submitted within 72 hours of its claim
+(`model_requests.STAGING_TTL`) is deleted by its watcher (§6.5), and the line reads "This
+file expired; upload it again" **(call)**: an abandoned cart must not keep up to 1 GiB in
+the bucket for the 30-day cart TTL. A new claim or other activity does not move that
+deadline.
 
 ### 4.4 After submit
 
-Submit (storefront spec §5.5) fires the `order.submitted` trigger event (new, §8.1), which
-runs the built-in `customer-model-intake` flow (§8). It imports each ready file into the
+Submit (storefront spec §5.5) signals each staged file's watcher (§6.5): from then on the
+file has no deadline, and its watcher runs the import (§8) and waits until the file is
+imported or a person declines it. The built-in `customer-model-intake` flow (§8) keeps the
+orchestration. It imports each ready file into the
 native library and deletes its staging object, and it imports each MakerWorld link through
 #6128. Each import makes a `library_file` item on the order (§5.4). The shop slices a quote
 per item and the customer accepts it on the order page (a `library_file` item has no
@@ -147,7 +151,7 @@ has none. As built (PR 1) this is a side table, not columns on `order_items`, so
 One row per presigned slot: `id` (uuid4 hex), `visitor` (the visitor id's sha256), `object_key`
 (`<prefix>/staging/<id>`), `filename`, `size` (declared, signed into the URL), `media_type`
 (`model/stl` or `model/3mf`), `created_at`, `expires_at` (the URL's expiry), `claimed_at`.
-The row owns its staging object: the sweep (§6.5) deletes the object with the row.
+The row owns its staging object: its watcher (§6.5) deletes the object with the row.
 
 ### 5.3 The request's sources: `order_item_sources`
 
@@ -204,7 +208,7 @@ written only by the lifecycle (§10.3).
   often comes as one STL per part, and 20 covers a typical kit. Each file costs one worker
   check and one import, so the count bounds the work one request starts. The 1 GiB total
   bounds what one allowance can stage: 6 requests an hour per client (`REQUEST_UPLOADS`,
-  `storefront/ratelimit.py`) is at most 6 GiB an hour, and the sweep removes what is never
+  `storefront/ratelimit.py`) is at most 6 GiB an hour, and each watcher removes what is never
   claimed (§6.5).
 - **Purchase links**: 5 per item (the owner's cap).
 
@@ -219,8 +223,10 @@ Turnstile, a new action `model`, after the allowance. No `UploadGate`: no body b
 CRUD route `POST /api/v1/crud/storefront/uploads` (area `draft`, service credential): needs
 the S3 store (`listings.py` `public_content`; any other backend is 503 `storefront_needs_s3`,
 as public media is), checks each entry (a name ending `.stl` or `.3mf` that agrees with
-`media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, and answers
-per file `{id, url, headers: {"Content-Type": …, "x-amz-acl": "private"}, expires_at}`.
+`media_type`, `1 <= size <= 256 MiB`, the per-request total), writes the rows, starts one watcher per row (§6.5), and only then answers per file
+`{id, url, headers: {"Content-Type": …, "x-amz-acl": "private"}, expires_at}`. A watcher
+that cannot be started is 503 `uploads_unavailable` with no URL, and the new rows are
+dropped: no file can land in the staging area without a watcher.
 
 Each URL is a presigned `PUT` (`S3ContentBackend.presign_put`, new) for exactly one key,
 `<prefix>/staging/<id>`, with `ContentType` and `ContentLength` signed in, valid 15 minutes
@@ -242,10 +248,11 @@ Edge route `POST /api/store/v1/draft/models`, JSON
 `{uploads: [ids], links: [{url, purpose, note}], quantity, colours, note}` (Turnstile is not
 asked again; the allowance was spent at presign). CRUD route
 `POST /api/v1/crud/storefront/draft/models` (area `draft`): each upload must be the
-visitor's, unclaimed and not swept; a `HEAD` of its key must answer exactly the declared size
+visitor's, unclaimed and not cleaned up; a `HEAD` of its key must answer exactly the declared size
 (else 422 `upload_missing` or `upload_size`, naming the file). Then one transaction adds the
 request item, its sources and a `checking` state per file, and claims the uploads. After
-commit it starts one `CustomerFileCheck` per file (§7). A retry with the same idempotency
+commit it signals each file's watcher `claimed` (§6.5) and starts one `CustomerFileCheck` per
+file (§7). A retry with the same idempotency
 key answers its first reply, as `add_request` does. The CRUD service never reads the bytes.
 
 ### 6.4 The bucket's CORS rule
@@ -271,21 +278,56 @@ origin for the `PUT`. The edge reads it from the CRUD service with the upload ca
 (`GET /api/v1/crud/storefront/uploads/config`, cached as the site key is, `SiteKey`), and adds
 that origin to `connect-src` once read **(call)**.
 
-### 6.5 The sweep
+### 6.5 Each file's watcher, and the backstop
 
-The storefront drafts sweep (`housekeeping_sweep_storefront_drafts`, both Schedules) runs it
-after the carts (`model_requests.sweep_staged`), 200 rows of each kind a run; as built it is no
-new activity, so no workflow patch is needed:
+The owner's rule (2026-11-13): "start a workflow to watch the file that ends when work is
+done, or if the file times out." Each upload has one watcher, the workflow `StagedFile`
+(`workflows/staged_file.py`) on the `library` queue, id `staged-file:<upload id>`. As built
+(PR 1, #6147):
 
-- a row never claimed, an hour past `expires_at`;
-- a row claimed by a source of a cart not submitted, 72 hours after its claim;
-- a row whose source is gone (a swept cart, a removed line).
+- **Start.** The presign route starts the watchers before it answers any URL (§6.2), with
+  `USE_EXISTING` and `ALLOW_DUPLICATE`: a presign sent again (its replay re-signs the same
+  slots) joins the running watcher, and a watcher that ended is started again. This is the
+  owner's `REJECT_DUPLICATE` intent, one watcher per file, in a form a replay can pass.
+- **One step.** Each turn runs one activity, `staged_file_step`
+  (`orders/storefront/staged_files.py` `step`). It reads the file's state from Postgres under
+  the order's lock (the lock a claim, a line's removal and a submit take) and, when the file
+  is due, cleans it up in the same transaction. The database is the truth: a signal only
+  wakes the watcher early, so a lost signal costs time, never a file.
+- **Signals.** `claimed` (the claim's route), `unclaimed` (a line's removal), `submitted`
+  (the submit), and, for later PRs, `checked` (the intake worker), `imported`, `declined`,
+  `closed` and `retry`. Each is sent after its commit and may be lost.
+- **Deadlines** (the TTLs below, measured from the database's timestamps): an upload never
+  claimed is cleaned up `UNCLAIMED_GRACE` after its URL's expiry; a claimed upload of a cart
+  not submitted, `STAGING_TTL` after its claim; a claimed upload whose line is gone, at once.
+  A submitted order's file has **no deadline**: the watcher reads it again every hour and
+  ends only when the file is imported (§8.3) or a person declines it.
+- **Clean-up.** In one transaction: a cart's line reads `EXPIRED` (`check_status`
+  `refused`), and the row is deleted. After the commit, the staging object and its preview
+  are deleted; a missing object is no error. A step that fails is retried with backoff and
+  no limit, so the watcher does not end before its clean-up succeeded; a retry after a crash
+  between the commit and the deletes finds no row and deletes the objects again. The order's
+  page is told (`OrderChanged`).
+- **History.** A watcher holds a few signals and one step per deadline; one that waits long
+  (a submitted file) continues as new past 2000 events.
 
-Each: delete the staging object and its preview, then the row. An object under `staging/`
-with no row, older than a day, is deleted too (a crash between the `PUT` and the row is not
-possible, because the row is written before the URL is answered, but a manual upload or a
-lost delete is). `S3ContentBackend.sweep_unrecorded` already skips keys outside
-`<kind>/<sha256>` (its `_OBJECT` pattern), so it never touches staging.
+| TTL | Value | What it bounds |
+| --- | --- | --- |
+| `UPLOAD_URL_TTL` | 15 minutes | how long a presigned `PUT` may start |
+| `UNCLAIMED_GRACE` | 1 hour | an upload never claimed, after its URL's expiry |
+| `STAGING_TTL` | 72 hours | a claimed upload of a cart not submitted, after its claim |
+| `ORPHAN_AGE` | 1 day | the backstop's threshold |
+| (submitted) | none | a submitted order's file waits for its import or a decline |
+
+**The backstop.** The storefront drafts sweep (`housekeeping_sweep_storefront_drafts`, both
+Schedules) runs `staged_files.sweep_staged` after the carts; it owns no file's life. It
+deletes an object under `staging/` that no row names, older than `ORPHAN_AGE`, and it starts
+the watcher again of a row older than `ORPHAN_AGE` whose watcher is not running (Temporal's
+describe answers not found or closed); that watcher then applies the rules above, so a
+submitted file is never deleted by the backstop. Each repair is logged and counted
+(`scadbuddy_staged_files_repaired`, by kind); it should find nothing, and a count is a bug
+to look into. `S3ContentBackend.sweep_unrecorded` skips keys outside `<kind>/<sha256>` (its
+`_OBJECT` pattern), so it never touches staging.
 
 ## 7. The intake worker (no database secret)
 
@@ -348,9 +390,18 @@ check has its own limits and leaves those alone.
 
 ### 8.1 The trigger and the flow
 
-A new trigger event `order.submitted` (`flow_triggers/events.py`), fired once per order when
-a storefront submit commits, key `order:<id>:submitted` **(call)**: no status change marks a
-submit (it stays `draft`, storefront spec §5.5), so `order.changed` cannot.
+The import does not hang on the event bus (the owner's question, 2026-11-13: "How do we
+have a strong guarantee that the workflow triggers to import it into regular storage?").
+`flow_triggers/events.py` fires nothing for an event lost while the bus is disconnected, and
+its catch-up reads status changes only; a submit is none (the order stays `draft`, storefront
+spec §5.5). So each staged file's watcher (§6.5) owns the import: once its step reads the
+file as submitted, it runs the import itself, as a child workflow with a deterministic id
+(`staged-file-import:<upload id>`) that runs the flow's import step for that file, retried
+with backoff and no limit. A watcher whose import has not finished one hour after the submit
+marks the source "Import stuck" (`status_reason`, shown on the order page and the orders
+list, with "Retry import", which sends the watcher `retry`), logs it and counts it
+(`scadbuddy_staged_files_stuck`), and keeps waiting. A paused intake trigger or a revoked
+grant shows the same way. The watcher ends only when the file is imported or declined.
 
 A new built-in flow `customer-model-intake` (`orders/builtin_intake_flow.py`), registered as
 `order-fulfilment` is (`orders/builtin_flow.py`: `register_new`, the upgrade rules, a trigger
@@ -410,7 +461,8 @@ This PR waits for #6128 to merge and does not rebase onto its branch.
    in the API process, `print_library/native.py` `_read_upload`);
 4. in one transaction: the source gets `library_file_id`, `status` `imported`, `upload_id`
    null; the `library_file` item is added (§5.4); the upload row is deleted;
-5. after commit, deletes the staging object. A failed delete leaves it to the sweep.
+5. after commit, signals the file's watcher `imported`; its next step finds no row and
+   deletes the staging object (§6.5).
 
 Known residue: the native library's cover and plate image routes still read the 3MF in the
 API process when served. That is the same as for every library file today, and #5296 owns
@@ -542,7 +594,8 @@ state, facts, preview, "Download" as a presigned `GET` while staged or the libra
 imported, "Check again", "Import"), each link (type, the link as text, "Open link", "Import
 again" for MakerWorld, "Use library file", "Decline"), and each purchase ("Open link", the
 note, "Record cost", "Change", "Not needed"). The order header shows "Purchase pending (n)".
-The orders list filters by "own model" and "purchase pending". Settings → Orders gets the two
+The orders list filters by "own model", "purchase pending" and "import stuck" (§8.1); a
+stuck source shows "Import stuck", its reason and "Retry import". Settings → Orders gets the two
 fee fields.
 
 Agent tools: `order_get` shows the sources; `import_staged_model`,
@@ -559,13 +612,15 @@ rule (§6.4).
 
 ## 13. Phases, one PR each
 
-1. Data and staging: migrations, the registry, presign, claim, the sweep, the CRUD and edge
-   routes, CORS config read.
+1. Data and staging: migrations, the registry, presign, claim, each file's watcher and its
+   clean-up (§6.5), the backstop, the CRUD and edge routes, CORS config read.
 2. The intake worker and its check.
 3. Purchases, the fee, the gate.
-4. The storefront form, cart and order page; the back office panel and fee settings.
-5. After #6128 merges: `staged_model_import`, `copy_staged_to_native`, the
-   `order.submitted` event, the `customer-model-intake` flow and the source tools.
+4. The storefront form, cart and order page; the back office panel and fee settings;
+   "Import stuck" and "Retry import".
+5. After #6128 merges: `staged_model_import`, `copy_staged_to_native`, the watcher's
+   import child and its stuck state (§8.1), the `customer-model-intake` flow and the source
+   tools.
 6. eh-homelab/clusters: the Deployment and the CORS rule.
 
 ## 14. Out of scope

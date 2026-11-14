@@ -41,6 +41,7 @@ from scadbuddy.orders.models import Order
 from scadbuddy.orders.storefront.accounts import Account
 from scadbuddy.orders.storefront.addresses import EmailInvalidError, check_address
 from scadbuddy.orders.storefront.listings import problem
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import SubmitBody, SubmittedOrder
 from scadbuddy.payments.credentials import KekMissingError
@@ -152,4 +153,8 @@ async def submit_draft(
             "submit_unavailable",
             "The shop cannot take orders now. Try again later.",
         ) from None
+    # Each staged file of the order now waits for its import, not a deadline (#6133).
+    await poke(
+        state, await asyncio.to_thread(uploads_of, state, order_id=body.draft_id), "submitted"
+    )
     return SubmittedOrder.model_validate(reply.body)

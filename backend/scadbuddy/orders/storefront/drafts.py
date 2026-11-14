@@ -52,6 +52,7 @@ from scadbuddy.orders.store import item_subject
 from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
 from scadbuddy.orders.storefront.model_requests import draft_sources
 from scadbuddy.orders.storefront.renders import checked_choice
+from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
     MAX_REQUEST_FILE_BYTES,
@@ -422,6 +423,8 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
         changes: list[Order] = []
 
         def remove(conn: Any) -> Replay:
+            # The staged files the line held, for their watchers (#6133).
+            freed.extend(uploads_of(state, item_id=item_id))
             orders.lifecycle.delete_item(draft.id, item_id, by, cart_of=visitor.id, conn=conn)
             order = orders.store.order(draft.id, conn=conn)
             assert order is not None
@@ -436,12 +439,14 @@ async def remove_item(state: AppState, visitor_id: str, key: str, item_id: str) 
             orders.lifecycle.told(order)
         return done
 
+    freed: list[str] = []
     try:
         reply = await asyncio.to_thread(write)
     except LifecycleError as error:
         if error.not_found:
             raise item_not_found() from None
         raise draft_changed() from None
+    await poke(state, freed, "unclaimed")
     return await _answer(state, visitor_id, reply)
 
 

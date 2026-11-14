@@ -12,10 +12,9 @@ and one `order_item_sources` row per file and link, and claims the uploads.
 
 A link is stored as text only (`orders/customer_links.py`): this side never fetches it.
 
-`sweep_staged` (in the storefront drafts sweep) deletes each staging object with its row:
-a slot never claimed `UNCLAIMED_GRACE` past its expiry, a claim whose source is gone (a
-removed line, a swept cart), a claimed file of a cart not submitted within `STAGING_TTL`
-(its line then reads expired), and any staging object no row names past `ORPHAN_AGE`.
+Each upload has a watcher, a ``StagedFile`` workflow (`staged_files.py`), started before
+the presign answers any URL; it owns the file's life and its clean-up (`UNCLAIMED_GRACE`,
+`STAGING_TTL`). `staged_files.sweep_staged` is only the backstop (`ORPHAN_AGE`).
 
 Everything needs the S3 store (`listings.py` `public_content`): any other is 503
 ``storefront_needs_s3``, as the public site's media is.
@@ -71,18 +70,20 @@ MODELS_ROUTE: Final = "POST /storefront/draft/models"
 #: How long a presigned PUT may start (S3 checks the expiry when a request starts, so a
 #: slow upload that started in time completes).
 UPLOAD_URL_TTL: Final = timedelta(minutes=15)
-#: A slot never claimed is swept this long past its URL's expiry.
+#: A slot never claimed is cleaned up this long past its URL's expiry.
 UNCLAIMED_GRACE: Final = timedelta(hours=1)
-#: A claimed file of a cart not submitted is swept this long after its claim: an abandoned
-#: cart must not keep up to `MAX_MODEL_REQUEST_BYTES` staged for the cart TTL.
+#: A claimed file of a cart not submitted is cleaned up this long after its claim: an
+#: abandoned cart must not keep up to `MAX_MODEL_REQUEST_BYTES` staged for the cart TTL. A
+#: submitted order's file has no deadline.
 STAGING_TTL: Final = timedelta(hours=72)
-#: A staging object no row names (a lost delete) is swept past this age.
+#: The backstop deletes a staging object no row names, and restarts the watcher of a row
+#: whose watcher is not running, past this age.
 ORPHAN_AGE: Final = timedelta(days=1)
-#: The most rows one sweep pass takes of each kind.
+#: The most rows one backstop pass reads.
 SWEEP_BATCH: Final = 200
 #: A request item's title; its note is its notes.
 MODEL_REQUEST_TITLE: Final = "Your models"
-#: The check reason of a staged file the sweep took from a cart not submitted.
+#: The check reason of a staged file cleaned up from a cart not submitted.
 EXPIRED: Final = "This file expired before the order was sent; upload it again."
 _SUFFIXES: Final = {"model/stl": ".stl", "model/3mf": ".3mf"}
 
@@ -188,15 +189,21 @@ async def presign_uploads(
     state: AppState, visitor_id: str, key: str, body: UploadSlotsBody
 ) -> UploadSlots:
     """One upload slot per file: a row and a presigned PUT of its staging key. A retry of
-    the same key answers the same slots with new URLs (those still unclaimed). Refusals:
-    503 ``storefront_needs_s3``; 422 ``upload_name``, ``upload_total``."""
+    the same key answers the same slots with new URLs (those still unclaimed). Each slot's
+    watcher is started before any URL is answered. Refusals: 503 ``storefront_needs_s3``,
+    ``uploads_unavailable`` (no watcher could be started; the new rows are dropped); 422
+    ``upload_name``, ``upload_total``."""
+    from scadbuddy.orders.storefront.staged_files import watch
+
     backend = _backend(state)
     names = _checked_names(body)
     asked = {"visitor": token_sha256(visitor_id), **body.model_dump(mode="json")}
     reply = await asyncio.to_thread(_stored, state, key, UPLOADS_ROUTE, asked)
     if reply is not None:
         ids: list[str] = reply.body["ids"]
-        return await _signed(backend, await asyncio.to_thread(_slots, state, ids, renew=True))
+        again = await asyncio.to_thread(_slots, state, ids, renew=True)
+        await watch(state, [slot.id for slot in again])
+        return await _signed(backend, again)
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     prefix = backend.settings.prefix
     made = [
@@ -235,7 +242,20 @@ async def presign_uploads(
             idempotent_write(conn, "storefront", key, UPLOADS_ROUTE, asked, lambda: insert(conn))
 
     await asyncio.to_thread(write)
+    try:
+        await watch(state, [slot.id for slot in made])
+    except ApiError:
+        # No URL without a watcher. A replay of the key re-signs only rows that remain.
+        await asyncio.to_thread(_drop, state, [slot.id for slot in made])
+        raise
     return await _signed(backend, made)
+
+
+def _drop(state: AppState, ids: Sequence[str]) -> None:
+    with state.projection.pool.connection() as conn:
+        conn.execute(
+            "DELETE FROM storefront_uploads WHERE id = ANY(%s) AND claimed_at IS NULL", (list(ids),)
+        )
 
 
 async def upload_origin(state: AppState) -> str:
@@ -365,8 +385,9 @@ async def add_model_request(
     model link), ``link_invalid``, ``too_many_links``, ``request_text``,
     ``colour_missing``, ``colour_unknown``, ``upload_missing``, ``upload_size``,
     ``draft_full``; 409 ``upload_taken``, ``draft_changed``; 503
-    ``storefront_needs_s3``."""
+    ``storefront_needs_s3``. After the commit each claimed file's watcher is told."""
     from scadbuddy.orders.storefront.drafts import MAX_DRAFT_ITEMS, draft_changed, draft_full
+    from scadbuddy.orders.storefront.staged_files import poke
 
     orders = _orders(state)
     links = _checked_links(body)
@@ -458,9 +479,11 @@ async def add_model_request(
         return done
 
     try:
-        return await asyncio.to_thread(write)
+        done = await asyncio.to_thread(write)
     except LifecycleError:
         raise draft_changed() from None
+    await poke(state, [slot.id for slot in slots], "claimed")
+    return done
 
 
 def _print_status(link: _Link) -> str:
@@ -494,82 +517,3 @@ def draft_sources(state: AppState, order_id: str) -> dict[str, tuple[bool, list[
         item_id = row.pop("item_id")
         found.setdefault(item_id, (item_id in own, []))[1].append(DraftSource(**row))
     return found
-
-
-# -- the sweep --------------------------------------------------------------------------
-
-
-def _doomed(state: AppState, now: datetime) -> list[tuple[str, str]]:
-    """The rows the sweep takes, as (id, object key), at most `SWEEP_BATCH` of each kind.
-    A claimed file of a cart not submitted past `STAGING_TTL` reads expired first."""
-    with state.projection.pool.connection() as conn, conn.transaction():
-        unclaimed = conn.execute(
-            "SELECT id, object_key FROM storefront_uploads"
-            " WHERE claimed_at IS NULL AND expires_at < %s LIMIT %s",
-            (now - UNCLAIMED_GRACE, SWEEP_BATCH),
-        ).fetchall()
-        orphaned = conn.execute(
-            "SELECT u.id, u.object_key FROM storefront_uploads u"
-            " WHERE u.claimed_at IS NOT NULL AND NOT EXISTS"
-            " (SELECT 1 FROM order_item_sources s WHERE s.upload_id = u.id) LIMIT %s",
-            (SWEEP_BATCH,),
-        ).fetchall()
-        expired = conn.execute(
-            "UPDATE order_item_sources s SET check_status = 'refused', check_reason = %s,"
-            " updated_at = now() FROM storefront_uploads u, orders o"
-            " WHERE s.upload_id = u.id AND o.id = s.order_id AND o.submitted_at IS NULL"
-            " AND u.claimed_at < %s"
-            " AND s.id IN (SELECT s2.id FROM order_item_sources s2"
-            "   JOIN storefront_uploads u2 ON u2.id = s2.upload_id"
-            "   JOIN orders o2 ON o2.id = s2.order_id"
-            "   WHERE o2.submitted_at IS NULL AND u2.claimed_at < %s LIMIT %s)"
-            " RETURNING u.id, u.object_key",
-            (EXPIRED, now - STAGING_TTL, now - STAGING_TTL, SWEEP_BATCH),
-        ).fetchall()
-    seen: dict[str, str] = {}
-    for row in [*unclaimed, *orphaned, *expired]:
-        seen[row["id"]] = row["object_key"]
-    return list(seen.items())
-
-
-def _forget(state: AppState, slot_id: str) -> None:
-    with state.projection.pool.connection() as conn:
-        conn.execute("DELETE FROM storefront_uploads WHERE id = %s", (slot_id,))
-
-
-def _named(state: AppState, keys: Sequence[str]) -> set[str]:
-    with state.projection.pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT object_key FROM storefront_uploads WHERE object_key = ANY(%s)", (list(keys),)
-        ).fetchall()
-    return {row["object_key"] for row in rows}
-
-
-async def sweep_staged(state: AppState, *, now: datetime | None = None) -> int:
-    """The staging objects and rows the module docstring lists, deleted; how many rows.
-    Nothing on a store that is not S3: no slot is ever made there."""
-    content = state.store.content
-    if state.store.backend != "s3" or content is None:
-        return 0
-    backend = content.backend
-    if not isinstance(backend, S3ContentBackend):
-        return 0
-    now = datetime.now(UTC) if now is None else now
-    doomed = await asyncio.to_thread(_doomed, state, now)
-    prefix = backend.settings.prefix
-    for slot_id, object_key in doomed:
-        # The object first: a row left after a failed delete is swept again.
-        await backend.remove_staged(object_key)
-        await backend.remove_staged(staging_key(prefix, slot_id, preview=True))
-        await asyncio.to_thread(_forget, state, slot_id)
-    old: list[str] = []
-    async for object_key, written in backend.staged_objects():
-        if written < now - ORPHAN_AGE:
-            old.append(object_key)
-    if old:
-        uploads = [key.removesuffix(".png") for key in old]
-        named = await asyncio.to_thread(_named, state, uploads)
-        for object_key, upload in zip(old, uploads, strict=True):
-            if upload not in named:
-                await backend.remove_staged(object_key)
-    return len(doomed)

@@ -6,7 +6,7 @@ never claimed."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,10 +14,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.orders.storefront import model_requests
-from scadbuddy.orders.storefront.model_requests import EXPIRED, sweep_staged
+from scadbuddy.orders.storefront import staged_files
+from scadbuddy.orders.storefront.model_requests import EXPIRED, STAGING_TTL, UNCLAIMED_GRACE
+from scadbuddy.orders.storefront.staged_files import WATCH_UNAVAILABLE, sweep_staged
 from scadbuddy.store.s3 import S3ContentBackend, staging_key
 from scadbuddy.storefront.wire import MAX_MODEL_FILE_BYTES, STOREFRONT_PROBLEMS
+from scadbuddy.workflows.staged_file import StagedFileState
 from tests.orders.storefront.test_drafts import (  # noqa: F401  (fixtures)
     TOKEN_A,
     TOKEN_B,
@@ -338,7 +340,37 @@ def test_the_upload_config_names_the_puts_origin(asks: CrudCaller, s3_api: TestC
     assert origin == backend(s3_api).settings.endpoint
 
 
-# -- the sweep --------------------------------------------------------------------------
+# -- each file's watcher (#6133, spec §6.5) ----------------------------------------------
+
+
+class FakeWatcher:
+    """What the routes start and signal, recorded; ``refuse`` makes every start fail, and
+    ``stopped`` names the uploads whose watcher reads as not running."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.signals: list[tuple[str, str]] = []
+        self.refuse = False
+        self.stopped: set[str] = set()
+
+    async def watch(self, upload_ids: Sequence[str]) -> None:
+        if self.refuse:
+            raise RuntimeError("Temporal is down")
+        self.started.extend(upload_ids)
+        self.stopped -= set(upload_ids)
+
+    async def poke(self, upload_ids: Sequence[str], signal: str) -> None:
+        self.signals.extend((upload_id, signal) for upload_id in upload_ids)
+
+    async def running(self, upload_id: str) -> bool | None:
+        return upload_id not in self.stopped
+
+
+@pytest.fixture(autouse=True)
+def watcher(monkeypatch: pytest.MonkeyPatch) -> FakeWatcher:
+    fake = FakeWatcher()
+    monkeypatch.setattr(staged_files, "watcher", lambda _state: fake)
+    return fake
 
 
 def staged(app: TestClient, slot_id: str) -> int | None:
@@ -346,53 +378,155 @@ def staged(app: TestClient, slot_id: str) -> int | None:
     return on_app(app, store.staged_size, staging_key(store.settings.prefix, slot_id))
 
 
+def step(app: TestClient, slot_id: str, now: datetime) -> StagedFileState:
+    return on_app(app, lambda: staged_files.step(_state(app), slot_id, now=now))
+
+
 def sweep(app: TestClient, now: datetime) -> int:
     return on_app(app, lambda: sweep_staged(_state(app), now=now))
 
 
-def test_the_sweep_takes_a_slot_never_claimed(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
-    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
-    now = datetime.now(UTC)
-    assert sweep(s3_api, now) == 0
-    assert staged(s3_api, slot_id) == len(STL)
-    assert sweep(s3_api, now + timedelta(hours=2)) == 1
-    assert staged(s3_api, slot_id) is None
-    assert rows(s3_api, "SELECT id FROM storefront_uploads") == []
-
-
-def test_the_sweep_takes_a_file_whose_line_is_gone(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
-    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
-    item = ask(asks, {"uploads": [slot_id]}).json()["items"][0]
-    assert asks.delete(f"/draft/items/{item['id']}", key="d1").status_code == 200
-    assert sweep(s3_api, datetime.now(UTC)) == 1
-    assert staged(s3_api, slot_id) is None
-
-
-def test_the_sweep_expires_a_file_of_a_cart_not_sent(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
-    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
-    ask(asks, {"uploads": [slot_id]})
-    assert sweep(s3_api, datetime.now(UTC) + timedelta(hours=1)) == 0
-    assert sweep(s3_api, datetime.now(UTC) + timedelta(hours=73)) == 1
-    assert staged(s3_api, slot_id) is None
-    [source] = asks.get("/draft").json()["items"][0]["sources"]
-    assert (source["check_status"], source["check_reason"]) == ("refused", EXPIRED)
-
-
-def submitted(asks: CrudCaller, order_id: str) -> None:
+def submitted(asks: CrudCaller, order_id: str) -> None:  # noqa: F811
     body = {"draft_id": order_id, "name": "Ada", "email": "ada@example.com"}
     r = asks.post("/draft/submit", json=body, key="submit-1")
     assert r.status_code == 200, r.text
 
 
-def test_the_sweep_keeps_a_file_of_a_sent_order(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
+def test_every_slot_has_a_watcher_before_its_url_is_answered(
+    asks: CrudCaller,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    files = [("a.stl", STL, "model/stl"), ("b.3mf", THREE_MF, "model/3mf")]
+    r = slots(asks, files)
+    assert r.status_code == 200, r.text
+    ids = [slot["id"] for slot in r.json()["uploads"]]
+    assert watcher.started == ids
+    # A presign sent again re-signs the same slots and joins their watchers.
+    again = slots(asks, files)
+    assert again.status_code == 200, again.text
+    assert watcher.started == ids * 2
+
+
+def test_no_url_is_answered_when_no_watcher_can_start(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    watcher.refuse = True
+    r = slots(asks, [("cube.stl", STL, "model/stl")])
+    assert r.status_code == 503, r.text
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}{WATCH_UNAVAILABLE}"
+    assert "uploads" not in r.json()
+    assert rows(s3_api, "SELECT id FROM storefront_uploads") == []
+
+
+def test_a_slot_never_claimed_is_cleaned_up_an_hour_past_its_url(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    [row] = rows(s3_api, "SELECT expires_at FROM storefront_uploads")
+    found = step(s3_api, slot_id, datetime.now(UTC))
+    assert (found.phase, found.due) == ("unclaimed", row["expires_at"] + UNCLAIMED_GRACE)
+    assert staged(s3_api, slot_id) == len(STL)
+    found = step(s3_api, slot_id, row["expires_at"] + UNCLAIMED_GRACE)
+    assert (found.phase, found.reason) == ("ended", "unclaimed")
+    assert staged(s3_api, slot_id) is None
+    assert rows(s3_api, "SELECT id FROM storefront_uploads") == []
+
+
+def test_a_claim_tells_the_watcher_and_moves_the_deadline_to_the_claim(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    ask(asks, {"uploads": [slot_id]})
+    assert watcher.signals == [(slot_id, "claimed")]
+    [row] = rows(s3_api, "SELECT claimed_at FROM storefront_uploads")
+    # Past the slot's own expiry: a claimed file waits for its cart.
+    found = step(s3_api, slot_id, datetime.now(UTC) + timedelta(hours=2))
+    assert (found.phase, found.due) == ("claimed", row["claimed_at"] + STAGING_TTL)
+
+
+def test_a_removed_line_tells_the_watcher_and_frees_its_file(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    item = ask(asks, {"uploads": [slot_id]}).json()["items"][0]
+    assert asks.delete(f"/draft/items/{item['id']}", key="d1").status_code == 200
+    assert (slot_id, "unclaimed") in watcher.signals
+    found = step(s3_api, slot_id, datetime.now(UTC))
+    assert (found.phase, found.reason) == ("ended", "removed")
+    assert staged(s3_api, slot_id) is None
+
+
+def test_a_file_of_a_cart_not_sent_expires_72_hours_after_its_claim(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    ask(asks, {"uploads": [slot_id]})
+    [row] = rows(s3_api, "SELECT claimed_at FROM storefront_uploads")
+    assert step(s3_api, slot_id, row["claimed_at"] + timedelta(hours=71)).phase == "claimed"
+    found = step(s3_api, slot_id, row["claimed_at"] + STAGING_TTL)
+    assert (found.phase, found.reason) == ("ended", "expired")
+    assert staged(s3_api, slot_id) is None
+    [source] = asks.get("/draft").json()["items"][0]["sources"]
+    assert (source["check_status"], source["check_reason"]) == ("refused", EXPIRED)
+
+
+def test_a_file_of_a_sent_order_has_no_deadline(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
     [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
     order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
     submitted(asks, order_id)
+    assert (slot_id, "submitted") in watcher.signals
+    found = step(s3_api, slot_id, datetime.now(UTC) + timedelta(days=30))
+    assert (found.phase, found.due) == ("submitted", None)
+    assert staged(s3_api, slot_id) == len(STL)
     assert sweep(s3_api, datetime.now(UTC) + timedelta(days=30)) == 0
     assert staged(s3_api, slot_id) == len(STL)
 
 
-def test_the_sweep_takes_an_old_object_no_row_names(asks: CrudCaller, s3_api: TestClient) -> None:  # noqa: F811
+def test_a_declined_file_of_a_sent_order_is_cleaned_up(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    order_id = ask(asks, {"uploads": [slot_id]}).json()["id"]
+    submitted(asks, order_id)
+    with _state(s3_api).projection.pool.connection() as conn:
+        conn.execute("UPDATE order_item_sources SET status = 'declined'")
+    found = step(s3_api, slot_id, datetime.now(UTC))
+    assert (found.phase, found.reason) == ("ended", "declined")
+    assert staged(s3_api, slot_id) is None
+
+
+def test_a_step_run_again_after_its_row_went_deletes_the_objects(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
+    """A crash between the clean-up's commit and its deletes: the retry finds no row and
+    deletes the object anyway; a missing object is no error."""
+    [slot_id] = uploaded(asks, [("cube.stl", STL, "model/stl")])
+    with _state(s3_api).projection.pool.connection() as conn:
+        conn.execute("DELETE FROM storefront_uploads")
+    for _ in range(2):
+        found = step(s3_api, slot_id, datetime.now(UTC))
+        assert (found.phase, found.reason) == ("ended", "gone")
+    assert staged(s3_api, slot_id) is None
+
+
+def test_the_backstop_takes_an_old_object_no_row_names(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+) -> None:
     store = backend(s3_api)
     stray = staging_key(store.settings.prefix, "e" * 32)
     kept = uploaded(asks, [("cube.stl", STL, "model/stl")])[0]
@@ -402,19 +536,33 @@ def test_the_sweep_takes_an_old_object_no_row_names(asks: CrudCaller, s3_api: Te
         await client.put_object(Bucket=store.settings.bucket, Key=stray, Body=b"x")
 
     on_app(s3_api, plant)
-    sweep(s3_api, datetime.now(UTC) + timedelta(minutes=10))
+    assert sweep(s3_api, datetime.now(UTC) + timedelta(minutes=10)) == 0
     assert on_app(s3_api, store.staged_size, stray) == 1
-    sweep(s3_api, datetime.now(UTC) + timedelta(days=2))
+    assert sweep(s3_api, datetime.now(UTC) + timedelta(days=2)) == 1
     assert on_app(s3_api, store.staged_size, stray) is None
-    # The swept slot was never claimed, so it went too; a named object only goes with its row.
-    assert staged(s3_api, kept) is None
+    # A named object only goes with its row, by its watcher.
+    assert staged(s3_api, kept) == len(STL)
 
 
-def test_the_sweep_does_nothing_on_another_store(api: TestClient) -> None:  # noqa: F811
+def test_the_backstop_restarts_a_watcher_that_stopped(
+    asks: CrudCaller,  # noqa: F811
+    s3_api: TestClient,  # noqa: F811
+    watcher: FakeWatcher,
+) -> None:
+    [lost, fine] = uploaded(asks, [("a.stl", STL, "model/stl"), ("b.stl", STL, "model/stl")])
+    watcher.stopped = {lost}
+    later = datetime.now(UTC) + timedelta(days=2)
+    assert sweep(s3_api, later) == 1
+    assert watcher.started[-1] == lost
+    assert watcher.started.count(fine) == 1
+    assert sweep(s3_api, later) == 0
+
+
+def test_the_backstop_does_nothing_on_another_store(api: TestClient) -> None:  # noqa: F811
     assert sweep(api, datetime.now(UTC)) == 0
 
 
 @pytest.fixture(autouse=True)
 def _short_batches(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(model_requests, "SWEEP_BATCH", 50)
+    monkeypatch.setattr(staged_files, "SWEEP_BATCH", 50)
     yield

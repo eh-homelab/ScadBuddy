@@ -544,6 +544,14 @@ class Metrics:
             "Stored files removed by the sweep because nothing referenced or used them.",
             registry=r,
         )
+        # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
+        self.staged_files_repaired = Counter(
+            "scadbuddy_staged_files_repaired",
+            "Staged customer files the backstop repaired, by kind: a staging object no row"
+            " names (orphan_object) or a row whose watcher was not running (unwatched_row).",
+            ["kind"],
+            registry=r,
+        )
 
         # The browser trace relay (spec 2026-10-01 §5.2): it watches the tracing path
         # itself, and is the one metric the tracing design adds.

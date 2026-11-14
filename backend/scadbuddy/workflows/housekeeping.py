@@ -198,8 +198,9 @@ BANK_DEPOSITS_PATCH = "housekeeping-sync-bank-deposits"
 #: #5282: delete the storefront carts idle past ``storefront_draft_ttl_days``
 #: (`orders.lifecycle.Lifecycle.sweep_drafts`: each cart's attachments and their holds,
 #: then the order), then the visitors idle as long with no order and the
-#: `storefront_renders` rows past a day (`VisitorStore.sweep`), then the staging uploads
-#: of a customer's own models (#6133, `orders.storefront.model_requests.sweep_staged`).
+#: `storefront_renders` rows past a day (`VisitorStore.sweep`), then the backstop of a
+#: customer's staged files (#6133, `orders.storefront.staged_files.sweep_staged`; each
+#: file's own ``StagedFile`` workflow cleans it up).
 #: Last, behind its own patch; on the prune Schedule too, so carts go with the sweeps off
 #: as well.
 STOREFRONT_DRAFTS_SWEEP = "housekeeping_sweep_storefront_drafts"

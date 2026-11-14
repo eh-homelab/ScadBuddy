@@ -203,7 +203,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
   (`PreviewBackfill`, `ensure_preview_schedule`), the pass over every model for missing
   default-render previews, on its own hourly Schedule on the same queue; the per-change
-  requests stay in-process (`render/previews.py` `PreviewScheduler`).
+  requests stay in-process (`render/previews.py` `PreviewScheduler`). A customer's staged
+  file (#6133): `staged_file.py` (`StagedFile`, one watcher per upload on the same queue,
+  started by the presign route, not a sweep; "A customer's own models" below).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish; a kind its worker does not register fails the workflow task until a build that
   has it is current, #4139, told by `registered.py` `RegisteredActivities`),
@@ -997,7 +999,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   order's and the visitor's locks (`claim_idle_draft`) before its attachments go through
   `delete_attachment`, then the order), then the visitors idle as long with no order and
   the `storefront_renders` rows past a day (`VisitorStore.sweep`), 200 of each a run, then
-  the staging uploads of a customer's own models (#6133, `model_requests.sweep_staged`). A cancelled order reopened past `quoted`
+  the backstop of a customer's staged files (#6133, `staged_files.sweep_staged`). A cancelled order reopened past `quoted`
   that had asked for money gets its balance request again (`_open_balance(reopened=True)`),
   and an accepted order whose deposit paid the whole total opens one once its balance is
   above zero (`_regate_balance`, from `_retax`; never after the shop cancelled the balance
@@ -1391,11 +1393,23 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   requests' `UploadAllowance` and Turnstile action `model`; the page's CSP names the bucket
   in `connect-src` from `GET …/uploads/config` (`storefront/upload_origin.py`
   `UploadOrigin`, a bare origin only). The S3 store is required (503 `storefront_needs_s3`).
-  `sweep_staged` (in the storefront drafts sweep) deletes each staging object with its row: a
-  slot never claimed an hour past its expiry, a claim whose source is gone, a claimed file of
-  a cart not submitted within 72 h (its source reads `refused`, `EXPIRED`), and a staging
-  object no row names past a day. `S3ContentBackend.sweep_unrecorded` never touches
-  `staging/`.
+  Each upload has a watcher, the workflow `StagedFile` (`workflows/staged_file.py`, `library`
+  queue, id `staged-file:<upload id>`, AUTO_UPGRADE as `VersionedStagedFile`, so a change to
+  its commands goes behind `workflow.patched`), which owns the file's life. The presign
+  starts it before it answers any URL (`staged_files.watch`; a failed start is 503
+  `uploads_unavailable`, no URL, the new rows dropped). Its one activity,
+  `staged_file_step` (`orders/storefront/staged_files.py` `step`), reads the file's state
+  under the order's lock and cleans it up when due, in the same transaction, then deletes
+  the object and its preview: a slot never claimed `UNCLAIMED_GRACE` (1 h) past its URL's
+  expiry, a claim whose line is gone, a claimed file of a cart not submitted `STAGING_TTL`
+  (72 h) after its claim (its source reads `refused`, `EXPIRED`), a declined file. A
+  submitted order's file has no deadline. The routes signal it after their commits
+  (`staged_files.poke`: `claimed`, `unclaimed`, `submitted`), but the database is the truth,
+  so a lost signal costs time, never a file; the step retries with no limit.
+  `sweep_staged` (in the storefront drafts sweep) is only the backstop: a staging object no
+  row names past `ORPHAN_AGE` (1 day) is deleted, and a row that old whose watcher is not
+  running gets one started again, each counted in `scadbuddy_staged_files_repaired`.
+  `S3ContentBackend.sweep_unrecorded` never touches `staging/`.
 - Storefront accounts (#5283, spec 2026-11-02 §5.2): `orders/storefront/accounts.py`, a
   passwordless sign-in on the caller's connection (migration `…_storefront_accounts.sql`).
   - `request_code` makes a sixteen-character code from `CODE_ALPHABET` (Crockford's
