@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { ActionKey, errorText, store, type Draft, type DraftItem, type SubmittedOrder } from '../api/client'
 import { SubmitForm } from '../components/SubmitForm'
 import { useDraftChanged } from '../draftCount'
+import { valueText } from '../params'
 
 /**
  * `/draft`: the visitor's order before it is sent (spec §5.4). Each item can be removed,
@@ -112,7 +113,7 @@ export function DraftPage() {
                   {Object.entries(item.inputs).map(([name, value]) => (
                     <div key={name}>
                       <dt>{item.labels?.[name] ?? name}</dt>
-                      <dd>{String(value)}</dd>
+                      <dd>{valueText(value)}</dd>
                     </div>
                   ))}
                 </dl>

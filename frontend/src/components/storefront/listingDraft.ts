@@ -1,5 +1,6 @@
 import type { CustomizerSchema, Filament, ListingBound, MediaView, Param, ParamValue, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
+import { shownLabel } from '../../storefront/params'
 
 /**
  * #5282 (spec 2026-11-02 §5.3) — a listing as the Storefront page edits it, and what the
@@ -97,7 +98,11 @@ export function listingInput(draft: ListingDraft, schema: CustomizerSchema | und
   const colours = filamentColours(draft, filaments)
   const types = new Map((schema?.parameters ?? []).map((param) => [param.name, param.type]))
   const params = Object.fromEntries(
-    Object.entries(draft.params).map(([name, bound]) => [name, types.get(name) === 'color' ? { kind: 'choice' as const, choices: colours } : bound]),
+    Object.entries(draft.params).map(([name, bound]) => [
+      name,
+      // A colour's choices are the filaments'; its own label stays (#6137).
+      types.get(name) === 'color' ? { kind: 'choice' as const, choices: colours, ...(bound.label ? { label: bound.label } : {}) } : bound,
+    ]),
   )
   return { ...draft, params }
 }
@@ -148,7 +153,15 @@ export function previewListing(
   for (const param of schema?.parameters ?? []) {
     const bound = input.params?.[param.name]
     if (!bound) continue
-    params[param.name] = { ...bound, label: param.caption || param.name, group: param.group ?? '', colour: param.type === 'color' } as PublicParam
+    const placeholder = bound.kind === 'text' && typeof param.initial === 'string' && param.initial.trim() ? param.initial : null
+    params[param.name] = {
+      ...bound,
+      // As the public page shows it (`shown_label`, `_public_param`).
+      label: shownLabel(param.name, bound.label, param.caption),
+      group: param.group ?? '',
+      colour: param.type === 'color',
+      ...(bound.kind === 'text' ? { placeholder } : {}),
+    } as PublicParam
   }
   return {
     id: 'preview',

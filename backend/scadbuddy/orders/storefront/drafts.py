@@ -63,6 +63,7 @@ from scadbuddy.orders.storefront.wire import (
     DraftView,
     Listing,
     PublicShippingOption,
+    shown_label,
 )
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
@@ -168,15 +169,37 @@ def _inputs(item: OrderItem, offered: list[str] | None) -> dict[str, Any] | None
 
 
 def _captions(listings: Sequence[Listing]) -> dict[tuple[str, str], dict[str, str]]:
-    """Each published template commit's parameter captions, by (slug, commit): what a
-    draft item's values are called on the page."""
-    found: dict[tuple[str, str], dict[str, str]] = {}
+    """Each published template commit's parameter labels, by (slug, commit): what a
+    draft item's values are called on the page (`shown_label`).
+
+    An item does not record which listing it came from, and several listings may share a
+    slug and commit. So a listing's own label is used only when every listing at that
+    pair that offers the parameter shows the same one; otherwise the item reads the
+    template's caption without its extruder note, which never names another listing's
+    choice. Like the listing page, this reads each row's live ``params``, so an edited
+    label shows at once."""
+    seen: dict[tuple[str, str], dict[str, set[str]]] = {}
+    captions: dict[tuple[str, str], dict[str, str | None]] = {}
     for listing in listings:
         if listing.snapshot is None:
             continue
-        found.setdefault((listing.slug, listing.commit), {}).update(
-            {p.name: p.caption for p in listing.snapshot.schema_.parameters if p.caption}
-        )
+        pair = (listing.slug, listing.commit)
+        bounds = listing.params
+        names = seen.setdefault(pair, {})
+        for p in listing.snapshot.schema_.parameters:
+            captions.setdefault(pair, {})[p.name] = p.caption
+            votes = names.setdefault(p.name, set())
+            # Only a listing that offers the parameter has a say in its label.
+            if p.name in bounds:
+                votes.add(shown_label(p.name, bounds[p.name].label, p.caption))
+    found: dict[tuple[str, str], dict[str, str]] = {}
+    for pair, names in seen.items():
+        labels = found.setdefault(pair, {})
+        for name, shown in names.items():
+            caption = captions[pair][name]
+            label = next(iter(shown)) if len(shown) == 1 else shown_label(name, None, caption)
+            if label != name:
+                labels[name] = label
     return found
 
 
