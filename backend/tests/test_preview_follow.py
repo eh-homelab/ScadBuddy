@@ -553,6 +553,9 @@ def test_one_process_holds_a_slice_claim_at_a_time(pg_conninfo: str) -> None:
             time.sleep(0.05)
         else:
             raise AssertionError("closing the connection did not free its slices")
+        # A claim that cannot reach Postgres also answers True: the slice was claimed only
+        # if the connection is still open (#6198).
+        assert one.open_connections() == 1
     finally:
         one.close()
         two.close()
