@@ -334,7 +334,9 @@ describe('Copy link (#1022)', () => {
   it("uses the page's host, not the configured public URL", async () => {
     setMockSettings({ ...mockSettings(), public_url: 'https://scadbuddy.internal.nullreference.io/' })
     vi.stubGlobal('location', new URL('https://scadbuddy.sso.nullreference.io/m/name-keychain'))
-    onTestFinished(() => vi.unstubAllGlobals())
+    onTestFinished(() => {
+      vi.unstubAllGlobals()
+    })
     const { user } = render('/m/name-keychain')
     const writeText = stubClipboard()
     const select = await picker()
