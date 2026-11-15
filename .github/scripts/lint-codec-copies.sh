@@ -5,7 +5,7 @@
 # (TypeScript), agent-durable/ and backend/ (Python). The payload vectors pin the
 # bytes; this pins the rest (plan 2026-10-09-durable-phase-6-flows.md Ruling 10):
 #  - the backend's tests run in an image holding only backend/, so they read copies
-#    of the agent's vectors and key migration, which must equal the originals;
+#    of the agent's vectors and key migrations, which must equal the originals;
 #  - the two Python codecs must be the same code apart from their imports,
 #    docstrings (module, class and function ones) and converter function (the key lock and tombstone logic that no
 #    vector covers).
@@ -21,6 +21,12 @@ same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vec
 same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
 same agent/src/db/migrations/20261009T0421Z_payload_keys.sql \
   backend/tests/fixtures/agent-migrations/20261009T0421Z_payload_keys.sql
+# The agent's secrets behind the CRUD routes (#5299 step 4): its credential vectors and the
+# migrations that make the tables the routes use.
+same agent/test/fixtures/secret-vectors.json backend/tests/fixtures/secret-vectors.json
+for f in "$root"/backend/tests/fixtures/agent-secret-migrations/*.sql; do
+  same "agent/src/db/migrations/${f##*/}" "backend/tests/fixtures/agent-secret-migrations/${f##*/}"
+done
 
 if ! python3 - "$root" <<'PY'
 import ast

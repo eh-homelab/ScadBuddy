@@ -147,3 +147,16 @@ def open_secret(kek: Kek, envelope: Envelope, aad: str) -> str:
         )
     dek = _open(kek.key, envelope.dek_sealed, f"dek:{aad}")
     return _open(dek, envelope.secret_sealed, aad).decode()
+
+
+def rewrap(old: Kek, new: Kek, envelope: Envelope, aad: str) -> Envelope:
+    """secrets.ts ``rewrap``, for a key rotation: the data key sealed again under ``new``;
+    the sealed secret is untouched (spec §9, "Rotating it re-wraps the data keys only")."""
+    if envelope.kek_id != old.id:
+        raise SealError(f"secret was sealed with key {envelope.kek_id}, not {old.id}")
+    dek = _open(old.key, envelope.dek_sealed, f"dek:{aad}")
+    return Envelope(
+        secret_sealed=envelope.secret_sealed,
+        dek_sealed=_seal(new.key, dek, f"dek:{aad}", os.urandom),
+        kek_id=new.id,
+    )

@@ -18,9 +18,17 @@ copy() {
     backend/scadbuddy/workflows/payload_codec.py \
     backend/tests/fixtures/payload-vectors.json \
     backend/tests/fixtures/subject-vectors.json \
-    backend/tests/fixtures/agent-migrations/20261009T0421Z_payload_keys.sql; do
+    backend/tests/fixtures/agent-migrations/20261009T0421Z_payload_keys.sql \
+    agent/test/fixtures/secret-vectors.json \
+    backend/tests/fixtures/secret-vectors.json; do
     mkdir -p "$work/r/$(dirname "$f")"
     cp "$root/$f" "$work/r/$f"
+  done
+  for f in "$root"/backend/tests/fixtures/agent-secret-migrations/*.sql; do
+    for d in agent/src/db/migrations backend/tests/fixtures/agent-secret-migrations; do
+      mkdir -p "$work/r/$d"
+      cp "$f" "$work/r/$d/${f##*/}"
+    done
   done
 }
 
