@@ -29,7 +29,7 @@
     }
   },
   {
-    "name": "a blank listing: the template's defaults; a colour no filament has is still offered (colourProblems names its default)",
+    "name": "a blank listing: the template's defaults; a colour whose template default no filament has is still offered, starting at the first colour on offer (#6144)",
     "schema": {
       "groups": ["Size", "Colours"],
       "parameters": [
@@ -43,13 +43,13 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] }, "trim": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [] }, "trim": { "kind": "choice", "choices": [], "default": "#ffffff" } },
       "fixed": { "width": 10 },
       "colours": ["f-white"]
     }
   },
   {
-    "name": "no colour matches: every priced filament, of any material",
+    "name": "no colour matches: every priced filament, of any material; the colour starts at the first of them (#6144)",
     "schema": {
       "groups": ["Colours"],
       "parameters": [{ "name": "body", "type": "color", "group": "Colours", "caption": "Body", "initial": "#123456" }]
@@ -60,7 +60,7 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#F9D72C" } },
       "fixed": {},
       "colours": ["f-pla", "f-petg"]
     }
@@ -179,10 +179,10 @@
     ],
     "values": {},
     "expected": {
-      "params": { "body": { "kind": "choice", "choices": [] } },
+      "params": { "body": { "kind": "choice", "choices": [], "default": "#ffffff" } },
       "fixed": {},
       "colours": ["f-white", "f-pva"]
     },
-    "input": { "body": { "kind": "choice", "choices": ["#ffffff"] } }
+    "input": { "body": { "kind": "choice", "choices": ["#ffffff"], "default": "#ffffff" } }
   }
 ]
